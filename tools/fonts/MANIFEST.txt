@@ -1,0 +1,119 @@
+メモアニマ 同梱フォント MANIFEST
+生成: tools/fonts/write_manifest.py / 2026-07-31
+
+後から同一物を取り直せるようにするための記録。すべて一次配布元から取得している
+（ミラー・フォントまとめサイトは使わない）。取得は tools/fonts/fetch_fonts.ps1。
+
+==============================================================================
+■ 配布アーカイブ（取得したままのもの）
+==============================================================================
+misaki_ttf_2021-05-05.zip
+  URL    : https://littlelimit.net/arc/misaki/misaki_ttf_2021-05-05.zip
+  size   : 794,317 bytes
+  sha256 : c1851af85a0a010dd84f40803159c2d8a23feecb6c7e800cfeb5c6edc50da46e
+
+PixelMplus-20130602.zip
+  URL    : https://github.com/itouhiro/PixelMplus/releases/download/v1.0.0/PixelMplus-20130602.zip
+  size   : 1,428,228 bytes
+  sha256 : ca4b5eecc9cf869e85d480000084ecc0fb24c16fc8b37b4046145ecd642fae11
+
+==============================================================================
+■ フォント原本（サブセット前）と assets/fonts への出力（サブセット後）
+==============================================================================
+美咲ゴシック Regular
+  URL       : https://littlelimit.net/arc/misaki/misaki_ttf_2021-05-05.zip
+  原本      : download/misaki_ttf_2021-05-05/misaki_gothic.ttf
+    size    : 1,171,204 bytes
+    sha256  : 0963e11e89d5fa409a7a048a52e8ea2d623d764a7998488f8a4291111611c4e1
+  サブセット: assets/fonts/misaki.woff2
+    size    : 46,732 bytes
+    sha256  : c4fefbc37cd5756a9bbaf5abb3eedc9b3d48a34c176e9fdb1cbc9237f83dcdf1
+
+PixelMplus12 Regular
+  URL       : https://github.com/itouhiro/PixelMplus/releases/download/v1.0.0/PixelMplus-20130602.zip
+  原本      : download/PixelMplus-20130602/PixelMplus-20130602/PixelMplus12-Regular.ttf
+    size    : 1,274,396 bytes
+    sha256  : 02f19467ea7cc235cc06c570b7f6c3b0a12a6f682bc8d74c43f2d323d97bcd12
+  サブセット: assets/fonts/pixel12.woff2
+    size    : 98,656 bytes
+    sha256  : b263b3854aef7a471ca3a10b1415e2ddf2034e0e9f0ab81035ae2a5d7a0ed723
+
+PixelMplus12 Bold
+  URL       : https://github.com/itouhiro/PixelMplus/releases/download/v1.0.0/PixelMplus-20130602.zip
+  原本      : download/PixelMplus-20130602/PixelMplus-20130602/PixelMplus12-Bold.ttf
+    size    : 1,254,540 bytes
+    sha256  : 7276753dc80861e2f45257b7b1a54c967c160065f5d40e10fb48aabd5648a2a6
+  サブセット: assets/fonts/pixel12-bold.woff2
+    size    : 95,168 bytes
+    sha256  : b4b6bf62a22bba05fce02464dcb74413f209049e5eb37fd392ff573c866b4a66
+
+Zen Maru Gothic Regular
+  URL       : https://github.com/googlefonts/zen-marugothic/raw/main/fonts/ttf/ZenMaruGothic-Regular.ttf
+  原本      : download/ZenMaruGothic-Regular.ttf
+    size    : 3,832,756 bytes
+    sha256  : a0c0b53543e0993ae2225e629c833f3d51495ad31720694ff112ce4ce11111ef
+  サブセット: assets/fonts/maru.woff2
+    size    : 464,352 bytes
+    sha256  : f6e7fb784cb010c26bf8be40abc2ce20ccd0af0201d4443039dd8e182f770d76
+
+Zen Maru Gothic Bold
+  URL       : https://github.com/googlefonts/zen-marugothic/raw/main/fonts/ttf/ZenMaruGothic-Bold.ttf
+  原本      : download/ZenMaruGothic-Bold.ttf
+    size    : 3,779,008 bytes
+    sha256  : fe24426b9c8b5523a0146a8235c8674eccf0493af354a53ec895c3596d9eb745
+  サブセット: assets/fonts/maru-bold.woff2
+    size    : 480,004 bytes
+    sha256  : 35bc65a8a619f10c1bb9aadcf6f772f8e3eb798ed36852c69102dae7ee93de3d
+
+Dela Gothic One Regular
+  URL       : https://github.com/syakuzen/DelaGothic/raw/master/fonts/ttf/DelaGothicOne-Regular.ttf
+  原本      : download/DelaGothicOne-Regular.ttf
+    size    : 5,469,244 bytes
+    sha256  : f73c81ed56ca9d07b796228f7f0f7e8f0117b64dcb54da7246f1001ace5c6d19
+  サブセット: assets/fonts/pop.woff2
+    size    : 320,472 bytes
+    sha256  : dc6ff5ec2cb29786e2e3e37a82a7b5c2b28f0183ca89a31856ffed046a4cfb5e
+
+Zen Antique Regular
+  URL       : https://github.com/googlefonts/zen-antique/raw/main/fonts/ttf/ZenAntique-Regular.ttf
+  原本      : download/ZenAntique-Regular.ttf
+    size    : 5,507,920 bytes
+    sha256  : 8c5cf7a136837ee705d06bbc133ea18ac06b7dd284f38aace91f5de36725c315
+  サブセット: assets/fonts/mincho.woff2
+    size    : 646,864 bytes
+    sha256  : 1de89c8f6cf3d64a2a8a77819a75bf39e413db47c299cc58e633407a4779f28d
+
+==============================================================================
+■ ライセンス条文（tools/fonts/licenses/）
+==============================================================================
+OFL-1.1_ZenMaruGothic.txt
+  出典   : https://github.com/googlefonts/zen-marugothic/raw/main/OFL.txt
+  sha256 : 2a20cf7ce1909d8ee1e949095d340f7d7656705f7c810a2d6faf56800ad0cb3d
+
+OFL-1.1_DelaGothicOne.txt
+  出典   : https://github.com/syakuzen/DelaGothic/raw/master/OFL.txt
+  sha256 : 30879094bb985ac783855bedd83ffe99c7ab6a90c137367852b6652fa97e81fc
+
+OFL-1.1_ZenAntique.txt
+  出典   : https://github.com/googlefonts/zen-antique/raw/main/OFL.txt
+  sha256 : c76594cc8f4af2ea35d1e05278b1911b22cc6227bc3b0ad404f68be03fe3f107
+
+M+_FONT_LICENSE_E.txt
+  出典   : PixelMplus-20130602.zip 内 mplus_bitmap_fonts/LICENSE_E
+  sha256 : 907e9f5ac24cba6ce2523cd2a66d6ba143e082c685344dfa8d30ef12f67410a0
+
+M+_FONT_LICENSE_J.txt
+  出典   : PixelMplus-20130602.zip 内 mplus_bitmap_fonts/LICENSE_J
+  sha256 : b831d51b4b20640091a3e6e6947a209f7a4287c7d384638a907ea838399b3405
+
+misaki_readme_ja.txt
+  出典   : misaki_ttf_2021-05-05.zip 内 misaki.txt（ライセンス条項を含む同梱文書）
+  sha256 : 82929cc3b34c79b6a67f21fe137c7bb165589c9e34ba1441611e493afd67dfca
+
+==============================================================================
+■ サブセット条件
+==============================================================================
+文字集合 : tools/fonts/subset_charset.txt（2580 字・うち常用漢字 2,136 字）
+  sha256 : 94ad61483a23dbd04dfe2d3c731a9392931dfe93ed321e9fc2c6821fba9ebe65
+コマンド : python tools/fonts/subset.py
+           （pyftsubset --flavor=woff2 --layout-features= --no-hinting）

@@ -1,0 +1,40 @@
+{
+  "name": "animemo",
+  "private": true,
+  "version": "1.1.0",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "fflate": "^0.8.3",
+    "flipnote.js": "^6",
+    "gif.js": "^0.2.0",
+    "pixi.js": "^8",
+    "upng-js": "^2.1.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@napi-rs/canvas": "^1.0.3",
+    "@tauri-apps/cli": "^2",
+    "@types/node": "^26.1.2",
+    "@types/pngjs": "^6.0.5",
+    "jpeg-js": "^0.4.4",
+    "pngjs": "^7.0.0",
+    "tsx": "^4.23.1",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3"
+  }
+}

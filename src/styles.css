@@ -1,0 +1,2004 @@
+/* アニメモ (AniMemo) — M3 UIシェル（モック animemo_ui_mockup.html / animemo_editor_v2.html 準拠）
+   レトロ・ビビッド: 赤×青＋クリーム地＋ドット、太い輪郭＋押せる3Dボタン、丸ゴシック */
+
+/* M10-1c: 文字ツール用の同梱フォント（assets/fonts/ のサブセット版）。
+   相対パスで書くことで Vite の CSS パイプラインに乗り、dist/assets/ へ実体が出力され
+   参照も自動で書き換わる（assets/ は public/ ではないので、これが唯一の同梱経路）。
+   ネットワーク URL は書かない＝実行時通信ゼロの不変条件。
+   Bold を持つ2書体は **同じ family 名で weight 400/700 の2宣言**にして、
+   canvas の ctx.font に "bold " を前置するだけで切り替わるようにする。 */
+@font-face { font-family: "MA Misaki";  src: url("../assets/fonts/misaki.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Pixel12"; src: url("../assets/fonts/pixel12.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Pixel12"; src: url("../assets/fonts/pixel12-bold.woff2") format("woff2"); font-weight: 700; font-display: block; }
+@font-face { font-family: "MA Maru";    src: url("../assets/fonts/maru.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Maru";    src: url("../assets/fonts/maru-bold.woff2") format("woff2"); font-weight: 700; font-display: block; }
+@font-face { font-family: "MA Pop";     src: url("../assets/fonts/pop.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Mincho";  src: url("../assets/fonts/mincho.woff2") format("woff2"); font-weight: 400; font-display: block; }
+
+:root {
+  --paper: #fbefd6;
+  --paper2: #f3e3c2;
+  --panel: #ffffff;
+  --ink: #2c2621;
+  --ink-soft: #7a6f60;
+  --red: #ff4b4b;
+  --blue: #1fa2ff;
+  --tangerine: #ff9f1c;
+  --orange: #f07a1a;
+  --orange-l: #fff0e2;
+  --yellow: #ffd23f;
+  --green: #22b573;
+  --shadow: 0 3px 0 rgba(44, 38, 33, 0.18);
+  font-family: "Hiragino Maru Gothic ProN", "Yu Gothic UI", "Quicksand", system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(circle at 12px 12px, rgba(44, 38, 33, 0.05) 2px, transparent 2px) 0 0/24px 24px,
+    var(--paper);
+  overflow: hidden;
+  user-select: none;
+}
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.screen[hidden] {
+  display: none;
+}
+
+.card {
+  background: var(--panel);
+  border: 3px solid var(--ink);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+/* ============ 共通ボタン ============ */
+
+/* M6-5 Q-5: チップ/ボタン/ラベル類は単語内で折り返さない（全画面共通ルール）。
+   収まらない場合はコンテナ側の flex-wrap でボタン単位に折り返すか、短いラベルにする */
+.btn,
+.minibtn,
+.oni .lv,
+.tog,
+.modal-field > span,
+.modal-field label,
+.side h3 {
+  white-space: nowrap;
+}
+
+.btn {
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  border: 3px solid var(--ink);
+  border-radius: 12px;
+  padding: 7px 14px;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 4px 0 var(--ink);
+  transition: 0.05s;
+  user-select: none;
+}
+
+.btn:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 var(--ink);
+}
+
+.btn.primary {
+  background: var(--red);
+  color: #fff;
+}
+
+.btn.blue {
+  background: var(--blue);
+  color: #fff;
+}
+
+.minibtn {
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+  padding: 2px 8px;
+  box-shadow: 0 2px 0 var(--ink);
+}
+
+.minibtn:active {
+  transform: translateY(2px);
+  box-shadow: 0 0 0 var(--ink);
+}
+
+.minibtn.ok {
+  background: var(--green);
+  color: #fff;
+}
+
+.ic {
+  width: 38px;
+  height: 38px;
+  border-radius: 9px;
+  border: 3px solid var(--ink);
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 3px 0 var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.ic:active {
+  transform: translateY(3px);
+  box-shadow: 0 0 0 var(--ink);
+}
+
+.ic.onb,
+.rbtn.onb {
+  background: var(--yellow);
+}
+
+.hb {
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  border: 3px solid var(--ink);
+  border-radius: 10px;
+  padding: 6px 12px;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 3px 0 var(--ink);
+  font-size: 13px;
+}
+
+.hb:active {
+  transform: translateY(3px);
+  box-shadow: 0 0 0 var(--ink);
+}
+
+.hb.green {
+  background: var(--green);
+  color: #fff;
+}
+
+.hb.danger {
+  background: var(--red);
+  color: #fff;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ============ ライブラリ画面 ============ */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  background: var(--tangerine);
+  border-bottom: 4px solid var(--ink);
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 800;
+  font-size: 21px;
+  color: #fff;
+  text-shadow: 0 2px 0 rgba(44, 38, 33, 0.35);
+}
+
+.logo .mark {
+  width: 32px;
+  height: 32px;
+  background: #fff;
+  border: 3px solid var(--ink);
+  border-radius: 9px;
+  position: relative;
+  box-shadow: var(--shadow);
+}
+
+.logo .mark::before {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, var(--red) 0 50%, var(--blue) 50% 100%);
+}
+
+.logo small {
+  font-size: 11px;
+  font-weight: 700;
+  opacity: 0.9;
+}
+
+.logo .ver {
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0.85;
+  margin-left: 4px;
+}
+
+.topbar .spacer {
+  flex: 1;
+}
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  border: 3px solid var(--ink);
+  border-radius: 999px;
+  padding: 6px 14px;
+  box-shadow: var(--shadow);
+  min-width: 200px;
+}
+
+.search input {
+  border: 0;
+  outline: 0;
+  font: inherit;
+  background: transparent;
+  width: 100%;
+}
+
+.lib-main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 220px minmax(320px, 1fr) 330px;
+  gap: 14px;
+  padding: 14px;
+  min-height: 0;
+}
+
+@media (max-width: 1100px) {
+  .lib-main {
+    grid-template-columns: 160px minmax(280px, 1fr) 230px;
+    gap: 10px;
+    padding: 10px;
+  }
+}
+
+/* 左: アルバム */
+.albums {
+  padding: 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.albums h2 {
+  margin: 2px 6px 10px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  letter-spacing: 0.05em;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.albbtns {
+  display: flex;
+  gap: 4px;
+}
+
+#albums-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.album {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  margin-bottom: 6px;
+  border: 3px solid transparent;
+}
+
+.album:hover {
+  background: var(--paper);
+}
+
+.album.active {
+  background: #fff;
+  border-color: var(--ink);
+  box-shadow: var(--shadow);
+}
+
+.album.drop {
+  border-color: var(--green);
+  background: #eafff3;
+}
+
+.album .n {
+  font-size: 11px;
+  color: #fff;
+  background: var(--ink);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-weight: 800;
+}
+
+.album.active .n {
+  background: var(--red);
+}
+
+.dnd-hint {
+  font-size: 10px;
+  color: var(--ink-soft);
+  margin: 8px 4px 0;
+}
+
+/* 中央: ビューア */
+.lib-main .stage {
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  min-height: 0;
+}
+
+.stage-top {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 2px 4px 10px;
+}
+
+.stage-top .title {
+  font-size: 18px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage-top .author {
+  font-size: 12px;
+  color: var(--ink-soft);
+  flex: 0 0 auto;
+}
+
+.screen-view {
+  flex: 1;
+  min-height: 0;
+  background: #fff;
+  border: 4px solid var(--ink);
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+  background-image: linear-gradient(rgba(31, 162, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(31, 162, 255, 0.05) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+
+/* M3.5: Player のキャンバスは表示しない（再生制御＋音声のみに使用）。
+   映像はネイティブ解像度バッキングの #preview-host に自前描画し、
+   拡大は CSS pixelated（nearest-neighbor）の一段スケールに限定する（ボケ根絶） */
+#player-host {
+  display: none !important;
+}
+
+#preview-host {
+  width: 100% !important;
+  height: 100% !important;
+  padding: 6px;
+  object-fit: contain;
+  image-rendering: pixelated !important;
+  background: transparent;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.transport {
+  display: flex;
+  gap: 8px;
+}
+
+.rbtn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 3px solid var(--ink);
+  background: #fff;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  cursor: pointer;
+  box-shadow: 0 4px 0 var(--ink);
+  font-family: inherit;
+}
+
+.rbtn:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 var(--ink);
+}
+
+.rbtn.play {
+  background: var(--green);
+  color: #fff;
+  width: 54px;
+  height: 54px;
+  font-size: 21px;
+}
+
+.meta-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.chip {
+  font-size: 11px;
+  font-weight: 800;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: #fff;
+  font-family: inherit;
+  color: var(--ink);
+}
+
+.chip.red {
+  background: var(--red);
+  color: #fff;
+}
+
+.chip.edit {
+  background: var(--blue);
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 2px 0 var(--ink);
+}
+
+.chip.edit:active {
+  transform: translateY(2px);
+  box-shadow: 0 0 0 var(--ink);
+}
+
+.chip.export {
+  background: var(--green);
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 2px 0 var(--ink);
+}
+
+.chip.export:active {
+  transform: translateY(2px);
+  box-shadow: 0 0 0 var(--ink);
+}
+
+.chip.danger {
+  background: var(--red);
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 2px 0 var(--ink);
+}
+
+.chip.danger:active {
+  transform: translateY(2px);
+  box-shadow: 0 0 0 var(--ink);
+}
+
+/* 右: サムネ棚 */
+.shelf {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  min-height: 0;
+}
+
+.shelf-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 2px 4px 10px;
+}
+
+.shelf-head .t {
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shelf-head .c {
+  font-size: 11px;
+  color: var(--ink-soft);
+  flex: 0 0 auto;
+}
+
+.grid {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-auto-rows: max-content;
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.thumb {
+  border: 3px solid var(--ink);
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+}
+
+.thumb.active {
+  outline: 4px solid var(--red);
+  outline-offset: -1px;
+}
+
+/* F-1対策: aspect-ratio に依存せず padding-top で 4:3 を確実に確保する
+   （画像未生成・読み込み失敗・エンジン差でも線状に潰れない） */
+.thumb .pic {
+  position: relative;
+  background-image: linear-gradient(rgba(31, 162, 255, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(31, 162, 255, 0.06) 1px, transparent 1px);
+  background-size: 10px 10px;
+  overflow: hidden;
+}
+
+.thumb .pic::before {
+  content: "";
+  display: block;
+  padding-top: 75%; /* 4:3 */
+}
+
+.thumb .pic img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.thumb .cap {
+  font-size: 10px;
+  padding: 4px 6px;
+  border-top: 2px solid var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink-soft);
+}
+
+/* 下: 取り込み進捗 */
+#import-footer {
+  border-top: 4px solid var(--ink);
+  background: #fff;
+  padding: 8px 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+#import-footer[hidden] {
+  display: none;
+}
+
+#import-footer .label {
+  font-weight: 800;
+  font-size: 13px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar {
+  flex: 1;
+  height: 16px;
+  background: var(--paper2);
+  border: 3px solid var(--ink);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.bar > i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: repeating-linear-gradient(45deg, var(--tangerine) 0 10px, #ffb84d 10px 20px);
+  transition: width 0.15s;
+}
+
+#import-footer .pct {
+  font-weight: 800;
+}
+
+/* ============ エディタ画面 ============ */
+
+.edbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  background: var(--orange);
+  border-bottom: 4px solid var(--ink);
+}
+
+.edbar .h-title {
+  font-weight: 800;
+  color: #fff;
+  font-size: 15px;
+  text-shadow: 0 2px 0 rgba(44, 38, 33, 0.3);
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edbar .h-spec {
+  color: #fff;
+  font-weight: 800;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.18);
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
+.edbar .sp {
+  flex: 1;
+}
+
+.ed-main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 88px 1fr 268px;
+  grid-template-rows: 1fr 148px;
+  gap: 10px;
+  padding: 10px;
+  min-height: 0;
+}
+
+/* F-0対策: gridアイテムの min-width/height 既定値（auto）だと、フィルムストリップ等の
+   非折返しコンテンツ（数百コマ×80px）が 1fr 列を数万pxまで押し広げ、キャンバスが
+   画面外へ飛ぶ。必ず 0 に落としてカード内でスクロールさせる。 */
+.ed-main > .card,
+.lib-main > .card {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 左: ツール */
+.tools {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 6px;
+  overflow-y: auto;
+}
+
+.tlabel {
+  font-size: 10px;
+  color: var(--ink-soft);
+  font-weight: 800;
+  margin: 2px 0 0;
+}
+
+.tool {
+  width: 66px;
+  height: 54px;
+  border-radius: 12px;
+  border: 3px solid var(--ink);
+  background: #fff;
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  cursor: pointer;
+  box-shadow: 0 3px 0 var(--ink);
+  font-family: inherit;
+  flex: 0 0 auto;
+}
+
+.tool:active {
+  transform: translateY(3px);
+  box-shadow: 0 0 0 var(--ink);
+}
+
+.tool .em {
+  font-size: 19px;
+  line-height: 1;
+}
+
+.tool .nm {
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.tool.on {
+  background: var(--yellow);
+}
+
+/* 中央: キャンバス（E-1: 高倍率時は手のひら/Spaceパンでスクロール）
+   M3.9 H-1: スクロールは内側の .stage-scroll に限定。HUD（バッジ/ボタン/ミニプレビュー等の
+   浮遊UI）は stage 直下の absolute のままなので、パンしても定位置に固定される */
+.ed-main .stage {
+  grid-column: 2;
+  grid-row: 1;
+  position: relative;
+  display: flex;
+  padding: 10px;
+  overflow: hidden;
+  background: repeating-linear-gradient(45deg, #efe4c8 0 8px, #f3e9d2 8px 16px);
+}
+
+.stage-scroll {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  display: flex;
+  padding: 10px;
+}
+
+.cvwrap {
+  position: relative;
+  flex: 0 0 auto;
+  /* flex中央寄せだと拡大時に左上へスクロールできなくなるため margin:auto で中央化 */
+  margin: auto;
+  touch-action: none;
+  /* M3.10 G-1（根本原因）: border-box だと枠線4px×2がキャンバス領域を食い、
+     320×240×z 指定でも実表示が (W*z-8) になってドットが非整数倍（例: 8倍指定で7.975px/ドット）
+     になっていた。content-box にして「キャンバス実表示＝厳密に W*z」を復元する */
+  box-sizing: content-box;
+}
+
+.cvwrap canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+#ed-canvas {
+  background: #fff;
+  border: 0;
+  cursor: crosshair;
+}
+
+#ed-overlay {
+  pointer-events: none;
+}
+
+.cvwrap {
+  background: #fff;
+  border: 4px solid var(--ink);
+  border-radius: 4px;
+}
+
+/* E-2: ピクセル格子オーバーレイ（絵に焼き込まない・書き出し/サムネ/保存に非混入）
+   M3.10 G-1: CSSグラデーションは非整数ピッチ（OSスケール1.25/1.5等）で滲み/倍ピッチに見える
+   ため canvas 化。バッキングは cssSize×devicePixelRatio・線は物理pxに描く（editor.ts updateGridOverlay） */
+.pxgrid {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.pxgrid[hidden] {
+  display: none;
+}
+
+/* E-4: 変形中バッジ */
+.xform-badge {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--orange);
+  color: #fff;
+  border: 3px solid var(--ink);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 4px 14px;
+  z-index: 8;
+  box-shadow: var(--shadow);
+}
+
+.xform-badge[hidden] {
+  display: none;
+}
+
+.drawguide {
+  position: absolute;
+  left: calc(5 / 320 * 100%);
+  right: calc(5 / 320 * 100%);
+  top: calc(5 / 240 * 100%);
+  bottom: calc(5 / 240 * 100%);
+  border: 1px dashed rgba(240, 122, 26, 0.45);
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.cvbadge {
+  position: absolute;
+  top: 16px;
+  left: 18px;
+  background: var(--ink);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 3px 10px;
+  border-radius: 999px;
+  z-index: 6;
+}
+
+.cvright {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  display: flex;
+  gap: 6px;
+  z-index: 6;
+}
+
+.cvright .ic {
+  width: 34px;
+  height: 34px;
+  font-size: 14px;
+}
+
+.zoominfo {
+  position: absolute;
+  bottom: 14px;
+  left: 18px;
+  background: #fff;
+  border: 3px solid var(--ink);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 2px 10px;
+  z-index: 6;
+}
+
+.mini {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: 150px;
+  aspect-ratio: 320/240;
+  background: #fff;
+  border: 3px solid var(--ink);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  z-index: 7;
+  cursor: pointer;
+}
+
+.mini .tg {
+  position: absolute;
+  top: 3px;
+  left: 5px;
+  font-size: 9px;
+  font-weight: 800;
+  background: var(--green);
+  color: #fff;
+  padding: 1px 7px;
+  border-radius: 999px;
+  z-index: 2;
+}
+
+.mini canvas {
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+/* プレビュー大画面（比率反転） */
+.ed-main .stage.swapped .cvwrap {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: 200px !important;
+  height: 150px !important;
+  z-index: 7;
+}
+
+.ed-main .stage.swapped .mini {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  width: min(92%, 92vh);
+  max-height: 100%;
+  z-index: 1;
+}
+
+.ed-main .stage.swapped .cvbadge,
+.ed-main .stage.swapped .zoominfo {
+  display: none;
+}
+
+/* 右: サイドパネル */
+.side {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  overflow-y: auto;
+  overflow-x: hidden; /* M6-6 R-1: 横スクロールもはみ出しも出さない保険 */
+}
+
+.side h3 {
+  margin: 3px 2px 1px;
+  font-size: 11px;
+  color: var(--ink-soft);
+  letter-spacing: 0.04em;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap; /* M6-6 R-1: 収まらない幅ではボタン単位で折返す（単語内改行は不可のまま） */
+  min-width: 0;
+}
+
+/* M6-6 R-1: 見出し内の操作ボタン（＋/📁/🗑/▲/▼/⇓統合）は縮めず、折返しで逃がす */
+.side h3 .minibtn {
+  flex: 0 0 auto;
+}
+
+.sizes {
+  display: flex;
+  gap: 6px;
+}
+
+.sz {
+  flex: 1;
+  height: 32px;
+  border: 3px solid var(--ink);
+  border-radius: 9px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.sz i {
+  background: var(--ink);
+  border-radius: 50%;
+  display: block;
+}
+
+.sz.on {
+  background: var(--yellow);
+}
+
+.tex {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 5px;
+}
+
+.tx {
+  aspect-ratio: 1;
+  border: 3px solid var(--ink);
+  border-radius: 9px;
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.tx.on {
+  background: var(--yellow);
+}
+
+/* M5-4: ブラシのトーンパターンピッカー（3DS風2列・大小並び） */
+.tex.tonegrid {
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+
+.tone-btn {
+  border: 3px solid var(--ink);
+  border-radius: 9px;
+  background: #fff;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tone-btn canvas {
+  width: 64px; /* 32×32バッキング → ×2 整数拡大（ドット感維持） */
+  height: 64px;
+  image-rendering: pixelated;
+}
+
+.tone-btn.on {
+  background: var(--yellow);
+  outline: 2px solid var(--orange);
+  outline-offset: -1px;
+}
+
+.pal {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 5px;
+}
+
+.sw {
+  aspect-ratio: 1;
+  border: 2px solid var(--ink);
+  border-radius: 7px;
+  cursor: pointer;
+  box-shadow: 0 2px 0 rgba(44, 38, 33, 0.25);
+  padding: 0;
+}
+
+.sw.on {
+  outline: 3px solid var(--orange);
+  outline-offset: 1px;
+}
+
+.sw.tp {
+  background: repeating-conic-gradient(#ccc 0 25%, #fff 0 50%) 0/8px 8px;
+}
+
+.sw.sm {
+  border-radius: 5px;
+}
+
+.lay {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 3px solid var(--ink);
+  border-radius: 10px;
+  padding: 4px 7px;
+  margin-bottom: 4px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.lay.on {
+  background: var(--orange-l);
+}
+
+.lay.active {
+  outline: 3px solid var(--orange);
+  outline-offset: -1px;
+}
+
+.lay .nm {
+  flex: 1;
+  min-width: 0; /* M6-6 R-1: nowrap でも flex 行内で縮めるように（これが無いとはみ出す） */
+  font-weight: 800;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lay .eye {
+  font-size: 13px;
+  cursor: pointer;
+  flex: 0 0 auto; /* M6-6 R-1: 縮まない要素（縮むのは名前とスライダーだけ） */
+}
+
+/* M6-6 R-1: 行内ボタン（フォルダ🗑等）も縮めない */
+.lay .minibtn {
+  flex: 0 0 auto;
+}
+
+.lay-op {
+  width: 56px;
+  flex: 0 1 56px; /* M6-6 R-1: 基準56px・狭い行では縮む（最小48px）。名前(ellipsis)と分担して吸収 */
+  min-width: 48px;
+}
+
+/* M3.7: レイヤーフォルダ行 */
+.lay-folder {
+  background: var(--paper2);
+  border-style: dashed;
+}
+
+.lay-folder.active {
+  outline: 3px solid var(--blue);
+  outline-offset: -1px;
+}
+
+.lay.droptarget {
+  outline: 3px dashed var(--green);
+  outline-offset: -1px;
+}
+
+/* M3.8: 複数選択（active はさらに強調＝既存 outline） */
+.lay.sel {
+  box-shadow: inset 0 0 0 2px var(--blue);
+}
+
+/* M3.9 H-2: 自前ドラッグ用（ペンでのスクロール/テキスト選択に乗っ取られない） */
+.lay {
+  touch-action: none;
+  user-select: none;
+}
+
+.drag-ghost {
+  position: fixed;
+  z-index: 120;
+  pointer-events: none;
+  background: var(--ink);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 3px 10px;
+  border-radius: 999px;
+  opacity: 0.92;
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.drag-ghost.invalid {
+  background: var(--red);
+}
+
+/* M3.8: DnD 挿入線（行間並べ替えのインジケータ） */
+#ed-layers {
+  position: relative;
+}
+
+.ins-line {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  height: 0;
+  border-top: 3px solid var(--blue);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap; /* M6-6 R-1: 収まらない幅では要素単位で折返す（はみ出しゼロ優先） */
+}
+
+.tog {
+  font-weight: 800;
+  font-size: 12px;
+  flex: 0 0 auto; /* M6-6 R-1: ラベルは縮めない（折返しで逃がす） */
+}
+
+.sw2 {
+  width: 44px;
+  height: 24px;
+  background: var(--paper2);
+  border: 3px solid var(--ink);
+  border-radius: 999px;
+  position: relative;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+/* M6-4 P-2: ノブは垂直中央固定（top固定値だと枠内で下にズレて見えた） */
+.sw2::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 50%;
+  transition: 0.1s;
+}
+
+.sw2.on {
+  background: var(--green);
+}
+
+.sw2.on::after {
+  left: calc(100% - 18px);
+}
+
+/* M6-5 Q-1: 共通スライダー部品（src/ui/slider.ts）。
+   見た目のトラック=root全幅、つまみ位置= calc(--f * (100% - つまみ幅)) で両端ピクセル一致。
+   操作は透明な input[type=range] を全面に重ねる（つまみ幅20pxを input 側にも与えて写像を一致）。 */
+.uisl {
+  position: relative;
+  height: 24px;
+  flex: 1;
+  min-width: 40px;
+  --f: 0;
+}
+
+.uisl-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 12px;
+  background: var(--paper2);
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.uisl-thumb {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  left: calc(var(--f) * (100% - 20px)); /* 20px = SLIDER_THUMB_W */
+  width: 20px;
+  height: 20px;
+  background: #fff;
+  border: 3px solid var(--ink);
+  border-radius: 50%;
+  box-shadow: 0 2px 0 rgba(44, 38, 33, 0.25);
+  pointer-events: none;
+}
+
+.uisl > input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.uisl > input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 20px; /* 可視つまみと同幅＝ポインタ位置→値の写像が見た目と一致 */
+  height: 24px;
+}
+
+.oni {
+  display: flex;
+  gap: 5px;
+}
+
+.oni .lv {
+  flex: 1;
+  height: 30px;
+  border: 3px solid var(--ink);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.oni .lv.on {
+  background: var(--yellow);
+}
+
+.selacts {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.hintline {
+  font-size: 10px;
+  color: var(--ink-soft);
+  margin: 2px 0;
+}
+
+select {
+  font: inherit;
+  font-weight: 700;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  padding: 2px 6px;
+  background: #fff;
+}
+
+input[type="number"],
+input[type="text"] {
+  font: inherit;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  padding: 2px 6px;
+  background: #fff;
+}
+
+/* 下: タイムライン */
+.timeline {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  padding: 7px 10px;
+  min-height: 0;
+}
+
+.tl-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.tl-head .sp {
+  flex: 1;
+}
+
+.tl-head .t {
+  font-weight: 800;
+  font-size: 13px;
+}
+
+.tl-head .play {
+  background: var(--green);
+  color: #fff;
+}
+
+.speed {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 800;
+  font-size: 12px;
+}
+
+.film {
+  flex: 1;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  align-items: center;
+  padding: 4px;
+  background: var(--ink);
+  border-radius: 10px;
+  min-height: 0;
+}
+
+.fr {
+  flex: 0 0 auto;
+  width: 78px;
+  aspect-ratio: 320/240;
+  border: 3px solid #fff;
+  border-radius: 6px;
+  background: #fff;
+  position: relative;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.fr.on {
+  border-color: var(--yellow);
+  outline: 3px solid var(--yellow);
+}
+
+/* M3.3: フィルムの範囲選択（Shift+クリック） */
+.fr.rangesel {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue);
+}
+
+.fr.on.rangesel {
+  border-color: var(--yellow);
+}
+
+.fr .no {
+  position: absolute;
+  top: 1px;
+  left: 3px;
+  font-size: 9px;
+  font-weight: 800;
+  color: var(--ink-soft);
+  background: rgba(255, 255, 255, 0.75);
+  padding: 0 3px;
+  border-radius: 4px;
+  z-index: 2;
+}
+
+.fr canvas {
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+.fradd {
+  flex: 0 0 auto;
+  width: 52px;
+  aspect-ratio: 320/240;
+  border: 3px dashed #fff;
+  border-radius: 6px;
+  background: transparent;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* ============ モーダル / トースト ============ */
+
+.modal-back {
+  position: fixed;
+  inset: 0;
+  background: rgba(44, 38, 33, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-box {
+  background: var(--panel);
+  border: 3px solid var(--ink);
+  border-radius: 16px;
+  box-shadow: 0 6px 0 rgba(44, 38, 33, 0.3);
+  padding: 20px;
+  max-width: calc(100vw - 32px); /* M6-6 R-1: 画面からはみ出さない保険 */
+  min-width: 340px;
+  max-width: 480px;
+}
+
+.modal-msg {
+  margin: 0 0 14px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+
+.modal-input {
+  width: 100%;
+  font: inherit;
+  border: 3px solid var(--ink);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 14px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.modal-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap; /* M6-6 R-1: 収まらない幅では要素単位で折返す */
+  margin-bottom: 10px;
+  font-weight: 700;
+}
+
+.modal-field span {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.modal-field select,
+.modal-field input {
+  flex: 1;
+  font: inherit;
+  border: 3px solid var(--ink);
+  border-radius: 10px;
+  padding: 6px 8px;
+  min-width: 0;
+}
+
+.modal-path {
+  font-size: 11px;
+  color: var(--ink-soft);
+  word-break: break-all;
+  margin: 0 0 12px;
+}
+
+/* M6-6 R-2: 変形モードラベル（カーソル非依存の視覚補助。ペン入力ではCSSカーソルが見えないため） */
+.xmode-label {
+  position: absolute;
+  z-index: 9;
+  background: var(--ink);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 2px 9px;
+  border-radius: 999px;
+  pointer-events: none;
+  white-space: nowrap;
+  opacity: 0.92;
+  box-shadow: var(--shadow);
+}
+
+/* M6-3: 波形調整パネル（M6-4: 大プレビュー＋ズームバー構成） */
+.audio-panel {
+  /* M5-5 T-1: 幅を大幅拡大（波形が主役・画面幅ほぼいっぱいまで）。
+     max-width:none は基底 .modal-box の max-width:480px を明示的に打ち消す
+     （M5-3 で .audio-panel 側の max-width:820px を消した際にこの基底キャップが
+     露出してパネルが480pxへ縮んだ＝T-1退行の原因）。
+     幅は固定値（shrink-to-fit だとスクロールバー内側幅で揺れる=M5-3 S-2 の教訓は維持） */
+  width: min(1500px, 94vw);
+  max-width: none;
+  max-height: 94vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* M5-5 T-1: 広い幅を活かす上段レイアウト（プレビュー左＋SEセクション右） */
+.ap-top {
+  display: flex;
+  gap: 16px;
+  align-items: stretch;
+  margin-bottom: 10px;
+  min-width: 0;
+}
+
+.ap-top .ap-big {
+  width: min(420px, 36%);
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin: 0;
+}
+
+.ap-top #ap-se {
+  flex: 1;
+  min-width: 0;
+}
+
+/* M6-4 P-4: パネル最上部の大プレビュー（320×240バッキング＋pixelated・4:3維持）
+   M6-6 R-5: クリックで再生⇄一時停止 */
+.ap-big {
+  display: block;
+  width: 62%;
+  aspect-ratio: 4 / 3;
+  margin: 0 auto 12px;
+  background: #fff;
+  border: 3px solid var(--ink);
+  border-radius: 10px;
+  image-rendering: pixelated;
+  cursor: pointer;
+}
+
+.ap-wave {
+  display: block;
+  width: 100%;
+  height: 170px;
+  background: #fff;
+  border: 3px solid var(--ink);
+  border-radius: 10px;
+  margin-bottom: 10px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+/* M6-4 P-3: ズーム中のパン用スクロールバー（波形直下） */
+.ap-scroll {
+  overflow-x: scroll;
+  overflow-y: hidden;
+  height: 14px;
+  margin: -4px 0 10px;
+}
+
+.ap-scroll > div {
+  height: 1px;
+}
+
+.ap-scroll::-webkit-scrollbar {
+  height: 12px;
+}
+
+.ap-scroll::-webkit-scrollbar-track {
+  background: var(--paper2);
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+}
+
+.ap-scroll::-webkit-scrollbar-thumb {
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+}
+
+/* M5-1: 音声パネルの SE セクション */
+.ap-se-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 6px;
+  font-size: 13px;
+}
+
+.ap-se-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 2px solid var(--ink);
+  border-radius: 9px;
+  padding: 3px 8px;
+  margin-bottom: 5px;
+  background: #fff;
+  min-width: 0;
+}
+
+.ap-se-row.empty {
+  border-style: dashed;
+  color: var(--ink-soft);
+  background: transparent;
+}
+
+.ap-se-row .nm {
+  flex: 1;
+  min-width: 0;
+  font-weight: 800;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ap-se-row .minibtn {
+  flex: 0 0 auto;
+}
+
+.ap-se-add {
+  margin: 2px 0 8px;
+}
+
+/* M5-1: フィルムの SE 配置マーク */
+.fr.hasse::after {
+  content: "♪";
+  position: absolute;
+  right: 2px;
+  top: 1px;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--blue);
+  text-shadow: 0 0 2px #fff, 0 0 2px #fff;
+  pointer-events: none;
+}
+
+/* M7-1 R-A: エラーダイアログの詳細表示 */
+.err-detail {
+  max-width: 640px;
+  max-height: 240px;
+  overflow: auto;
+  background: #f6f1e4;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0 0 12px;
+}
+
+/* M7-1 R-A: ライブラリフォルダ消失の空状態 */
+.lib-missing {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 28px 12px;
+  border: 3px dashed var(--ink);
+  border-radius: 12px;
+  color: var(--ink-soft);
+}
+
+.lib-missing .btn {
+  margin-top: 10px;
+}
+
+/* M7-2: 初回ガイド（暗幕＋切り抜きハイライト＋吹き出し） */
+.guide-root {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+}
+
+.guide-root.nofocus {
+  background: rgba(44, 38, 33, 0.6);
+}
+
+.guide-hl {
+  position: fixed;
+  border: 3px solid var(--yellow);
+  border-radius: 12px;
+  box-shadow: 0 0 0 9999px rgba(44, 38, 33, 0.6);
+  pointer-events: none;
+}
+
+.guide-bubble {
+  position: fixed;
+  background: var(--panel);
+  border: 3px solid var(--ink);
+  border-radius: 14px;
+  box-shadow: 0 5px 0 rgba(44, 38, 33, 0.35);
+  padding: 14px 16px;
+}
+
+.guide-bubble .g-step {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--ink-soft);
+}
+
+.guide-bubble h4 {
+  margin: 2px 0 6px;
+  font-size: 16px;
+}
+
+.guide-bubble p {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.guide-bubble .g-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* M7-2b: 設定メニュー */
+.settings-menu {
+  width: min(560px, calc(100vw - 32px));
+  /* M9-1 P-2: 権利表記で背が伸びるぶんは**縦方向だけ**で吸収する。
+     幅（基底 .modal-box の max-width:480px）は絶対に触らないこと
+     ——M5-3→M5-5 でパネル幅が480pxへ縮む退行を踏んでいる。 */
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+
+/* M9-1 P-2: バージョン情報の権利表記（長文・スクロール可能） */
+.legal-note {
+  max-height: 176px;
+  overflow-y: auto;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 0 0 8px;
+  background: var(--panel);
+}
+
+.legal-note p {
+  font-size: 11px;
+  line-height: 1.75;
+  color: var(--ink-soft);
+  margin: 0 0 8px;
+}
+
+.legal-note p:last-child {
+  margin-bottom: 0;
+}
+
+.set-sec {
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: #fff;
+}
+
+.set-sec > b {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.set-sec .modal-path {
+  margin: 0 0 8px;
+}
+
+.settings-menu .credits {
+  font-size: 11px;
+  color: var(--ink-soft);
+  line-height: 1.7;
+  margin: 6px 0 0;
+}
+
+.settings-menu .oni .lv:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#toast-host {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 200;
+  pointer-events: none;
+}
+
+.toast {
+  background: var(--ink);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  border-radius: 999px;
+  padding: 8px 18px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: 0.25s;
+  max-width: 70vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ---------------- M8-1: 📷 画像を取り込む（さつえいGUI） ---------------- */
+.imgimp-box {
+  /* 基底 .modal-box の max-width:480px を打ち消す（audio-panel と同じ教訓） */
+  width: min(1120px, 94vw);
+  max-width: none;
+  max-height: 94vh;
+  overflow: auto;
+}
+.imgimp {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.imgimp-left {
+  flex: 0 0 auto;
+}
+#ii-cv {
+  width: 640px;
+  height: 480px;
+  max-width: 100%;
+  image-rendering: pixelated;
+  background: #fff;
+  border: 3px solid var(--ink);
+  border-radius: 8px;
+}
+.imgimp-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 8px;
+  font-weight: 700;
+}
+.imgimp-right {
+  flex: 1;
+  min-width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.imgimp-right .modal-field > span {
+  min-width: 118px;
+}
+.ii-sl {
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+.ii-swatches {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.ii-sw {
+  width: 26px;
+  height: 26px;
+  border: 2px solid var(--ink);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 0;
+}
+.ii-sw.on {
+  outline: 3px solid var(--accent, #ff8c1a);
+  outline-offset: 1px;
+}
+.ii-swatches input[type="color"] {
+  width: 34px;
+  height: 28px;
+  padding: 0;
+  border: 2px solid var(--ink);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+#ii-invert.on {
+  background: var(--ink);
+  color: #fff;
+}
+@media (max-width: 1000px) {
+  .imgimp {
+    flex-direction: column;
+  }
+  #ii-cv {
+    width: 100%;
+    height: auto;
+  }
+}

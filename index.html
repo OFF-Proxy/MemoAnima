@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>メモアニマ (MemoAnima)</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <!-- ============ ライブラリ（閲覧）画面 ============ -->
+    <div id="screen-library" class="screen">
+      <header class="topbar">
+        <div class="logo">
+          <span class="mark"></span>メモアニマ <small>MemoAnima</small>
+          <span id="app-meta" class="ver"></span>
+        </div>
+        <div class="spacer"></div>
+        <div class="search">🔍<input id="lib-search" placeholder="作品を検索…" /></div>
+        <button class="btn blue" id="lib-import" type="button">＋ 3DS作品を取り込む (.kwz)</button>
+        <button class="btn" id="lib-open-file" type="button" title="単発の .kwz / .ppm を開く（合作の受け取り）">📂 ファイルを開く</button>
+        <button class="btn primary" id="lib-new-note" type="button">✏ 新規メモ</button>
+        <button class="btn" id="lib-change-dir" type="button" title="設定">⚙</button>
+      </header>
+
+      <main class="lib-main">
+        <!-- 左: アルバム（＝実フォルダ・ファイル管理） -->
+        <nav class="card albums">
+          <h2>アルバム
+            <span class="albbtns">
+              <button class="minibtn" id="album-add" type="button" title="アルバムを作成">＋</button>
+              <button class="minibtn" id="album-rename" type="button" title="アルバム名を変更">✎</button>
+              <button class="minibtn" id="album-delete" type="button" title="アルバムを削除（空のみ）">🗑</button>
+            </span>
+          </h2>
+          <div id="albums-list"></div>
+          <p class="dnd-hint">サムネをアルバムへドラッグで移動</p>
+        </nav>
+
+        <!-- 中央: ビューア -->
+        <section class="card stage">
+          <div class="stage-top">
+            <span class="title" id="stage-title">作品を選んでください</span>
+            <span class="author" id="stage-author"></span>
+          </div>
+          <div class="screen-view">
+            <div id="player-host"></div>
+            <canvas id="preview-host" width="320" height="240" hidden></canvas>
+          </div>
+          <div class="controls">
+            <div class="transport">
+              <button class="rbtn" id="tp-restart" type="button" title="先頭へ">⏮</button>
+              <button class="rbtn play" id="tp-play" type="button" title="再生 / 一時停止">▶</button>
+              <button class="rbtn" id="tp-loop" type="button" title="ループ">🔁</button>
+            </div>
+            <div class="meta-row" id="stage-meta"></div>
+          </div>
+        </section>
+
+        <!-- 右: サムネ棚 -->
+        <aside class="card shelf">
+          <div class="shelf-head">
+            <span class="t" id="shelf-title"></span>
+            <!-- M10-20: 並び順（手動=従来／名前順／日付順。選択はアプリ設定に保存） -->
+            <select id="shelf-sort" title="並び順">
+              <option value="manual">-並び替え-</option>
+              <option value="name">名前順</option>
+              <option value="date">日付順</option>
+            </select>
+            <span class="c" id="shelf-count"></span>
+          </div>
+          <div class="grid" id="shelf-grid"></div>
+        </aside>
+      </main>
+
+      <!-- 下: 取り込み進捗バー -->
+      <footer id="import-footer" hidden>
+        <span class="label" id="import-label">📥 取り込み中…</span>
+        <div class="bar"><i id="import-bar-fill"></i></div>
+        <span class="pct" id="import-count"></span>
+        <button class="btn" id="lib-cancel-import" type="button">中断</button>
+      </footer>
+    </div>
+
+    <!-- ============ エディタ画面 ============ -->
+    <div id="screen-editor" class="screen" hidden>
+      <header class="edbar">
+        <button class="ic" id="ed-back" type="button" title="ライブラリへ戻る">←</button>
+        <div class="h-title" id="ed-title">✏ 新規メモ</div>
+        <button class="ic" id="ed-undo" type="button" title="元に戻す (Ctrl+Z)">↶</button>
+        <button class="ic" id="ed-redo" type="button" title="やり直し (Ctrl+Y)">↷</button>
+        <div class="sp"></div>
+        <div class="h-spec">320×240 ドット等倍（描画310×230）/ レイヤー無制限 / パレット＋フルカラー</div>
+        <div class="sp"></div>
+        <button class="hb green" id="ed-save" type="button">💾 保存 (Ctrl+S)</button>
+        <button class="hb" id="ed-saveas" type="button" title="別のファイル名/アルバムに保存 (Ctrl+Shift+S)">💾 別名で保存</button>
+        <button class="hb" id="ed-export" type="button" title="MP4 / GIF / APNG / PNG連番へ書き出し">⬇ 書き出し</button>
+      </header>
+
+      <main class="ed-main">
+        <!-- 左: 道具 -->
+        <div class="card tools" id="ed-tools"></div>
+
+        <!-- 中央: キャンバス（M3.9 H-1: スクロールは #ed-scroll に限定し、HUDは stage 直下で固定） -->
+        <div class="card stage" id="ed-stage">
+          <div class="stage-scroll" id="ed-scroll">
+            <div class="cvwrap" id="ed-cvwrap">
+              <canvas id="ed-canvas" width="320" height="240"></canvas>
+              <canvas id="ed-overlay" width="320" height="240"></canvas>
+              <!-- M3.10 G-1: 格子は canvas 化（実測ピッチ×devicePixelRatio の物理pxに線を引く） -->
+              <canvas class="pxgrid" id="ed-grid" hidden></canvas>
+              <div class="drawguide"></div>
+            </div>
+          </div>
+          <div class="cvbadge" id="ed-badge"></div>
+          <div class="xform-badge" id="ed-xform-badge" hidden>🔀 変形中（Enter=確定 / Esc=キャンセル）</div>
+          <div class="cvright">
+            <button class="ic" id="ed-view-rot" type="button" title="表示を回転（データは不変）">🔄</button>
+            <button class="ic" id="ed-view-flip" type="button" title="表示を左右反転（データは不変）">↔</button>
+            <button class="ic" id="ed-zoom-in" type="button" title="ズーム＋">＋</button>
+            <button class="ic" id="ed-zoom-out" type="button" title="ズーム−">−</button>
+          </div>
+          <div class="zoominfo" id="ed-zoominfo"></div>
+          <div class="mini" id="ed-mini" title="クリックでプレビューを大画面に（もう一度で戻る）">
+            <span class="tg">▶ プレビュー</span>
+            <canvas id="ed-mini-canvas" width="320" height="240"></canvas>
+          </div>
+        </div>
+
+        <!-- 右: ペン設定・色・レイヤー・描き味 -->
+        <div class="card side" id="ed-side"></div>
+
+        <!-- 下: タイムライン -->
+        <div class="card timeline">
+          <div class="tl-head" id="ed-tlhead"></div>
+          <div class="film" id="ed-film"></div>
+        </div>
+      </main>
+    </div>
+
+    <div id="modal-root"></div>
+    <div id="toast-host"></div>
+  </body>
+</html>
