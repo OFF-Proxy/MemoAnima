@@ -1,0 +1,61 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# --- アニメモ: 秘密の鍵・個人データは絶対にコミットしない（REQ v1.5 §13-3 / §12-2） ---
+keys/
+*.sed
+movable.sed
+boot9*.bin
+aes_keys*.txt
+/private/
+# 取り込んだ個人のうごメモ作品（テストデータ含む）を誤ってコミットしないため
+/test-data/
+*.kwz
+
+# M7-3: 配布物の生成先（zip/LICENSES はビルド生成物・コミットしない）
+/dist-release/
+
+# MAT-1: photo2memo のテスト入力（個人写真）・リポジトリ直下の生成物をコミットしない
+/*.jpg
+/*.jpeg
+/*.png
+/*.memoanima
+/*.memoanima.png
+
+# M10-1a: フォント作業の中間生成物。
+# assets/fonts/*.woff2（サブセット後の実体）は実行時に必要なので **追跡する**。
+# download/ は一次配布元から再取得できる原本・Unihan.zip（合計 30MB 超）なので追跡しない。
+# 見本シートは確認ゲート用の中間生成物なので追跡しない（MANIFEST/charset/licenses は追跡する）。
+/tools/fonts/download/
+/tools/fonts/sample_sheet.png
+
+# M9-1c/1d: ローカル環境固有の設定（絶対パス・SDカードのドライブレターを含む）。
+# .claude/ 全体ではなく個別に指定する（共有したい設定を置く余地を残す）。
+# どちらも .git/info/exclude やグローバル ignore はマシン依存＝他クローンで無効なので、
+# リポジトリ管理下の .gitignore に明示する。
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+.claude/
