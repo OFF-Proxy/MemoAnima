@@ -90,6 +90,17 @@ export function normalizeTrim(
   return { trimStartSec, trimEndSec, usableSec: Math.max(0, trimEndSec - trimStartSec) };
 }
 
+/** M11-9: 発火中のSEノード1つ。一時停止で「どこまで鳴ったか」を出すため、
+ *  素材（buf）・トラック（音量/ミュートを再開時に読む）・0秒地点（startedAt）を持つ */
+interface SeNode {
+  node: AudioBufferSourceNode;
+  gain: GainNode;
+  buf: AudioBuffer;
+  track: SeTrack | null;
+  /** ctx.currentTime 基準の「このSEの 0秒地点」。途中から鳴らした場合は offset を引いてある */
+  startedAt: number;
+}
+
 /**
  * .animemo プレビューの音声再生（エディタ／ライブラリで各1インスタンス）。
  * 完全なフレーム精度同期は不要（開始タイミングを合わせる程度・handoff §6）。
@@ -106,6 +117,16 @@ export class AudioPreview {
   private lastRate = 1;
   /** M5-1: SE の decode キャッシュ（トラック実体キー。invalidate でクリア） */
   private seCache = new Map<SeTrack, AudioBuffer>();
+  /** M11-1: 発火中のSEノード。SEは多重発火するので単一参照ではなく集合で持つ。
+   *  playSeBuffer で登録し、onended（自然終了・stopSe 由来の両方）で登録解除する。
+   *  これが無いと発火済みSEを止める手段が無く、一時停止しても最後まで鳴り切っていた */
+  private seNodes = new Set<SeNode>();
+  /** M11-1: SEの停止世代。decode 待ちの間に stopSe() が走ったらその発火は捨てる
+   *  （BGM の seq と同じ考え方。SE専用にして BGM の start/stop とは干渉させない） */
+  private seEpoch = 0;
+  /** M11-9: 一時停止で畳んだSEの「続き」。resumeSe() で offset から鳴らし直す。
+   *  stopSe()（＝完全な停止）では捨てる＝続きは残さない */
+  private sePaused: { buf: AudioBuffer; track: SeTrack | null; offset: number }[] = [];
 
   /** トラック変更（差し替え/削除/適用）時に呼ぶ */
   invalidate() {
@@ -123,7 +144,11 @@ export class AudioPreview {
    * 戻るたびに呼び出し側が restart() を呼び、頭出しから鳴り直す（モード共通・書き出し不変）。
    */
   async start(track: BgmTrack | null | undefined, startFrameSec: number, rate = 1) {
-    this.stop();
+    // M11-9: 鳴っているSEは止めるが、**畳んだ続き（sePaused）には触れない**。
+    // ループ折り返しの restart() で前の周回を切る挙動（M11-1）はそのまま、
+    // かつ ⏸→▶ の再開で startPlayback → start() → resumeSe() の順に呼べるようにするため
+    this.stopBgm();
+    this.killLiveSe();
     this.lastTrack = track ?? null;
     this.lastRate = rate;
     if (!track || track.muted) return;
@@ -163,11 +188,25 @@ export class AudioPreview {
 
   /** A-1: アニメが先頭へループした瞬間に呼ぶ（stop→頭出しから再スタート。decode/rateは使い回し） */
   restart() {
-    if (!this.lastTrack) return;
+    // M11-1: BGMがある場合は start() の先頭の stop() が SE もまとめて止める。
+    // BGMが無い作品はここで早期 return するため SE が止まらず、周回ごとに重なっていた
+    // （BGMの有無で折り返しの挙動が変わらないように、明示的に止める）
+    if (!this.lastTrack) {
+      this.stopSe();
+      return;
+    }
     void this.start(this.lastTrack, 0, this.lastRate);
   }
 
   stop() {
+    this.stopBgm();
+    // M11-1: 発火済みSEも一緒に止める（BGMだけ止めても効果音が鳴り切ってしまう症状の修正）
+    // M11-9: 完全な停止なので「続き」も捨てる
+    this.stopSe();
+  }
+
+  /** BGM だけ止める（SEには触れない） */
+  private stopBgm() {
     this.seq++;
     try {
       this.node?.stop();
@@ -182,6 +221,82 @@ export class AudioPreview {
     }
     this.node = null;
     this.gain = null;
+  }
+
+  /** M11-1: 鳴っているSEノードを止める（BGMにも「続き」にも触れない）。
+   *  seEpoch を進めるので、decode 待ちだった発火もここで捨てられる */
+  private killLiveSe() {
+    this.seEpoch++;
+    // stop() 由来の onended が集合を触るので、反復はコピーに対して行う
+    const fired = [...this.seNodes];
+    this.seNodes.clear();
+    for (const e of fired) {
+      try {
+        e.node.stop();
+      } catch {
+        /* noop */
+      }
+      try {
+        e.node.disconnect();
+        e.gain.disconnect();
+      } catch {
+        /* noop */
+      }
+    }
+    return fired;
+  }
+
+  /** M11-1: 発火中のSEを全部止める（BGMには触れない）。
+   *  停止・コマ移動・SEの編集・パネルを閉じる・エディタを離れる、から呼ぶ。stop() からも呼ばれる。
+   *  M11-9: **続きは捨てる**（一時停止したいときは pauseSe() を使う） */
+  stopSe() {
+    this.killLiveSe();
+    this.sePaused = [];
+  }
+
+  /** M11-9: 一時停止。鳴っているSEを「どこまで鳴ったか」つきで畳む。
+   *  resumeSe() を呼ぶまで音は止まったまま。stopSe() を挟むと続きは捨てられる */
+  pauseSe() {
+    const ctx = _ctx;
+    const fired = this.killLiveSe();
+    if (!ctx) return;
+    for (const e of fired) {
+      // 経過時間 = いまの時刻 - このノードの「0秒地点」。start(0, offset) で始めたものは
+      // startedAt に offset を引いた値を入れてあるので、**繰り返しても累積しない**
+      const played = ctx.currentTime - e.startedAt;
+      if (!isFinite(played) || played < 0) continue;
+      if (played >= e.buf.duration) continue; // 鳴り終わっている＝続きは無い
+      this.sePaused.push({ buf: e.buf, track: e.track, offset: played });
+    }
+  }
+
+  /** M11-9: 一時停止したSEを続きから鳴らす。**続きから鳴らしたトラックの id** を返す
+   *  （呼び出し側が「開始コマのSE」を二重に鳴らさないために使う）。
+   *  音量・ミュートは**再開時点の**トラックの値を読む */
+  resumeSe(): string[] {
+    const pending = this.sePaused;
+    this.sePaused = [];
+    const ids: string[] = [];
+    for (const p of pending) {
+      if (p.offset >= p.buf.duration) continue; // 長さを超えていたら鳴らさない
+      if (p.track?.muted) continue; // 一時停止中にミュートされた
+      this.playSeBuffer(p.buf, p.track, p.offset);
+      if (p.track) ids.push(p.track.id);
+    }
+    return ids;
+  }
+
+  /** M11-9: 畳んである「続き」だけを捨てる（鳴っている音には触れない）。
+   *  SEの編集（差し替え・削除・ミュート・配置換え）から呼ぶ＝消えた音源の続きが後から鳴らないように */
+  discardPausedSe() {
+    this.sePaused = [];
+  }
+
+  /** M11-9: 一時停止（⏸）。BGM は止める（▶ で現在のコマ位置から鳴り直す＝従来どおり）。
+   *  SE だけ「続き」を残す。再開側は start() のあとに resumeSe() を呼ぶ */
+  pause() {
+    this.stopBgm();
+    this.pauseSe();
   }
 
   /** M5-1: SE の decode キャッシュを温める（再生開始時に呼ぶと初回発火が遅れない） */
@@ -203,28 +318,44 @@ export class AudioPreview {
     if (track.muted) return;
     const cached = this.seCache.get(track);
     if (cached) {
-      this.playSeBuffer(cached, track.volume);
+      this.playSeBuffer(cached, track);
       return;
     }
+    const myEpoch = this.seEpoch;
     void decodeAudio(track.data)
       .then((buf) => {
         this.seCache.set(track, buf);
-        if (!track.muted) this.playSeBuffer(buf, track.volume);
+        // M11-1: decode 待ちの間に停止（一時停止など）されていたら、もう鳴らさない
+        if (myEpoch !== this.seEpoch) return;
+        if (!track.muted) this.playSeBuffer(buf, track);
       })
       .catch(() => {});
   }
 
-  private playSeBuffer(buf: AudioBuffer, volume: number) {
+  /** SE を1回鳴らす。offset>0 なら途中から（M11-9 の一時停止からの再開）。
+   *  SE は速度連動しない（playbackRate は既定の 1 のまま＝既存仕様） */
+  private playSeBuffer(buf: AudioBuffer, track: SeTrack | null, offset = 0) {
     try {
       const ctx = sharedCtx();
       if (ctx.state === "suspended") void ctx.resume().catch(() => {});
       const node = ctx.createBufferSource();
       node.buffer = buf;
       const gain = ctx.createGain();
-      gain.gain.value = Math.max(0, Math.min(1, volume));
+      gain.gain.value = Math.max(0, Math.min(1, track ? track.volume : 1));
       node.connect(gain);
       gain.connect(ctx.destination);
+      // M11-1: 停止できるよう集合で保持する（登録は start 成功後＝例外時に集合へ残さない）
+      // M11-9: 一時停止で「どこまで鳴ったか」を出せるよう、素材と 0秒地点も持たせる。
+      // startedAt から offset を引いておくので、一時停止と再開を繰り返しても経過が累積しない
+      const entry: SeNode = {
+        node,
+        gain,
+        buf,
+        track,
+        startedAt: ctx.currentTime - offset,
+      };
       node.onended = () => {
+        this.seNodes.delete(entry); // stopSe 由来の終了でも安全（delete は冪等）
         try {
           node.disconnect();
           gain.disconnect();
@@ -232,7 +363,8 @@ export class AudioPreview {
           /* noop */
         }
       };
-      node.start();
+      node.start(0, Math.max(0, Math.min(offset, buf.duration)));
+      this.seNodes.add(entry);
     } catch {
       /* noop */
     }

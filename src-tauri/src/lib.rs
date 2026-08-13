@@ -100,6 +100,12 @@ fn scan_library(lib_root: String) -> Result<Vec<pclib::LibraryView>, String> {
     pclib::scan_library(&lib_root)
 }
 
+/// M11-4: 外部変更の軽量検知用の指紋（フォーカス復帰のたびに呼び、変化時だけ本スキャン）。
+#[tauri::command]
+fn library_stamp(lib_root: String) -> Result<String, String> {
+    pclib::library_stamp(&lib_root)
+}
+
 /// アルバム一覧。
 #[tauri::command]
 fn list_albums(lib_root: String) -> Result<Vec<String>, String> {
@@ -118,7 +124,7 @@ fn rename_album(lib_root: String, old: String, new: String) -> Result<String, St
     pclib::rename_album(&lib_root, &old, &new)
 }
 
-/// アルバム削除（空のみ）。
+/// アルバム削除（M11-1: 作品0件のみ。アプリ/OS 由来の付属物は一緒に削除する）。
 #[tauri::command]
 fn delete_album(lib_root: String, name: String) -> Result<(), String> {
     pclib::delete_album(&lib_root, &name)
@@ -140,6 +146,17 @@ fn delete_note(
 #[tauri::command]
 fn move_note(lib_root: String, hash: String, dest_album: String) -> Result<(), String> {
     pclib::move_note(&lib_root, &hash, &dest_album)
+}
+
+/// M11-3: プロジェクト（.memoanima/.animemo）を別アルバムへ移動（サイドカーPNGも一緒に）。
+#[tauri::command]
+fn move_project(
+    lib_root: String,
+    album: String,
+    name: String,
+    dest_album: String,
+) -> Result<String, String> {
+    pclib::move_project(&lib_root, &album, &name, &dest_album)
 }
 
 /// アルバム内のメモ表示順を保存。
@@ -537,12 +554,14 @@ pub fn run() {
             cancel_import,
             import_single_file,
             scan_library,
+            library_stamp,
             list_albums,
             create_album,
             rename_album,
             delete_album,
             delete_note,
             move_note,
+            move_project,
             set_note_order,
             save_project,
             save_project_raw,

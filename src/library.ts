@@ -46,6 +46,8 @@ export interface LibraryCallbacks {
   toast: (msg: string) => void;
   /** M10-20: 並び順の変更を設定へ保存する（文字設定と同じ「変えた瞬間に保存」の流儀） */
   onShelfSortChange?: (v: "manual" | "name" | "date") => void;
+  /** M11-3: アルバム選択ダイアログ（「📁 移動」の代替導線）。null=キャンセル */
+  pickAlbum?: (albums: string[], current: string, title: string) => Promise<string | null>;
 }
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) =>
@@ -92,12 +94,40 @@ export class LibraryScreen {
       window.addEventListener("keydown", (e) => {
         // ライブラリ画面表示中のみ・入力欄以外で Delete → 選択メモ削除（L-1）
         if ($("#screen-library").hidden) return;
+        // M11-3: ドラッグ中の Esc はドラッグだけ取り消す（rowDrag と同じ作法）
+        if (e.key === "Escape" && this.cardDrag) {
+          e.preventDefault();
+          this.cancelCardDrag();
+          return;
+        }
+        // M11-10: モーダル（確認・設定・進捗）が開いている間は発火しない
+        //（エディタ側は M11-7 で塞いだが、ライブラリ側は素通りしていた）
+        if (document.querySelector(".modal-back")) return;
         const tag = (e.target as HTMLElement).tagName;
         if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if ((e.target as HTMLElement).isContentEditable) return;
+        if (e.isComposing || e.keyCode === 229) return;
         if (e.key === "Delete" && this.selected) {
           e.preventDefault();
           void this.deleteSelected();
         }
+        // M11-10: Space はホームでも再生／一時停止（作品未選択なら何も起きない）。
+        // 長押しの手のひらはエディタだけの作法なので、こちらは単純なトグル。
+        // ボタンにフォーカスがあるときはブラウザ既定（Space でそのボタンを押す）を優先する
+        if (e.code === "Space" && !(e.target as HTMLElement | null)?.closest?.("button, a")) {
+          e.preventDefault();
+          if (!e.repeat) this.togglePreviewPlayback();
+        }
+      });
+    }
+    // M11-4: 外部（エクスプローラー等）での変更に追随する。ウィンドウへ戻ってきたら
+    // **軽量な指紋**（library_stamp）だけ取り、変化があったときにフル再スキャンする。
+    // ライブラリ画面を見ているときだけ（編集中に一覧が動くのは事故のもと）
+    if (!this.focusBound) {
+      this.focusBound = true;
+      window.addEventListener("focus", () => void this.checkExternalChanges());
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") void this.checkExternalChanges();
       });
     }
     await this.refresh();
@@ -112,7 +142,8 @@ export class LibraryScreen {
     }
   }
 
-  async refresh() {
+  /** 一覧を取り直して描き直す。戻り値: 成功したか（失敗時はエラートースト済み） */
+  async refresh(): Promise<boolean> {
     try {
       const [items, albums] = await Promise.all([
         invoke<LibraryView[]>("scan_library", { libRoot: this.libRoot }),
@@ -120,14 +151,118 @@ export class LibraryScreen {
       ]);
       this.items = items;
       this.albums = albums;
+      const prevAlbum = this.currentAlbum;
       if (!this.currentAlbum || !albums.includes(this.currentAlbum)) {
         this.currentAlbum = albums[0] ?? "";
       }
+      // M11-4: renderShelf は棚を作り直す＝スクロール位置が先頭へ飛ぶ（M3.4/L-2 で
+      // 避けてきた挙動）。フォーカス復帰で勝手に再スキャンするようになったぶん、
+      // 同じアルバムを描き直すときは位置を戻す
+      const grid = $("#shelf-grid") as HTMLElement;
+      const top = grid.scrollTop;
       this.renderAlbums();
       this.renderShelf();
+      if (this.currentAlbum === prevAlbum) grid.scrollTop = top;
+      // M11-4: いま見えている状態＝この指紋、として基準を更新する
+      this.lastStamp = await invoke<string>("library_stamp", { libRoot: this.libRoot }).catch(
+        () => this.lastStamp
+      );
+      return true;
     } catch (e) {
       this.cb.toast(`ライブラリ読み込みエラー: ${e}`);
+      return false;
     }
+  }
+
+  // ---------------- M11-4: 外部変更への追随 ----------------
+
+  /** フォーカス復帰の検知を1回だけ張ったか */
+  private focusBound = false;
+  /** 直近に見た指紋（library_stamp）。null=未取得 */
+  private lastStamp: string | null = null;
+  /** 指紋チェックの最終時刻（連続発火の抑制） */
+  private stampCheckedAt = 0;
+  /** 指紋チェック〜再スキャンが進行中か（多重起動の抑制） */
+  private stampBusy = false;
+  /** 指紋チェックの最小間隔（ms）。フォーカスと visibilitychange が連続で来るため */
+  private static readonly STAMP_MIN_INTERVAL = 400;
+
+  /** M11-4: 外部変更があれば一覧を更新する。`force` で間隔制限を無視。
+   *  戻り値: 再スキャンしたか */
+  async checkExternalChanges(force = false): Promise<boolean> {
+    if (!this.libRoot) return false;
+    // エディタを開いている間は走らせない（編集中に一覧が動かない・重い処理も挟まない）
+    if ($("#screen-library").hidden) return false;
+    // 取り込み中も走らせない。`scan_library` は取り込みと同じロックを取るので、
+    // ここで待つと取り込みが終わるまでウィンドウが固まる（中断ボタンも効かなくなる）
+    if (!$("#import-footer").hidden) return false;
+    // 実行中の再入を止める（フォーカス往復で refresh が積み上がるのを防ぐ）
+    if (this.stampBusy) return false;
+    const now = performance.now();
+    if (!force && now - this.stampCheckedAt < LibraryScreen.STAMP_MIN_INTERVAL) return false;
+    this.stampBusy = true;
+    try {
+      let stamp: string;
+      try {
+        stamp = await invoke<string>("library_stamp", { libRoot: this.libRoot });
+      } catch {
+        return false; // 取得できない（フォルダが無い等）ときは何もしない
+      }
+      if (this.lastStamp === null) {
+        this.lastStamp = stamp;
+        return false;
+      }
+      if (stamp === this.lastStamp) return false;
+      const okRefresh = await this.refresh(); // 成功時は refresh の中で lastStamp も更新される
+      // 読み込みに失敗したときも見た指紋は覚えておく（フォーカスのたびに同じエラーを
+      // 出し続けないため。復帰したいときは 🔄 更新ボタンがある）
+      if (!okRefresh) this.lastStamp = stamp;
+      return okRefresh;
+    } finally {
+      this.stampBusy = false;
+      this.stampCheckedAt = performance.now(); // 完了時刻を基準に間隔を測る
+    }
+  }
+
+  /** M11-4: 古いパスで操作が失敗したとき用。一覧を更新して同じ作品を探し直す（1回だけ）。
+   *  `item` が null なら呼び出し側は利用者向けの案内を出す（内部パスは見せない）。
+   *  `refreshed` は実際に一覧を取り直したか（文言を実態に合わせるため） */
+  private async ensureFresh(
+    it: LibraryView
+  ): Promise<{ item: LibraryView | null; refreshed: boolean }> {
+    const before = this.items; // 更新前のスナップショット（refresh は配列ごと差し替える）
+    const refreshed = await this.checkExternalChanges(true);
+    if (it.kind === "note") {
+      // .kwz/.ppm は索引が内容ハッシュで持っているので取り違えようがない
+      const item = this.items.find((i) => i.kind === "note" && i.hash === it.hash) ?? null;
+      return { item, refreshed };
+    }
+    const same = this.items.find(
+      (i) => i.kind === "project" && i.album === it.album && i.name === it.name
+    );
+    if (same) return { item: same, refreshed };
+    // 外部で別アルバムへ移された可能性。ただし **名前だけで拾ってはいけない**
+    // （別アルバムに同名の作品があると、そちらを削除/移動してしまう＝作品の喪失）。
+    // 「移動された」と言えるのは、更新前には無かった場所に、同名・同サイズの作品が
+    // ちょうど1件だけ現れたとき。ひとつでも怪しければ拾わない（案内を出して何もしない）
+    const appeared = this.items.filter(
+      (i) =>
+        i.kind === "project" &&
+        i.name === it.name &&
+        i.size === it.size &&
+        !before.some((b) => b.kind === "project" && b.album === i.album && b.name === i.name)
+    );
+    return { item: appeared.length === 1 ? appeared[0] : null, refreshed };
+  }
+
+  /** M11-4: 「移動または削除された」旨の案内（内部パスは出さない。詳細はログへ） */
+  private notifyGone(refreshed: boolean, e?: unknown) {
+    if (e !== undefined) console.error("[M11-4] 作品が見つかりません:", e);
+    this.cb.toast(
+      refreshed
+        ? "この作品は移動または削除されたようです。一覧を更新しました"
+        : "この作品は見つかりませんでした"
+    );
   }
 
   // ---------------- ヘッダー ----------------
@@ -151,6 +286,25 @@ export class LibraryScreen {
       this.renderShelf();
       this.cb.onShelfSortChange?.(this.shelfSort);
     };
+    // M11-4: 手動の「🔄 更新」（自動検知が効かない場面の逃げ道）。既存クラス・1個だけ作る
+    if (!document.querySelector("#lib-reload")) {
+      const btn = document.createElement("button");
+      btn.className = "minibtn";
+      btn.id = "lib-reload";
+      btn.type = "button";
+      btn.textContent = "🔄";
+      btn.title = "一覧を更新（外部でファイルを動かしたとき）";
+      btn.onclick = async () => {
+        btn.disabled = true;
+        try {
+          // 失敗時は refresh 自身がエラーを出すので、成功したときだけ知らせる
+          if (await this.refresh()) this.cb.toast("一覧を更新しました");
+        } finally {
+          btn.disabled = false;
+        }
+      };
+      sortSel.parentElement?.insertBefore(btn, sortSel);
+    }
   }
 
   private bindAlbumOps() {
@@ -182,8 +336,11 @@ export class LibraryScreen {
     };
     $("#album-delete").onclick = async () => {
       if (!this.currentAlbum) return;
+      // M11-1: 削除できる条件が「空のフォルダ」から「作品が入っていない」に変わり、
+      // アプリが作ったサムネ（.memoanima.png 等）は一緒に消える。同意を取る文言が
+      // 実際の挙動と食い違わないようにする
       const ok = await this.cb.confirm(
-        `アルバム「${this.currentAlbum}」を削除しますか？（空のフォルダのみ削除できます）`
+        `アルバム「${this.currentAlbum}」を削除しますか？（作品が入っていないアルバムのみ削除できます。サムネなどアプリが作ったファイルは一緒に削除されます）`
       );
       if (!ok) return;
       try {
@@ -288,27 +445,10 @@ export class LibraryScreen {
         this.renderAlbums();
         this.renderShelf();
       };
-      // メモ移動のドロップ先
-      row.addEventListener("dragover", (e) => {
-        if (e.dataTransfer?.types.includes("text/animemo-note")) {
-          e.preventDefault();
-          row.classList.add("drop");
-        }
-      });
-      row.addEventListener("dragleave", () => row.classList.remove("drop"));
-      row.addEventListener("drop", async (e) => {
-        e.preventDefault();
-        row.classList.remove("drop");
-        const hash = e.dataTransfer?.getData("text/animemo-note");
-        if (!hash) return;
-        try {
-          await invoke("move_note", { libRoot: this.libRoot, hash, destAlbum: album });
-          this.cb.toast(`「${album}」へ移動しました`);
-          await this.refresh();
-        } catch (err) {
-          this.cb.toast(String(err));
-        }
-      });
+      // M11-3: HTML5 DnD（dragover/drop）は実 exe では動かない（Tauri の dragDropEnabled が
+      // OS の drag&drop を握るため）。ドロップ先の判定は pointer ドラッグ側の
+      // hitTestCardDrag が dataset.album を見て行う
+      row.dataset.album = album;
       host.appendChild(row);
     }
   }
@@ -344,40 +484,39 @@ export class LibraryScreen {
       const card = document.createElement("div");
       card.className =
         "thumb" + (this.selected && this.selected.path === it.path ? " active" : "");
-      card.draggable = it.kind === "note";
       const pic = document.createElement("div");
       pic.className = "pic";
       const img = document.createElement("img");
       img.alt = it.name;
+      // M11-3: <img> は既定でネイティブのドラッグ対象。放置すると画像ドラッグが始まって
+      // 以降の pointermove を奪い、pointer ドラッグが「掴めているのに動かない」状態になる
+      //（実 exe でサムネが表示された作品だけ再現した。dev では気づけない類の不具合）
+      img.draggable = false;
       pic.appendChild(img);
       const cap = document.createElement("div");
       cap.className = "cap";
       cap.textContent = (it.kind === "project" ? "📝 " : "") + it.name;
       card.dataset.path = it.path; // L-2: 選択ハイライトの差分更新用
+      // 並べ替えキー: ノート=h:<hash> / プロジェクト=p:<rel_path>（両方永続化）
+      card.dataset.orderkey = this.orderKey(it);
       card.appendChild(pic);
       card.appendChild(cap);
-      card.onclick = () => this.select(it);
+      card.onclick = () => {
+        // M11-3: ドラッグ直後の click では選択を変えない（rowDrag の suppressRowClick と同じ）
+        if (this.suppressCardClick) {
+          this.suppressCardClick = false;
+          return;
+        }
+        void this.select(it);
+      };
       card.ondblclick = () => this.edit(it);
-      // 並べ替えキー: ノート=h:<hash> / プロジェクト=p:<rel_path>（両方永続化）
-      const orderKey = this.orderKey(it);
-      card.draggable = true;
-      card.addEventListener("dragstart", (e) => {
-        if (it.kind === "note") e.dataTransfer?.setData("text/animemo-note", it.hash);
-        e.dataTransfer?.setData("text/animemo-order", orderKey);
+      // M11-3: HTML5 DnD は実 exe で動かないため pointer ドラッグへ置換（手本: editor.ts rowDrag）
+      card.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        this.startCardDrag(e, it);
       });
-      card.addEventListener("dragover", (e) => {
-        // M10-20: 並び替えドロップは「手動」モードのときだけ受ける（名前順・日付順では
-        // order を誤操作で壊さない。アルバム行へのメモ移動ドロップは従来どおり全モード有効）
-        if (this.shelfSort !== "manual") return;
-        if (e.dataTransfer?.types.includes("text/animemo-order")) e.preventDefault();
-      });
-      card.addEventListener("drop", async (e) => {
-        if (this.shelfSort !== "manual") return; // M10-20: 念のための二重ガード
-        e.preventDefault();
-        const fromKey = e.dataTransfer?.getData("text/animemo-order");
-        if (!fromKey || fromKey === orderKey) return;
-        await this.reorder(fromKey, orderKey);
-      });
+      // ネイティブのドラッグ（画像・テキスト選択）が始まると pointermove が止まるので塞ぐ
+      card.addEventListener("dragstart", (e) => e.preventDefault());
       grid.appendChild(card);
       this.loadThumb(img, it);
     }
@@ -402,6 +541,240 @@ export class LibraryScreen {
     } catch (e) {
       this.cb.toast(String(e));
     }
+  }
+
+  // ---------------- M11-3: カードの pointer ドラッグ（実 exe で動く方式） ----------------
+  // Tauri の dragDropEnabled=true では WebView 内の HTML5 DnD（dragstart/dragover/drop）が
+  // 動かない（OS の drag&drop を Tauri 側が握るため）。dev（素のブラウザ）でだけ動いて
+  // 実 exe で 🚫 になっていた原因がこれ。editor.ts の rowDrag と同じ流儀で作り直す
+  //（pointerdown → 距離しきい値でドラッグ開始 → pointerup で確定 / Esc・pointercancel で取消）。
+  // 副次効果としてペン（液タブ）でも確実に掴める。
+  private cardDrag: {
+    it: LibraryView;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    active: boolean;
+    ghost: HTMLElement | null;
+    target: { kind: "album"; album: string } | { kind: "card"; key: string } | null;
+    onMove: (e: PointerEvent) => void;
+    onUp: (e: PointerEvent) => void;
+    onBlur: () => void;
+  } | null = null;
+  /** ドラッグ確定後の click で選択を変えないための抑止（rowDrag の suppressRowClick と同じ） */
+  private suppressCardClick = false;
+  /** 掴んだと判定する移動距離（px）。時間条件は付けない（ペンでもマウスでも素直） */
+  private static readonly CARD_DRAG_THRESHOLD = 6;
+
+  private startCardDrag(e: PointerEvent, it: LibraryView) {
+    if (this.cardDrag) return;
+    this.suppressCardClick = false;
+    // 掴んだポインタ以外（別の指・別のペン）のイベントは無視する
+    const mine = (ev: PointerEvent) => this.cardDrag?.pointerId === ev.pointerId;
+    const onMove = (ev: PointerEvent) => {
+      if (mine(ev)) this.updateCardDrag(ev);
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (!mine(ev)) return;
+      // pointercancel（タッチのスクロール引き継ぎ等）は「何も起きない」で終わる
+      if (ev.type === "pointercancel") this.cancelCardDrag();
+      else void this.finishCardDrag();
+    };
+    const onBlur = () => this.cancelCardDrag(); // ウィンドウ外へ出た場合の保険
+    this.cardDrag = {
+      it,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      active: false,
+      ghost: null,
+      target: null,
+      onMove,
+      onUp,
+      onBlur,
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("blur", onBlur);
+  }
+
+  /** パスからカード要素を引く（パスに \ や " が入るので属性セレクタは使わない） */
+  private cardEl(path: string): HTMLElement | null {
+    return (
+      ([...document.querySelectorAll("#shelf-grid .thumb")] as HTMLElement[]).find(
+        (el) => el.dataset.path === path
+      ) ?? null
+    );
+  }
+
+  private clearCardDropUi() {
+    document
+      .querySelectorAll("#albums-list .album.drop")
+      .forEach((el) => el.classList.remove("drop"));
+    document
+      .querySelectorAll("#shelf-grid .thumb")
+      .forEach((el) => ((el as HTMLElement).style.outline = ""));
+  }
+
+  private hitTestCardDrag(x: number, y: number) {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    if (!el) return null;
+    const album = el.closest("#albums-list .album") as HTMLElement | null;
+    if (album?.dataset.album) return { kind: "album" as const, album: album.dataset.album };
+    const card = el.closest("#shelf-grid .thumb") as HTMLElement | null;
+    if (card?.dataset.orderkey) return { kind: "card" as const, key: card.dataset.orderkey };
+    return null;
+  }
+
+  private updateCardDrag(ev: PointerEvent) {
+    const d = this.cardDrag;
+    if (!d) return;
+    if (!d.active) {
+      if (
+        Math.hypot(ev.clientX - d.startX, ev.clientY - d.startY) <
+        LibraryScreen.CARD_DRAG_THRESHOLD
+      )
+        return; // しきい値未満はクリック/ダブルクリックのまま（従来の操作を壊さない）
+      d.active = true;
+      this.suppressCardClick = true;
+      const g = document.createElement("div");
+      g.className = "drag-ghost"; // 既存クラス（エディタのレイヤードラッグと共用）
+      g.textContent = (d.it.kind === "project" ? "📝 " : "") + d.it.name;
+      document.body.appendChild(g);
+      d.ghost = g;
+      const src = this.cardEl(d.it.path);
+      if (src) src.style.opacity = "0.4"; // 掴んでいる元カードを薄く（styles.css は触らない）
+    }
+    if (d.ghost) {
+      d.ghost.style.left = `${ev.clientX + 14}px`;
+      d.ghost.style.top = `${ev.clientY + 16}px`;
+    }
+    const hit = this.hitTestCardDrag(ev.clientX, ev.clientY);
+    this.clearCardDropUi();
+    let valid = false;
+    if (hit?.kind === "album") {
+      valid = hit.album !== d.it.album;
+      if (valid) {
+        const row = ([...document.querySelectorAll("#albums-list .album")] as HTMLElement[]).find(
+          (el) => el.dataset.album === hit.album
+        );
+        row?.classList.add("drop"); // 既存の .album.drop（緑）をそのまま流用
+      }
+    } else if (hit?.kind === "card") {
+      // M10-20: 並び替えは「手動」モードのときだけ（名前順/日付順では order を壊さない）。
+      // 検索中は棚がアルバム横断リストになり、そのまま順序を書くと**他アルバムの並び**まで
+      // 書き換わるため受け付けない（M11-3 レビュー検出・従来からの穴）
+      valid = this.shelfSort === "manual" && !this.search && hit.key !== this.orderKey(d.it);
+      if (valid) {
+        const card = ([...document.querySelectorAll("#shelf-grid .thumb")] as HTMLElement[]).find(
+          (el) => el.dataset.orderkey === hit.key
+        );
+        // .thumb 用のドロップ先クラスは既存に無いため、レイヤーの .lay.droptarget と
+        // 同じ見た目をインラインで当てる（styles.css は不変）
+        if (card) card.style.outline = "3px dashed var(--green)";
+      }
+    }
+    d.target = valid ? hit : null;
+    d.ghost?.classList.toggle("invalid", !valid);
+  }
+
+  private async finishCardDrag() {
+    const d = this.cardDrag;
+    if (!d) return;
+    const { it, active, target } = d;
+    this.endCardDrag();
+    if (!active) return;
+    if (!target) {
+      // 掴んだが有効なドロップ先が無かった＝ただのクリックとして扱う（掴んだ作品を選ぶ）。
+      // これが無いと「6px 以上動かして同じ場所で離す」と選択が変わらない
+      //（rowDrag はドラッグ確定時にその場で選択を切り替えて同じ効果を出している）
+      void this.select(it);
+      return;
+    }
+    if (target.kind === "album") await this.moveItemTo(it, target.album);
+    else await this.reorder(this.orderKey(it), target.key);
+  }
+
+  /** Esc / pointercancel / ウィンドウ外 → 何も起きない状態へ戻す */
+  cancelCardDrag() {
+    this.endCardDrag();
+  }
+
+  private endCardDrag() {
+    const d = this.cardDrag;
+    if (!d) return;
+    window.removeEventListener("pointermove", d.onMove);
+    window.removeEventListener("pointerup", d.onUp);
+    window.removeEventListener("pointercancel", d.onUp);
+    window.removeEventListener("blur", d.onBlur);
+    d.ghost?.remove();
+    const src = this.cardEl(d.it.path);
+    if (src) src.style.opacity = "";
+    this.clearCardDropUi();
+    this.cardDrag = null;
+  }
+
+  /** M11-3: 作品を別アルバムへ移動（note=move_note / project=move_project）。
+   *  移動後は移動先アルバムを開いて対象を選択する（見失わせない） */
+  async moveItemTo(it: LibraryView, album: string, retried = false): Promise<void> {
+    if (!album || it.album === album) return;
+    try {
+      let newPath: string | null = null;
+      if (it.kind === "note") {
+        await invoke("move_note", { libRoot: this.libRoot, hash: it.hash, destAlbum: album });
+      } else {
+        newPath = await invoke<string>("move_project", {
+          libRoot: this.libRoot,
+          album: it.album,
+          name: it.name,
+          destAlbum: album,
+        });
+      }
+      this.currentAlbum = album; // refresh 内の再描画で移動先が開く（二度描きしない）
+      await this.refresh();
+      const moved =
+        it.kind === "note"
+          ? this.items.find((i) => i.hash === it.hash && i.album === album)
+          : this.items.find((i) => i.path === newPath);
+      if (moved) await this.select(moved);
+      this.cb.toast(`「${album}」へ移動しました`);
+    } catch (e) {
+      // M11-4: 外部で移動された等でパスが古いときは、一覧を更新して1回だけやり直す
+      if (retried) {
+        console.error("[M11-4] 移動に失敗:", e);
+        this.cb.toast("移動できませんでした。もう一度お試しください");
+        return;
+      }
+      const { item: fresh, refreshed } = await this.ensureFresh(it);
+      if (!fresh) {
+        this.notifyGone(refreshed, e);
+        return;
+      }
+      if (fresh.album === album) {
+        // 外部で既に移動先へ動いていた＝もう目的は達成されている
+        this.currentAlbum = album;
+        this.renderAlbums();
+        this.renderShelf();
+        await this.select(fresh);
+        this.cb.toast(`すでに「${album}」にありました`);
+        return;
+      }
+      await this.moveItemTo(fresh, album, true);
+    }
+  }
+
+  /** M11-3: 「📁 移動」ボタン（ドラッグ以外の導線。アルバムが多いときはこちらが確実） */
+  private async moveSelectedWithPicker() {
+    const it = this.selected;
+    if (!it) return;
+    if (!this.cb.pickAlbum) {
+      this.cb.toast("移動先を選ぶダイアログが使えません");
+      return;
+    }
+    const album = await this.cb.pickAlbum(this.albums, it.album, `「${it.name}」の移動先`);
+    if (!album) return;
+    await this.moveItemTo(it, album);
   }
 
   // サムネイル（遅延・1件ずつ）
@@ -628,6 +1001,13 @@ export class LibraryScreen {
     exp.textContent = "⬇ 書き出し";
     exp.onclick = () => this.exportSelected();
     host.appendChild(exp);
+    // M11-3: ドラッグ以外の移動導線（アルバムが多いとスクロールしながらのドラッグは厳しい）
+    const mv = document.createElement("button");
+    mv.className = "chip";
+    mv.textContent = "📁 移動";
+    mv.title = "別のアルバムへ移動";
+    mv.onclick = () => void this.moveSelectedWithPicker();
+    host.appendChild(mv);
     const del = document.createElement("button");
     del.className = "chip danger";
     del.textContent = "🗑 削除";
@@ -762,29 +1142,66 @@ export class LibraryScreen {
         album: it.album,
         name: it.name,
       });
-      this.selected = null;
-      // 進行中のサムネ遅延生成キューを破棄（削除済みハッシュの再生成防止。
-      // Rust側でも索引に無いハッシュの save_thumb は拒否される）
-      this.thumbQueue.length = 0;
-      // ステージ表示を停止・クリア
-      this.suspend();
-      this.previewProject = null;
-      $("#stage-title").textContent = "作品を選んでください";
-      $("#stage-author").textContent = "";
-      $("#stage-meta").innerHTML = "";
-      ($("#preview-host") as unknown as HTMLCanvasElement).hidden = true;
-      $("#player-host").hidden = true;
-      await this.refresh();
-      this.cb.toast("削除しました");
+      await this.afterDelete();
     } catch (e) {
-      this.cb.toast(`削除に失敗: ${e}`);
+      // M11-4: 外部で移動された等でパスが古いときは、一覧を更新して1回だけやり直す
+      const { item: fresh, refreshed } = await this.ensureFresh(it);
+      if (!fresh) {
+        this.notifyGone(refreshed, e);
+        return;
+      }
+      try {
+        await invoke("delete_note", {
+          libRoot: this.libRoot,
+          hash: fresh.kind === "note" ? fresh.hash : "",
+          album: fresh.album,
+          name: fresh.name,
+        });
+        await this.afterDelete();
+      } catch (e2) {
+        console.error("[M11-4] 削除に失敗（1回目）:", e, "（再試行）:", e2);
+        this.cb.toast(
+          refreshed
+            ? "削除できませんでした。一覧を更新したのでもう一度お試しください"
+            : "削除できませんでした。もう一度お試しください"
+        );
+      }
     }
   }
 
-  private edit(it: LibraryView) {
+  /** 削除に成功したあとの後始末（選択解除・ステージ停止・一覧更新）。
+   *  M11-4: 再試行で成功した場合もここを通す（消えた作品が鳴り続けないように） */
+  private async afterDelete() {
+    this.selected = null;
+    // 進行中のサムネ遅延生成キューを破棄（削除済みハッシュの再生成防止。
+    // Rust側でも索引に無いハッシュの save_thumb は拒否される）
+    this.thumbQueue.length = 0;
+    // ステージ表示を停止・クリア
     this.suspend();
-    if (it.kind === "project") this.cb.openEditorWithProject(it);
-    else this.cb.openEditorWithNote(it);
+    this.previewProject = null;
+    $("#stage-title").textContent = "作品を選んでください";
+    $("#stage-author").textContent = "";
+    $("#stage-meta").innerHTML = "";
+    ($("#preview-host") as unknown as HTMLCanvasElement).hidden = true;
+    $("#player-host").hidden = true;
+    await this.refresh();
+    this.cb.toast("削除しました");
+  }
+
+  private edit(it: LibraryView) {
+    void this.editChecked(it);
+  }
+
+  /** M11-4: 開く前に外部変更を拾い直す（古いパスのまま開いて内部エラーを見せない） */
+  private async editChecked(it: LibraryView) {
+    const { item: fresh, refreshed } = await this.ensureFresh(it);
+    if (!fresh) {
+      this.notifyGone(refreshed);
+      return;
+    }
+    this.suspend();
+    if (fresh.kind === "project") this.cb.openEditorWithProject(fresh);
+    else this.cb.openEditorWithNote(fresh);
   }
 
   // 再生コントロール（ビューア）
@@ -801,15 +1218,7 @@ export class LibraryScreen {
         }
       }
     };
-    $("#tp-play").onclick = () => {
-      if (this.selected?.kind === "project") {
-        if (this.previewPlaying) this.stopPreview();
-        else this.startPreview();
-      } else if (this.player) {
-        this.player.paused ? this.player.play() : this.player.pause();
-      }
-      this.updatePlayButton();
-    };
+    $("#tp-play").onclick = () => this.togglePreviewPlayback();
     $("#tp-loop").onclick = () => {
       const btn = $("#tp-loop");
       if (this.selected?.kind === "project" && this.previewProject) {
@@ -824,6 +1233,18 @@ export class LibraryScreen {
         }
       }
     };
+  }
+
+  /** M11-10: プレビューの再生／一時停止（▶ ボタンと Space の共通の入口）。
+   *  作品を選んでいないときは何も起きない */
+  togglePreviewPlayback() {
+    if (this.selected?.kind === "project") {
+      if (this.previewPlaying) this.stopPreview();
+      else this.startPreview();
+    } else if (this.player) {
+      this.player.paused ? this.player.play() : this.player.pause();
+    }
+    this.updatePlayButton();
   }
 
   private updatePlayButton() {

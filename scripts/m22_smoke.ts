@@ -236,5 +236,74 @@ const mkOpts = (over: Partial<PenOptions> = {}): PenOptions => ({
   }
 }
 
+// ---------- 4) M11-12: stampMask がキャンバス外へはみ出しても絵を壊さない ----------
+// textToMask のクランプを外したので、マスクは 320×240 より大きくなり、dx/dy には負の値も来る。
+// 「重なった画素だけが期待どおりに変わり、それ以外は1画素も変わらない」ことを、
+// 独立実装（総当たり）との一致で確かめる。
+{
+  /** 参照実装: マスクの全画素を見て、キャンバス内に入るものだけ書く（境界の書き方を変えた別実装） */
+  const naiveStamp = (
+    buf: IndexBuf,
+    mask: { w: number; h: number; data: Uint8Array },
+    dx: number,
+    dy: number,
+    color: number,
+    clip?: Uint8Array
+  ) => {
+    for (let y = 0; y < mask.h; y++)
+      for (let x = 0; x < mask.w; x++) {
+        if (!mask.data[y * mask.w + x]) continue;
+        const tx = dx + x;
+        const ty = dy + y;
+        if (tx < 0 || ty < 0 || tx >= W || ty >= H) continue;
+        if (clip && !clip[ty * W + tx]) continue;
+        buf[ty * W + tx] = color;
+      }
+  };
+  /** 決定的な市松＋斜線のマスク（全1でも全0でもない） */
+  const mkMask = (w: number, h: number) => {
+    const data = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) data[y * w + x] = (x * 7 + y * 3) % 5 === 0 || x === y ? 1 : 0;
+    return { w, h, data };
+  };
+  const cases: { name: string; w: number; h: number; dx: number; dy: number }[] = [
+    { name: "左上へ大きくはみ出す（負の座標）", w: 400, h: 300, dx: -350, dy: -260 },
+    { name: "右下へはみ出す", w: 400, h: 300, dx: 300, dy: 220 },
+    { name: "キャンバスより大きいマスクが全面を覆う", w: 900, h: 700, dx: -290, dy: -230 },
+    { name: "完全に画面外（左）", w: 100, h: 60, dx: -101, dy: 50 },
+    { name: "完全に画面外（右）", w: 100, h: 60, dx: W, dy: 50 },
+    { name: "完全に画面外（上）", w: 100, h: 60, dx: 40, dy: -60 },
+    { name: "完全に画面外（下）", w: 100, h: 60, dx: 40, dy: H },
+    { name: "1画素だけ重なる（左上隅）", w: 100, h: 60, dx: -99, dy: -59 },
+    { name: "1画素だけ重なる（右下隅）", w: 100, h: 60, dx: W - 1, dy: H - 1 },
+    { name: "画面内（従来どおり）", w: 60, h: 40, dx: 130, dy: 100 },
+  ];
+  const clip4 = halfClip();
+  for (const cs of cases) {
+    const mask = mkMask(cs.w, cs.h);
+    for (const withClip of [false, true]) {
+      const a = basePattern(5);
+      const b = basePattern(5);
+      stampMask(a, mask, cs.dx, cs.dy, 9, withClip ? clip4 : undefined);
+      naiveStamp(b, mask, cs.dx, cs.dy, 9, withClip ? clip4 : undefined);
+      check(`はみ出し${withClip ? "（clipあり）" : ""}: ${cs.name}`, eq(a, b));
+    }
+    // 完全に画面外なら1画素も変わらない
+    if (cs.dx + cs.w <= 0 || cs.dy + cs.h <= 0 || cs.dx >= W || cs.dy >= H) {
+      const a = basePattern(5);
+      const before = a.slice();
+      stampMask(a, mask, cs.dx, cs.dy, 9, undefined);
+      check(`完全に画面外は1画素も変えない: ${cs.name}`, eq(a, before));
+    }
+  }
+  // バッファ長が変わらない（範囲外へ書いて Uint8Array/Uint16Array を伸ばしていない）
+  {
+    const a = basePattern(5);
+    stampMask(a, mkMask(2000, 1500), -1000, -700, 9);
+    check("stampMask 後もバッファ長は 320×240 のまま", a.length === PIXELS);
+  }
+}
+
 console.log(`m22 smoke: pass=${pass} fail=${fail}`);
 process.exit(fail === 0 ? 0 : 1);

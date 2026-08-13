@@ -527,6 +527,13 @@ export function shapeEllipse(
  * **索引バッファとの関係**: ここで平均しているのは 0〜255 の**アルファ値**であって
  * colorTable の添字ではない。戻り値は 0/1 のマスクで、焼き込みは `stampMask` が
  * 単色を代入するだけ。索引バッファへの補間・平均・ブレンドは一切発生しない。
+ *
+ * **M11-12**: 改行（`\n`）に対応し、**マスクをキャンバス（320×240）に切るのをやめた**。
+ * 旧実装は `Math.min(W/H, …)` で生成の時点で切っていたため、はみ出す文字は
+ * 「置く前に失われて」いた（＝消して打ち直すしかなかった）。戻り値のマスクは
+ * キャンバスより大きくなり得る。**はみ出しの切り出しは `stampMask` の責務**
+ *（負のオフセットも受ける）。行送りは `ceil(px * 1.35)`＝1行だけのときの高さと同値なので、
+ * 単一行・単一列の出力は M10-11 時点と1画素も変わらない。
  */
 export function textToMask(
   text: string,
@@ -542,21 +549,44 @@ export function textToMask(
   const fontStr = `${bold ? "bold " : ""}${renderPx}px "${def.cssFamily}"`;
 
   const vertical = !!opts.vertical;
-  // M10-11: 縦書きは 1文字＝1セル（送り px）の1列。文字数は書記素ではなくコードポイント単位
+  // M11-12: 改行で分ける。横書き＝行が下へ / 縦書き＝列が**左へ**（日本語の縦組の流儀）。
+  // 空行も1行ぶんの場所を取る（split の結果に空文字が残るのでそのまま数に入る）
+  const lines = text.split("\n");
+  // M10-11: 縦書きは 1文字＝1セル（送り px）。文字数は書記素ではなくコードポイント単位
   // （サロゲートペアを割らないため Array.from を使う）
-  const chars = vertical ? Array.from(text) : [];
+  const cols = vertical ? lines.map((l) => Array.from(l)) : [];
+  const lineH = Math.ceil(px * 1.35); // 行送り＝1行だけのときの高さと同じ値
 
   const probe = document.createElement("canvas").getContext("2d")!;
   probe.font = fontStr;
-  const m = probe.measureText(text);
-  // 出力（等倍）のサイズ。余白 1px は現行の挙動を維持する
-  const w = vertical
-    ? Math.min(W, px + 2)
-    : Math.min(W, Math.ceil(m.width / oversample) + 2);
-  const h = vertical
-    ? Math.min(H, px * chars.length + 2)
-    : Math.min(H, Math.ceil(px * 1.35) + 2);
-  if (w <= 2 || text.length === 0) return null;
+  // 出力（等倍）のサイズ。余白 1px は現行の挙動を維持する。
+  // M11-12: **キャンバス（320×240）でのクランプは廃止**。ここで切ると
+  // 「はみ出す文字を置く前に失う」（＝消して打ち直すしかない）ので、
+  // マスクはキャンバスより大きくてよいものとし、切り出しは stampMask に任せる
+  let rawW: number;
+  let rawH: number;
+  if (vertical) {
+    rawW = px * cols.length + 2;
+    let maxLen = 0;
+    for (const c of cols) maxLen = Math.max(maxLen, c.length);
+    rawH = px * maxLen + 2;
+  } else {
+    let maxW = 0;
+    for (const l of lines) {
+      if (!l) continue;
+      maxW = Math.max(maxW, Math.ceil(probe.measureText(l).width / oversample));
+    }
+    rawW = maxW + 2;
+    rawH = lineH * lines.length + 2;
+  }
+  if (text.length === 0 || rawW <= 2 || rawH <= 2) return null;
+  // 安全弁: 「キャンバスより大きくてよい」＝無制限ではない。canvas の実際的な上限と、
+  // 打鍵ごとに作り直すコストの両方を抑える。通常の入力（100文字程度）では発火しない
+  const MASK_MAX_SIDE = 4096; // キャンバス約13枚分
+  const MASK_MAX_CELLS = Math.floor(32_000_000 / (oversample * oversample));
+  const w = Math.min(MASK_MAX_SIDE, rawW);
+  let h = Math.min(MASK_MAX_SIDE, rawH);
+  if (w * h > MASK_MAX_CELLS) h = Math.max(1, Math.floor(MASK_MAX_CELLS / w));
 
   const canvas = document.createElement("canvas");
   canvas.width = w * oversample;
@@ -568,37 +598,47 @@ export function textToMask(
   if (vertical) {
     // セル（倍率つき）。左右に余白1px＝oversample を取るのは横書きと同じ流儀
     const cell = px * oversample;
-    const left = oversample;
     const half = cell / 2;
-    for (let k = 0; k < chars.length; k++) {
-      const top = oversample + k * cell;
-      if (top >= canvas.height) break; // 240px を超えた分は下端で切る
-      const ch = chars[k];
-      if (V_ROTATE.has(ch) || isAsciiPrintable(ch)) {
-        // 90°時計回り。セル中心へ移してから回すので、回転後もセル内に収まる
-        c2.save();
-        c2.translate(left + half, top + half);
-        c2.rotate(Math.PI / 2);
-        c2.textAlign = "center";
-        c2.textBaseline = "middle";
-        c2.fillText(ch, 0, 0);
-        c2.restore();
-        c2.textAlign = "start";
-        c2.textBaseline = "top";
-      } else if (V_PUNCT_TOPRIGHT.has(ch)) {
-        // 句読点は右上へ。グリフは em ボックスの左下に描かれるので、
-        // 描画原点を右へ半角・上へ半角ずらすとセルの右上区画に収まる
-        c2.fillText(ch, left + half, top - half);
-      } else {
-        // かな・漢字・？！・全角英数・矢印などは立てたまま、セル中央に置く
-        c2.textAlign = "center";
-        c2.fillText(ch, left + half, top);
-        c2.textAlign = "start";
+    // M11-12: 列は**右から左**へ並ぶ。1列目（読み始め）が一番右
+    for (let j = 0; j < cols.length; j++) {
+      const left = oversample + (cols.length - 1 - j) * cell;
+      if (left >= canvas.width) continue;
+      const chars = cols[j];
+      for (let k = 0; k < chars.length; k++) {
+        const top = oversample + k * cell;
+        if (top >= canvas.height) break; // 安全弁に当たった分だけ下端で切る
+        const ch = chars[k];
+        if (V_ROTATE.has(ch) || isAsciiPrintable(ch)) {
+          // 90°時計回り。セル中心へ移してから回すので、回転後もセル内に収まる
+          c2.save();
+          c2.translate(left + half, top + half);
+          c2.rotate(Math.PI / 2);
+          c2.textAlign = "center";
+          c2.textBaseline = "middle";
+          c2.fillText(ch, 0, 0);
+          c2.restore();
+          c2.textAlign = "start";
+          c2.textBaseline = "top";
+        } else if (V_PUNCT_TOPRIGHT.has(ch)) {
+          // 句読点は右上へ。グリフは em ボックスの左下に描かれるので、
+          // 描画原点を右へ半角・上へ半角ずらすとセルの右上区画に収まる
+          c2.fillText(ch, left + half, top - half);
+        } else {
+          // かな・漢字・？！・全角英数・矢印などは立てたまま、セル中央に置く
+          c2.textAlign = "center";
+          c2.fillText(ch, left + half, top);
+          c2.textAlign = "start";
+        }
       }
     }
   } else {
-    // 余白も倍率ぶん取り、縮小後に現行と同じ 1px になるようにする
-    c2.fillText(text, oversample, oversample);
+    // 余白も倍率ぶん取り、縮小後に現行と同じ 1px になるようにする。
+    // M11-12: 2行目以降は行送り（lineH）ぶんずつ下へ（左揃え）
+    for (let i = 0; i < lines.length; i++) {
+      const top = oversample + i * lineH * oversample;
+      if (top >= canvas.height) break; // 安全弁に当たった分だけ下端で切る
+      if (lines[i]) c2.fillText(lines[i], oversample, top);
+    }
   }
   const img = c2.getImageData(0, 0, canvas.width, canvas.height).data;
 
@@ -624,7 +664,12 @@ export function textToMask(
   return { w, h, data };
 }
 
-/** マスクを色で焼き込む（M10-22: clip 指定時は選択範囲内にのみ書く） */
+/** マスクを色で焼き込む（M10-22: clip 指定時は選択範囲内にのみ書く）。
+ *
+ *  M11-12: `textToMask` がキャンバスより大きなマスクを返すようになり、`dx`/`dy` には
+ *  **負の値**も来る（画面の外へはみ出した文字）。**キャンバスと重なる範囲だけ**を回すので、
+ *  範囲外の索引バッファには触れない（`buf` の長さは常に 320×240 のまま）。
+ *  行・列の単位で先に刈るため、巨大なマスクでも画面外を空回りしない。 */
 export function stampMask(
   buf: IndexBuf,
   mask: { w: number; h: number; data: Uint8Array },
@@ -633,13 +678,18 @@ export function stampMask(
   color: number,
   clip?: Uint8Array
 ) {
-  for (let y = 0; y < mask.h; y++) {
-    const ty = dy + y;
-    if (ty < 0 || ty >= H) continue;
-    for (let x = 0; x < mask.w; x++) {
-      if (!mask.data[y * mask.w + x]) continue;
-      const tx = dx + x;
-      if (tx < 0 || tx >= W) continue;
+  const ox = Math.round(dx);
+  const oy = Math.round(dy);
+  const x0 = Math.max(0, -ox);
+  const x1 = Math.min(mask.w, W - ox);
+  const y0 = Math.max(0, -oy);
+  const y1 = Math.min(mask.h, H - oy);
+  for (let y = y0; y < y1; y++) {
+    const ty = oy + y;
+    const row = y * mask.w;
+    for (let x = x0; x < x1; x++) {
+      if (!mask.data[row + x]) continue;
+      const tx = ox + x;
       if (clip && !clip[ty * W + tx]) continue;
       buf[ty * W + tx] = color;
     }
@@ -683,6 +733,52 @@ export function lassoMask(points: { x: number; y: number }[]): Uint8Array {
     }
   }
   return mask;
+}
+
+/** M11-8: 選択範囲を反転する（選ばれていた所と外側を入れ替える）。2回で元に戻る */
+export function invertMask(mask: Uint8Array): Uint8Array {
+  const m = new Uint8Array(PIXELS);
+  for (let i = 0; i < PIXELS; i++) m[i] = mask[i] ? 0 : 1;
+  return m;
+}
+
+/** M11-8: 外側へ1px 広げる（3×3 の膨張）。キャンバスの外へは広がらない＝端でクランプ */
+export function expandMask(mask: Uint8Array): Uint8Array {
+  const m = new Uint8Array(PIXELS);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (!mask[y * W + x]) continue;
+      const y0 = Math.max(0, y - 1);
+      const y1 = Math.min(H - 1, y + 1);
+      const x0 = Math.max(0, x - 1);
+      const x1 = Math.min(W - 1, x + 1);
+      for (let ny = y0; ny <= y1; ny++) for (let nx = x0; nx <= x1; nx++) m[ny * W + nx] = 1;
+    }
+  }
+  return m;
+}
+
+/** M11-8: 内側へ1px 狭める（3×3 の収縮）。**キャンバスの外は「選ばれていない」扱い**なので、
+ *  端まで選んでいる範囲は端からも縮む（一般的な画像編集ソフトと同じ）。
+ *  全部消えたら呼び出し側で選択を解除する */
+export function contractMask(mask: Uint8Array): Uint8Array {
+  const m = new Uint8Array(PIXELS);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (!mask[y * W + x]) continue;
+      let keep = true;
+      for (let ny = y - 1; ny <= y + 1 && keep; ny++) {
+        for (let nx = x - 1; nx <= x + 1; nx++) {
+          if (nx < 0 || nx >= W || ny < 0 || ny >= H || !mask[ny * W + nx]) {
+            keep = false;
+            break;
+          }
+        }
+      }
+      if (keep) m[y * W + x] = 1;
+    }
+  }
+  return m;
 }
 
 export function maskBBox(

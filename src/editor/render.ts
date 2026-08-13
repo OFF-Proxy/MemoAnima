@@ -185,6 +185,58 @@ export function presentToCanvas(buf: Uint32Array, canvas: HTMLCanvasElement) {
   ctx.putImageData(img, 0, 0);
 }
 
+/** M11-11: 1コマを画像に書き出す（PNG / JPEG・1〜8倍）。
+ *  拡大は**整数倍のドット複製**（なましなし）。canvas の drawImage は使わず、
+ *  画素をそのまま並べるので「補間で縁がぼける」ことが原理的に起きない。
+ *  - transparent: 紙（背景）を透明にする。PNG のみ意味を持つ
+ *  - JPEG は透過を持てないので、常に紙を敷いた合成を出す（＝作品の紙色。既定は白） */
+export function frameToImageBlob(
+  p: Project,
+  frameIndex: number,
+  opts: { scale: number; type: "image/png" | "image/jpeg"; transparent?: boolean }
+): Promise<Blob | null> {
+  const s = Math.max(1, Math.min(8, Math.round(opts.scale) || 1));
+  const jpeg = opts.type === "image/jpeg";
+  const transparent = !jpeg && opts.transparent === true;
+  const src = compositeFrame(p, frameIndex, undefined, { skipPaper: transparent });
+  const ow = W * s;
+  const oh = H * s;
+  const out = new Uint32Array(ow * oh);
+  // ドット複製（最近傍）。1画素を s×s に広げるだけ＝平均も補間もしない
+  for (let y = 0; y < H; y++) {
+    const rowTop = y * s * ow;
+    for (let x = 0; x < W; x++) {
+      const v = src[y * W + x];
+      const left = x * s;
+      for (let dy = 0; dy < s; dy++) {
+        const o = rowTop + dy * ow + left;
+        for (let dx = 0; dx < s; dx++) out[o + dx] = v;
+      }
+    }
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = ow;
+  canvas.height = oh;
+  const ctx = canvas.getContext("2d")!;
+  if (jpeg) {
+    // JPEG は透過を持てない。念のため白で塗ってから重ねる（合成側に alpha=0 が残っていても白になる）
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, ow, oh);
+  }
+  const img = new ImageData(new Uint8ClampedArray(out.buffer, 0, ow * oh * 4), ow, oh);
+  if (jpeg) {
+    // putImageData は下地を無視して置き換えるので、白の上に重ねるには一度別 canvas を経由する
+    const tmp = document.createElement("canvas");
+    tmp.width = ow;
+    tmp.height = oh;
+    tmp.getContext("2d")!.putImageData(img, 0, 0);
+    ctx.drawImage(tmp, 0, 0);
+  } else {
+    ctx.putImageData(img, 0, 0);
+  }
+  return new Promise((resolve) => canvas.toBlob(resolve, opts.type, jpeg ? 0.92 : undefined));
+}
+
 /** フレームのサムネイル PNG Blob（等倍320×240） */
 export function frameToPngBlob(p: Project, frameIndex: number): Promise<Blob | null> {
   const canvas = document.createElement("canvas");

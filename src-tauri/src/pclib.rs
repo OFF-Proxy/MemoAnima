@@ -307,14 +307,148 @@ pub fn cancel_import() {
     IMPORT_CANCEL.store(true, Ordering::SeqCst);
 }
 
-/// M10-18: 幽霊行（索引にあるが実ファイルが無い行）を索引から取り除く。戻り値は削除行数。
-/// **実ファイルは一切消さない**（消してよいのは台帳の行だけ）。同ハッシュで両方実在する
-/// 重複行は対象外（どちらを残すかは利用者がアプリの削除機能で決める）。
-/// サムネキャッシュ（.animemo/thumbs/）も触らない（同ハッシュの別行が生きている場合がある）。
-fn prune_ghost_rows(lib: &Path, index: &mut LibraryIndex) -> usize {
+/// M11-4: **外部（エクスプローラー等）でライブラリ内を移動された作品を探し直す。**
+/// 幽霊行を消す前に呼ぶこと。実体が見つかった行は `album`/`name`/`rel_path` を新しい位置へ
+/// 書き換える（＝索引から消さない）。戻り値は復旧した行数。
+///
+/// コスト（重要・ハンドオフ指定）:
+/// - **幽霊行が1件も無ければ即座に返る**（＝通常の起動・スキャンではファイルを1つも読まない）
+/// - 照合対象は「索引に載っていない実ファイル」だけ（全件のハッシュは計算しない）
+/// - 読むのは**幽霊行と同じサイズの候補だけ**（索引の `size` で足切り）。
+///   幽霊行が求める実体が全部そろった時点で打ち切る（残りの候補は読まない）
+///
+/// サムネキャッシュは `thumbs/<hash>.png` でハッシュ基準のため追随不要。
+/// 同一内容（同ハッシュ）の実体が複数ある場合は、1行に1実体ずつ順に割り当てる。
+fn relocate_moved_notes(lib: &Path, index: &mut LibraryIndex, alive: &[bool]) -> usize {
+    // 1) 探しているもの（幽霊行）のハッシュとサイズ。size が 0 の行（壊れた索引）が
+    //    混じっていたらサイズ足切りは使わない＝取りこぼすより読む方を選ぶ
+    let mut want_hashes: HashSet<String> = HashSet::new();
+    let mut want_sizes: HashSet<u64> = HashSet::new();
+    let mut want_rows = 0usize;
+    let mut use_size = true;
+    for (item, a) in index.items.iter().zip(alive) {
+        if *a {
+            continue;
+        }
+        want_rows += 1;
+        want_hashes.insert(item.hash.clone());
+        if item.size == 0 {
+            use_size = false;
+        } else {
+            want_sizes.insert(item.size);
+        }
+    }
+    if want_rows == 0 {
+        return 0;
+    }
+    // 2) 実在している行の相対パスは照合対象から外す（別の行が使っているファイル）
+    let taken: HashSet<String> = index
+        .items
+        .iter()
+        .zip(alive)
+        .filter(|(_, a)| **a)
+        .map(|(i, _)| i.rel_path.to_ascii_lowercase())
+        .collect();
+    // 3) ライブラリ内の .kwz/.ppm のうち、索引に載っていないものだけを候補にする
+    let mut candidates: Vec<(String, String, String, u64)> = Vec::new(); // (album, name, rel, size)
+    for album in list_albums(&lib.to_string_lossy()).unwrap_or_default() {
+        let Ok(entries) = fs::read_dir(lib.join(&album)) else {
+            continue;
+        };
+        for ent in entries.flatten() {
+            let Ok(md) = ent.metadata() else { continue };
+            if !md.is_file() {
+                continue;
+            }
+            let p = ent.path();
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            if ext != "kwz" && ext != "ppm" {
+                continue;
+            }
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let rel = format!("{album}/{name}");
+            if taken.contains(&rel.to_ascii_lowercase()) {
+                continue;
+            }
+            candidates.push((album.clone(), name.to_string(), rel, md.len()));
+        }
+    }
+    if candidates.is_empty() {
+        return 0;
+    }
+    candidates.sort_by(|a, b| a.2.cmp(&b.2)); // 実行ごとに同じ結果になるように
+    // 4) 候補のハッシュを取る（サイズ違いは読まない・求めているものが全部そろったら打ち切り）
+    let mut by_hash: std::collections::HashMap<String, Vec<(String, String, String)>> =
+        std::collections::HashMap::new();
+    let mut found = 0usize;
+    for (album, name, rel, size) in candidates {
+        if use_size && !want_sizes.contains(&size) {
+            continue;
+        }
+        let Ok(bytes) = fs::read(lib.join(&rel)) else {
+            continue;
+        };
+        let h = hex::encode(Sha256::digest(&bytes));
+        if !want_hashes.contains(&h) {
+            continue; // 幽霊行が求めていない実体は覚えない
+        }
+        by_hash.entry(h).or_default().push((album, name, rel));
+        found += 1;
+        if found >= want_rows {
+            break;
+        }
+    }
+    // 5) 幽霊行に一致があれば新しい位置へ書き換える（1つの実体は1行だけが引き受ける）
+    let mut fixed = 0usize;
+    for (item, a) in index.items.iter_mut().zip(alive) {
+        if *a {
+            continue;
+        }
+        let Some(v) = by_hash.get_mut(&item.hash) else { continue };
+        if v.is_empty() {
+            continue;
+        }
+        let (album, name, rel) = v.remove(0);
+        item.album = album;
+        item.name = name;
+        item.rel_path = rel;
+        fixed += 1;
+    }
+    fixed
+}
+
+/// M10-18 + M11-4: 索引の自己修復。戻り値は (復旧した行数, 掃除した行数)。
+///
+/// - **実ファイルは一切消さない**（消してよいのは台帳の行だけ）
+/// - 実体が見つからない行は、まず M11-4 の探し直し（外部移動）にかけ、
+///   それでも見つからなければ M10-18 どおり行を落とす
+/// - **実在判定（stat）は1周だけ**。健全な状態（幽霊行ゼロ）では旧 `prune_ghost_rows`
+///   と同じコストで即座に返る＝通常スキャンを一切重くしない（ハンドオフの計測条件）
+/// - サムネキャッシュ（.animemo/thumbs/）は触らない（同ハッシュの別行が生きている場合がある）
+fn heal_index_rows(lib: &Path, index: &mut LibraryIndex) -> (usize, usize) {
+    let alive: Vec<bool> = index
+        .items
+        .iter()
+        .map(|i| lib.join(&i.rel_path).is_file())
+        .collect();
+    if alive.iter().all(|a| *a) {
+        return (0, 0); // 幽霊行なし＝探索も掃除も不要（ファイルは1つも読まない）
+    }
+    let relocated = relocate_moved_notes(lib, index, &alive);
     let before = index.items.len();
+    // 復旧できなかった行だけを落とす（復旧済みの行は実体があるので残る）
     index.items.retain(|i| lib.join(&i.rel_path).is_file());
-    before - index.items.len()
+    // 同じ実体を指す行が2行できていたら1行にする（M10-18 の「重複行を作らない」規約の保険。
+    // 実在判定と探索のあいだで一時的に stat が失敗した場合などに起こりうる）
+    let mut seen: HashSet<String> = HashSet::new();
+    index.items.retain(|i| seen.insert(i.rel_path.to_ascii_lowercase()));
+    (relocated, before - index.items.len())
 }
 
 /// 取り込み元を read-only スキャンし、未取り込み分だけをライブラリへ独立コピーする。
@@ -338,7 +472,9 @@ pub fn import(
     // M10-18: 幽霊行を掃除してから known を「実在する行」だけで構築する
     //（scan_library が先に走る保証はない。これで手動削除→SD再取り込みが skipped ではなく
     // imported になる＝アプリから復旧できる。掃除結果は末尾の既存 save_index で永続化）
-    prune_ghost_rows(lib, &mut index);
+    // M11-4: 掃除の前に外部移動の探し直しを挟む（scan_library と同じ順序。これが無いと
+    // 取り込みのたびに「移動しただけの作品」の行が消えてしまう）
+    heal_index_rows(lib, &mut index);
     let mut known: HashSet<String> = index.items.iter().map(|i| i.hash.clone()).collect();
 
     let mut result = ImportResult {
@@ -490,6 +626,70 @@ pub fn list_albums(lib_root: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// M11-4: 外部変更の**軽量**検知用の指紋。アルバム名と、その中の**作品ファイルの名前・サイズ**
+/// （.kwz/.ppm/.memoanima/.animemo だけ）＋索引ファイルの更新時刻・サイズを見る。
+/// `scan_library` と違い索引の読み込みも JSON 直列化も行わないので2桁軽い。
+/// フォーカス復帰のたびに呼び、値が変わったときだけ本スキャンする。
+///
+/// フォルダの更新時刻を使わない理由（M11-4 レビュー反映）:
+/// - アプリ自身が書くサイドカーサムネ（`<作品名>.memoanima.png`）でフォルダの更新時刻と
+///   エントリ数が動く＝**外部変更が無いのに毎回フル再スキャン**していた
+/// - `mtime` の秒丸めで「同じ秒に起きた2回目の変更」を取りこぼしていた
+/// 名前とサイズを見ることで、リネーム・追加・削除・上書き（サイズ変化）を直接拾える。
+/// 「同名・同サイズでの中身の差し替え」だけは拾えないが、これは 🔄 更新ボタンの担当。
+pub fn library_stamp(lib_root: &str) -> Result<String, String> {
+    let lib = Path::new(lib_root);
+    if !lib.is_dir() {
+        return Err(format!("ライブラリフォルダが見つかりません: {lib_root}"));
+    }
+    let mut h = Sha256::new();
+    for album in list_albums(lib_root)? {
+        h.update([0u8]); // 区切り（名前の連結で偶然一致しないように）
+        h.update(album.as_bytes());
+        let mut files: Vec<(String, u64)> = Vec::new();
+        if let Ok(entries) = fs::read_dir(lib.join(&album)) {
+            for ent in entries.flatten() {
+                let Ok(md) = ent.metadata() else { continue };
+                if !md.is_file() {
+                    continue;
+                }
+                let name = ent.file_name().to_string_lossy().to_string();
+                let ext = Path::new(&name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if ext != "kwz" && ext != "ppm" && !is_project_ext(&ext) {
+                    continue; // サムネ等の付属物は無視（自分の書き込みで指紋を動かさない）
+                }
+                files.push((name, md.len()));
+            }
+        }
+        files.sort();
+        for (name, len) in files {
+            h.update([1u8]);
+            h.update(name.as_bytes());
+            h.update(len.to_le_bytes());
+        }
+    }
+    // 索引ファイル（外部からの差し替え・別プロセスの取り込みを拾う。秒丸めは避ける）
+    let idx = index_path(lib);
+    let (mtime, len) = fs::metadata(&idx)
+        .map(|m| {
+            let t = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            (t, m.len())
+        })
+        .unwrap_or((0, 0));
+    h.update(mtime.to_le_bytes());
+    h.update(len.to_le_bytes());
+    Ok(hex::encode(h.finalize()))
+}
+
 /// ライブラリ索引＋ディスク上の `.animemo` プロジェクトを一覧で返す。
 /// M10-18: 幽霊行（実ファイル無し）は表示から除外するだけでなく**索引からも掃除**する
 ///（自己修復。行を消すだけでファイルは消さない。変更ゼロなら書き戻さない）。
@@ -501,7 +701,11 @@ pub fn scan_library(lib_root: &str) -> Result<Vec<LibraryView>, String> {
         return Err(format!("ライブラリフォルダが見つかりません: {lib_root}"));
     }
     let mut index = load_index(lib)?;
-    if prune_ghost_rows(lib, &mut index) > 0 {
+    // M11-4: 掃除の前に「外部で移動された作品」を探し直す（幽霊行があるときだけ走る）。
+    // これが無いと、エクスプローラーでアルバムを移した .kwz が幽霊行として消え、
+    // アプリから見えなくなる（再取り込みが必要になる）
+    let (relocated, pruned) = heal_index_rows(lib, &mut index);
+    if relocated > 0 || pruned > 0 {
         save_index(lib, &index)?;
     }
     let index = index;
@@ -648,7 +852,37 @@ pub fn rename_album(lib_root: &str, old: &str, new: &str) -> Result<String, Stri
     Ok(new_s)
 }
 
-/// アルバムを削除する（空フォルダのみ。作品が残っている場合はエラー）。
+/// M11-1: 作品ファイル（利用者の作品そのもの）か。これが1件でもあるアルバムは削除しない。
+fn is_work_file(name: &str) -> bool {
+    match Path::new(name).extension().and_then(|e| e.to_str()) {
+        Some(ext) => {
+            is_project_ext(ext) || ext.eq_ignore_ascii_case("kwz") || ext.eq_ignore_ascii_case("ppm")
+        }
+        None => false,
+    }
+}
+
+/// M11-1: アプリ／OS が作る付属物か（作品が0件なら、これらは一緒に消してよい）。
+/// **ここに列挙したもの以外は「利用者が置いたファイル」として扱い、決して消さない。**
+fn is_app_sidecar(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(&format!(".{PROJECT_EXT}.png"))
+        || lower.ends_with(&format!(".{PROJECT_EXT_LEGACY}.png"))
+        || lower == "thumbs.db"
+        || lower == "desktop.ini"
+        || lower == ".ds_store"
+}
+
+/// アルバムを削除する。
+///
+/// M11-1: 「空である」の判定を**作品ファイルの有無**で行う（従来は全ファイル数だったため、
+/// アプリ自身が作るサイドカーサムネ `<作品名>.memoanima.png` が残っているだけで
+/// 利用者がアルバムを削除できなかった）。
+/// - 作品（.memoanima/.animemo/.kwz/.ppm）が1件でもあれば拒否（件数は「作品数」で示す）
+/// - 作品0件なら、アプリ／OS 由来の付属物（`is_app_sidecar`）ごと削除してよい
+/// - **利用者が置いた未知のファイルが1件でもあれば拒否**（黙って消さない）
+/// - サブフォルダがある場合は従来どおり拒否（アルバムはフラット構造）
+/// - 削除は lib_root 配下のみ（canonicalize + starts_with。delete_item と同じ作法）
 pub fn delete_album(lib_root: &str, name: &str) -> Result<(), String> {
     let _guard = lock_lib();
     let lib = Path::new(lib_root);
@@ -657,16 +891,199 @@ pub fn delete_album(lib_root: &str, name: &str) -> Result<(), String> {
     if !dir.is_dir() {
         return Err(format!("アルバムが見つかりません: {name}"));
     }
-    let count = fs::read_dir(&dir)
-        .map_err(|e| format!("一覧取得失敗: {e}"))?
-        .flatten()
-        .count();
-    if count > 0 {
+    // M11-1: アルバム自体がリンク（ジャンクション/シンボリックリンク）なら触らない。
+    // canonicalize はリンクを解決するため、解決先を削除すると「リンクを消したつもりが
+    // 別フォルダの中身が消える」ことになる（レビューで実測した回帰の対策）
+    let link_meta = fs::symlink_metadata(&dir).map_err(|e| format!("アルバム確認失敗: {e}"))?;
+    if link_meta.file_type().is_symlink() {
         return Err(format!(
-            "アルバム「{name}」には {count} 個のファイルがあります。先に中身を移動してください。"
+            "アルバム「{name}」はリンク（ショートカット）です。実体を確認のうえ、エクスプローラーで削除してください。"
         ));
     }
-    fs::remove_dir(&dir).map_err(|e| format!("削除失敗: {e}"))
+    // 封じ込め: ジャンクション/シンボリックリンクでライブラリ外を指していても消さない
+    let lib_c = lib
+        .canonicalize()
+        .map_err(|e| format!("ライブラリ確認失敗: {e}"))?;
+    let dir_c = dir
+        .canonicalize()
+        .map_err(|e| format!("アルバム確認失敗: {e}"))?;
+    if !dir_c.starts_with(&lib_c) || dir_c == lib_c {
+        return Err("ライブラリ外のフォルダは削除できません".into());
+    }
+
+    let mut works = 0usize;
+    let mut sidecars: Vec<PathBuf> = Vec::new();
+    let mut others: Vec<String> = Vec::new();
+    let mut has_subdir = false;
+    for ent in fs::read_dir(&dir_c)
+        .map_err(|e| format!("一覧取得失敗: {e}"))?
+        .flatten()
+    {
+        let fname = ent.file_name().to_string_lossy().to_string();
+        // シンボリックリンクは is_dir/is_file とも false → others 扱い（＝消さずに拒否）
+        let ftype = ent.file_type().map_err(|e| format!("種別確認失敗: {e}"))?;
+        if ftype.is_dir() {
+            has_subdir = true;
+        } else if is_work_file(&fname) {
+            works += 1;
+        } else if ftype.is_file() && is_app_sidecar(&fname) {
+            sidecars.push(ent.path());
+        } else {
+            others.push(fname);
+        }
+    }
+    if works > 0 {
+        return Err(format!(
+            "アルバム「{name}」には {works} 件の作品があります。先に中身を移動してください。"
+        ));
+    }
+    if has_subdir {
+        return Err(format!(
+            "アルバム「{name}」の中にフォルダがあります。先に中身を移動してください。"
+        ));
+    }
+    if !others.is_empty() {
+        let sample = others
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("、");
+        let more = if others.len() > 3 {
+            format!(" ほか{}件", others.len() - 3)
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "アルバム「{name}」に作品以外のファイルが残っています（{sample}{more}）。中身を確認してから削除してください。"
+        ));
+    }
+    // 作品0件・未知のファイルなし → アプリ由来の付属物ごと削除する
+    for p in sidecars {
+        let pc = p
+            .canonicalize()
+            .map_err(|e| format!("付属ファイル確認失敗: {e}"))?;
+        if !pc.starts_with(&dir_c) {
+            return Err("アルバム外を指すファイルがあるため削除できません".into());
+        }
+        fs::remove_file(&pc).map_err(|e| format!("削除失敗: {e}"))?;
+    }
+    fs::remove_dir(&dir_c).map_err(|e| format!("削除失敗: {e}"))
+}
+
+/// M11-3: プロジェクト（.memoanima/.animemo）を別アルバムへ移動する。戻り値は移動後のフルパス。
+///
+/// `move_note` はハッシュ索引に載るノート専用なので、索引外のプロジェクト用に新設した。
+/// - **サイドカーサムネ `<ファイル名>.png` も一緒に移動する。** 置き去りにすると移動先で
+///   サムネが消え、移動元に孤児PNGが残って**アルバムを削除できなくなる**（M11-1 で直した症状の再発）
+/// - 同名衝突は `unique_dest`（既存の作法）で回避し、**PNGの名前も確定した本体名に合わせる**
+/// - `project_order` のキー（`album/name`）を新しいキーへ付け替える（`rename_album` と同じ流儀）
+/// - 失敗時は**何も動いていない状態へ戻す**（本体 rename 後に PNG で失敗したら本体を戻す）
+/// - 封じ込め: canonicalize + starts_with で lib_root 配下のみ（`delete_item` と同じ作法）
+pub fn move_project(
+    lib_root: &str,
+    album: &str,
+    name: &str,
+    dest_album: &str,
+) -> Result<String, String> {
+    let _guard = lock_lib();
+    let lib = Path::new(lib_root);
+    if !lib.is_dir() {
+        return Err(format!("ライブラリフォルダが見つかりません: {lib_root}"));
+    }
+    let lib_c = lib
+        .canonicalize()
+        .map_err(|e| format!("ライブラリ確認失敗: {e}"))?;
+    let album_s = validate_album(album)?;
+    let dest_s = validate_album(dest_album)?;
+    let name_s = sanitize_component(name);
+    let ext_ok = Path::new(&name_s)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(is_project_ext)
+        .unwrap_or(false);
+    if !ext_ok {
+        return Err("プロジェクト（.memoanima / .animemo）以外は移動できません".into());
+    }
+    // 対象パスはフロントの path を信用せず album/name から組み立てる（delete_item と同じ）
+    let src_c = lib
+        .join(&album_s)
+        .join(&name_s)
+        .canonicalize()
+        .map_err(|e| format!("対象確認失敗: {e}"))?;
+    if !src_c.starts_with(&lib_c) {
+        return Err("ライブラリ外のファイルは移動できません".into());
+    }
+    if !src_c.is_file() {
+        return Err("移動対象がファイルではありません".into());
+    }
+    if album_s == dest_s {
+        // 同じアルバム＝何もしない。**戻り値は scan_library と同じ形式**にする
+        //（canonicalize 産物は Windows で `\\?\` 付きになり、フロントの path 比較が
+        //   必ず外れる — レビュー検出）
+        return Ok(lib.join(&album_s).join(&name_s).to_string_lossy().to_string());
+    }
+    let dest_dir = lib.join(&dest_s);
+    fs::create_dir_all(&dest_dir).map_err(|e| format!("移動先フォルダ作成失敗: {e}"))?;
+    let dest_dir_c = dest_dir
+        .canonicalize()
+        .map_err(|e| format!("移動先確認失敗: {e}"))?;
+    if !dest_dir_c.starts_with(&lib_c) {
+        return Err("ライブラリ外へは移動できません".into());
+    }
+    let dest = unique_dest(&dest_dir_c, &name_s);
+
+    // 1) 本体を移動
+    fs::rename(&src_c, &dest).map_err(|e| format!("移動失敗: {e}"))?;
+    let dest_name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&name_s)
+        .to_string();
+
+    // 2) サイドカーPNG（無ければ何もしない。失敗したら本体を戻して「何も起きていない」状態へ）
+    let src_png = {
+        let mut s = src_c.clone().into_os_string();
+        s.push(".png");
+        PathBuf::from(s)
+    };
+    if src_png.is_file() {
+        let dest_png = {
+            let mut s = dest.clone().into_os_string();
+            s.push(".png");
+            PathBuf::from(s)
+        };
+        if let Err(e) = fs::rename(&src_png, &dest_png) {
+            // 戻しにも失敗したら「取り消しました」と嘘をつかない（実際の在り処を伝える）
+            return Err(match fs::rename(&dest, &src_c) {
+                Ok(_) => format!("サムネイルの移動に失敗（移動を取り消しました）: {e}"),
+                Err(e2) => format!(
+                    "サムネイルの移動に失敗し、取り消しにも失敗しました。作品は「{dest_s}」にあります（{e} / {e2}）"
+                ),
+            });
+        }
+    }
+
+    // 3) 表示順のキーを付け替える（rename_album と同じ remove→insert）
+    let mut index = load_index(lib)?;
+    let old_key = format!("{album_s}/{name_s}");
+    let new_key = format!("{dest_s}/{dest_name}");
+    let old_order = index.project_order.remove(&old_key);
+    // 移動先に同名キーの残骸（アプリ外で消された作品の分など）があれば、その順序を
+    // 引き継がないよう必ず捨てる
+    let had_stale = index.project_order.remove(&new_key).is_some();
+    if let Some(v) = old_order {
+        index.project_order.insert(new_key, v);
+    }
+    if old_order.is_some() || had_stale {
+        save_index(lib, &index)?;
+    }
+    // 戻り値は scan_library の path と同じ形式（生の lib_root からの join）にする
+    Ok(lib
+        .join(&dest_s)
+        .join(&dest_name)
+        .to_string_lossy()
+        .to_string())
 }
 
 /// メモ（索引管理の .kwz/.ppm）を別アルバムへ移動する。

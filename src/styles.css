@@ -570,6 +570,7 @@ button:disabled {
   overflow: hidden;
   cursor: pointer;
   box-shadow: var(--shadow);
+  touch-action: none; /* M11-4: ペンのドラッグがスクロール扱いで打ち切られないように（.lay と同じ） */
 }
 
 .thumb.active {
@@ -1366,6 +1367,28 @@ button:disabled {
   margin: 2px 0;
 }
 
+/* M11-12: 文字ツールの複数行入力欄。ペンで押せる大きさ（3行分）＋
+   touch-action: none（ペンのドラッグがスクロール扱いで打ち切られないように・.lay と同じ） */
+.tinput {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  padding: 4px 6px;
+  background: #fff;
+  resize: vertical;
+  touch-action: none;
+}
+
+.tinput:disabled {
+  background: var(--paper2);
+  color: var(--ink-soft);
+}
+
 select {
   font: inherit;
   font-weight: 700;
@@ -1446,6 +1469,7 @@ input[type="text"] {
   position: relative;
   cursor: pointer;
   overflow: hidden;
+  touch-action: none; /* M11-7: ペンのドラッグがスクロール扱いで打ち切られないように（.thumb と同じ） */
 }
 
 .fr.on {
@@ -1589,6 +1613,129 @@ input[type="text"] {
   white-space: nowrap;
   opacity: 0.92;
   box-shadow: var(--shadow);
+}
+
+/* M11-8 P-3: 選択範囲ランチャー（選択範囲の下に浮かぶバー）。
+   #ed-cvwrap は表示回転/反転の transform を持つので、その外側の #ed-stage に置く */
+.sel-launcher {
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--panel);
+  border: 1px solid var(--paper2);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  /* ペンでの操作をブラウザのパン/ズームに奪われないようにする（.thumb/.fr で踏んだのと同じ轍） */
+  touch-action: none;
+}
+
+.sel-launcher button {
+  touch-action: none;
+  min-width: 28px;
+  height: 26px;
+  padding: 0 6px;
+  font-size: 13px;
+  line-height: 1;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+/* M11-11: 歪みのモードボタン。`.oni .lv{flex:1}` は既定の min-width:auto なので、
+   ラベル（「◍ ふくらませ」など）がボタン幅より広い環境ではパネルからはみ出す。
+   この4つだけ縮められるようにし、文字も少し詰めて余裕を作る（他の .oni は触らない） */
+#ed-warpmode .lv {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 2px;
+  font-size: 10px;
+}
+
+/* M11-10: ショートカットの設定（キー一覧） */
+.keymap-menu .km-ops {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.keymap-menu .km-list {
+  max-height: 46vh;
+  overflow: auto;
+  border: 2px solid var(--paper2);
+  border-radius: 10px;
+  padding: 4px 6px;
+  margin: 8px 0;
+  background: var(--paper);
+}
+
+.keymap-menu .km-group {
+  font-weight: 800;
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin: 8px 0 2px;
+}
+
+.keymap-menu .km-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.keymap-menu .km-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.keymap-menu .km-name em {
+  display: block;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--ink-soft);
+}
+
+.keymap-menu .km-key {
+  min-width: 92px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 2px 6px;
+  border: 2px solid var(--ink);
+  border-radius: 7px;
+  background: var(--panel);
+}
+
+.keymap-menu .km-key.none {
+  border-color: var(--paper2);
+  color: var(--ink-soft);
+  font-weight: 400;
+}
+
+.keymap-menu .km-key.waiting {
+  border-color: var(--orange);
+  color: var(--orange);
+}
+
+/* M11-9 P-5: 「範囲をいじる」と「絵をどうにかする」の間の細い区切り */
+.sel-launcher .sep {
+  width: 1px;
+  margin: 3px 2px;
+  background: var(--paper2);
+}
+
+.sel-launcher button:hover {
+  background: var(--orange-l);
+  border-color: var(--paper2);
+}
+
+.sel-launcher button:active {
+  background: var(--paper2);
 }
 
 /* M6-3: 波形調整パネル（M6-4: 大プレビュー＋ズームバー構成） */

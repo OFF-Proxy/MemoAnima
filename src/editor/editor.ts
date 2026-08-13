@@ -42,6 +42,14 @@ import type { BgmTrack, SeTrack, ProjectAudio, Frame } from "./model";
 import { newSeId, sanitizeAudio } from "./model";
 import { createSlider, SliderHandle } from "../ui/slider";
 import { moveNodes, wouldCycle, topNodesOf, DropTarget } from "./layerTree";
+// M11-10: ショートカット（キー → コマンドID → 実行）。定義とプリセットは src/keymap.ts に集約
+import {
+  COMMANDS,
+  buildLookup,
+  eventKey,
+  type CommandId,
+  type Preset,
+} from "../keymap";
 // M10-1c: 書体テーブル・明示ロード・サイズ選択の規則は fonts.ts に集約
 import {
   FONTS,
@@ -73,7 +81,9 @@ type Tool =
   | "hand"
   | "select"
   | "transform"
-  | "warp";
+  | "warp"
+  // M11-8 P-2: 絵そのものを動かす専用ツール（選択範囲は「位置決めの道具」になったため）
+  | "move";
 
 type ShapeKind = "line" | "rect" | "ellipse";
 
@@ -156,6 +166,9 @@ export interface EditorCallbacks {
     audio?: ExportAudioSource | null,
     onSyncModeChange?: (m: "audioToAnim" | "animToAudio") => void
   ) => void;
+  /** M11-11: いま見ているコマ1枚を画像で保存する（PNG / JPEG・1/2/4/8倍）。
+   *  アニメの書き出し（openExport）とは UI も経路も分けてある（1枚に範囲・音声・進捗は要らない） */
+  openImageExport?: (p: Project, frameIndex: number, baseName: string) => void;
   /** M6-2: 音声ファイル（mp3/wav/ogg）を選んで読み込む。
    *  M10-8: m4a と動画（mp4/mov/webm/mkv）も通る。動画は main.ts 側で
    *  音声だけ MP3 192kbps に抽出されてから、外部音声と同じ形で返ってくる。 */
@@ -213,7 +226,23 @@ export class Editor {
   /** M10-19: バケツ塗りの参照（false=このレイヤー（既定・従来） / true=全レイヤー）。セッションのみ */
   fillRefAll = false;
   colorHex: string = UGO_COLORS.black;
-  penSize = 3;
+  /** M11-2: ツールごとの太さ（ペン/ブラシ/消しゴムが各自の値を覚える）。
+   *  図形などはペンの値を流用する（＝独立サイズを持たせない・従来どおり）。
+   *  永続化はしない（従来の penSize と同じくセッション内のみ） */
+  private sizeByTool: Record<"pen" | "brush" | "eraser", number> = {
+    pen: 3,
+    brush: 3,
+    eraser: 3,
+  };
+  /** 現在のツールの太さ。**実体は sizeByTool 側**にしかない（二重状態を持たない）。
+   *  こうしておかないと setTool を経由しないツール変更（貼り付け・画像配置・変形の
+   *  離脱/確定）で「記憶値と実際の太さ」が食い違う — レビュー検出 */
+  get penSize(): number {
+    return this.sizeByTool[this.sizeSlot(this.tool)];
+  }
+  set penSize(v: number) {
+    this.sizeByTool[this.sizeSlot(this.tool)] = v;
+  }
   texture: PenTexture = "solid";
   /** M5-4: ブラシのトーンパターン（ペンの texture とは独立に記憶。既定=網点大） */
   brushToneId = "halftone-l";
@@ -228,10 +257,42 @@ export class Editor {
   textBold = DEFAULT_TEXT.bold;
   /** M10-11: 縦書き（1列・上から下）。textBold と同じ流儀で永続化する */
   textVertical = false;
+  /** M11-12: 確定前の浮動テキスト。**保持するのは文字のパラメータでピクセルではない**
+   *  （書体やサイズを変えても位置を保ったまま作り直せる。ピクセルで持つと変えるたびに劣化する）。
+   *
+   *  変形モード（`xformActive` + `floatBuf`）と同じ「浮いて → 動かして → 確定/取消」の
+   *  状態機械だが、**プロジェクトには一切触れていない**点が違う（レイヤーから切り出さない）。
+   *  そのため保存・オートセーブは浮いていても正しく走る（作品の中身は完全なまま）。
+   *  保存しない・履歴にも積まない（確定したときに1エントリだけ積む）。 */
+  private textDraft: {
+    text: string;
+    x: number;
+    y: number;
+    family: FontKey;
+    size: number;
+    bold: boolean;
+    vertical: boolean;
+  } | null = null;
+  /** 生成したマスクのキャッシュ（位置を動かすだけなら作り直さない）。
+   *  `cv` は色つきのプレビュー用キャンバスで、色を変えたときだけ作り直す */
+  private textDraftCache: {
+    key: string;
+    mask: { w: number; h: number; data: Uint8Array } | null;
+    cv: HTMLCanvasElement | null;
+    cvColor: string;
+  } | null = null;
+  /** 浮動テキストを掴んでいる位置（掴んだ点と左上の差） */
+  private textDrag: { ox: number; oy: number } | null = null;
   /** E-2: ピクセル格子（1ドット≥8px で表示・既定ON） */
   gridEnabled = true;
   /** E-1: Space押下中の一時手のひら */
   private spaceHeld = false;
+  /** M11-2: Space を押した時刻。keyup までが短く、その間にパンしていなければ「単押し」＝再生トグル */
+  private spaceDownAt = 0;
+  /** M11-2: この Space 押下中に実際にパンが始まったか（始まっていたら再生トグルにしない） */
+  private spacePanned = false;
+  /** M11-2: 単押しと判定する上限（ms）。これを超えたら従来どおり手のひらだけ */
+  private static readonly SPACE_TAP_MS = 250;
   private panState: { sx: number; sy: number; sl: number; st: number } | null = null;
 
   // 表示
@@ -270,6 +331,12 @@ export class Editor {
   private lastPt: { x: number; y: number } | null = null;
   private smoothPt: { x: number; y: number } | null = null;
   private pointerDown = false;
+  /** M11-5: いま #ed-cvwrap が掴んでいるポインタ。pointerup/pointercancel が届かないまま
+   *  終わった接触を後から解放するために覚えておく（掴みっぱなしだと、その入力機器の
+   *  イベントが全部キャンバスへ配送され続け、ボタン類が押せなくなる） */
+  private capturedPointerId: number | null = null;
+  /** M11-5: 直近のポインタイベント。接触が途切れたとき、この位置でストロークを閉じる */
+  private lastPointerEvent: PointerEvent | null = null;
   private shapeStart: { x: number; y: number } | null = null;
   /** M10-7: 図形ドラッグ中の**生の**終点（拘束前）。Shift の押下/解放を
    *  マウスを動かさずに即反映するため、拘束前の座標を保持しておく必要がある */
@@ -326,7 +393,8 @@ export class Editor {
     flipV: false,
   };
   private xformActive = false;
-  private dragMode: "" | "move" | "scale" | "rotate" | "selmove" = "";
+  // M11-8: selmask=選択枠だけの移動（P-1） / layermove=レイヤーの絵の移動（P-2）
+  private dragMode: "" | "move" | "scale" | "rotate" | "selmove" | "selmask" | "layermove" = "";
   private dragStart: { x: number; y: number } | null = null;
   private dragBase: R.Transform | null = null;
   private static clipboard: R.FloatBuf | null = null;
@@ -349,15 +417,71 @@ export class Editor {
   };
   private keyupHandler = (e: KeyboardEvent) => {
     if (e.key === " ") {
+      const wasHeld = this.spaceHeld;
+      const held = performance.now() - this.spaceDownAt;
+      const panned = this.spacePanned;
       this.spaceHeld = false;
+      this.spacePanned = false;
       this.updatePanCursor();
+      // M11-2: 単押し（短く押して離す・その間パンしていない）なら再生/一時停止のトグル。
+      // 長押しは従来どおり手のひらのまま（何もしない）。ダイアログ中・文字入力中は無反応
+      if (
+        wasHeld &&
+        !panned &&
+        held <= Editor.SPACE_TAP_MS &&
+        this.mounted &&
+        !this.dialogOpen() &&
+        !this.isTextEntry(e.target)
+      ) {
+        this.togglePlayback();
+      }
     }
     if (e.key === "Shift") {
       this.shiftHeld = false;
       this.refreshShapePreview();
     }
+    // M11-11: 「押している間だけ透かす」を離したら戻す（割り当てを変えても同じ物理キーで戻る）
+    if (this.xformPeek && (this.peekCode === null || e.code === this.peekCode)) {
+      this.setXformPeek(false);
+    }
+  };
+  /** M11-5: ウィンドウがフォーカスを失ったときの後始末。
+   *
+   *  作者症状「修飾キーを連打しているとペンだけ操作が効かなくなる（マウスなら動く）」の調査で、
+   *  **接触の pointerup が届かないまま終わると状態が残り続ける**ことを実 exe で確認した:
+   *  - `#ed-cvwrap` がそのポインタを掴んだまま → **同じ入力機器のイベントが全部
+   *    キャンバスへ配送され、ツールボタン等が押せない**（ポインタごとに別管理なので
+   *    掴まれていない機器＝マウスは平気。「ペンだけ効かない」の説明になる）
+   *  - `pointerDown` が立ちっぱなし → かざしただけで線が引かれる・オートセーブが止まる
+   *  - `spaceHeld` が立ちっぱなし → 手のひらのままで描けない
+   *  フォーカスを失うと keyup も pointerup も**二度と来ない**ので、ここで畳む。
+   *  （ポインタ種別で分岐していない。「接触が途切れた」という事実だけを扱う） */
+  private blurHandler = () => {
+    if (!this.mounted) return;
+    this.spaceHeld = false;
+    this.spacePanned = false;
+    this.shiftHeld = false;
+    // M11-11: 透かしたままフォーカスを失うと keyup が来ない（薄いまま戻らなくなる）
+    this.setXformPeek(false);
+    this.endPointerSession("blur");
+    // レイヤー行のドラッグも同じ理由で取り残される（pointerup が来ないと
+    // 以後どの行も掴めなくなる）。こちらは取り消し＝並びは動かさない
+    this.cancelRowDrag();
+    // M11-6: 音声パネルの波形も同じ（掴んだままだと、戻ったあと載せただけで値が動く）
+    this.audioWaveEndDrag?.();
+    this.updatePanCursor();
   };
   private resizeHandler = () => this.applyZoom();
+  /** M11-10: エディタ画面のどこかを押したら「別の操作を始めた」とみなして、
+   *  矢印キーの移動セッションを確定する。capture 段階なので**どのボタンの処理より先**に走る
+   *（保存・書き出し・タイムライン・レイヤー行・キャンバス…を1箇所でまかなう） */
+  private uiPointerHandler = () => {
+    if (this.mounted) this.endArrowSession();
+  };
+  /** M11-8: ステージのスクロール（手のひら・ホイール）にランチャーを追従させる */
+  private stageScrollHandler = () => {
+    if (this.mounted) this.refreshSelectionLauncher();
+  };
   private mounted = false;
   /** F-0対策: フィルムサムネは縮小解像度・可視分のみ遅延描画（canvasメモリ上限対策） */
   private static readonly THUMB_W = 80;
@@ -409,10 +533,32 @@ export class Editor {
     this.buildTimeline();
     this.bindHeader();
     this.bindCanvas();
+    // M11-5: 診断ビルドのみ — キーとフォーカスの出入りも記録する（通常ビルドでは登録しない）。
+    // **本体のハンドラより先に**登録する（処理が走る前の状態をログに残すため。
+    // 後ろに置くと「H を押した瞬間のツール」が既に hand になっていて因果が読めない）
+    if (this.inputLog) {
+      window.addEventListener("keydown", this.keyLogHandler);
+      window.addEventListener("keyup", this.keyLogHandler);
+      window.addEventListener("blur", this.winLogHandler);
+      window.addEventListener("focus", this.winLogHandler);
+      document.addEventListener("visibilitychange", this.winLogHandler);
+    }
     window.addEventListener("keydown", this.keydownHandler);
     window.addEventListener("keyup", this.keyupHandler);
     window.addEventListener("resize", this.resizeHandler);
+    window.addEventListener("blur", this.blurHandler);
     this.spaceHeld = false;
+    // M11-5: 前のセッションの接触状態を持ち越さない（pointerup が届かないまま閉じた場合、
+    // 開き直しても「かざしただけで線が引かれる」等が残っていた）。
+    // **掴んだままなら解放してから忘れる** — ウィンドウへのドロップ→「編集」は unmount() を
+    // 通らずに mount() し直すので、ここで id を忘れるだけだと二度と解放できなくなる
+    this.spacePanned = false;
+    this.pointerDown = false;
+    this.panState = null;
+    this.lastPointerEvent = null;
+    this.releaseCapture();
+    this.cancelRowDrag();
+    this.cancelFrameDrag(); // M11-7: 掴んだまま別の作品を開かない
     $("#ed-title").textContent = `✏ ${project.meta.title || "無題"}`;
     this.applyZoom();
     this.refreshAll();
@@ -433,6 +579,11 @@ export class Editor {
       });
     });
     this.resizeObs.observe($("#ed-stage"));
+    // M11-8: 手のひら/スクロールでキャンバスが動いたらランチャーも追従させる
+    // （M3.9 H-1 でスクロールは内側の #ed-scroll に限定されている。#ed-stage は動かない）
+    $("#ed-scroll").addEventListener("scroll", this.stageScrollHandler);
+    // M11-10: 矢印キーの移動セッションを「別の操作」で確定させる（capture）
+    $("#screen-editor").addEventListener("pointerdown", this.uiPointerHandler, true);
     // F-3: オートセーブ（15秒間隔・変更があるときだけ・描画中はスキップ）
     this._dirty = false;
     this.autosavePending = false;
@@ -440,10 +591,35 @@ export class Editor {
   }
 
   unmount() {
+    // M11-6: 二度呼んでも安全にする（showEditor() の先頭と showLibrary() の両方から
+    // 呼ばれ得るため）。mount していない状態での後始末は何もしない
+    if (!this.mounted) return;
     this.stopPlayback();
     window.removeEventListener("keydown", this.keydownHandler);
     window.removeEventListener("keyup", this.keyupHandler);
     window.removeEventListener("resize", this.resizeHandler);
+    window.removeEventListener("blur", this.blurHandler);
+    // M11-5: 診断ビルドで張った分（張っていなければ何も起きない）
+    window.removeEventListener("keydown", this.keyLogHandler);
+    window.removeEventListener("keyup", this.keyLogHandler);
+    window.removeEventListener("blur", this.winLogHandler);
+    window.removeEventListener("focus", this.winLogHandler);
+    document.removeEventListener("visibilitychange", this.winLogHandler);
+    this.releaseCapture(); // M11-5: 掴んだまま画面を離れない
+    // M11-7: 進行中の自前ドラッグ（window リスナー）を残さない
+    this.cancelRowDrag();
+    this.cancelFrameDrag();
+    // M11-10: 矢印キーの移動セッションを持ったまま画面を離れない（確定してから閉じる）
+    this.endArrowSession();
+    // M11-12: 浮動テキストも同じ（保険。⟵もどる等の通常経路では xformGuard で既に焼けている）。
+    // DOM が消えかけているので silent（UI 更新なし）で呼ぶ
+    this.commitTextDraft(true);
+    document
+      .querySelector("#screen-editor")
+      ?.removeEventListener("pointerdown", this.uiPointerHandler, true);
+    // M11-8: ランチャーと、そのスクロール購読を残さない
+    document.querySelector("#ed-scroll")?.removeEventListener("scroll", this.stageScrollHandler);
+    this.hideSelectionLauncher();
     this.resizeObs?.disconnect();
     this.resizeObs = null;
     this.filmObserver?.disconnect();
@@ -555,6 +731,27 @@ export class Editor {
   }
 
   /** 進行中のオートセーブを待ち、以後の古い書き込みを無効化してからスロットを消す */
+  /** M11-6: 編集を中断してよいか確かめる。true=進んでよい / false=中断する。
+   *
+   *  「変形ガード → 未保存の確認 → 破棄ならオートセーブも消す」の3点は、
+   *  ⟵もどる（`#ed-back`）と、ウィンドウへのドロップ→「編集」の**両方**が通る必要がある。
+   *  片方にしか無かったせいで、ドロップ経路では編集中の変更が黙って消えていた（M11-6 P-1）。
+   *  破棄のときにオートセーブも消すのは、次回起動で「復元しますか？」を出さないため。
+   *  ※ 設定メニューの「終了」は**この経路を通さない**（オートセーブを残したまま終わる
+   *    従来の挙動を維持する。M11-6 P-1-5） */
+  async confirmLeave(
+    message = "保存していない変更があります。破棄してライブラリへ戻りますか？"
+  ): Promise<boolean> {
+    if (!this.mounted) return true;
+    if (this.xformGuard()) return false; // E-4: 変形中は確定/取消が先
+    if (this.dirty) {
+      const ok = await this.cb.confirm(message);
+      if (!ok) return false;
+      await this.invalidateAutosave();
+    }
+    return true;
+  }
+
   private async invalidateAutosave() {
     this.autosaveEpoch++;
     this.autosavePending = false;
@@ -577,6 +774,8 @@ export class Editor {
       { key: "eyedrop", icon: "💧", label: "スポイト" },
     ];
     const edits: { key: Tool | "copyprev" | "clear"; icon: string; label: string }[] = [
+      // M11-8 P-2: 絵を動かすのはこのツール（選択範囲内のドラッグは枠だけが動く）
+      { key: "move", icon: "✥", label: "移動" },
       { key: "select", icon: "⬚", label: "範囲選択" },
       { key: "transform", icon: "🔀", label: "変形" },
       // M10-2a: 方式（押す/ふくらませ/へこませ/四隅）はツールオプション内で切り替える。
@@ -711,7 +910,25 @@ export class Editor {
     }
   }
 
+  /** M11-2: そのツールが太さを記憶する枠。ペン/ブラシ/消しゴムは各自、
+   *  それ以外（図形など）はペンの枠を共有する */
+  private sizeSlot(t: Tool): "pen" | "brush" | "eraser" {
+    return t === "brush" ? "brush" : t === "eraser" ? "eraser" : "pen";
+  }
+
+  /** M11-2: 太さピッカーの選択表示を現在の penSize に合わせ直す（DOMは作り直さない） */
+  private refreshSizePicker() {
+    const host = document.querySelector("#ed-sizes");
+    if (!host) return;
+    host.querySelectorAll(".sz").forEach((el, i) => {
+      el.classList.toggle("on", PEN_SIZES[i] === this.penSize);
+    });
+  }
+
   private setTool(t: Tool) {
+    // M11-12: 文字ツールから抜けるときは浮動テキストを**確定**する（変形の「取り消し」とは逆。
+    // 打った文字が黙って消えないように＝REQ「別のツールへ切り替える＝確定」）
+    if (this.textDraft && t !== "text") this.commitTextDraft();
     if (this.xformActive && t !== "transform") this.cancelTransform();
     // M10-2c: 歪み以外へ抜けるときは未確定の四隅変形を取り消す
     if (this.cornerActive && t !== "warp") this.cancelCornerWarp();
@@ -722,6 +939,8 @@ export class Editor {
     }
     this.prevTool = this.tool;
     this.tool = t;
+    // M11-2: 太さの実体は sizeByTool なので、ここは表示（.sz の on）を合わせるだけ
+    this.refreshSizePicker();
     if (t === "transform") this.beginTransform();
     // M10-2c: 歪みへ戻ってきたときにモードが corner のままなら再開する
     // （これが無いとハンドルの出ていない死んだモードになる）
@@ -731,6 +950,19 @@ export class Editor {
     this.buildToolOptions();
     this.rebuildTexPicker(); // M5-4: ペン⇄ブラシでピッカー切替（各自の選択を記憶）
     this.redrawOverlay();
+    this.revealToolOptions();
+  }
+
+  /** M11-11: ツールオプションはサイドパネルの一番下にあるので、画面が低いと
+   *  「枠からはみ出している」ように見えて確定/キャンセルのボタンに気づけない。
+   *  はみ出しているときだけ、そこまでスクロールして見せる（収まっていれば何もしない） */
+  private revealToolOptions() {
+    const side = document.querySelector("#ed-side") as HTMLElement | null;
+    const host = document.querySelector("#ed-toolopts") as HTMLElement | null;
+    if (!side || !host || !host.firstChild) return;
+    const sr = side.getBoundingClientRect();
+    const hr = host.getBoundingClientRect();
+    if (hr.bottom > sr.bottom + 1) host.scrollIntoView({ block: "end" });
   }
 
   private updateToolButtons() {
@@ -771,7 +1003,7 @@ export class Editor {
       d.innerHTML = `<i style="width:${Math.min(18, s + 2)}px;height:${Math.min(18, s + 2)}px"></i>`;
       d.title = `${s}ドット`;
       d.addEventListener("click", () => {
-        this.penSize = s;
+        this.penSize = s; // setter が「今のツールの枠」へ書く（図形などはペンの枠）
         sizes.querySelectorAll(".sz").forEach((e) => e.classList.remove("on"));
         d.classList.add("on");
       });
@@ -847,6 +1079,9 @@ export class Editor {
   private audioPreview = new AudioPreview();
   private audioPanelEl: HTMLElement | null = null;
   private audioPanelClose: (() => void) | null = null;
+  /** M11-6: 波形（`#ap-wave`）のドラッグを畳む手（`audioPanelClose` と同じ流儀）。
+   *  キャンバス側と同じく「接触が途切れたら畳む」を通すために外から呼べるようにする */
+  private audioWaveEndDrag: (() => void) | null = null;
 
   /** A-2: 波形＋コマ目盛＋試し再生の大パネル。
    *  M5-1: BGM側は従来どおり作業コピー（適用までプロジェクトに触らない）。
@@ -980,6 +1215,7 @@ export class Editor {
         trialTimer = null;
       }
       stopTrialAudio();
+      self.audioPreview.stopSe(); // M11-1: 試し再生で発火したSEも止める
       if (playheadT0 != null) {
         // Q-2: どこまで聴いたか分かるよう、停止位置に薄いマーカーを残す
         stopMarkT = currentHeadT();
@@ -1002,24 +1238,26 @@ export class Editor {
       playheadRaf = requestAnimationFrame(tickHead);
     };
     // M5-1: 試し再生でも配置SEをコマ発火（プロジェクトの生きた配置を参照）
-    const fireTrialSe = (i: number) => {
+    const fireTrialSe = (i: number, skipIds?: string[]) => {
       const a = proj.audio;
       if (!a || a.se.length === 0) return;
       const ids = proj.frames[i]?.se;
       if (!ids) return;
       for (const id of ids) {
+        if (skipIds && skipIds.includes(id)) continue; // M11-9: 続きから鳴っているSEは重ねない
         const t = a.se.find((s) => s.id === id);
         if (t) self.audioPreview.fireSe(t);
       }
     };
-    const startFrameTimer = () => {
-      fireTrialSe(trialFrame); // 開始コマ
+    const startFrameTimer = (skipIds?: string[]) => {
+      fireTrialSe(trialFrame, skipIds); // 開始コマ
       trialTimer = window.setInterval(() => {
         let next = trialFrame + 1;
         if (next >= frameCount) {
           next = 0;
           if (frameCount > 1) {
             playTrialAudio(); // A-1と同じ: アニメが先頭に戻るたび音も頭出し
+            self.audioPreview.stopSe(); // M11-1: SEも本再生と同じく頭出しし直す（周回で重ねない）
             resetPlayhead(); // ヘッドも頭出し位置へ戻す
           }
         }
@@ -1046,6 +1284,9 @@ export class Editor {
       clearInterval(trialTimer);
       trialTimer = null;
       stopTrialAudio();
+      // M11-1: 一時停止でSEも止める（本再生の⏸と同じ扱い）
+      // M11-9: 止めるだけでなく「どこまで鳴ったか」を畳む＝再開で続きから鳴る
+      self.audioPreview.pauseSe();
       playheadT0 = null;
       cancelAnimationFrame(playheadRaf);
       pausedAt = t;
@@ -1062,7 +1303,8 @@ export class Editor {
       playTrialAudio(off);
       resetPlayhead(off);
       startHeadRaf();
-      startFrameTimer();
+      // M11-9: 一時停止で畳んだSEを続きから鳴らし、そのぶんは開始コマで重ねて鳴らさない
+      startFrameTimer(self.audioPreview.resumeSe());
       setTrialButton(true);
     };
 
@@ -1264,6 +1506,10 @@ export class Editor {
     // ---- パネル描画 ----
     const render = () => {
       stopTrial();
+      // M11-6: 描き直すと古い #ap-wave は DOM から外れる。畳む手も作り直すので、
+      // ここで捨てておく（BGM を消した直後は波形が無く、再代入されないため）
+      this.audioWaveEndDrag?.();
+      this.audioWaveEndDrag = null;
       const baseFps = FPS_TABLE[w.baseSpeedIndex] ?? fps;
       const statusText = w.deleted || !w.bytes
         ? "BGMなし"
@@ -1458,10 +1704,32 @@ export class Editor {
           if (localY(e) < RULER_H) return "grab"; // ルーラー帯=パン
           return "ew-resize"; // 波形=波形自体を左右に動かす
         };
+        // M11-6: 掴んだポインタを覚え、解放を1箇所に集約する（キャンバス側と同じ流儀）。
+        // 掴みっぱなしのまま戻ってくると「カーソルを載せただけでトリムが動く」ため
+        let wavePointerId: number | null = null;
+        const releaseWave = () => {
+          if (wavePointerId == null) return;
+          try {
+            cv.releasePointerCapture(wavePointerId);
+          } catch {
+            /* すでに解放済み・そのポインタが無い場合は何もしなくてよい */
+          }
+          wavePointerId = null;
+        };
+        /** 進行中のドラッグを畳む（トリム／ルーラーパン／波形移動のすべて共通） */
+        const endWaveDrag = () => {
+          if (dragging === "seek" || dragging === "viewpan") syncZoomUI();
+          dragging = "";
+          releaseWave();
+        };
+        this.audioWaveEndDrag = endWaveDrag;
         cv.addEventListener("pointerdown", (e) => {
           if (!buffer) return;
+          // 前の接触が pointerup 無しで終わっていたら、ここで畳んでから始める（M11-5 と同じ）
+          if (dragging || wavePointerId != null) endWaveDrag();
           try {
             cv.setPointerCapture(e.pointerId);
+            wavePointerId = e.pointerId;
           } catch {
             /* 合成イベント・ペン切断時などは捕捉なしで続行 */
           }
@@ -1478,6 +1746,15 @@ export class Editor {
         });
         cv.addEventListener("pointermove", (e) => {
           if (!buffer) return;
+          // M11-6: 掴んでいるポインタ以外の移動は無視する（手本: library.ts の mine()）
+          if (wavePointerId != null && e.pointerId !== wavePointerId) return;
+          // M11-6: 「掴んでいるはずなのにボタンが押されていない」＝ pointerup の取りこぼし。
+          // 畳んでからホバー扱いにする（これが無いと載せただけでトリムが動く）
+          if (dragging && e.buttons === 0) {
+            endWaveDrag();
+            cv.style.cursor = zoneCursor(e);
+            return;
+          }
           if (!dragging) {
             cv.style.cursor = zoneCursor(e); // R-4: ホバー中はゾーンに応じたカーソル
             return;
@@ -1512,12 +1789,16 @@ export class Editor {
           syncInputs();
         });
         const up = (e: PointerEvent) => {
-          if (dragging === "seek" || dragging === "viewpan") syncZoomUI(); // スクロールバーを再同期
-          dragging = "";
+          if (wavePointerId != null && e.pointerId !== wavePointerId) return; // M11-6
+          endWaveDrag(); // syncZoomUI・dragging クリア・キャプチャ解放をここに集約
           cv.style.cursor = zoneCursor(e);
         };
         cv.addEventListener("pointerup", up);
         cv.addEventListener("pointercancel", up);
+        // M11-6: ブラウザ側で解放されたときも記録を合わせる（記録のみ）
+        cv.addEventListener("lostpointercapture", (e) => {
+          if (wavePointerId === e.pointerId) wavePointerId = null;
+        });
         // 任意: Ctrl+ホイール=カーソル位置基準ズーム / ホイール=パン
         cv.addEventListener(
           "wheel",
@@ -1668,6 +1949,9 @@ export class Editor {
     const close = () => {
       stopTrial();
       this.seSectionRefresh = null;
+      // M11-6: 掴んだまま閉じない（要素ごと消えるので実害は無いが、記録も残さない）
+      this.audioWaveEndDrag?.();
+      this.audioWaveEndDrag = null;
       back.remove();
       this.audioPanelEl = null;
       this.audioPanelClose = null;
@@ -1751,6 +2035,9 @@ export class Editor {
   /** SE変更後の共通処理（dirty・ボタン/フィルム表示・パネル再描画） */
   private afterSeChange() {
     this.dirty = true;
+    // M11-9 P-1: SEを編集したら「一時停止で畳んだ続き」は捨てる（消した音源の続きが後から鳴らない）。
+    // 鳴っている音には触れない＝従来の挙動は変えない
+    this.audioPreview.discardPausedSe();
     sanitizeAudio(this.project);
     this.updateAudioToolButton();
     this.updateFilmSeMarks();
@@ -1964,6 +2251,9 @@ export class Editor {
       d.addEventListener("click", () => this.setPaper(hex));
       pp.appendChild(d);
     }
+    // M11-12: 浮動テキストのプレビューは現在の色で描いているので、色が変わったら描き直す
+    //（色の変更は必ずここを通る＝スポイト・カラーピッカー・パレット・透明のすべて）
+    if (this.textDraft) this.redrawOverlay();
   }
 
   // ---------------- M3.7: レイヤーツリー（フォルダ・ネスト対応） ----------------
@@ -2002,6 +2292,8 @@ export class Editor {
   private rowDrag: {
     id: string;
     kind: "layer" | "folder";
+    /** M11-7 P-2: 掴んだポインタ。これ以外の move/up は無視する */
+    pointerId: number;
     startX: number;
     startY: number;
     active: boolean;
@@ -2019,11 +2311,20 @@ export class Editor {
     if (this.rowDrag) return;
     if (this.xformActive || this.floatBuf || this.cornerActive) return; // ガードのトーストは click 側に任せる
     this.suppressRowClick = false;
-    const onMove = (ev: PointerEvent) => this.updateRowDrag(ev);
-    const onUp = (ev: PointerEvent) => this.finishRowDrag(ev);
+    // M11-7 P-2: 掴んだポインタ以外（2本目の指・別のペン）の move/up は無視する。
+    // 見ていないと、触れた指の座標でドロップ先が計算され、**指していない位置へ行が動く**。
+    // down 側には入れない（M11-6 P-3 と同じ理由＝自己修復の復帰経路を塞がないため）
+    const mine = (ev: PointerEvent) => this.rowDrag?.pointerId === ev.pointerId;
+    const onMove = (ev: PointerEvent) => {
+      if (mine(ev)) this.updateRowDrag(ev);
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (mine(ev)) this.finishRowDrag(ev);
+    };
     this.rowDrag = {
       id,
       kind,
+      pointerId: e.pointerId,
       startX: e.clientX,
       startY: e.clientY,
       active: false,
@@ -2733,6 +3034,8 @@ export class Editor {
     } else if (this.tool === "text") {
       // M10-1c: 書体 → サイズ（書体連動）→ 太さ の順。選択肢は fonts.ts のテーブルから組む
       const def = fontDef(this.textFamily);
+      // M11-12: 浮動テキストがあるときだけ入力欄と確定/取消を使える状態にする
+      const drafting = !!this.textDraft;
       host.innerHTML = `<h3>文字</h3>
         <div class="row"><span class="tog">書体</span>
           <select id="ed-textfont">${FONTS.map(
@@ -2755,25 +3058,42 @@ export class Editor {
             <button type="button" class="lv${this.textVertical ? "" : " on"}" data-v="h">横書き</button>
             <button type="button" class="lv${this.textVertical ? " on" : ""}" data-v="v">縦書き</button>
           </div></div>
-        <p class="hintline">キャンバスをクリックすると入力ダイアログが出ます。</p>`;
+        <textarea id="ed-textinput" class="tinput" rows="3" spellcheck="false"
+          placeholder="${drafting ? "ここに入力（Enter で改行）" : "キャンバスをクリックしてから入力"}"
+          ${drafting ? "" : "disabled"}></textarea>
+        <div class="selacts">
+          <button class="minibtn ok" id="ed-text-ok"${drafting ? "" : " disabled"}>✔ 確定</button>
+          <button class="minibtn" id="ed-text-cancel"${drafting ? "" : " disabled"}>✖ 取り消し</button>
+        </div>
+        <p class="hintline">${
+          drafting
+            ? "Ctrl+Enter か ✔ で確定。Esc で取り消し。文字をドラッグして動かせます（そのあとは矢印キーで1ドット・Shift で10ドット）。"
+            : "キャンバスをクリックすると、その位置に文字を置けます。確定するまで何度でも直せます。"
+        }</p>`;
       $("#ed-textfont").addEventListener("change", (e) => {
         this.textFamily = (e.target as HTMLSelectElement).value as FontKey;
         const d = fontDef(this.textFamily);
         // 直前のサイズが新候補にあれば維持し、無ければ最も近い値へ
         this.textSize = nearestSize(d, this.textSize);
         if (!d.hasBold) this.textBold = false;
+        this.syncTextDraftStyle(); // M11-12: 浮動テキストへ即反映（位置は変えない）
         this.buildToolOptions();
+        this.redrawOverlay();
         this.cb.onTextSettingsChange?.(this.textSettings());
       });
       $("#ed-textsize").addEventListener("change", (e) => {
         this.textSize = Number((e.target as HTMLSelectElement).value);
+        this.syncTextDraftStyle();
+        this.redrawOverlay();
         this.cb.onTextSettingsChange?.(this.textSettings());
       });
       // M10-15: 行は hasBold の書体でしか描かない — 存在するときだけリスナを張る
       document.querySelector("#ed-textbold")?.addEventListener("click", () => {
         if (!fontDef(this.textFamily).hasBold) return; // 最終防衛線（行が無いので実質不要）
         this.textBold = !this.textBold;
+        this.syncTextDraftStyle();
         this.buildToolOptions();
+        this.redrawOverlay();
         this.cb.onTextSettingsChange?.(this.textSettings());
       });
       // M10-11: 向き（横書き／縦書き）。既存の .oni + .lv だけで組む（新規CSSなし）
@@ -2782,10 +3102,42 @@ export class Editor {
           const v = (b as HTMLElement).dataset.v === "v";
           if (v === this.textVertical) return;
           this.textVertical = v;
+          this.syncTextDraftStyle();
           this.buildToolOptions();
+          this.redrawOverlay();
           this.cb.onTextSettingsChange?.(this.textSettings());
         })
       );
+      // M11-12: 複数行の入力欄。打つたびにプレビューを作り直す（間引きなし・実測で不要と判断）
+      {
+        const ta = $("#ed-textinput") as HTMLTextAreaElement;
+        ta.value = this.textDraft?.text ?? "";
+        ta.addEventListener("input", () => {
+          if (!this.textDraft) return;
+          this.textDraft.text = ta.value;
+          this.redrawOverlay();
+        });
+        // Escape と Ctrl+Enter は**入力欄の中でも**効かせる。window 側の onKeyDown は
+        // isTextEntry() で早期 return するので、ここで受けないとどちらも届かない。
+        // それ以外（Enter=改行 / 矢印=カーソル移動 / P=「P」）はブラウザ既定のまま通す
+        ta.addEventListener("keydown", (e) => {
+          if (e.isComposing || e.keyCode === 229) return; // IME 変換中は触らない
+          if (e.code === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            this.cancelTextDraft();
+          } else if ((e.code === "Enter" || e.code === "NumpadEnter") && e.ctrlKey) {
+            e.preventDefault();
+            e.stopPropagation();
+            this.commitTextDraft();
+          }
+        });
+        $("#ed-text-ok").addEventListener("click", () => this.commitTextDraft());
+        $("#ed-text-cancel").addEventListener("click", () => this.cancelTextDraft());
+        // 書体やサイズを変えるとこのパネルごと作り直されてフォーカスが飛ぶ。
+        // 浮動中で行き場を失っていたら入力欄へ戻す（打ちかけの続きをそのまま打てるように）
+        if (drafting && document.activeElement === document.body) this.focusTextInput();
+      }
     } else if (this.tool === "warp") {
       // M10-2a: モードボタンは最初から4つ置き、未実装の3つは無効表示で残す。
       // M10-2b/2c で並びが変わって段組みが崩れる（M5-3→M5-5 の再演）のを避けるため。
@@ -2805,15 +3157,18 @@ export class Editor {
           : this.warpMode === "pinch"
             ? "押した場所を中心にへこみます。押しっぱなしで強くなります。"
             : "ドラッグした向きに絵が引っ張られます。範囲選択があるとその中だけ。";
+      // M11-2: 4つを1本の .oni に並べると `.oni .lv{flex:1}` ＋ `white-space:nowrap` で
+      // ラベルがパネル右端からはみ出す（作者報告）。**2個ずつ2行**の .oni に分ける
+      // （styles.css は触らない・既存クラスのみ。行間は .oni の gap と同じ 5px）
+      const modeBtn = (m: (typeof modes)[number]) =>
+        `<button class="lv${m.k === this.warpMode ? " on" : ""}" data-m="${m.k}"${
+          m.ready ? "" : " disabled"
+        }>${m.label}</button>`;
       host.innerHTML = `<h3>歪み</h3>
-        <div class="oni" id="ed-warpmode">${modes
-          .map(
-            (m) =>
-              `<button class="lv${m.k === this.warpMode ? " on" : ""}" data-m="${m.k}"${
-                m.ready ? "" : " disabled"
-              }>${m.label}</button>`
-          )
-          .join("")}</div>
+        <div id="ed-warpmode">
+          <div class="oni">${modes.slice(0, 2).map(modeBtn).join("")}</div>
+          <div class="oni" style="margin-top:5px">${modes.slice(2).map(modeBtn).join("")}</div>
+        </div>
         <div class="row"><span class="tog">半径 <b id="ed-warpr-v">${this.warpRadius}</b>px</span><div id="ed-warpr" style="flex:1"></div></div>
         <div class="row"><span class="tog">強さ <b id="ed-warps-v">${this.warpStrength}</b>%</span><div id="ed-warps" style="flex:1"></div></div>
         <p class="hintline">${warpHint}</p>${
@@ -2904,8 +3259,8 @@ export class Editor {
       </div>
       <p class="hintline">${
         this.selectKind === "auto"
-          ? "クリックした場所と同じ色の範囲を選択します。選択内ドラッグで移動。"
-          : "選択内ドラッグで移動。変形ツールで回転・拡縮。"
+          ? "クリックした場所と同じ色の範囲を選択します。選択内ドラッグで枠だけ移動。"
+          : "選択内ドラッグで枠だけ移動。絵を動かすには ✥ 移動ツール。"
       }</p>`;
       // M10-19: 種別切替は data-k のボタンだけに束ねる（参照/範囲の .lv と混線させない）
       host.querySelectorAll("[data-k]").forEach((b) =>
@@ -2937,22 +3292,59 @@ export class Editor {
         this.redrawOverlay();
       });
     } else if (this.tool === "transform") {
+      // M11-11: 数値の行は畳める（変形の状態には一切触らない・見た目だけ）
+      const fold = this.xformNumFold;
       host.innerHTML = `<h3>変形（高精度・結果はドット確定）</h3>
-      <div class="row"><span class="tog">回転</span><input type="number" id="ed-x-angle" value="${Math.round(
-        (this.xform.angle * 180) / Math.PI
-      )}" step="1" style="width:64px"> °
-        <div class="sw2${this.snap15 ? " on" : ""}" id="ed-x-snap" title="15°スナップ"></div><span class="tog">15°</span></div>
-      <div class="row"><span class="tog">拡縮</span><input type="number" id="ed-x-scale" value="${(
-        this.xform.sx * 100
-      ).toFixed(0)}" step="1" style="width:64px"> %</div>
       <div class="selacts">
-        <button class="minibtn" id="ed-x-fliph">↔ 左右反転</button>
-        <button class="minibtn" id="ed-x-flipv">↕ 上下反転</button>
+        <button class="minibtn" id="ed-x-fold" title="回転・拡縮の数値を畳む/開く">${
+          fold ? "▸ 数値をひらく" : "▾ 数値をたたむ"
+        }</button>
+        <button class="minibtn" id="ed-x-peek" title="押している間だけ下の絵を透かして見る">👁 下を見る</button>
+      </div>
+      <div id="ed-x-nums"${fold ? " hidden" : ""}>
+        <div class="row"><span class="tog">回転</span><input type="number" id="ed-x-angle" value="${Math.round(
+          (this.xform.angle * 180) / Math.PI
+        )}" step="1" style="width:64px"> °
+          <div class="sw2${this.snap15 ? " on" : ""}" id="ed-x-snap" title="15°スナップ"></div><span class="tog">15°</span></div>
+        <div class="row"><span class="tog">拡縮</span><input type="number" id="ed-x-scale" value="${(
+          this.xform.sx * 100
+        ).toFixed(0)}" step="1" style="width:64px"> %</div>
+        <div class="selacts">
+          <button class="minibtn" id="ed-x-fliph">↔ 左右反転</button>
+          <button class="minibtn" id="ed-x-flipv">↕ 上下反転</button>
+        </div>
       </div>
       <div class="selacts">
         <button class="minibtn ok" id="ed-x-ok">✔ 確定</button>
         <button class="minibtn" id="ed-x-cancel">✖ キャンセル</button>
       </div>`;
+      $("#ed-x-fold").addEventListener("click", () => {
+        this.xformNumFold = !this.xformNumFold;
+        this.buildToolOptions();
+      });
+      // 押している間だけ透かす（ペンでもマウスでも同じ pointer 経路）。
+      // 離す・指が外れる・キャンセルのいずれでも必ず戻す
+      {
+        const peek = $("#ed-x-peek");
+        const on = (e: Event) => {
+          e.preventDefault();
+          this.setXformPeek(true);
+        };
+        const off = () => this.setXformPeek(false);
+        peek.addEventListener("pointerdown", on);
+        peek.addEventListener("pointerup", off);
+        peek.addEventListener("pointercancel", off);
+        peek.addEventListener("pointerleave", off);
+      }
+      if (fold) {
+        // 畳んでいる間は数値の入力欄が無いので、以降の配線は飛ばす
+        $("#ed-x-ok").addEventListener("click", () => this.commitTransform());
+        $("#ed-x-cancel").addEventListener("click", () => {
+          this.cancelTransform();
+          this.setTool(this.prevTool === "transform" ? "pen" : this.prevTool);
+        });
+        return;
+      }
       $("#ed-x-angle").addEventListener("input", (e) => {
         this.xform.angle =
           ((Number((e.target as HTMLInputElement).value) || 0) * Math.PI) / 180;
@@ -2984,6 +3376,25 @@ export class Editor {
     }
   }
   private snap15 = false;
+  /** M11-11: 変形の数値の行を畳んでいるか（見た目だけ・変形の状態には触らない） */
+  private xformNumFold = false;
+  /** M11-11: 変形プレビューを透かしているか（押している間だけ true） */
+  private xformPeek = false;
+  /** 透かしを始めたキー。同じキーの keyup で戻す（コマンドの割り当てが変わっても追従する） */
+  private peekCode: string | null = null;
+  /** 直近の keydown の e.code（「押している間だけ」のコマンドへ渡す） */
+  private peekPendingCode: string | null = null;
+
+  /** M11-11: 変形プレビューの透かしを入/切する。**変形の状態は一切変えない**（描き直すだけ） */
+  private setXformPeek(on: boolean, code: string | null = null) {
+    if (this.xformPeek === on) {
+      if (on && code) this.peekCode = code;
+      return;
+    }
+    this.xformPeek = on;
+    this.peekCode = on ? code : null;
+    this.redrawOverlay();
+  }
 
   // ---------------- タイムライン ----------------
 
@@ -3078,6 +3489,9 @@ export class Editor {
     const { L, A } = WOBBLE_TABLE[kind][strength];
     const field = new WarpField();
     const out: Frame[] = [];
+    // M11-8 P-4（REQ 表D）: 選択範囲があるときは**範囲内だけ**を揺らす（歪みツールと揃える）。
+    // 全コマ共通の場（field）は変えず、適用時にマスクで弾く
+    const clip = this.selMask ?? null;
     for (let k = 0; k < count - 1; k++) {
       const seedK = (seedBase + Math.imul(k + 1, 0x9e3779b9)) >>> 0;
       // dx と dy に別シード（同じだと全画素が斜めにずれるだけで「ゆれ」に見えない）
@@ -3092,8 +3506,7 @@ export class Editor {
         const dst = nf.layers[ld.id];
         // src と dst は別実体（cloneFrame → copyIndexBuf が新しい typed array を作る）。
         // 適用元は**常に原本**で、直前の生成結果には絶対に再適用しない。
-        // マスクは渡さない（ゆらゆらは別のコマを作る操作なので選択範囲を効かせない）
-        if (src && dst) applyWarp(src, dst, field, null);
+        if (src && dst) applyWarp(src, dst, field, clip);
       }
       out.push(nf);
     }
@@ -3284,7 +3697,6 @@ export class Editor {
     this.project.frames.forEach((_, i) => {
       const fr = document.createElement("div");
       fr.className = "fr" + (i === this.frameIndex ? " on" : "");
-      fr.draggable = true;
       fr.dataset.idx = String(i);
       const no = document.createElement("span");
       no.className = "no";
@@ -3295,6 +3707,8 @@ export class Editor {
       fr.appendChild(no);
       fr.appendChild(cv);
       fr.addEventListener("click", (e) => {
+        // M11-7: 並べ替えで掴んだあとの click ではコマを切り替えない
+        if (this.suppressFrameClick) return;
         if (e.shiftKey) {
           // 範囲選択: 起点（rangeAnchor）〜 i
           if (this.rangeAnchor == null) this.rangeAnchor = this.frameIndex;
@@ -3308,15 +3722,13 @@ export class Editor {
         }
         this.gotoFrame(i);
       });
-      fr.addEventListener("dragstart", (e) => {
-        e.dataTransfer?.setData("text/animemo-frame", String(i));
+      // M11-7: 並べ替えは Pointer Events の自前ドラッグ（HTML5 DnD は実 exe で発火しない）
+      fr.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        this.startFrameDrag(e, i);
       });
-      fr.addEventListener("dragover", (e) => e.preventDefault());
-      fr.addEventListener("drop", (e) => {
-        e.preventDefault();
-        const from = Number(e.dataTransfer?.getData("text/animemo-frame"));
-        if (!Number.isNaN(from)) this.reorderFrame(from, i);
-      });
+      // 保険: 万一ネイティブのドラッグが始まると pointermove を奪われる（M11-3 の実害）
+      fr.addEventListener("dragstart", (e) => e.preventDefault());
       film.appendChild(fr);
       this.filmObserver!.observe(fr);
     });
@@ -3328,6 +3740,222 @@ export class Editor {
     film.appendChild(add);
     this.updateBadge();
     this.updateFilmSeMarks(); // M5-1: SE配置マーク
+  }
+
+  // ---------------- M11-7: フィルムのコマ並べ替え（Pointer Events 自前ドラッグ） ----------------
+  // HTML5 DnD（draggable + dragstart/dragover/drop）は Tauri の dragDropEnabled が既定 true の
+  // もとで **実 exe ではまったく発火しない**（ペンでもマウスでも🚫が出て掴めない）。
+  // M3.9 H-2（レイヤー行）・M11-3（ライブラリのカード）と同じ pointer 方式へ置き換える。
+  // 移動そのものは既存の reorderFrame(from, to) を通す＝履歴は「コマ並べ替え」のまま。
+  private frameDrag: {
+    from: number;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    active: boolean;
+    ghost: HTMLElement | null;
+    line: HTMLElement | null;
+    /** 挿入位置（0..frames.length）。null = 有効な落とし先が無い */
+    gap: number | null;
+    scrollDir: -1 | 0 | 1;
+    raf: number | null;
+    onMove: (e: PointerEvent) => void;
+    onUp: (e: PointerEvent) => void;
+    onBlur: () => void;
+  } | null = null;
+  /** ドラッグ確定後の click でコマを切り替えないための抑止（rowDrag / cardDrag と同じ） */
+  private suppressFrameClick = false;
+  /** 掴んだと判定する移動距離（px）。library の CARD_DRAG_THRESHOLD に揃える（時間条件は付けない） */
+  private static readonly FRAME_DRAG_THRESHOLD = 6;
+  /** フィルムの端からこの内側でオートスクロール（横一列なので必須） */
+  private static readonly FILM_EDGE_PX = 40;
+
+  private frameEl(i: number): HTMLElement | null {
+    return document.querySelector(`#ed-film .fr[data-idx="${i}"]`) as HTMLElement | null;
+  }
+
+  private startFrameDrag(e: PointerEvent, from: number) {
+    if (this.frameDrag) return;
+    this.suppressFrameClick = false;
+    // 掴んだポインタ以外（別の指・別のペン）のイベントは無視する
+    const mine = (ev: PointerEvent) => this.frameDrag?.pointerId === ev.pointerId;
+    const onMove = (ev: PointerEvent) => {
+      if (mine(ev)) this.updateFrameDrag(ev);
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (!mine(ev)) return;
+      // pointercancel は「何も起きなかった」で終わる（まだ並びを変えていないので失うものが無い）
+      if (ev.type === "pointercancel") this.cancelFrameDrag();
+      else this.finishFrameDrag();
+    };
+    const onBlur = () => this.cancelFrameDrag();
+    this.frameDrag = {
+      from,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      lastX: e.clientX,
+      lastY: e.clientY,
+      active: false,
+      ghost: null,
+      line: null,
+      gap: null,
+      scrollDir: 0,
+      raf: null,
+      onMove,
+      onUp,
+      onBlur,
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("blur", onBlur);
+  }
+
+  private updateFrameDrag(ev: PointerEvent) {
+    const d = this.frameDrag;
+    if (!d) return;
+    d.lastX = ev.clientX;
+    d.lastY = ev.clientY;
+    if (!d.active) {
+      if (
+        Math.hypot(ev.clientX - d.startX, ev.clientY - d.startY) < Editor.FRAME_DRAG_THRESHOLD
+      )
+        return; // しきい値未満はクリック（コマ切替・Shift 範囲選択）のまま
+      d.active = true;
+      this.suppressFrameClick = true;
+      const g = document.createElement("div");
+      g.className = "drag-ghost"; // 既存クラス（レイヤー行・カードと共用）
+      g.textContent = `コマ ${d.from + 1}`;
+      document.body.appendChild(g);
+      d.ghost = g;
+      // 挿入位置の手がかり。新しいクラスを作らず、既存色をインラインで当てる
+      //（`.drag-ghost` と同じ position:fixed なので、フィルムのスクロールとも噛み合う）
+      const line = document.createElement("div");
+      line.style.cssText =
+        "position:fixed;z-index:121;pointer-events:none;width:3px;border-radius:2px;background:var(--green);";
+      document.body.appendChild(line);
+      d.line = line;
+      const src = this.frameEl(d.from);
+      if (src) src.style.opacity = "0.4"; // 掴んでいる元コマを薄く（styles.css は触らない）
+    }
+    if (d.ghost) {
+      d.ghost.style.left = `${ev.clientX + 14}px`;
+      d.ghost.style.top = `${ev.clientY + 16}px`;
+    }
+    d.gap = this.hitTestFrameDrag(ev.clientX, ev.clientY);
+    this.showFrameIndicator(d.gap);
+    d.ghost?.classList.toggle("invalid", d.gap === null);
+    this.updateFilmAutoScroll(ev.clientX);
+  }
+
+  /** 画面座標 → 挿入位置（0..frames.length）。フィルムの外なら null */
+  private hitTestFrameDrag(x: number, y: number): number | null {
+    const film = document.querySelector("#ed-film") as HTMLElement | null;
+    if (!film) return null;
+    const fr = film.getBoundingClientRect();
+    if (x < fr.left - 24 || x > fr.right + 24 || y < fr.top - 24 || y > fr.bottom + 24) return null;
+    const els = [...film.querySelectorAll(".fr")] as HTMLElement[];
+    for (let i = 0; i < els.length; i++) {
+      const r = els[i].getBoundingClientRect();
+      if (x < r.left + r.width / 2) return i; // このコマの手前へ
+    }
+    return els.length; // 末尾へ
+  }
+
+  private showFrameIndicator(gap: number | null) {
+    const d = this.frameDrag;
+    if (!d?.line) return;
+    const film = document.querySelector("#ed-film") as HTMLElement | null;
+    if (gap === null || !film) {
+      d.line.style.display = "none";
+      return;
+    }
+    const els = [...film.querySelectorAll(".fr")] as HTMLElement[];
+    const fr = film.getBoundingClientRect();
+    let x = fr.left;
+    if (gap < els.length) x = els[gap].getBoundingClientRect().left - 4;
+    else if (els.length > 0) x = els[els.length - 1].getBoundingClientRect().right + 1;
+    x = Math.max(fr.left, Math.min(fr.right - 3, x));
+    d.line.style.display = "";
+    d.line.style.left = `${Math.round(x)}px`;
+    d.line.style.top = `${Math.round(fr.top + 2)}px`;
+    d.line.style.height = `${Math.round(fr.height - 4)}px`;
+  }
+
+  /** フィルムは横一列なので、端に来たら自動でスクロールする（無いと見えている範囲にしか運べない） */
+  private updateFilmAutoScroll(clientX: number) {
+    const d = this.frameDrag;
+    const film = document.querySelector("#ed-film") as HTMLElement | null;
+    if (!d || !film) return;
+    const r = film.getBoundingClientRect();
+    d.scrollDir =
+      clientX < r.left + Editor.FILM_EDGE_PX ? -1 : clientX > r.right - Editor.FILM_EDGE_PX ? 1 : 0;
+    if (d.scrollDir === 0) {
+      this.stopFilmAutoScroll();
+      return;
+    }
+    if (d.raf != null) return;
+    const step = () => {
+      const dd = this.frameDrag;
+      const f = document.querySelector("#ed-film") as HTMLElement | null;
+      if (!dd || !f || dd.scrollDir === 0) {
+        if (dd) dd.raf = null;
+        return;
+      }
+      f.scrollLeft += dd.scrollDir * 14;
+      // 指を止めていてもコマが動くので、挿入位置を測り直す
+      dd.gap = this.hitTestFrameDrag(dd.lastX, dd.lastY);
+      this.showFrameIndicator(dd.gap);
+      dd.raf = requestAnimationFrame(step);
+    };
+    d.raf = requestAnimationFrame(step);
+  }
+
+  private stopFilmAutoScroll() {
+    const d = this.frameDrag;
+    if (!d || d.raf == null) return;
+    cancelAnimationFrame(d.raf);
+    d.raf = null;
+  }
+
+  private finishFrameDrag() {
+    const d = this.frameDrag;
+    if (!d) return;
+    const { from, gap, active } = d;
+    this.endFrameDrag();
+    // click は pointerup 直後に来るので、そのあとで必ず抑止を解く（rowDrag と同じ作法）
+    if (active) setTimeout(() => (this.suppressFrameClick = false), 0);
+    if (!active || gap === null) return;
+    // gap（挿入位置）→ reorderFrame の to（取り除いたあとの添字）へ
+    const to = gap > from ? gap - 1 : gap;
+    this.reorderFrame(from, to); // 履歴（コマ並べ替え）も xformGuard も既存のまま
+  }
+
+  /** Esc / pointercancel / ウィンドウ外 → 何も起きない状態へ戻す（並びは動かさない） */
+  cancelFrameDrag() {
+    const d = this.frameDrag;
+    if (!d) return;
+    const wasActive = d.active;
+    this.endFrameDrag();
+    if (wasActive) setTimeout(() => (this.suppressFrameClick = false), 0);
+  }
+
+  private endFrameDrag() {
+    const d = this.frameDrag;
+    if (!d) return;
+    this.stopFilmAutoScroll();
+    window.removeEventListener("pointermove", d.onMove);
+    window.removeEventListener("pointerup", d.onUp);
+    window.removeEventListener("pointercancel", d.onUp);
+    window.removeEventListener("blur", d.onBlur);
+    d.ghost?.remove();
+    d.line?.remove();
+    const src = this.frameEl(d.from);
+    if (src) src.style.opacity = "";
+    this.frameDrag = null;
   }
 
   private paintFilmThumb(i: number, cv?: HTMLCanvasElement) {
@@ -3370,15 +3998,7 @@ export class Editor {
 
   private bindHeader() {
     $("#ed-back").onclick = async () => {
-      if (this.xformGuard()) return; // E-4
-      if (this.dirty) {
-        const ok = await this.cb.confirm(
-          "保存していない変更があります。破棄してライブラリへ戻りますか？"
-        );
-        if (!ok) return;
-        // 破棄を選んだのでオートセーブも消す（次回起動時に復元を出さない）
-        await this.invalidateAutosave();
-      }
+      if (!(await this.confirmLeave())) return;
       this.cb.onExit();
     };
     // M3.8 L-B: ヘッダーの↶↷もキーと同じ規則（変形/浮動中はグローバル履歴に通さない）
@@ -3402,6 +4022,16 @@ export class Editor {
             this.dirty = true;
           }
         }
+      );
+    };
+    // M11-11: いま見ているコマ1枚を画像で保存（アニメの書き出しとは別の導線）
+    $("#ed-imgexport").onclick = () => {
+      if (this.xformGuard()) return; // 変形/歪みの未確定があるときは先に確定させる
+      if (this.playing) this.stopPlayback();
+      this.cb.openImageExport?.(
+        this.project,
+        this.frameIndex,
+        (this.project.meta.title || "無題").replace(/\.[^.]+$/, "")
       );
     };
     this.history.onchange = () => {
@@ -3630,6 +4260,7 @@ export class Editor {
     // E-2/M3.10 G-1: ピクセル格子（1ドット≥8pxで表示・実測ピッチで再描画）
     this.updateGridOverlay(z);
     this.applyViewTransform();
+    this.refreshSelectionLauncher(); // M11-8: ズーム/リサイズ/回転反転に追従
   }
 
   /** M3.10 G-1: ピクセル格子の再描画。
@@ -3757,6 +4388,8 @@ export class Editor {
     }
     // M10-2c: 四隅変形のハンドル
     if (this.cornerActive) this.drawCornerHandles(ctx);
+    // M11-12: 浮動テキスト（実際のドット＋外接する薄い枠。選択範囲では切らない）
+    if (this.textDraft) this.drawTextDraftPreview(ctx);
     // 自由選択の軌跡
     if (this.lassoPts.length > 1) {
       ctx.strokeStyle = "rgba(44,38,33,.8)";
@@ -3766,6 +4399,8 @@ export class Editor {
       for (const p of this.lassoPts) ctx.lineTo(p.x + 0.5, p.y + 0.5);
       ctx.stroke();
     }
+    // M11-8 P-3: 選択の状態が変わる経路はすべてここを通るので、ランチャーもここで更新する
+    this.refreshSelectionLauncher();
   }
 
   private floatToCanvas(f: R.FloatBuf): HTMLCanvasElement {
@@ -3795,6 +4430,8 @@ export class Editor {
     const cy = f.oy + f.h / 2 + t.ty;
     ctx.save();
     ctx.imageSmoothingEnabled = false;
+    // M11-11: 「下を見る」中は絵だけ薄くする（枠とハンドルは残す＝位置合わせの参考になる）
+    if (this.xformPeek) ctx.globalAlpha = 0.18;
     ctx.translate(cx, cy);
     ctx.rotate(t.angle);
     ctx.scale(t.sx * (t.flipH ? -1 : 1), t.sy * (t.flipV ? -1 : 1));
@@ -3809,24 +4446,57 @@ export class Editor {
     const hw = (f.w / 2) * t.sx;
     const hh = (f.h / 2) * t.sy;
     ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
-    // ハンドル（四隅＋回転）
-    ctx.fillStyle = "#fff";
-    for (const [hx, hy] of [
-      [-hw, -hh],
-      [hw, -hh],
-      [hw, hh],
-      [-hw, hh],
-    ]) {
-      ctx.fillRect(hx - 2, hy - 2, 4, 4);
-      ctx.strokeRect(hx - 2, hy - 2, 4, 4);
-    }
-    ctx.beginPath();
-    ctx.moveTo(0, -hh);
-    ctx.lineTo(0, -hh - 10);
-    ctx.stroke();
-    ctx.fillRect(-2, -hh - 12, 4, 4);
-    ctx.strokeRect(-2, -hh - 12, 4, 4);
     ctx.restore();
+    // M11-11: ハンドル（四隅＋回転ノブ）は**キャンバス座標**で描く。
+    // 枠が画面の外へ出たハンドルは内側へ寄せて描く（外に描いても 320×240 の
+    // オーバーレイでは見えず、掴めなくなるため）。寄せた印として色を変える
+    const hs = this.xformHandleWorld();
+    const topMid = hs[5];
+    const knob = this.clampedHandle(hs[4].x, hs[4].y) ?? hs[4];
+    ctx.save();
+    ctx.strokeStyle = "#f07a1a";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(topMid.x, topMid.y);
+    ctx.lineTo(knob.x, knob.y);
+    ctx.stroke();
+    for (let i = 0; i < 5; i++) {
+      const cl = this.clampedHandle(hs[i].x, hs[i].y);
+      const p = cl ?? hs[i];
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(t.angle);
+      ctx.fillStyle = cl ? "#f07a1a" : "#fff"; // 寄せたハンドルは塗りつぶし
+      ctx.fillRect(-2, -2, 4, 4);
+      ctx.strokeRect(-2, -2, 4, 4);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  /** M11-11: 変形ハンドルのキャンバス座標。[四隅4つ, 回転ノブ, 上辺中央] */
+  private xformHandleWorld(): { x: number; y: number }[] {
+    const f = this.floatBuf!;
+    const t = this.xform;
+    const cx = f.ox + f.w / 2 + t.tx;
+    const cy = f.oy + f.h / 2 + t.ty;
+    const hw = Math.abs((f.w / 2) * t.sx);
+    const hh = Math.abs((f.h / 2) * t.sy);
+    const cos = Math.cos(t.angle);
+    const sin = Math.sin(t.angle);
+    const w = (lx: number, ly: number) => ({
+      x: cx + lx * cos - ly * sin,
+      y: cy + lx * sin + ly * cos,
+    });
+    return [w(-hw, -hh), w(hw, -hh), w(hw, hh), w(-hw, hh), w(0, -hh - 12), w(0, -hh)];
+  }
+
+  /** M11-11: キャンバスの外へ出たハンドルを内側へ寄せた位置。外に出ていなければ null */
+  private clampedHandle(wx: number, wy: number): { x: number; y: number } | null {
+    const M = 6; // 端からの余白（ドット）。□の半径 2 より大きくして枠線に潜らせない
+    const x = Math.max(M, Math.min(W - M, wx));
+    const y = Math.max(M, Math.min(H - M, wy));
+    return x === wx && y === wy ? null : { x, y };
   }
 
   // ---------------- 入力（ポインタ） ----------------
@@ -3845,7 +4515,28 @@ export class Editor {
     wrap.onpointerdown = h("down", (e) => this.onPointerDown(e));
     wrap.onpointermove = h("move", (e) => this.onPointerMove(e));
     wrap.onpointerup = h("up", (e) => this.onPointerUp(e));
+    // M11-6: pointercancel も **onPointerUp に流して確定させる**（据え置きの判断）。
+    // 画素は move の時点で既にレイヤーへ書かれており（R.stamp / R.strokeSegment）、
+    // 履歴を積むのは onPointerUp だけ。「無かったこと」にすると **Undo で戻せない絵**が残り、
+    // 選択移動では切り出し済みの絵が消えたままになる。確定側の副作用は Undo 1回で戻せる。
+    // ライブラリのカードドラッグが cancel を「何も起きなかった」にしているのは、
+    // あちらが「まだ何も変えていない」＝取り消しても失うものが無いため（非対称でよい）
     wrap.onpointercancel = h("cancel", (e) => this.onPointerUp(e));
+    // M11-5: ブラウザ側で解放されたときも「掴んでいる id」の記録を合わせる（記録のみ）
+    wrap.onlostpointercapture = (e) => {
+      if (this.capturedPointerId === (e as PointerEvent).pointerId) this.capturedPointerId = null;
+    };
+    // M11-5: 診断ビルドのみ — 「pointerdown が来ないのか、来ているのに何も起きないのか」を
+    // 切り分けるため、接触していないときの出入りも記録する（通常ビルドでは登録しない）
+    if (this.inputLog) {
+      wrap.onpointerover = h("over", () => {});
+      wrap.onpointerenter = h("enter", () => {});
+      wrap.onpointerleave = h("leave", () => {});
+      wrap.ongotpointercapture = h("gotcapture", () => {});
+      wrap.onlostpointercapture = h("lostcapture", (e) => {
+        if (this.capturedPointerId === e.pointerId) this.capturedPointerId = null;
+      });
+    }
   }
 
   /** M10-21: 入力診断ログ（フラグ時のみ到達）。IPC 連打を避けるため 400ms でまとめて書く */
@@ -3853,11 +4544,57 @@ export class Editor {
     const co =
       "getCoalescedEvents" in e ? (e as unknown as { getCoalescedEvents(): unknown[] }).getCoalescedEvents().length : -1;
     this.inputLogBuf.push(
-      `[inputlog] ${name} pt=${e.pointerType} btn=${e.button} btns=${e.buttons} ` +
-        `p=${e.pressure.toFixed(2)} co=${co} tool=${this.tool} dt=${dtMs.toFixed(2)}ms`
+      // M11-5: id（ポインタごとの識別子）を追加。「ペンだけ効かない」は
+      // 「その id のキャプチャが残っている」ときに起きるため、id 無しでは切り分けられない
+      `[inputlog] ${name} pt=${e.pointerType} id=${e.pointerId} btn=${e.button} btns=${e.buttons} ` +
+        `p=${e.pressure.toFixed(2)} co=${co} ${this.stateLine()} dt=${dtMs.toFixed(2)}ms`
     );
     this.flushInputLogSoon();
   }
+
+  /** M11-5: 診断ビルド専用のアプリ内部状態スナップショット（フラグOFFでは呼ばれない） */
+  private stateLine(): string {
+    const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
+    const id = this.capturedPointerId;
+    let held = "-";
+    if (wrap && id != null) {
+      try {
+        held = wrap.hasPointerCapture(id) ? "yes" : "no";
+      } catch {
+        held = "?";
+      }
+    }
+    return (
+      `tool=${this.tool} down=${this.pointerDown ? 1 : 0} pan=${this.panState ? 1 : 0} ` +
+      `space=${this.spaceHeld ? 1 : 0} shift=${this.shiftHeld ? 1 : 0} ` +
+      `capId=${id ?? "-"} capHeld=${held} focus=${document.hasFocus() ? 1 : 0} vis=${document.visibilityState}`
+    );
+  }
+
+  /** M11-5: キー入力の診断ログ（フラグ時のみ登録される）。
+   *  **打った文字そのものは残さない**（作品の文字・レイヤー名・ファイル名が
+   *  ログに平文で残ると、作者がログを渡しにくい）。1文字のキーは伏せ字にし、
+   *  文字入力欄でのキーはそもそも記録しない。修飾キー・機能キーは診断に要るので残す */
+  private keyLogHandler = (e: KeyboardEvent) => {
+    if (this.isTextEntry(e.target)) return;
+    const printable = e.key.length === 1;
+    const mod =
+      `${e.shiftKey ? "S" : "-"}${e.ctrlKey ? "C" : "-"}${e.altKey ? "A" : "-"}${e.metaKey ? "M" : "-"}`;
+    // ショートカット判定に要るものだけ素で出す（修飾キー併用・エディタが見ている単キー）
+    const named =
+      !printable || e.ctrlKey || e.altKey || e.metaKey || e.key === " " || e.key.toLowerCase() === "h";
+    this.inputLogBuf.push(
+      `[inputlog] ${e.type} key=${named ? e.key : "*"} code=${named ? e.code : "*"} ` +
+        `repeat=${e.repeat ? 1 : 0} mod=${mod} ` +
+        this.stateLine()
+    );
+    this.flushInputLogSoon();
+  };
+  /** M11-5: ウィンドウのフォーカス出入りの診断ログ（フラグ時のみ登録される） */
+  private winLogHandler = (e: Event) => {
+    this.inputLogBuf.push(`[inputlog] win:${e.type} ${this.stateLine()}`);
+    this.flushInputLogSoon();
+  };
 
   private flushInputLogSoon() {
     if (this.inputLogTimer != null) return;
@@ -3935,6 +4672,38 @@ export class Editor {
     else wrap.style.cursor = "";
   }
 
+  /** M11-5: 掴んでいるポインタを解放する（掴んでいなければ何もしない） */
+  private releaseCapture(pointerId?: number) {
+    const id = pointerId ?? this.capturedPointerId;
+    if (id == null) return;
+    try {
+      ($("#ed-cvwrap") as HTMLElement).releasePointerCapture(id);
+    } catch {
+      /* すでに解放済み・そのポインタが存在しない場合は何もしなくてよい */
+    }
+    if (this.capturedPointerId === id) this.capturedPointerId = null;
+  }
+
+  /** M11-5: 進行中の接触を「直前の位置で離した」ことにして畳む。
+   *  pointerup が来ないまま終わった接触の後始末（フォーカス喪失・新しい接触の開始時）。
+   *  描きかけのストロークは pointerup と同じ経路で確定する（履歴が飛ばない） */
+  private endPointerSession(src: "blur" | "down" | "move" | "mount") {
+    // 診断ビルドのみ: 自己修復が走った事実を残す（何回取りこぼしたかを数えられるように）
+    if (this.inputLog && (this.pointerDown || this.capturedPointerId !== null)) {
+      this.inputLogBuf.push(`[inputlog] heal from=${src} ${this.stateLine()}`);
+      this.flushInputLogSoon();
+    }
+    const last = this.lastPointerEvent;
+    this.lastPointerEvent = null;
+    if (this.pointerDown && last) this.onPointerUp(last);
+    this.pointerDown = false;
+    if (this.panState) {
+      this.panState = null;
+      this.updatePanCursor();
+    }
+    this.releaseCapture();
+  }
+
   private onPointerDown(e: PointerEvent) {
     // M10-19: 右ボタンでは何も始めない（Windows のペン長押しは右クリック扱いになるため、
     // contextmenu 抑止とセットで「長押しで点を描いてしまう」事故を防ぐ。中ボタンは従来どおり）
@@ -3942,15 +4711,28 @@ export class Editor {
     // 「ペンで色が拾えない」の正体だった（実走ログで確定）。スポイトは何も描かないので
     // 長押し誤爆の実害が構造的に無く、右ボタンでも拾ってよい（contextmenu は抑止済み）
     if (e.button === 2 && this.tool !== "eyedrop") return;
-    if (this.playing) return;
+    // M11-9 P-2: 再生中にキャンバスへ触れたら**再生を止める**。ただし**その接触では描かない**
+    //（描きたければもう一度触れる＝作者の決定）。描かないツール（手のひら・スポイト・ズーム）でも
+    // 同じく止める。トーストは出さない。pointerDown を立てないので、この接触の move/up は
+    // 何もしないまま素通りする（M11-6 のツール切替と同じ畳み方）
+    if (this.playing) {
+      this.stopPlayback();
+      return;
+    }
+    // M11-5: 前の接触が pointerup 無しで終わっていたら、ここで畳んでから始める
+    //（フォーカスを奪われて up が届かなかった場合の自己修復。正常時は何もしない）
+    if (this.pointerDown || this.capturedPointerId !== null) this.endPointerSession("down");
     this.shiftHeld = e.shiftKey; // M10-7: pointer 側の modifier を真実として同期
+    this.lastPointerEvent = e;
     try {
       ($("#ed-cvwrap") as HTMLElement).setPointerCapture(e.pointerId);
+      this.capturedPointerId = e.pointerId;
     } catch {
       /* 合成イベント・ペン切断時などは捕捉なしで続行 */
     }
     // E-1: 手のひら / Space一時パン（変形中でも画面移動は可能）
     if (this.tool === "hand" || this.spaceHeld) {
+      if (this.spaceHeld) this.spacePanned = true; // M11-2: パンしたら単押し扱いにしない
       const stage = $("#ed-scroll"); // M3.9 H-1: スクロールは #ed-scroll（HUDは固定）
       this.panState = {
         sx: e.clientX,
@@ -4021,9 +4803,32 @@ export class Editor {
         this.shapeStart = pt;
         this.shapeLastPt = pt;
         break;
-      case "text":
-        this.placeText(pt);
+      case "text": {
+        // M11-12: 浮いている文字の上を押したらドラッグ（移動）。
+        // それ以外の場所なら、今のものを確定してから新しい文字を始める
+        const d = this.textDraft;
+        const mask = d ? this.textDraftMask() : null;
+        const org = d ? this.textDraftOrigin(d) : null;
+        if (
+          d &&
+          mask &&
+          org &&
+          pt.x >= org.x &&
+          pt.y >= org.y &&
+          pt.x < org.x + mask.w &&
+          pt.y < org.y + mask.h
+        ) {
+          this.textDrag = { ox: pt.x - d.x, oy: pt.y - d.y };
+          // 入力欄からフォーカスを外す。ここを外さないと onKeyDown が isTextEntry で
+          // 早期 return し続けるので、**矢印キーでの微調整が一生できない**
+          //（入力欄にフォーカスがある間はカーソル移動が優先＝REQ の要求。
+          //   打ち直したくなったら入力欄をクリックすれば戻れる）
+          (document.querySelector("#ed-textinput") as HTMLTextAreaElement | null)?.blur();
+          break;
+        }
+        void this.beginTextDraft(pt);
         break;
+      }
       case "eyedrop": {
         this.pickColor(pt);
         // M10-21b: pick 後の同一接触では何も起きないようにする。pickColor → setTool で
@@ -4031,17 +4836,21 @@ export class Editor {
         // 「拾った色のストローク」を描いてしまう（実走ログ 1012–1015 行の実害）。
         // pointerDown を下ろしてキャプチャも解放し、この接触の move/up を素通しにする
         this.pointerDown = false;
-        try {
-          ($("#ed-cvwrap") as HTMLElement).releasePointerCapture(e.pointerId);
-        } catch {
-          /* 捕捉していない合成イベント等は無視 */
-        }
+        this.lastPointerEvent = null;
+        this.releaseCapture(e.pointerId); // M11-5: 解放は1箇所に集約（掴んだ id も忘れる）
         return;
+      }
+      case "move": {
+        // M11-8 P-2: 選択範囲があれば「範囲の中の絵だけ」、無ければレイヤー（フォルダなら中身全部）
+        if (this.selMask) this.beginSelectionMove(pt);
+        else this.beginLayerMove(pt);
+        break;
       }
       case "select": {
         if (this.selMask && this.selMask[pt.y * W + pt.x]) {
-          // 選択内ドラッグ → 移動
-          this.beginSelectionMove(pt);
+          // M11-8 P-1: 範囲内のドラッグは**枠だけ**が動く（絵は動かない）。
+          // 絵を動かすのは移動ツール（上の case "move"）
+          this.beginSelMaskMove(pt);
         } else if (this.selectKind === "auto") {
           // M10-19: ✨自動 — クリックで即マスク生成（既存選択は置き換え）。
           // 生成した selMask の下流（点線・移動・コピー・削除・変形）は既存のまま
@@ -4109,7 +4918,24 @@ export class Editor {
   }
 
   private onPointerMove(e: PointerEvent) {
+    // M11-6: 掴んでいるポインタ以外の移動は無視する（ペンで描いている最中に
+    // 手のひらが触れて線が飛ぶのを防ぐ）。**down 側には入れない** —
+    // 取りこぼしたキャプチャを次の pointerdown で畳んで直すのが M11-5 の復帰経路で、
+    // そのとき届く down は別 id になり得るため、弾くと直した症状が戻る。
+    // ※ この判定は下の「buttons===0 で畳む」自己修復より**前**にある。つまり
+    //   取りこぼしからの復帰は「同じポインタの移動 / 次の pointerdown / blur」で起こり、
+    //   **別のポインタを動かすだけでは起こらない**。ここを緩めると、描いている最中に
+    //   別のポインタがホバーしただけでストロークが終わってしまうため、この順序を選んでいる
+    if (this.capturedPointerId !== null && e.pointerId !== this.capturedPointerId) return;
     this.shiftHeld = e.shiftKey; // M10-7: pointer 側の modifier を真実として同期
+    // M11-5: 「押している最中」のはずなのに、どのボタンも押されていないイベントが来たら、
+    // pointerup を取りこぼしている（ペンが浮いて戻ってきた等）。直前の位置で畳んで解放する。
+    // これが無いと、かざしただけで線が引かれ、キャプチャも掴まれたままになる
+    if (this.pointerDown && e.buttons === 0) {
+      this.endPointerSession("move");
+      return;
+    }
+    if (this.pointerDown) this.lastPointerEvent = e; // M11-5: 途切れたときの終端に使う
     // E-1: パン中はスクロールのみ（描画しない・ズーム非依存の画面座標）
     if (this.panState) {
       const stage = $("#ed-scroll"); // M3.9 H-1
@@ -4165,9 +4991,22 @@ export class Editor {
           this.previewShape(this.shapeStart, this.shapeEnd(pt));
           break;
         }
+        case "text": {
+          // M11-12: 浮動テキストのドラッグ（1ドット単位・パラメータの x/y を動かすだけ）
+          if (!this.textDrag || !this.textDraft) break;
+          this.textDraft.x = pt.x - this.textDrag.ox;
+          this.textDraft.y = pt.y - this.textDrag.oy;
+          this.redrawOverlay();
+          break;
+        }
+        case "move": {
+          if (this.dragMode === "selmove") this.updateSelectionMove(pt);
+          else if (this.dragMode === "layermove") this.updateLayerMove(pt);
+          break;
+        }
         case "select": {
-          if (this.dragMode === "selmove") {
-            this.updateSelectionMove(pt);
+          if (this.dragMode === "selmask") {
+            this.updateSelMaskMove(pt); // M11-8 P-1: 枠だけ動かす
           } else if (this.selectKind === "rect" && this.shapeStart) {
             this.previewSelectRect(this.shapeStart, pt);
           } else if (this.selectKind === "lasso" && this.lassoPts.length) {
@@ -4510,6 +5349,13 @@ export class Editor {
   }
 
   private onPointerUp(e: PointerEvent) {
+    // M11-6: 掴んでいるポインタ以外の up では、描きかけのストロークを切らない
+    //（2本目の指を離しただけでペンの線が終わってしまうのを防ぐ）
+    if (this.capturedPointerId !== null && e.pointerId !== this.capturedPointerId) return;
+    // M11-5: 掴んだままにしない（pointerup/pointercancel の暗黙解放に頼らず必ず解放する）。
+    // pointerDown が立っていなくても解放だけは通す
+    this.lastPointerEvent = null;
+    this.releaseCapture(e.pointerId);
     if (!this.pointerDown) return;
     // M10-7: 確定時の拘束は**離した瞬間の** Shift 状態で決める（pointerup にも modifier がある）。
     // pointercancel は shiftKey を持つが意味が薄いので、いずれにせよ直前の move と一致する
@@ -4543,6 +5389,12 @@ export class Editor {
         this.lastPt = null;
         this.smoothPt = null;
         this.paintFilmThumb(this.frameIndex);
+        break;
+      }
+      case "text": {
+        // M11-12: 掴んでいた文字を離すだけ（確定ではない。履歴も積まない）。
+        // **フォーカスは入力欄へ戻さない** — 戻すと矢印キーでの1ドット調整ができなくなる
+        this.textDrag = null;
         break;
       }
       case "warp": {
@@ -4636,9 +5488,14 @@ export class Editor {
         this.paintFilmThumb(this.frameIndex);
         break;
       }
+      case "move": {
+        if (this.dragMode === "selmove") this.commitSelectionMove();
+        else if (this.dragMode === "layermove") this.commitLayerMove();
+        break;
+      }
       case "select": {
-        if (this.dragMode === "selmove") {
-          this.commitSelectionMove();
+        if (this.dragMode === "selmask") {
+          this.commitSelMaskMove(); // M11-8 P-1
         } else if (this.selectKind === "rect" && this.shapeStart) {
           // M10-22: 選択の作成・置換を履歴へ（before=直前のマスク・null許容）
           const selBefore = this.selMask ? this.selMask.slice() : null;
@@ -4768,6 +5625,206 @@ export class Editor {
   // ---------------- 選択の移動/コピー ----------------
 
   private selMoveBefore: IndexBuf | null = null;
+
+  // ---------------- M11-8 P-1: 選択範囲（枠）だけの移動 ----------------
+  // 選択範囲ツールで範囲内をドラッグしても**絵は動かさない**。動くのは点線の枠だけ。
+  // 枠は画面外へ出てよい（`base` + dx/dy を保持し、見えている分だけを selMask に materialize
+  // するので、外へ出して戻せば形が復活する）。完全に外へ出たまま離したら解除する。
+  private selMaskDrag: {
+    start: { x: number; y: number };
+    /** 掴んだ時点のマスク（これを平行移動して毎回作り直す） */
+    base: Uint8Array;
+    /** 履歴用の before */
+    before: Uint8Array;
+    dx: number;
+    dy: number;
+  } | null = null;
+
+  private beginSelMaskMove(pt: { x: number; y: number }) {
+    if (!this.selMask) return;
+    this.selMaskDrag = {
+      start: pt,
+      base: this.selMask.slice(),
+      before: this.selMask.slice(),
+      dx: 0,
+      dy: 0,
+    };
+    this.dragMode = "selmask";
+    this.refreshSelectionLauncher(); // ドラッグ中は隠す（離したら再表示）
+  }
+
+  /** base を (dx, dy) だけ平行移動したマスクを作る（画面外は落ちる＝表示用） */
+  private shiftedMask(base: Uint8Array, dx: number, dy: number): Uint8Array {
+    const m = new Uint8Array(PIXELS);
+    for (let y = 0; y < H; y++) {
+      const ny = y + dy;
+      if (ny < 0 || ny >= H) continue;
+      for (let x = 0; x < W; x++) {
+        if (!base[y * W + x]) continue;
+        const nx = x + dx;
+        if (nx < 0 || nx >= W) continue;
+        m[ny * W + nx] = 1;
+      }
+    }
+    return m;
+  }
+
+  private updateSelMaskMove(pt: { x: number; y: number }) {
+    const d = this.selMaskDrag;
+    if (!d) return;
+    d.dx = pt.x - d.start.x;
+    d.dy = pt.y - d.start.y;
+    this.selMask = this.shiftedMask(d.base, d.dx, d.dy);
+    this.redrawOverlay();
+  }
+
+  /** M11-8: ドラッグ中の Escape ＝この移動だけ取り消す（掴んだ時点の枠へ戻す・履歴は積まない） */
+  private cancelSelMaskMove() {
+    const d = this.selMaskDrag;
+    if (!d) return;
+    this.selMaskDrag = null;
+    this.dragMode = "";
+    this.selMask = d.before;
+    this.redrawOverlay();
+  }
+
+  private commitSelMaskMove() {
+    const d = this.selMaskDrag;
+    this.selMaskDrag = null;
+    this.dragMode = "";
+    if (!d) return;
+    const moved = this.shiftedMask(d.base, d.dx, d.dy);
+    const empty = !moved.some((v) => v !== 0);
+    if (empty) {
+      // 完全に画面外へ出た＝解除（REQ E）
+      this.selMask = null;
+      this.pushSelectionHistory("選択解除", d.before, null);
+    } else if (d.dx !== 0 || d.dy !== 0) {
+      this.selMask = moved;
+      this.pushSelectionHistory("選択範囲の移動", d.before, moved.slice());
+    } else {
+      this.selMask = moved; // 動いていない＝履歴に積まない
+    }
+    this.redrawOverlay();
+  }
+
+  // ---------------- M11-8 P-2: レイヤー移動（絵そのものを動かす） ----------------
+  // 選択範囲が無いとき: 選択中のレイヤー1枚（フォルダ選択中はその中の全レイヤー）。
+  // 選択範囲があるとき: 既存の beginSelectionMove（extractFloat）へ委譲＝範囲内の絵だけ動く。
+  // はみ出しは**掴んだ時点のスナップショットから毎回描き直す**ので、外へ出して戻せば復活し、
+  // 離した時点（＝確定）で外に出ている分だけが落ちる。Undo は before スナップショットへ戻す。
+  private layerDrag: {
+    start: { x: number; y: number };
+    ids: string[];
+    before: Record<string, IndexBuf>;
+    /** 掴んだ時点のコマ。ドラッグ中に表示コマが変わっても**掴んだコマだけ**を書き換える */
+    frameIdx: number;
+    dx: number;
+    dy: number;
+  } | null = null;
+
+  /** いま動かす対象のレイヤー id（フォルダ選択中はフォルダ内の全レイヤー） */
+  private moveTargetLayerIds(): string[] {
+    if (this.selectedFolderId) {
+      const ids = this.folderLayerIndices(this.selectedFolderId)
+        .map((i: number) => this.project.layerDefs[i]?.id)
+        .filter((v): v is string => !!v);
+      if (ids.length > 0) return ids;
+    }
+    return this.activeLayerId ? [this.activeLayerId] : [];
+  }
+
+  private beginLayerMove(pt: { x: number; y: number }) {
+    const f = this.project.frames[this.frameIndex];
+    if (!f) return;
+    const ids = this.moveTargetLayerIds().filter((id) => !!f.layers[id]);
+    if (ids.length === 0) {
+      this.cb.toast("動かせるレイヤーがありません");
+      return;
+    }
+    const before: Record<string, IndexBuf> = {};
+    for (const id of ids) before[id] = copyIndexBuf(f.layers[id]);
+    this.layerDrag = { start: pt, ids, before, frameIdx: this.frameIndex, dx: 0, dy: 0 };
+    this.dragMode = "layermove";
+    this.refreshSelectionLauncher(); // ドラッグ中は隠す（離したら再表示）
+  }
+
+  /** before スナップショットを (dx, dy) だけずらして書き直す（画面外は落ちる＝確定時の切り捨て） */
+  private applyLayerMove(dx: number, dy: number) {
+    const d = this.layerDrag;
+    // 掴んだコマを覚えておく（ドラッグ中に ←→ や再生でコマが変わっても、
+    // 別のコマの絵を「前のコマのスナップショット」で塗り潰さない）
+    const f = d ? this.project.frames[d.frameIdx] : null;
+    if (!d || !f) return;
+    for (const id of d.ids) {
+      const dst = f.layers[id];
+      const src = d.before[id];
+      if (!dst || !src) continue;
+      dst.fill(0);
+      for (let y = 0; y < H; y++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= H) continue;
+        for (let x = 0; x < W; x++) {
+          const v = src[y * W + x];
+          if (!v) continue;
+          const nx = x + dx;
+          if (nx < 0 || nx >= W) continue;
+          dst[ny * W + nx] = v;
+        }
+      }
+    }
+  }
+
+  private updateLayerMove(pt: { x: number; y: number }) {
+    const d = this.layerDrag;
+    if (!d) return;
+    d.dx = pt.x - d.start.x;
+    d.dy = pt.y - d.start.y;
+    this.applyLayerMove(d.dx, d.dy);
+    this.renderCanvas();
+  }
+
+  /** M11-8: ドラッグ中の Escape ＝この移動だけ取り消す（掴んだ時点の絵へ戻す・履歴は積まない） */
+  private cancelLayerMove() {
+    const d = this.layerDrag;
+    if (!d) return;
+    this.applyLayerMove(0, 0);
+    this.layerDrag = null;
+    this.dragMode = "";
+    this.renderCanvas();
+    this.paintFilmThumb(d.frameIdx);
+    this.refreshSelectionLauncher();
+  }
+
+  private commitLayerMove() {
+    const d = this.layerDrag;
+    this.layerDrag = null;
+    this.dragMode = "";
+    if (!d) return;
+    const frameIdx = d.frameIdx;
+    const f = this.project.frames[frameIdx];
+    if (!f) return;
+    if (d.dx === 0 && d.dy === 0) return; // 動いていない＝履歴に積まない
+    const after: Record<string, IndexBuf> = {};
+    for (const id of d.ids) if (f.layers[id]) after[id] = copyIndexBuf(f.layers[id]);
+    this.history.push(
+      multiBufferChangeEntry(
+        "レイヤーの移動",
+        (id) => this.project.frames[frameIdx]?.layers[id] ?? null,
+        d.before,
+        after,
+        () => {
+          this.renderCanvas();
+          this.redrawOverlay();
+          this.paintFilmThumb(frameIdx);
+        }
+      )
+    );
+    this.dirty = true;
+    this.renderCanvas();
+    this.paintFilmThumb(frameIdx);
+    this.refreshSelectionLauncher();
+  }
 
   private beginSelectionMove(pt: { x: number; y: number }) {
     const buf = this.activeBuffer();
@@ -4954,20 +6011,318 @@ export class Editor {
     this.cb.toast("配置しました — ドラッグで移動・Enterで確定・Escで取消");
   }
 
+  /** 選択範囲の中を消す。**選択は維持する**（M11-9 P-3）。
+   *  Delete / Backspace・側パネルの「削除」・ランチャーの「消去」の3つの入口が
+   *  同じ結果になるよう、実体はこの1つだけにしてある。
+   *  M10-22 では「画素の削除とマスク解除を1エントリに束ねる」形だったが、
+   *  解除しなくなったので履歴には**画素の変化だけ**を積む */
   private deleteSelection() {
     const buf = this.activeBuffer();
     if (!buf || !this.selMask) return;
+    // M11-9: 選択を維持するようになったので、**消すものが無ければ何もしない**。
+    // これが無いと Delete のキーリピートで空の履歴が積み上がり、64件の上限を押し出して
+    // 本物の履歴（＝消す前の絵）が戻せなくなる（「消す」の changed 判定と同じ作法）
+    let hit = false;
+    for (let i = 0; i < PIXELS; i++) {
+      if (this.selMask[i] && buf[i]) {
+        hit = true;
+        break;
+      }
+    }
+    if (!hit) return;
     const before = copyIndexBuf(buf);
     R.deleteMasked(buf, this.selMask);
-    // M10-22: 画素の削除とマスク解除を1エントリに束ねる（Ctrl+Z 1回で両方戻る）
-    this.pushBufferHistory("選択削除", buf, before, {
-      before: this.selMask.slice(),
-      after: null,
-    });
-    this.selMask = null;
+    this.pushBufferHistory("選択部分を消去", buf, before);
     this.renderCanvas();
     this.redrawOverlay();
     this.paintFilmThumb(this.frameIndex);
+  }
+
+  // ---------------- M11-8 P-3: 選択範囲ランチャー ----------------
+  // 選択範囲の下に浮かぶバー。#ed-cvwrap は表示回転/反転の CSS transform を持つので、
+  // その**外側**の #ed-stage に置く（変形モードラベルと同じ作法）。
+
+  /** ボタンの定義。M11-9 P-5 で並び順とアイコンを確定:
+   *  「範囲をいじる」3つ ｜ 「絵をどうにかする」4つ ｜ 解除（末尾＝誤爆しにくい位置）。
+   *  sep:true の直前に細い区切り線を1本入れる */
+  private static readonly SEL_OPS: { op: string; icon: string; title: string; sep?: boolean }[] = [
+    { op: "invert", icon: "⬛⬜", title: "選択範囲を反転" },
+    { op: "expand", icon: "⊕", title: "選択範囲を拡張（1ドット）" },
+    { op: "contract", icon: "⊖", title: "選択範囲を縮小（1ドット）" },
+    { op: "erase", icon: "🧽", title: "選択部分を消去", sep: true },
+    { op: "cut-layer", icon: "✂", title: "切り取って新規レイヤー" },
+    { op: "copy-layer", icon: "⧉", title: "コピーして新規レイヤー" },
+    { op: "transform", icon: "⤢", title: "変形モードを起動" },
+    { op: "deselect", icon: "✕", title: "選択を解除 (Esc)", sep: true },
+  ];
+
+  private launcherEl: HTMLElement | null = null;
+  /** 外接矩形のキャッシュ（マスクの実体が変わったときだけ再計算＝毎回の全画素走査を避ける） */
+  private selBBoxCache: {
+    mask: Uint8Array;
+    box: { x: number; y: number; w: number; h: number } | null;
+  } | null = null;
+
+  private selBBox(): { x: number; y: number; w: number; h: number } | null {
+    if (!this.selMask) return null;
+    if (this.selBBoxCache && this.selBBoxCache.mask === this.selMask) return this.selBBoxCache.box;
+    const box = R.maskBBox(this.selMask);
+    this.selBBoxCache = { mask: this.selMask, box };
+    return box;
+  }
+
+  /** ドット座標 → クライアント座標（clientToPixel の逆写像。ドットの中心を返す） */
+  private pixelToClient(x: number, y: number): { x: number; y: number } {
+    const rect = ($("#ed-canvas") as unknown as HTMLCanvasElement).getBoundingClientRect();
+    let u = (x + 0.5) / W;
+    let v = (y + 0.5) / H;
+    if (this.viewFlipH) u = 1 - u;
+    let nx: number, ny: number;
+    switch (this.viewRot) {
+      case 90:
+        nx = 1 - v;
+        ny = u;
+        break;
+      case 180:
+        nx = 1 - u;
+        ny = 1 - v;
+        break;
+      case 270:
+        nx = v;
+        ny = 1 - u;
+        break;
+      default:
+        nx = u;
+        ny = v;
+    }
+    return { x: rect.left + nx * rect.width, y: rect.top + ny * rect.height };
+  }
+
+  private buildSelectionLauncher(): HTMLElement {
+    const el = document.createElement("div");
+    el.id = "ed-sel-launcher";
+    el.className = "sel-launcher";
+    for (const o of Editor.SEL_OPS) {
+      if (o.sep) {
+        const hr = document.createElement("span");
+        hr.className = "sep";
+        el.appendChild(hr);
+      }
+      const b = document.createElement("button");
+      b.type = "button";
+      b.dataset.op = o.op;
+      b.textContent = o.icon;
+      b.title = o.title;
+      b.setAttribute("aria-label", o.title);
+      el.appendChild(b);
+    }
+    // ランチャーの上でキャンバスの描画が始まらないようにする（クリックを抜けさせない）。
+    // キャンバスと同じ pointer 方式なので、ペンでもマウスでも同じように反応する
+    el.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+    });
+    el.addEventListener("click", (e) => {
+      const t = (e.target as HTMLElement | null)?.closest("button") as HTMLElement | null;
+      if (!t || !t.dataset.op) return;
+      e.stopPropagation();
+      this.selOp(t.dataset.op);
+    });
+    return el;
+  }
+
+  /** 表示/非表示と位置の更新。selMask が変わる経路（redrawOverlay）と
+   *  表示が変わる経路（applyZoom・ステージのスクロール）から呼ぶ */
+  private refreshSelectionLauncher() {
+    if (!this.mounted) {
+      this.hideSelectionLauncher();
+      return;
+    }
+    const show =
+      !!this.selMask &&
+      !this.xformActive &&
+      !this.cornerActive &&
+      !this.playing &&
+      !this.selMaskDrag &&
+      !this.layerDrag &&
+      !this.floatBuf;
+    const box = show ? this.selBBox() : null;
+    const stage = document.querySelector("#ed-stage") as HTMLElement | null;
+    if (!show || !box || !stage) {
+      this.hideSelectionLauncher();
+      return;
+    }
+    let el = this.launcherEl;
+    if (!el || !el.isConnected) {
+      el = this.buildSelectionLauncher();
+      stage.appendChild(el);
+      this.launcherEl = el;
+    }
+    // 外接矩形の4隅を写像して画面上の AABB を出す（回転/反転に追従）
+    const cs = [
+      this.pixelToClient(box.x, box.y),
+      this.pixelToClient(box.x + box.w - 1, box.y),
+      this.pixelToClient(box.x, box.y + box.h - 1),
+      this.pixelToClient(box.x + box.w - 1, box.y + box.h - 1),
+    ];
+    const left = Math.min(...cs.map((c) => c.x));
+    const right = Math.max(...cs.map((c) => c.x));
+    const top = Math.min(...cs.map((c) => c.y));
+    const bottom = Math.max(...cs.map((c) => c.y));
+    const sr = stage.getBoundingClientRect();
+    const w = el.offsetWidth || 240;
+    const h = el.offsetHeight || 32;
+    const GAP = 10;
+    let cx = (left + right) / 2 - w / 2;
+    let cy = bottom + GAP;
+    // 下に入りきらないときは上へ。上にも入らなければ下端に寄せる
+    if (cy + h > sr.bottom - 4) {
+      const above = top - GAP - h;
+      cy = above >= sr.top + 4 ? above : sr.bottom - 4 - h;
+    }
+    // 左右は表示領域の内側へ寄せる
+    cx = Math.min(Math.max(cx, sr.left + 4), Math.max(sr.left + 4, sr.right - 4 - w));
+    el.style.left = `${cx - sr.left + stage.scrollLeft}px`;
+    el.style.top = `${cy - sr.top + stage.scrollTop}px`;
+  }
+
+  private hideSelectionLauncher() {
+    this.launcherEl?.remove();
+    this.launcherEl = null;
+  }
+
+  /** ランチャーの8操作。すべて1操作＝履歴1エントリ */
+  private selOp(op: string) {
+    if (!this.selMask) return;
+    if (this.xformGuard()) return;
+    switch (op) {
+      case "deselect": {
+        const before = this.selMask.slice();
+        this.selMask = null;
+        this.pushSelectionHistory("選択解除", before, null);
+        this.dirty = true;
+        this.redrawOverlay();
+        break;
+      }
+      case "invert":
+        this.replaceSelection("選択範囲の反転", R.invertMask(this.selMask));
+        break;
+      case "expand":
+        this.replaceSelection("選択範囲の拡張", R.expandMask(this.selMask));
+        break;
+      case "contract":
+        this.replaceSelection("選択範囲の縮小", R.contractMask(this.selMask));
+        break;
+      case "erase":
+        this.deleteSelection(); // M11-9 P-3: Delete キーと同じ実体（選択は維持）
+        break;
+      case "cut-layer":
+        this.selectionToNewLayer(true);
+        break;
+      case "copy-layer":
+        this.selectionToNewLayer(false);
+        break;
+      case "transform":
+        this.setTool("transform");
+        break;
+    }
+    this.refreshSelectionLauncher();
+  }
+
+  /** 反転/拡張/縮小の共通処理。空になったら解除する（REQ 表E） */
+  private replaceSelection(label: string, next: Uint8Array) {
+    if (!this.selMask) return;
+    const before = this.selMask.slice();
+    const empty = !next.some((v) => v !== 0);
+    this.selMask = empty ? null : next;
+    this.pushSelectionHistory(label, before, empty ? null : next.slice());
+    this.dirty = true;
+    if (empty) this.cb.toast("選択範囲が無くなりました");
+    this.redrawOverlay();
+  }
+
+
+  /** ランチャー #6/#7。新規レイヤーは**全コマ**に作られ（レイヤーは作品全体の構造）、
+   *  絵が入るのは今のコマだけ。構造の変更と画素の移動を**1エントリ**に束ねるので
+   *  Undo 1回でレイヤーごと元に戻る */
+  private selectionToNewLayer(cut: boolean) {
+    const mask = this.selMask;
+    const src = this.activeBuffer();
+    const frame = this.project.frames[this.frameIndex];
+    if (!mask || !src || !frame) return;
+    const srcLayerId = this.activeLayerId;
+    const idx = this.project.layerDefs.findIndex((l) => l.id === srcLayerId);
+    if (idx < 0) return;
+    // 何も入らないなら作らない（空レイヤーが増えるだけ）
+    let any = false;
+    for (let i = 0; i < PIXELS; i++)
+      if (mask[i] && src[i]) {
+        any = true;
+        break;
+      }
+    if (!any) {
+      this.cb.toast("選択範囲に絵がありません");
+      return;
+    }
+    const id = newLayerId(this.project);
+    // 「1つ上」＝ソースレイヤーの直上。親は**ソースと同じフォルダ**（REQ）
+    const parent = this.project.layerDefs[idx].parent;
+    const def: LayerDef = {
+      id,
+      name: `レイヤー${this.project.layerDefs.length + 1}`, // addLayer と同じ規則
+      visible: true,
+      opacity: 1,
+      parent,
+    };
+    const insertAt = idx + 1;
+    const frameIdx = this.frameIndex;
+    const prevActive = srcLayerId;
+    const beforeSrc = copyIndexBuf(src);
+    const self = this;
+    const apply = () => {
+      self.project.layerDefs.splice(insertAt, 0, def);
+      for (const f of self.project.frames) {
+        f.layers[id] = allocIndexBuf(self.project);
+        if (f.order) f.order.push(id); // コマ固有描画順があれば最上位に追加（addLayer と同じ）
+      }
+      const fr = self.project.frames[frameIdx];
+      const s = fr?.layers[srcLayerId];
+      const d = fr?.layers[id];
+      if (s && d) {
+        for (let i = 0; i < PIXELS; i++) {
+          if (!mask[i] || !s[i]) continue;
+          d[i] = s[i];
+          if (cut) s[i] = 0;
+        }
+      }
+      self.activeLayerId = id;
+      self.afterLayerChange();
+      self.paintFilmThumb(frameIdx);
+      self.redrawOverlay();
+    };
+    const revert = () => {
+      const i = self.project.layerDefs.findIndex((l) => l.id === id);
+      if (i >= 0) self.project.layerDefs.splice(i, 1);
+      for (const f of self.project.frames) {
+        delete f.layers[id];
+        if (f.order) f.order = f.order.filter((x) => x !== id);
+      }
+      const s = self.project.frames[frameIdx]?.layers[srcLayerId];
+      if (s) s.set(beforeSrc as unknown as ArrayLike<number>);
+      self.activeLayerId = self.project.layerDefs.some((l) => l.id === prevActive)
+        ? prevActive
+        : (self.project.layerDefs[self.project.layerDefs.length - 1]?.id ?? "");
+      self.afterLayerChange();
+      self.paintFilmThumb(frameIdx);
+      self.redrawOverlay();
+    };
+    this.history.push({
+      label: cut ? "切り取って新規レイヤー" : "コピーして新規レイヤー",
+      undo: revert,
+      redo: apply,
+    });
+    apply();
+    this.cb.toast(cut ? "切り取って新規レイヤーへ移しました" : "新規レイヤーへコピーしました");
   }
 
   // ---------------- 変形 ----------------
@@ -5031,7 +6386,7 @@ export class Editor {
       this.cancelSelectionMove();
       return;
     }
-    this.history.undo();
+    this.applyHistory(() => this.history.undo());
   }
 
   /** M3.8 L-B: Ctrl+Y / ↷。変形・浮動中は無効 */
@@ -5040,7 +6395,20 @@ export class Editor {
       this.cb.toast("変形中はやり直しできません");
       return;
     }
-    this.history.redo();
+    this.applyHistory(() => this.history.redo());
+  }
+
+  /** M11-8: 履歴の適用中は「コマ構造の変更＝選択解除」を働かせない
+   *（undo/redo が復元したマスクを afterFrameStructureChange が消してしまわないように） */
+  private applyingHistory = false;
+  private applyHistory(run: () => void) {
+    this.applyingHistory = true;
+    try {
+      run();
+    } finally {
+      this.applyingHistory = false;
+    }
+    this.refreshSelectionLauncher();
   }
 
   /** M3.8 L-B: 選択移動の浮動をキャンセルして元位置に戻す（履歴には触れない） */
@@ -5055,8 +6423,14 @@ export class Editor {
     this.redrawOverlay();
   }
 
-  /** E-4: 変形/浮動中は他操作をロック（true=ブロックした） */
+  /** E-4: 変形/浮動中は他操作をロック（true=ブロックした）。
+   *
+   *  M11-12: 「別のことを始める」入口はほぼすべてここを通っている（コマ移動・レイヤー切替・
+   *  保存・書き出し・画像で保存・エディタを離れる・クリップボード・消す…）。浮動テキストは
+   *  **ブロックではなく確定**なので、判定の前にここで焼き切る。確定後は textDraft が
+   *  null になるので、以降の判定は従来どおり。**確定経路を1箇所に集約する**ための配置 */
   private xformGuard(): boolean {
+    if (this.textDraft) this.commitTextDraft();
     if (this.xformActive || this.floatBuf || this.cornerActive) {
       this.cb.toast("変形を確定（Enter）またはキャンセル（Esc）してください");
       return true;
@@ -5158,6 +6532,28 @@ export class Editor {
     }
     if (Math.hypot(lx, ly - (-hh - 12)) <= HIT)
       return { mode: "rotate", cursor: ROTATE_CURSOR }; // 上辺中央の棒付き□
+    // M11-11: キャンバスの外へ出たハンドルは内側へ寄せて**描いてある**ので、その位置でも掴める。
+    // 画面内にあるハンドルは上の判定で済んでいるので、ここは寄せたものだけを見る
+    // （回転ゾーンのリングより先に見る＝寄せたハンドルがリングに飲まれないように）
+    {
+      const hs = this.xformHandleWorld();
+      const locals: readonly (readonly [number, number])[] = [
+        [-hw, -hh],
+        [hw, -hh],
+        [hw, hh],
+        [-hw, hh],
+      ];
+      for (let i = 0; i < 5; i++) {
+        const cl = this.clampedHandle(hs[i].x, hs[i].y);
+        if (!cl) continue;
+        if (Math.hypot(pt.x - cl.x, pt.y - cl.y) > HIT) continue;
+        if (i === 4) return { mode: "rotate", cursor: ROTATE_CURSOR };
+        const c = locals[i];
+        const ga = Math.atan2(c[1], c[0]) + t.angle;
+        const deg = ((((ga * 180) / Math.PI) % 180) + 180) % 180;
+        return { mode: "scale", cursor: deg < 90 ? "nwse-resize" : "nesw-resize" };
+      }
+    }
     if (best <= HIT + RING) return { mode: "rotate", cursor: ROTATE_CURSOR };
     if (Math.abs(lx) <= hw && Math.abs(ly) <= hh)
       return { mode: "move", cursor: "move" };
@@ -5307,27 +6703,188 @@ export class Editor {
     this.textVertical = s.vertical;
   }
 
-  private async placeText(pt: { x: number; y: number }) {
-    // M10-1c: @font-face は遅延ロードなので、measureText より前に**明示的に**ロードを待つ。
-    // これが無いと起動直後の1回目だけ幅がずれる（document.fonts.ready だけでは待たない）。
+  // ---------------- M11-12: 浮動テキスト（確定するまで直せる文字） ----------------
+  //
+  // 確定は **commitTextDraft() 1つ**に集約し、あらゆる離脱経路から必ず呼ぶ
+  //（M11-5 の endPointerSession・M11-10 の endArrowSession と同じ作法）。
+  // 呼び出し元: 確定ボタン / Ctrl+Enter / 別ツールへの切替（setTool）/ キャンバスの別の場所を
+  // クリック / xformGuard()（＝コマ移動・レイヤー切替・保存・書き出し・エディタを離れる等、
+  // 「別のことを始める」入口すべてが既に通っている関門）/ unmount()。
+
+  /** 文字ツールでキャンバスを押した位置に浮動テキストを始める（既にあれば確定してから）。
+   *  @font-face は遅延ロードなので、measure より前に**明示的に**ロードを待つ
+   *  （これが無いと起動直後の1回目だけ幅がずれる。document.fonts.ready だけでは待たない） */
+  private async beginTextDraft(pt: { x: number; y: number }) {
     await ensureFontsLoaded();
-    const text = await this.cb.prompt("入力する文字", "");
-    if (!text) return;
-    const mask = R.textToMask(text, this.textSize, {
+    this.commitTextDraft();
+    this.textDraft = {
+      text: "",
+      x: pt.x,
+      y: pt.y,
       family: this.textFamily,
+      size: this.textSize,
       bold: this.textBold,
-      vertical: this.textVertical, // M10-11
-    });
-    if (!mask) return;
-    // 色解決（昇格でバッファ差し替えあり）→ バッファ取得の順を守る
-    const color = this.currentColorIndex();
-    const buf = this.activeBuffer();
-    if (!buf) return;
-    const before = copyIndexBuf(buf);
-    R.stampMask(buf, mask, pt.x, pt.y, color, this.selMask ?? undefined);
-    this.pushBufferHistory("文字", buf, before);
+      vertical: this.textVertical,
+    };
+    this.textDraftCache = null;
+    this.textDrag = null;
+    this.buildToolOptions(); // 入力欄を使える状態にして
+    this.focusTextInput(); //   そこへフォーカスを移す
+    this.redrawOverlay();
+  }
+
+  /** 浮動テキストのマスク（キャッシュつき）。位置だけ動かしたときは作り直さない */
+  private textDraftMask(): { w: number; h: number; data: Uint8Array } | null {
+    const d = this.textDraft;
+    if (!d) return null;
+    // 区切りは本文に現れない NUL（本文に空白や改行が入っても取り違えない）
+    const key = [d.text, d.family, d.size, d.bold, d.vertical].join("\u0000");
+    if (this.textDraftCache?.key === key) return this.textDraftCache.mask;
+    const mask = d.text
+      ? R.textToMask(d.text, d.size, { family: d.family, bold: d.bold, vertical: d.vertical })
+      : null;
+    this.textDraftCache = { key, mask, cv: null, cvColor: "" };
+    return mask;
+  }
+
+  /** マスクの左上を置く位置。
+   *
+   *  横書きは押した位置がそのまま左上。**縦書きは1列目（＝一番右の列）を押した位置に合わせる**ので、
+   *  列が増えたぶんだけ左へずらす。これが無いと、改行するたびに1列目が右へ飛び出してしまう
+   *  （「列が左へ進む」＝すでに書いた列はその場に留まり、新しい列が左に生える、が正しい見え方）。 */
+  private textDraftOrigin(d: NonNullable<Editor["textDraft"]>): { x: number; y: number } {
+    if (!d.vertical) return { x: d.x, y: d.y };
+    const cols = d.text.split("\n").length;
+    return { x: d.x - d.size * (cols - 1), y: d.y };
+  }
+
+  /** 浮動テキストを焼き込んで終わる。**すべての離脱経路はここを通す**。
+   *
+   *  - 入力欄が空 / 完全に画面外 / 選択範囲で全部そぎ落とされた → **何も焼かず履歴にも積まない**
+   *  - 一部だけはみ出している → 画面内の分だけ焼く（切り出しは `stampMask` の責務）
+   *  - 焼くときは履歴1エントリだけ（Undo 1回で完全に元へ戻る）
+   *  @param silent DOM を触らない（unmount 中など） */
+  commitTextDraft(silent = false) {
+    const d = this.textDraft;
+    if (!d) return;
+    const mask = this.textDraftMask();
+    this.textDraft = null;
+    this.textDrag = null;
+    this.textDraftCache = null;
+    // 画面と1画素も重ならないなら、色解決（＝16bit昇格し得る）にも触れずに終わる
+    const org = this.textDraftOrigin(d);
+    const overlaps =
+      !!mask && org.x < W && org.y < H && org.x + mask.w > 0 && org.y + mask.h > 0;
+    if (overlaps && mask) {
+      // 色解決（昇格でバッファ差し替えあり）→ バッファ取得の順を守る
+      const color = this.currentColorIndex();
+      const buf = this.activeBuffer();
+      if (buf) {
+        const before = copyIndexBuf(buf);
+        R.stampMask(buf, mask, org.x, org.y, color, this.selMask ?? undefined);
+        // 1画素も変わらなかったら履歴に積まない（選択範囲で全部そぎ落とされた場合など）。
+        // 空エントリで履歴（上限64）を押し流さないため — M11-9 の Delete 連打と同じ理由
+        let changed = false;
+        for (let i = 0; i < before.length; i++)
+          if (before[i] !== buf[i]) {
+            changed = true;
+            break;
+          }
+        if (changed) this.pushBufferHistory("文字", buf, before);
+      }
+    }
+    if (silent) return;
+    this.buildToolOptions(); // 入力欄を空にして押せない状態へ戻す
     this.renderCanvas();
+    this.redrawOverlay();
     this.paintFilmThumb(this.frameIndex);
+  }
+
+  /** 浮動テキストを捨てる（何も焼かない・履歴にも積まない） */
+  private cancelTextDraft() {
+    if (!this.textDraft) return;
+    this.textDraft = null;
+    this.textDrag = null;
+    this.textDraftCache = null;
+    this.buildToolOptions();
+    this.redrawOverlay();
+  }
+
+  /** 書体・サイズ・太さ・向きの変更を浮動テキストへ反映する（**位置は変えない**） */
+  private syncTextDraftStyle() {
+    if (!this.textDraft) return;
+    this.textDraft.family = this.textFamily;
+    this.textDraft.size = this.textSize;
+    this.textDraft.bold = this.textBold;
+    this.textDraft.vertical = this.textVertical;
+  }
+
+  /** 入力欄へフォーカスを移し、末尾にカーソルを置く */
+  private focusTextInput() {
+    const ta = document.querySelector("#ed-textinput") as HTMLTextAreaElement | null;
+    if (!ta || ta.disabled) return;
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+
+  /** マスク → 単色のプレビュー用キャンバス（色を変えたときだけ作り直す）。
+   *  索引バッファには一切触れない＝ここでの色は**画面表示だけ**のもの */
+  private textDraftCanvas(
+    mask: { w: number; h: number; data: Uint8Array },
+    hex: string
+  ): HTMLCanvasElement {
+    const c = this.textDraftCache;
+    if (c && c.cv && c.cvColor === hex) return c.cv;
+    const cv = document.createElement("canvas");
+    cv.width = mask.w;
+    cv.height = mask.h;
+    const ctx = cv.getContext("2d")!;
+    const img = ctx.createImageData(mask.w, mask.h);
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    for (let i = 0; i < mask.data.length; i++) {
+      if (!mask.data[i]) continue;
+      img.data[i * 4] = r;
+      img.data[i * 4 + 1] = g;
+      img.data[i * 4 + 2] = b;
+      img.data[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    if (c) {
+      c.cv = cv;
+      c.cvColor = hex;
+    }
+    return cv;
+  }
+
+  /** 浮動テキストのプレビュー（実際のドット＋外接する薄い枠）。
+   *
+   *  **選択範囲では切らない**。焼くときは範囲内だけに入るが、浮いている間に隠すと
+   *  どこへ置かれるのか見えず調整できない。この非対称は要件で意図されたもの（REQ §選択範囲との関係）。 */
+  private drawTextDraftPreview(ctx: CanvasRenderingContext2D) {
+    const d = this.textDraft;
+    if (!d) return;
+    const mask = this.textDraftMask();
+    const org = this.textDraftOrigin(d);
+    ctx.save();
+    ctx.strokeStyle = "rgba(240,122,26,.75)";
+    ctx.lineWidth = 1;
+    if (!mask) {
+      // 空のうちは「ここに置かれる」ことだけ示す（1行ぶんの縦棒）
+      const h = Math.max(2, Math.ceil(d.size * 1.35));
+      ctx.beginPath();
+      ctx.moveTo(d.x + 0.5, d.y);
+      ctx.lineTo(d.x + 0.5, d.y + h);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+    ctx.imageSmoothingEnabled = false;
+    // 透明（消しゴム色）のときは見えないので、灰色で形だけ見せる
+    ctx.drawImage(this.textDraftCanvas(mask, this.colorHex || "#888888"), org.x, org.y);
+    ctx.strokeRect(org.x - 0.5, org.y - 0.5, mask.w + 1, mask.h + 1);
+    ctx.restore();
   }
 
   private pickColor(pt: { x: number; y: number }) {
@@ -5429,29 +6986,80 @@ export class Editor {
     this.cb.toast("前のコマを複写しました");
   }
 
+  /** M11-2: 「消す」は**選択中のレイヤーだけ**を対象にする（従来はページ全体だった）。
+   *  - フォルダ選択中は配下の全レイヤー（ネスト含む・再帰）。**レイヤー構造は残す**
+   *  - 選択範囲があるときは範囲内だけ（M10-22 のクリップ方針と揃える）
+   *  - **非表示レイヤーも消す**（表示状態は対象判定に使わない。「見えないから残った」ほうが事故）
+   *  - Undo は multiBufferChangeEntry で1エントリ（フォルダで何枚消しても Ctrl+Z 1回） */
   private async clearFrame() {
-    const ok = await this.cb.confirm("このコマを全消ししますか？");
+    if (this.xformGuard()) return; // E-4: 浮動中は焼き込み前なので消させない
+    // 確認ダイアログの間にコマが進むと「見ていたコマ」と対象がずれるので先に止める
+    //（📷 画像取り込みと同じ流儀）
+    if (this.playing) this.stopPlayback();
+    const frame = this.project.frames[this.frameIndex];
+    if (!frame) return;
+    const folder = this.selectedFolderId
+      ? this.folderById(this.selectedFolderId)
+      : undefined;
+    const targets = folder
+      ? this.project.layerDefs.filter((ld) => this.ancestorChain(ld.parent).includes(folder.id))
+      : this.project.layerDefs.filter((ld) => ld.id === this.activeLayerId);
+    if (targets.length === 0) {
+      this.cb.toast(folder ? "このフォルダにはレイヤーがありません" : "レイヤーが選ばれていません");
+      return;
+    }
+    const scope = this.selMask ? "選択した範囲だけ" : "ぜんぶ";
+    const ok = await this.cb.confirm(
+      folder
+        ? `フォルダ「${folder.name}」の中のレイヤー${targets.length}枚について、このページの絵を${scope}消しますか？（レイヤーは残ります）`
+        : `レイヤー「${targets[0].name}」のこのページの絵を${scope}消しますか？`
+    );
     if (!ok) return;
-    const cur = this.project.frames[this.frameIndex];
-    const beforeLayers: Record<string, IndexBuf> = {};
-    for (const [k, v] of Object.entries(cur.layers)) beforeLayers[k] = copyIndexBuf(v);
-    for (const v of Object.values(cur.layers)) v.fill(0);
+    const mask = this.selMask;
+    const before: Record<string, IndexBuf> = {};
+    const after: Record<string, IndexBuf> = {};
+    for (const ld of targets) {
+      const buf = frame.layers[ld.id];
+      if (!buf) continue;
+      const b = copyIndexBuf(buf);
+      if (mask) R.deleteMasked(buf, mask);
+      else buf.fill(0);
+      let changed = false;
+      for (let i = 0; i < buf.length; i++)
+        if (buf[i] !== b[i]) {
+          changed = true;
+          break;
+        }
+      if (!changed) continue; // 元から空のレイヤーは履歴に含めない
+      before[ld.id] = b;
+      after[ld.id] = copyIndexBuf(buf);
+    }
+    if (Object.keys(before).length === 0) {
+      this.cb.toast("消せる絵がありませんでした");
+      return;
+    }
+    // バッファ実体は構造 undo/redo で作り直され得るので、Frame オブジェクト起点で適用時に解決する
     const self = this;
-    const fi = this.frameIndex;
-    this.history.push({
-      label: "全消し",
-      undo() {
-        const f = self.project.frames[fi];
-        for (const [k, v] of Object.entries(beforeLayers)) f.layers[k]?.set(v);
-        self.afterStructuralChange();
-      },
-      redo() {
-        const f = self.project.frames[fi];
-        for (const v of Object.values(f.layers)) v.fill(0);
-        self.afterStructuralChange();
-      },
-    });
-    this.afterStructuralChange();
+    this.history.push(
+      multiBufferChangeEntry(
+        "消す",
+        (id) => frame.layers[id] ?? null,
+        before,
+        after,
+        () => {
+          self.dirty = true;
+          self.renderCanvas();
+          const fi = self.project.frames.indexOf(frame);
+          if (fi >= 0) self.paintFilmThumb(fi);
+        }
+      )
+    );
+    // afterStructuralChange は「今表示中のコマ」のサムネを塗るが、対象は確認ダイアログ前に
+    // 捉えたコマなので、ここは対象コマのサムネを塗る（矢印キー等でコマが動いていても整合）
+    this.dirty = true;
+    this.renderCanvas();
+    const fi = this.project.frames.indexOf(frame);
+    if (fi >= 0) this.paintFilmThumb(fi);
   }
 
   // ---------------- レイヤー操作 ----------------
@@ -5630,26 +7238,54 @@ export class Editor {
 
   private async deleteFrame() {
     if (this.xformGuard()) return; // E-4
-    if (this.project.frames.length <= 1) {
+    const total = this.project.frames.length;
+    if (total <= 1) {
       this.cb.toast("最後のコマは削除できません");
       return;
     }
-    const at = this.frameIndex;
-    const frame = this.project.frames[at];
+    // M11-9 P-4: フィルムで範囲選択（Shift+クリック）しているときは、その範囲をまとめて削除する。
+    // ただし範囲は ←→ や再生でコマが動いても残る（SE配置やページコピーがその前提で使う）ので、
+    // **いま見ているコマが範囲の中にあるときだけ**まとめて削除する。外にいるときは
+    // 従来どおり「いま見ているコマ」1枚（見ていない場所が黙って消えるのを防ぐ）
+    const sel = this.rangeSel;
+    const selA = sel ? Math.max(0, Math.min(sel.a, sel.b)) : -1;
+    const selB = sel ? Math.min(total - 1, Math.max(sel.a, sel.b)) : -1;
+    const useRange = sel != null && this.frameIndex >= selA && this.frameIndex <= selB;
+    const at = useRange ? selA : this.frameIndex;
+    const end = useRange ? selB : this.frameIndex;
+    const count = end - at + 1;
+    if (count >= total) {
+      this.cb.toast("すべてのコマは削除できません（1枚は残す必要があります）");
+      return;
+    }
+    if (count > 1) {
+      const ok = await this.cb.confirm(
+        `${count}枚のコマを削除します。よろしいですか？\n（コマ ${at + 1}〜${end + 1}）`
+      );
+      if (!ok) return;
+      // 確認の間にコマ構造が変わっていたら中止（ダイアログ中の変更は無いはずだが保険）
+      if (this.project.frames.length !== total) return;
+    }
+    // 削除するコマの実体を保持しておく（SEの配置 Frame.se も frame ごと持ち帰る＝undo で戻る）
+    const removed = this.project.frames.slice(at, at + count);
     const self = this;
     const apply = () => {
-      self.project.frames.splice(at, 1);
-      self.frameIndex = Math.min(at, self.project.frames.length - 1);
+      self.project.frames.splice(at, count);
+      // 1枚のときは従来どおり「詰まってきたコマ」、複数のときは削除範囲の直前
+      self.frameIndex =
+        count > 1
+          ? Math.max(0, Math.min(at - 1, self.project.frames.length - 1))
+          : Math.min(at, self.project.frames.length - 1);
       self.afterFrameStructureChange();
     };
     const revert = () => {
       // 削除中にプロジェクトが16bit昇格していると frame が8bitのまま取り残される
-      conformFrameWidth(self.project, frame);
-      self.project.frames.splice(at, 0, frame);
+      for (const f of removed) conformFrameWidth(self.project, f);
+      self.project.frames.splice(at, 0, ...removed);
       self.frameIndex = at;
       self.afterFrameStructureChange();
     };
-    this.history.push({ label: "コマ削除", undo: revert, redo: apply });
+    this.history.push({ label: count > 1 ? `コマ削除（${count}枚）` : "コマ削除", undo: revert, redo: apply });
     apply();
   }
 
@@ -5673,10 +7309,27 @@ export class Editor {
     apply();
   }
 
+  /** M11-8 P-4（REQ 表E）: 「コマが移動した」ときの選択解除。解除の入口をここ1つに集約する
+   *（gotoFrame＝←→キー/タイムライン、startPlayback＝再生、afterFrameStructureChange＝
+   *  コマの追加・削除・並べ替え）。履歴には積まない（従来の gotoFrame と同じ） */
+  private clearSelectionOnFrameMove() {
+    if (!this.selMask) return;
+    this.selMask = null;
+    if (this.mounted) this.redrawOverlay();
+  }
+
   gotoFrame(i: number) {
     if (i < 0 || i >= this.project.frames.length) return;
+    // M11-10: コマが動く前に、矢印キーの移動セッションを確定する（下のドラッグ判定より先。
+    // セッションは layerDrag / selMaskDrag を使うので、確定させてから通す）
+    this.endArrowSession();
     if (this.xformGuard()) return; // E-4: 変形中はコマ移動をブロック
-    this.selMask = null;
+    // M11-8: ドラッグ中にコマが変わると、掴んだコマ以外の絵を壊す/選択が宙に浮く
+    if (this.pointerDown || this.layerDrag || this.selMaskDrag) return;
+    this.clearSelectionOnFrameMove();
+    // M11-1: 別の位置へ飛んだら、前の位置で鳴り始めたSEは止める（BGMには触れない。
+    // 再生ループはここを通らず frameIndex を直接進めるので、通常再生のSEは切れない）
+    this.audioPreview.stopSe();
     this.frameIndex = i;
     this.renderCanvas();
     this.redrawOverlay();
@@ -5687,18 +7340,25 @@ export class Editor {
   // ---------------- 再生 ----------------
 
   togglePlayback() {
+    // M11-2: ストローク中（ペンが接地したまま）に再生を始めると、コマが進んだ先で
+    // 描き続けたストロークが「開始コマの before」で履歴に積まれ、Ctrl+Z が別コマを
+    // 壊す（レビュー検出）。キー操作から呼ばれ得るようになったので入口で塞ぐ
+    if (this.pointerDown) return;
     if (!this.playing && this.xformGuard()) return; // E-4
-    if (this.playing) this.stopPlayback();
+    // M11-9 P-1: ⏸ は「一時停止」＝SEは続きから鳴らせるように畳む（▶ で続きから）
+    if (this.playing) this.stopPlayback(true);
     else this.startPlayback();
   }
 
-  /** M5-1: 指定コマに配置されたSEを発火（多重可・muted/volumeはトラック別） */
-  private fireFrameSe(i: number) {
+  /** M5-1: 指定コマに配置されたSEを発火（多重可・muted/volumeはトラック別）。
+   *  M11-9: skipIds に入っているものは鳴らさない（一時停止から続きを鳴らしたSEの二重発火を防ぐ） */
+  private fireFrameSe(i: number, skipIds?: string[]) {
     const a = this.project.audio;
     if (!a || a.se.length === 0) return;
     const ids = this.project.frames[i]?.se;
     if (!ids) return;
     for (const id of ids) {
+      if (skipIds && skipIds.includes(id)) continue;
       const t = a.se.find((s) => s.id === id);
       if (t) this.audioPreview.fireSe(t);
     }
@@ -5707,6 +7367,9 @@ export class Editor {
   private startPlayback() {
     if (this.playing) return;
     this.playing = true;
+    // M11-8 P-4（REQ 表E）: 再生はコマを進めるので選択を解除する
+    //（再生ループは gotoFrame を通らず frameIndex を直接進めるため、ここで1回だけ）
+    this.clearSelectionOnFrameMove();
     $("#ed-play").textContent = "⏸";
     const fps = FPS_TABLE[this.project.speedIndex] || 8;
     // M6-2/3: BGMプレビュー（開始フレーム位置に頭出し・ループ毎リセット）
@@ -5714,13 +7377,17 @@ export class Editor {
     const a = this.project.audio ?? null;
     const rate = a?.bgm ? bgmPlaybackRate(this.project.speedIndex, a.bgm.baseSpeedIndex) : 1;
     void this.audioPreview.start(a?.bgm ?? null, this.frameIndex / fps, rate);
+    // M11-9 P-1: 一時停止で畳んだSEを続きから鳴らす。start() は同期的に「鳴っているSE」だけを
+    // 止めて畳んだ分には触れないので、この順で呼べる
+    const resumedSe = this.audioPreview.resumeSe();
     // Codex指摘#3: デコードは「配置済みかつ非ミュート」のSEだけ（未使用SEをキャッシュしない）
     if (a && a.se.length > 0) {
       const used = new Set<string>();
       for (const f of this.project.frames) for (const id of f.se ?? []) used.add(id);
       void this.audioPreview.prepareSe(a.se.filter((s) => !s.muted && used.has(s.id)));
     }
-    this.fireFrameSe(this.frameIndex); // 開始コマのSEも鳴らす
+    // 開始コマのSEも鳴らす（続きから鳴らしたものは頭から鳴らし直さない）
+    this.fireFrameSe(this.frameIndex, resumedSe);
     this.playTimer = window.setInterval(() => {
       let next = this.frameIndex + 1;
       if (next >= this.project.frames.length) {
@@ -5741,9 +7408,12 @@ export class Editor {
     }, 1000 / fps);
   }
 
-  private stopPlayback() {
+  /** pause=true は ⏸（あとで ▶ で続きから）。それ以外の停止経路（画面を離れる・書き出し・
+   *  キャンバスに触れた・ループしない作品が終端に達した等）は**続きを捨てる**（M11-9 P-1） */
+  private stopPlayback(pause = false) {
     this.playing = false;
-    this.audioPreview.stop();
+    if (pause) this.audioPreview.pause();
+    else this.audioPreview.stop();
     if (this.playTimer != null) {
       clearInterval(this.playTimer);
       this.playTimer = null;
@@ -5751,6 +7421,7 @@ export class Editor {
     const btn = document.querySelector("#ed-play");
     if (btn) btn.textContent = "▶";
     if (this.mounted) this.renderCanvas();
+    this.refreshSelectionLauncher();
   }
 
   // ---------------- 共通 ----------------
@@ -5861,6 +7532,13 @@ export class Editor {
     // コマの追加/削除/並べ替え/挿入で範囲選択はインデックスがずれるためリセット
     this.rangeSel = null;
     this.rangeAnchor = null;
+    // M11-9: コマ構造が変わったら、鳴っているSEと畳んだ「続き」を捨てる（gotoFrame と同じ扱い。
+    // 消えたコマに置かれていた音が鳴り続けたり、あとから続きが鳴ったりしないように）
+    this.audioPreview.stopSe();
+    // M11-8 P-4（REQ 表E）: コマの追加・削除・並べ替えは「コマの移動」を伴うので選択を解除する。
+    // ここは undo/redo のクロージャからも呼ばれるため、履歴の適用中だけは触らない
+    //（pushSelectionHistory が復元したマスクを直後に消してしまわないように）
+    if (!this.applyingHistory) this.clearSelectionOnFrameMove();
     this.rebuildFilm();
     this.renderCanvas();
     this.redrawOverlay();
@@ -5874,56 +7552,364 @@ export class Editor {
     this.redrawOverlay();
   }
 
+  /** M11-2: ダイアログ（確認・保存先ピッカー・音声パネル等）が開いているか。
+   *  `modalDepth` はゆらゆらダイアログしか増やさないため、main.ts の `modal()` が作る
+   *  `.modal-back` の実在も見る。**再生トグルを裏で走らせないための番人**（レビュー検出） */
+  private dialogOpen(): boolean {
+    return this.modalDepth > 0 || !!document.querySelector(".modal-back");
+  }
+
+  /** M11-2: 文字入力中か（Space/Enter のショートカットを発火させない対象）。
+   *  target が window など HTMLElement でない場合は false */
+  private isTextEntry(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el || typeof el.tagName !== "string") return false;
+    const tag = el.tagName;
+    return (
+      tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || el.isContentEditable === true
+    );
+  }
+
+  // ---------------- M11-10: ショートカット（コマンド解決） ----------------
+
+  /** キー → コマンドID の引き当て表（キー1打ごとに線形探索しない） */
+  private keyLookup = new Map<string, CommandId>();
+  private static readonly REPEATABLE = new Set<string>(
+    COMMANDS.filter((c) => (c as { repeatable?: boolean }).repeatable).map((c) => c.id)
+  );
+
+  /** プリセットを適用する（設定画面から切り替えたときも同じ入口） */
+  applyKeyPreset(preset: Preset) {
+    this.keyLookup = buildLookup(preset);
+  }
+
+  /** UI のボタンを押す（ボタン側のガードをそのまま通したいコマンド用） */
+  private clickUi(sel: string) {
+    (document.querySelector(sel) as HTMLElement | null)?.click();
+  }
+
+  /** M11-10: コマンドの実行。**既存のボタンと同じ処理を呼ぶだけ**（新機能は作らない） */
+  private runCommand(id: CommandId) {
+    switch (id) {
+      // 道具
+      case "tool.pen":
+      case "tool.brush":
+      case "tool.eraser":
+      case "tool.fill":
+      case "tool.shape":
+      case "tool.text":
+      case "tool.eyedrop":
+      case "tool.hand":
+      case "tool.move":
+      case "tool.select":
+      case "tool.transform":
+      case "tool.warp":
+        this.setTool(id.slice(5) as Tool);
+        break;
+      // ペンの太さ
+      case "pen.sizeDown":
+      case "pen.sizeUp": {
+        const i = PEN_SIZES.indexOf(this.penSize);
+        const ni = Math.max(
+          0,
+          Math.min(PEN_SIZES.length - 1, (i < 0 ? 2 : i) + (id === "pen.sizeUp" ? 1 : -1))
+        );
+        this.penSize = PEN_SIZES[ni];
+        this.refreshSizePicker();
+        break;
+      }
+      case "pen.size1":
+      case "pen.size2":
+      case "pen.size3":
+      case "pen.size4":
+      case "pen.size5":
+      case "pen.size6":
+        this.penSize = PEN_SIZES[Number(id.slice(8)) - 1];
+        this.refreshSizePicker();
+        break;
+      // 編集
+      case "edit.undo":
+        this.handleUndo();
+        break;
+      case "edit.redo":
+        this.handleRedo();
+        break;
+      case "edit.copy":
+        this.copySelection(false);
+        break;
+      case "edit.cut":
+        this.copySelection(true);
+        break;
+      case "edit.paste":
+        this.pasteClipboard();
+        break;
+      case "edit.deleteSelection":
+        if (this.selMask) this.deleteSelection();
+        break;
+      case "edit.copyPrev":
+        this.copyPrevFrame();
+        break;
+      case "edit.clearFrame":
+        void this.clearFrame();
+        break;
+      // ファイル
+      case "file.save":
+        void this.save();
+        break;
+      case "file.saveAs":
+        void this.saveAs();
+        break;
+      case "file.export":
+        this.clickUi("#ed-export");
+        break;
+      case "file.image":
+        this.clickUi("#ed-tool-image");
+        break;
+      case "file.audio":
+        this.clickUi('#ed-tools .tool[data-tool="audio"]');
+        break;
+      // コマ
+      case "frame.prev":
+        this.gotoFrame(this.frameIndex - 1);
+        break;
+      case "frame.next":
+        this.gotoFrame(this.frameIndex + 1);
+        break;
+      case "frame.add":
+        this.addFrame(false);
+        break;
+      case "frame.duplicate":
+        this.addFrame(true);
+        break;
+      case "frame.delete":
+        void this.deleteFrame();
+        break;
+      case "frame.copyPage":
+        this.copySelectedFrames();
+        break;
+      case "frame.pastePage":
+        this.pasteFrames();
+        break;
+      case "frame.wobble":
+        void this.onWobbleClick();
+        break;
+      // 再生・表示
+      case "play.toggle":
+        this.togglePlayback();
+        break;
+      case "play.loop":
+        this.clickUi("#ed-loop");
+        break;
+      case "view.zoomIn":
+        this.adjustZoom(+1);
+        break;
+      case "view.zoomOut":
+        this.adjustZoom(-1);
+        break;
+      case "view.rotate":
+        this.clickUi("#ed-view-rot");
+        break;
+      case "view.flip":
+        this.clickUi("#ed-view-flip");
+        break;
+      case "xform.peek":
+        // 押している間だけ透かす。戻すのは keyup（peekCode が一致したとき）
+        if (this.xformActive) this.setXformPeek(true, this.peekPendingCode);
+        break;
+    }
+  }
+
+  // ---------------- M11-10: 矢印キーの1ドット移動（移動セッション） ----------------
+  // キーボードには「離す」が無いので、ドラッグと違ってセッションを持たざるを得ない。
+  // 確定は **endArrowSession() 1つ**に集約し、あらゆる離脱経路から必ず呼ぶ
+  //（M11-5 の endPointerSession と同じ作法）。加えて 800ms の自動確定で状態を長く残さない。
+
+  /** 進行中の移動セッションの種類（""＝無し） */
+  private arrowKind: "" | "layer" | "selmask" | "selmove" = "";
+  private arrowDx = 0;
+  private arrowDy = 0;
+  private arrowTimer: number | null = null;
+  /** 最後の矢印キーからこの時間が経ったら自動で確定する（仮の値・REQ 未決6） */
+  private static readonly ARROW_COMMIT_MS = 800;
+  /** Shift＋矢印の移動量（仮の値・REQ 未決7） */
+  private static readonly ARROW_BIG_STEP = 10;
+
+  /** 移動セッションを確定する（履歴は1エントリ）。セッションが無ければ何もしない */
+  endArrowSession() {
+    const kind = this.arrowKind;
+    if (this.arrowTimer != null) {
+      clearTimeout(this.arrowTimer);
+      this.arrowTimer = null;
+    }
+    if (!kind) return;
+    this.arrowKind = "";
+    this.arrowDx = 0;
+    this.arrowDy = 0;
+    if (kind === "layer") this.commitLayerMove();
+    else if (kind === "selmask") this.commitSelMaskMove();
+    else if (kind === "selmove") this.commitSelectionMove();
+  }
+
+  /** 移動セッションを取り消す（動かす前の位置へ戻す・履歴には積まない） */
+  private cancelArrowSession() {
+    const kind = this.arrowKind;
+    if (this.arrowTimer != null) {
+      clearTimeout(this.arrowTimer);
+      this.arrowTimer = null;
+    }
+    if (!kind) return;
+    this.arrowKind = "";
+    this.arrowDx = 0;
+    this.arrowDy = 0;
+    if (kind === "layer") this.cancelLayerMove();
+    else if (kind === "selmask") this.cancelSelMaskMove();
+    else if (kind === "selmove") this.cancelSelectionMove();
+  }
+
+  private scheduleArrowCommit() {
+    if (this.arrowTimer != null) clearTimeout(this.arrowTimer);
+    this.arrowTimer = window.setTimeout(() => {
+      this.arrowTimer = null;
+      this.endArrowSession();
+    }, Editor.ARROW_COMMIT_MS);
+  }
+
+  /** 矢印キー（割り当て対象外・モードで意味が変わる固定キー） */
+  private handleArrowKey(e: KeyboardEvent) {
+    const step = e.shiftKey ? Editor.ARROW_BIG_STEP : 1;
+    const dx = e.code === "ArrowLeft" ? -step : e.code === "ArrowRight" ? step : 0;
+    const dy = e.code === "ArrowUp" ? -step : e.code === "ArrowDown" ? step : 0;
+    if (dx === 0 && dy === 0) return;
+    // ① 変形モード中: 平行移動量を ±1 するだけ（確定は既存の Enter / 取消は Esc）。
+    //    何回押しても履歴は確定時の1つ
+    if (this.xformActive && this.floatBuf) {
+      e.preventDefault();
+      this.xform.tx += dx;
+      this.xform.ty += dy;
+      this.redrawOverlay();
+      this.buildToolOptions(); // 数値表示を追従
+      return;
+    }
+    // ①'' 浮動テキスト中: 位置（パラメータの x/y）を動かすだけ。確定は Ctrl+Enter / 取消は Esc
+    //     なので、何回押しても履歴は確定時の1つ。
+    //     **入力欄にフォーカスがある間はここへ来ない**（onKeyDown が isTextEntry で早期 return
+    //     する＝文字カーソルの移動が優先。REQ の要求どおり）
+    if (this.textDraft) {
+      e.preventDefault();
+      this.textDraft.x += dx;
+      this.textDraft.y += dy;
+      this.redrawOverlay();
+      return;
+    }
+    // ①' 四隅変形中: 4点をまとめて平行移動する（形は変えずに位置だけ動かす）。
+    //     確定/取消は既存のまま（Enter / Esc）なので、履歴はやはり確定時の1つ
+    if (this.cornerActive) {
+      e.preventDefault();
+      this.cornerPts = this.cornerPts.map((p) => ({ x: p.x + dx, y: p.y + dy }));
+      this.updateCornerPreview();
+      return;
+    }
+    // ② 移動ツール / ③ 選択範囲ツール（枠だけ）
+    const kind: "" | "layer" | "selmask" | "selmove" =
+      this.tool === "move"
+        ? this.selMask
+          ? "selmove"
+          : "layer"
+        : this.tool === "select" && this.selMask
+          ? "selmask"
+          : "";
+    if (kind) {
+      e.preventDefault();
+      if (this.arrowKind !== kind) {
+        // 種類が変わったら前のセッションを確定してから始める
+        this.endArrowSession();
+        const at = { x: 0, y: 0 };
+        if (kind === "layer") this.beginLayerMove(at);
+        else if (kind === "selmask") this.beginSelMaskMove(at);
+        else this.beginSelectionMove(at);
+        // begin が失敗した（動かす対象が無い）ときはセッションを持たない
+        const started =
+          kind === "layer" ? !!this.layerDrag : kind === "selmask" ? !!this.selMaskDrag : !!this.floatBuf;
+        if (!started) return;
+        this.arrowKind = kind;
+        this.arrowDx = 0;
+        this.arrowDy = 0;
+      }
+      this.arrowDx += dx;
+      this.arrowDy += dy;
+      const at = { x: this.arrowDx, y: this.arrowDy };
+      if (kind === "layer") this.updateLayerMove(at);
+      else if (kind === "selmask") this.updateSelMaskMove(at);
+      else this.updateSelectionMove(at);
+      this.scheduleArrowCommit();
+      return;
+    }
+    // ④ それ以外は従来どおり前後のコマ（↑↓ は従来どおり何もしない）
+    if (dx < 0) this.gotoFrame(this.frameIndex - 1);
+    else if (dx > 0) this.gotoFrame(this.frameIndex + 1);
+  }
+
   private onKeyDown(e: KeyboardEvent) {
     if (!this.mounted) return;
     // M10-3 P-8: 自前ダイアログが開いている間はエディタのショートカットを一切通さない。
     // ダイアログ側の capture リスナーだけに頼ると、イベントの target が window そのものの
     // ときに同一要素のリスナー順で抜けてしまう（Escape で選択解除まで走る）
-    if (this.modalDepth > 0) return;
-    const tag = (e.target as HTMLElement).tagName;
-    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
-    if (e.ctrlKey && e.key.toLowerCase() === "z") {
-      // M3.8 L-B: 最上流で変形/浮動を判定（グローバル履歴に通さない）
+    // M11-7 P-3: 判定を `dialogOpen()` に広げる。`modalDepth` を増やすのは
+    // ゆらゆらダイアログだけで、main.ts の `modal()`（ドロップの選択・取り込み進捗・
+    // 保存先ピッカー等）は増やさないため、その裏で Escape/Delete がここまで届いていた。
+    // カウンタを2箇所で上げ下げすると**片方が漏れた瞬間にショートカットが全滅する**ので、
+    // 数えずに「.modal-back が実在するか」を見る（OR なので二重計上も起きない）
+    if (this.dialogOpen()) return;
+    // M11-2: contenteditable も文字入力として除外（Space/Enter を再生に取られないように）
+    if (this.isTextEntry(e.target)) return;
+    // M11-10: IME 変換中は発火しない（変換確定の Enter で再生が始まらないように）。
+    // keyCode 229 は composition 中の古い環境向けの保険
+    if (e.isComposing || e.keyCode === 229) return;
+
+    // ---- 予約キー（割り当ての対象外。従来どおりの固定の分岐で受ける） ----
+    if (e.code === "Space") {
+      // E-1: Space押下中は一時的に手のひら（お絵描きソフト標準の作法）。
+      // M11-2: 単押しなら keyup 側で再生トグルにする（長押しは従来どおり手のひら）
       e.preventDefault();
-      this.handleUndo();
-    } else if (e.ctrlKey && e.key.toLowerCase() === "y") {
-      e.preventDefault();
-      this.handleRedo();
-    } else if (e.ctrlKey && e.key.toLowerCase() === "s") {
-      e.preventDefault();
-      if (e.shiftKey) this.saveAs();
-      else this.save();
-    } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "c") {
-      // ページクリップボード（Ctrl+C/X/V はピクセル選択用に温存）
-      e.preventDefault();
-      this.copySelectedFrames();
-    } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "v") {
-      e.preventDefault();
-      this.pasteFrames();
-    } else if (e.ctrlKey && e.key.toLowerCase() === "c") {
-      this.copySelection(false);
-    } else if (e.ctrlKey && e.key.toLowerCase() === "x") {
-      this.copySelection(true);
-    } else if (e.ctrlKey && e.key.toLowerCase() === "v") {
-      this.pasteClipboard();
-    } else if (e.key === "Delete" || e.key === "Backspace") {
-      if (this.selMask) {
-        e.preventDefault();
-        this.deleteSelection();
+      // M11-10: 手のひら/再生は「別の操作」なので、矢印の移動セッションは確定しておく
+      if (!e.repeat) this.endArrowSession();
+      if (!e.repeat) {
+        this.spaceHeld = true;
+        this.spaceDownAt = performance.now();
+        this.spacePanned = false;
+        this.updatePanCursor();
       }
-    } else if (e.key === "Enter") {
-      // E-4: Enter=変形確定
-      if (this.xformActive) {
-        e.preventDefault();
-        this.commitTransform();
-      } else if (this.cornerActive) {
-        e.preventDefault();
-        this.commitCornerWarp();
-      }
-    } else if (e.key === "Escape") {
+      return;
+    }
+    if (e.code === "Escape") {
       if (this.rowDrag) {
         // M3.9 H-2: レイヤードラッグ中の Esc はドラッグだけキャンセル
         this.cancelRowDrag();
+        return;
+      }
+      if (this.frameDrag) {
+        this.cancelFrameDrag(); // M11-7: コマの並べ替え中も同じ（並びは動かさない）
+        return;
+      }
+      // M11-12: 浮動テキストは取り消して終わり（何も焼かない）。選択解除まで走らせない
+      //（入力欄にフォーカスがあるときは、そちらの keydown が同じことをする）
+      if (this.textDraft) {
+        this.cancelTextDraft();
+        return;
+      }
+      // M11-10: 矢印キーでの移動セッション中は、そのセッションだけ取り消す
+      if (this.arrowKind) {
+        this.cancelArrowSession();
+        return;
+      }
+      // M11-8: 枠の移動／レイヤーの移動も「ドラッグ中の Esc はそのドラッグだけ取り消す」
+      //（これが無いと、Esc で選択を消したのに指を離した時点で復活する）
+      if (this.selMaskDrag) {
+        this.cancelSelMaskMove();
+        return;
+      }
+      if (this.layerDrag) {
+        this.cancelLayerMove();
         return;
       }
       if (this.xformActive) this.cancelTransform();
@@ -5933,20 +7919,65 @@ export class Editor {
       this.selMask = null;
       this.lassoPts = [];
       this.redrawOverlay();
-    } else if (e.key === " ") {
-      // E-1: Space押下中は一時的に手のひら（お絵描きソフト標準の作法。
-      // 従来の Space=再生 は再生ボタンに委譲）
-      e.preventDefault();
-      if (!e.repeat) {
-        this.spaceHeld = true;
-        this.updatePanCursor();
-      }
-    } else if (e.key.toLowerCase() === "h" && !e.ctrlKey) {
-      this.setTool("hand");
-    } else if (e.key === "ArrowLeft") {
-      this.gotoFrame(this.frameIndex - 1);
-    } else if (e.key === "ArrowRight") {
-      this.gotoFrame(this.frameIndex + 1);
+      return;
     }
+    if (e.code.startsWith("Arrow")) {
+      this.handleArrowKey(e);
+      return;
+    }
+    if (e.code === "Backspace") {
+      // 従来から Delete と2つある（Delete 側は割り当て可能・こちらは固定）
+      if (this.selMask) {
+        e.preventDefault();
+        // M11-9: 押しっぱなしのキーリピートで履歴を空エントリで埋めない
+        if (!e.repeat) {
+          this.endArrowSession(); // M11-10: 消す前に移動を確定（別の操作）
+          this.deleteSelection();
+        }
+      }
+      return;
+    }
+    if (e.code === "Enter" || e.code === "NumpadEnter") {
+      // M11-12: Ctrl+Enter=浮動テキストの確定（入力欄の外にフォーカスがある場合。
+      // 入力欄の中では、そちらの keydown が同じことをする）
+      if (this.textDraft && e.ctrlKey) {
+        e.preventDefault();
+        this.commitTextDraft();
+        return;
+      }
+      // E-4: Enter=変形確定（変形中・四隅変形中は確定が優先）
+      if (this.xformActive) {
+        e.preventDefault();
+        this.commitTransform();
+        return;
+      }
+      if (this.cornerActive) {
+        e.preventDefault();
+        this.commitCornerWarp();
+        return;
+      }
+      // M11-10: 矢印キーでの移動セッションの明示的な確定
+      if (this.arrowKind) {
+        e.preventDefault();
+        this.endArrowSession();
+        return;
+      }
+      // M11-2: ボタンにフォーカスがあるときはブラウザ既定の「Enter でそのボタンを押す」を
+      // 優先する（二重発火を避ける）。この判定は Enter/Space にだけ要る
+      if ((e.target as HTMLElement | null)?.closest?.("button, a")) return;
+      // 以降は割り当て（既定では play.toggle＝再生サブキー）へ流す
+    }
+
+    // ---- 割り当て（キー → コマンドID → 実行） ----
+    const id = this.keyLookup.get(eventKey(e));
+    if (!id) return;
+    // ツール切替などはキーリピートで連続実行しない（Undo/Redo・コマ移動・ズームは従来どおり連続）
+    if (e.repeat && !Editor.REPEATABLE.has(id)) return;
+    e.preventDefault();
+    // M11-11: 「押している間だけ」のコマンド用に、いま押されている物理キーを渡す
+    this.peekPendingCode = e.code;
+    // M11-10: 別の操作を始めたら、矢印キーの移動セッションは確定する
+    this.endArrowSession();
+    this.runCommand(id);
   }
 }
