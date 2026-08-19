@@ -13,6 +13,8 @@
 // - v1（indexBits無し）は 8bit として読む（完全可逆・従来と同一）
 // - .kwz は入力専用（この形式でのみ保存する）
 
+import { t } from "../i18n";
+import { folderBaseName, untitledTitle } from "../i18n/defaults";
 import {
   Project,
   Frame,
@@ -21,6 +23,7 @@ import {
   SeTrack,
   ProjectAudio,
   LayerFolder,
+  LayerDef,
   PIXELS,
   W,
   H,
@@ -186,7 +189,7 @@ async function encodeProject(
   const headJson = JSON.stringify(doc);
   // frames は doc の最後のキー。この前提が崩れると分割組み立てが壊れるので毎回検査する
   if (!headJson.endsWith('"frames":[]}')) {
-    throw new Error("内部エラー: doc の直列化順序が想定と異なります");
+    throw new Error(t("ed.save.internalOrder.msg"));
   }
   const headPart = headJson.slice(0, -2); // 末尾の `]}` を除去 → `...,"frames":[`
   const cs = new CompressionStream("gzip");
@@ -260,14 +263,14 @@ export async function projectFromBytes(bytes: Uint8Array): Promise<Project> {
     json = bytes;
   }
   const doc = JSON.parse(new TextDecoder().decode(json));
-  if (doc.magic !== MAGIC) throw new Error("メモアニマのプロジェクトファイルではありません");
+  if (doc.magic !== MAGIC) throw new Error(t("ed.load.notProject.msg"));
   if (typeof doc.version !== "number" || doc.version > PROJECT_VERSION) {
     throw new Error(
-      `このファイルは新しいバージョン（v${doc.version}）で作られています。アプリを更新してください。`
+      t("ed.load.newerVersion.msg", { version: doc.version })
     );
   }
   if (doc.width !== W || doc.height !== H) {
-    throw new Error("キャンバスサイズが不正です（320×240のみ対応）");
+    throw new Error(t("ed.load.badSize.msg"));
   }
   // v1 は indexBits 無し → 8bit（従来と同一の可逆ロード）
   const bits: 8 | 16 = doc.indexBits === 16 ? 16 : 8;
@@ -276,7 +279,7 @@ export async function projectFromBytes(bytes: Uint8Array): Promise<Project> {
     const layers: Record<string, IndexBuf> = {};
     for (const [id, b64] of Object.entries(sf.layers)) {
       const raw = base64ToBytes(b64);
-      if (raw.length !== expected) throw new Error("レイヤーデータが壊れています");
+      if (raw.length !== expected) throw new Error(t("ed.load.badLayer.msg"));
       layers[id] =
         bits === 16
           ? new Uint16Array(raw.buffer, 0, PIXELS) // base64ToBytes はオフセット0の自前バッファ（LE）
@@ -362,7 +365,7 @@ export async function projectFromBytes(bytes: Uint8Array): Promise<Project> {
         .filter((f) => f && typeof f.id === "string")
         .map((f) => ({
           id: f.id,
-          name: typeof f.name === "string" ? f.name : "フォルダ",
+          name: typeof f.name === "string" ? f.name : folderBaseName(),
           visible: f.visible !== false,
           opacity:
             typeof f.opacity === "number" ? Math.max(0, Math.min(1, f.opacity)) : 1,
@@ -389,9 +392,19 @@ export async function projectFromBytes(bytes: Uint8Array): Promise<Project> {
     colorMode: doc.colorMode === "fullcolor" ? "fullcolor" : "palette",
     nextLayerId: doc.nextLayerId ?? 1000,
     nextSeId: typeof doc.nextSeId === "number" ? doc.nextSeId : undefined,
-    meta: doc.meta ?? { title: "無題" },
+    meta: doc.meta ?? { title: untitledTitle() },
     audio,
   };
+  // M11-20: LayerDef.clip（クリッピング）は任意キー・PROJECT_VERSION=5 のまま。true 以外（欠損・非 boolean・
+  // 手で壊した値）は false 扱い＝キーを落とす。**オブジェクトは作り直さない**（layerDefs は素通しで
+  // 読み書きしているので、旧ビルドがこのファイルを開いて保存し直しても未知キーとして残る＝互換の要）
+  if (Array.isArray(p.layerDefs)) {
+    for (const ld of p.layerDefs as unknown[]) {
+      if (ld && typeof ld === "object" && "clip" in ld && (ld as LayerDef).clip !== true) {
+        delete (ld as { clip?: unknown }).clip;
+      }
+    }
+  }
   // 壊れた parent（存在しないid・循環）をルートへ隔離（絵は必ず開ける）
   sanitizeFolders(p);
   // M5-1: 壊れた bgm/se・未知SE配置の隔離＋nextSeId 健全化（絵は必ず開ける）

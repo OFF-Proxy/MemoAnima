@@ -23,7 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 
-# --- アニメモ: 秘密の鍵・個人データは絶対にコミットしない（REQ v1.5 §13-3 / §12-2） ---
+# --- メモアニマ: 秘密の鍵・個人データは絶対にコミットしない（REQ v1.5 §13-3 / §12-2） ---
 keys/
 *.sed
 movable.sed
@@ -57,5 +57,3 @@ aes_keys*.txt
 # リポジトリ管理下の .gitignore に明示する。
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
-
-.claude/

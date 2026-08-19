@@ -6,6 +6,7 @@
 
 import { FPS_TABLE, type BgmTrack, type SeTrack } from "./model";
 import type { ExportAudio } from "./exporter";
+import { t } from "../i18n";
 
 /** Int16 PCM → WAV バイト列（44byteヘッダ＋PCM・16bit）。channels>1 はインターリーブ済みを渡す */
 export function pcmS16ToWav(
@@ -526,7 +527,10 @@ export async function renderExportMix(spec: ExportMixSpec): Promise<ExportAudio 
   if (!plan.bgm && plan.seEvents.length === 0) return null; // 全ミュート/音なし → 無音経路
   if (plan.outDurSec > MAX_MIX_DURATION_SEC) {
     throw new Error(
-      `書き出し尺が長すぎます（${Math.round(plan.outDurSec / 60)}分 > 上限${MAX_MIX_DURATION_SEC / 60}分）。BGMのトリムで短くしてください`
+      t("ed.audio.mixTooLong.msg", {
+        min: Math.round(plan.outDurSec / 60),
+        max: MAX_MIX_DURATION_SEC / 60,
+      })
     );
   }
   const ctx = new OfflineAudioContext(

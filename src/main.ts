@@ -1,4 +1,4 @@
-// アニメモ（AniMemo）フロントエンド エントリ（M3）
+// メモアニマ（MemoAnima）フロントエンド エントリ（M3）
 // 画面: ライブラリ（3カラム閲覧） ⇄ エディタ（ドット等倍）
 // M0レガシーのフォルダ閲覧はM3で撤去（REQ v1.7 D-22）。
 
@@ -8,7 +8,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { runGuide, GuideStep } from "./guide";
 import { LibraryScreen, LibraryView } from "./library";
-import { Editor, EditorSaveContext } from "./editor/editor";
+import { Editor, EditorSaveContext, sanitizeMiniDock } from "./editor/editor";
+import { sanitizeCursor } from "./editor/cursor";
 import { newProject, UGO_COLORS, W, H, type Project } from "./editor/model";
 import { importFlipnote } from "./editor/kwzImport";
 import { projectFromBytes, projectToBytes } from "./editor/serialize";
@@ -28,23 +29,48 @@ import {
   FORMAT_INFO,
   runExport,
   withRange,
+  EXPORT_SCALES,
+  type ExportScale,
+  sanitizeExportScale,
+  scaleNote,
+  gifX8Warning,
+  exportPhaseLabel,
+  collectGifPalette,
+  estimateExport,
+  createEtaEstimator,
+  formatDuration,
+  formatBytes,
 } from "./editor/exporter";
 import { mimeFromExt } from "./editor/audio";
+// M12-1a: i18n（自前・依存なし）。設計は docs/REQ_M12_i18n_master.md §3
+import { t, setLang, getLang, sanitizeLang, detectLang, applyI18n, type Lang } from "./i18n";
+// M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
+import {
+  defaultAlbumName,
+  imageProjectTitle,
+  newAlbumName,
+  untitledTitle,
+} from "./i18n/defaults";
 // M11-10: ショートカット（コマンド定義・プリセット・キーの引き当て）
 import {
   BUILTIN_PRESETS,
   COMMANDS,
   COMMAND_GROUPS,
   MAX_USER_PRESETS,
+  TOOL_GROUP,
   activePreset,
+  bindingCaveat,
   bindingFromEvent,
+  commandLabel,
   defaultKeysSettings,
   findConflict,
   keyLabel,
   newPresetId,
   nextPresetName,
+  presetName,
   reservedReason,
   sanitizeKeysSettings,
+  sharedToolMates,
   type CommandId,
   type KeyBinding,
   type KeysSettings,
@@ -72,18 +98,64 @@ type Settings = {
   shelfSort?: "manual" | "name" | "date";
   /** M11-10: ショートカットの割り当て（追加のみ・壊れていても既定で起動する） */
   keys?: KeysSettings;
+  /** M11-13 の旧キー。M11-16 で `hudHidden` に統合され、**読み捨て**（値があっても無視・今後書かない）。
+   *  型に残しているのは「知らないキーとして落とさない」ためだけ */
+  miniHidden?: boolean;
+  /** M11-16: HUD（ミニ・バッジ・倍率）をまとめて隠しているか。**true 以外はすべて既定（表示）**へ倒す */
+  hudHidden?: boolean;
+  /** M11-17: エディタのパネル寸法（左ツール列幅・右パネル幅・タイムライン高さ・px）。
+   *  追加のみ・項目ごとに不正値/範囲外は既定へ（`sanitizeLayout`）。PROJECT_VERSION には無関係 */
+  layout?: { toolsW?: number; sideW?: number; tlH?: number };
+  /** M11-18: ミニプレビューの置き場（"timeline"=収納・既定／"float"）。それ以外は既定へ。
+   *  M11-21: "off"=表示しない（合成もしない・大画面切替も無し） */
+  miniDock?: "timeline" | "float" | "off";
+  /** M11-18: 個別の畳み状態（true 以外は開いている）。キャンバス集中は保存しない */
+  collapsed?: { tools?: boolean; side?: boolean; tl?: boolean };
+  /** M11-22: アニメ書き出し（MP4/GIF/APNG/PNG連番）の倍率（1|2|4|8）。無い・不正・3 などは既定 ×4（`sanitizeExportScale`） */
+  exportScale?: number;
+  /** M11-22: 「🖼 画像で保存」の倍率。アニメとは別に記憶（同じ正規化・既定 ×4） */
+  imageSaveScale?: number;
+  /** M12-1a: UI の表示言語。無い・不正値は OS の言語から判定（既定 en）。
+   *  **追加のみ**・`PROJECT_VERSION` には無関係（作品ファイルは1バイトも変わらない） */
+  lang?: Lang;
+  /** M12-C: 編集中のカーソル。**追加のみ**・不正値は既定へ（`sanitizeCursor`）。
+   *  `style: "cross"` にすると v1.2.0 と見分けがつかない状態に戻せる（既存ユーザーの逃げ場） */
+  cursor?: { style?: "dot" | "cross" | "arrow"; ring?: boolean; cell?: boolean };
 };
 
 /** M7-2b: クレジット（後で差し替えやすいよう**この定数1箇所**に集約）。
- *  ★本名不使用（厳守・M7-2b改訂）: 配布物のどこにも本名を入れない。作者表記は「アルカナ (arcana)」のみ */
+ *  ★本名不使用（厳守・M7-2b改訂）: 配布物のどこにも本名を入れない。作者表記は「アルカナ (arcana)」のみ
+ *
+ *  M12-4: **日英併記**にした（REQ_M12_4 §1・作者決定）。ここは唯一 t() を通していない画面文言で、
+ *  英語 UI でも日本語のまま出ていた（M12-2 §9-e で見つかった「英語版で日本語が残る唯一の面」）。
+ *  **辞書には移さない**——名義とリンクの塊で、5言語に割ると保守が重くなるため。
+ *  6行→8行に増えるが、設定ダイアログは元から縦スクロールするので縦は許容（横は要確認）。
+ *  検査5（ハードコード日本語）はこの定数を除外済み。**除外の仕組みを広げないこと**。 */
 const CREDITS: string[] = [
   "企画・ディレクション・絵: アルカナ (arcana)（X: @Arcana_Proxy）",
-  "素材や作品はこちら → BOOTH: https://shitamatsuge-com.booth.pm/",
   "開発: アルカナ (arcana)",
-  "使用OSS: flipnote.js / ffmpeg.wasm / gif.js / UPNG.js / fflate / Tauri / PixiJS ほか",
-  "本体は GNU GPL v3 以降で公開: https://github.com/OFF-Proxy/MemoAnima",
-  "（ライセンス詳細は同梱の LICENSES.txt を参照）",
+  "Planning, direction, art and development: arcana (X: @Arcana_Proxy)",
+  "素材や作品はこちら / More work → BOOTH: https://shitamatsuge-com.booth.pm/",
+  "使用OSS / Open source used: flipnote.js / ffmpeg.wasm / gif.js / UPNG.js / fflate / Tauri / PixiJS ほか",
+  "本体は GNU GPL v3 以降で公開 / Released under the GNU GPL v3 or later:",
+  "https://github.com/OFF-Proxy/MemoAnima",
+  "（ライセンス詳細は同梱の LICENSES.txt を参照 / See the bundled LICENSES.txt for details）",
 ];
+
+/**
+ * M12-1a: **翻訳しない名前**（master §5「作品名・アルバム名・ファイル名はユーザーのデータ」）。
+ * これらは画面に出ると同時に**ディスク上のフォルダ名・ファイル名になる**。
+ *
+ * M12-1c-2: 実体は `src/i18n/defaults.ts` に集約した。
+ *
+ * M12-D: **module 直下の別名（`const DEFAULT_ALBUM = defaultAlbumName()` 等）は全部消した。**
+ * トップレベルで評価すると **module 読み込み時の言語で値が固まる**（`applyI18n` より前に走る）ので、
+ * 既定名を UI 言語で付ける仕組みが無効になる。使うところで**その都度呼ぶ**こと。
+ * `scripts/m1201_i18n_check.ts` の**検査8**が、この形の再発を止める。
+ */
+// M12-1c-1: グループの識別子は keymap.ts の TOOL_GROUP（"tools"）へ移した。
+// 以前はここに `const TOOL_GROUP_ID = "道具"` があり、**表示名と同じ文字列**で比較していた
+const IMG_DEFAULT_TITLE_EDITOR = "画像";
 
 /** app_info の結果（設定メニューのバージョン表示に使い回す） */
 let appInfoCache: { name: string; version: string; milestone: string } | null = null;
@@ -108,6 +180,83 @@ function saveKeys() {
   settings.keys = keys;
   invoke("save_settings", { settings }).catch(() => {});
 }
+
+// ---------------- M12-E: 編集中の誤リロード対策（F5 / Ctrl+R） ----------------
+
+/** M12-E: 「再読み込み」のキーか。**F5 / Ctrl+R / Ctrl+Shift+R / Ctrl+F5** の4つ。
+ *
+ *  `e.key` ではなく **`e.code`** で見る。キーボード配列が変わっても位置で決まるし、
+ *  アプリの割り当て（`keymap.ts` の `eventKey`）も `e.code` で揃っている。
+ *  修飾なしの `R` は LEFTY プリセットのブラシなので、`KeyR` は **Ctrl/⌘ を必須**にする。 */
+function isReloadKey(e: KeyboardEvent): boolean {
+  if (e.code === "F5") return true; // F5 と Ctrl+F5（Ctrl の有無を問わない）
+  return (e.ctrlKey || e.metaKey) && e.code === "KeyR"; // Ctrl+R と Ctrl+Shift+R
+}
+
+/** M12-E: 確認を出している間に連打されても、ダイアログを二重に開かないための錠 */
+let reloadGuardBusy = false;
+/** M12-E: 「危ない操作の直前」オートセーブを最後に走らせた時刻（間引き用） */
+let lastGuardAutosaveAt = 0;
+/** M12-E: 背面に回るたびに書かないための最小間隔。ウィンドウの出入りは連続で来る */
+const GUARD_AUTOSAVE_MIN_INTERVAL = 3000;
+
+/** M12-E: **編集中に F5 を押しても、いきなり消えないようにする**。
+ *
+ *  これまで F5 はアプリ側で一切受けておらず、WebView の素の再読み込みがそのまま通っていた。
+ *  オートセーブは15秒間隔なので、**最大15秒ぶんが黙って失われる**状態だった。
+ *
+ *  約束事（`docs/REQ_M12_E_reload_guard.md` §3）:
+ *   - **ホーム画面では素通し**する（固まったときの逃げ道を残す）
+ *   - **未保存の変更が無ければ素通し**する（余計なダイアログを出さない）
+ *   - 未保存があるときだけ止めて、**確認より先にオートセーブを1回**走らせる。
+ *     こうしておくと、ダイアログを出している間に落ちても、その時点までは残る
+ *   - `confirmLeave()` は**使わない**。あれは「破棄」を選ぶと `invalidateAutosave()` が走って
+ *     **オートセーブを消す**。再読み込み後に「復元しますか？」を出したいので消してはいけない
+ *     （設定メニューの「終了」が同じ理由で `confirmLeave` を通していない・M11-6 P-1-5）
+ *
+ *  張る場所は **`window` の capture 段階**で、既存の `keydownHandler`（bubble・`editor.ts:715`）
+ *  とは**別の口**。既存のキー処理の順序には触れない。`keymap.ts` の割り当て対象にもしない
+ *  （これは割り当て可能なコマンドではなく**事故防止のガード**）。 */
+const reloadGuardHandler = (e: KeyboardEvent) => {
+  if (!isReloadKey(e)) return;
+  if (!editorOpen) return; // ホームは従来どおり再読み込みされる
+  // `editor.dirty` はライブラリへ戻っても false に戻らないので、`editorOpen` と必ず組で見る
+  if (!editor.dirty) return; // 失うものが無いなら止めない
+  // ここから先は**同期のうちに**既定動作を止める（この後の await 中に再読み込みされないように）
+  e.preventDefault();
+  e.stopPropagation();
+  if (reloadGuardBusy) return;
+  reloadGuardBusy = true;
+  void (async () => {
+    try {
+      // ★確認より前に1回。ユーザーが「やめる」を選んでも取りこぼさない
+      lastGuardAutosaveAt = Date.now();
+      await editor.autosaveNow();
+      const ok = await confirmDialog(t("ed.reload.dirty.msg"), {
+        yes: t("ed.reload.doReload.btn"),
+        no: t("ed.reload.stay.btn"),
+      });
+      if (ok) location.reload();
+    } finally {
+      reloadGuardBusy = false;
+    }
+  })();
+};
+
+/** M12-E: **アプリが背面に回ったとき**にもオートセーブを1回。
+ *
+ *  出入りは連続で来る（`library.ts` の指紋チェックが 400ms の最小間隔を置いているのと同じ事情）ので、
+ *  前回から `GUARD_AUTOSAVE_MIN_INTERVAL` 経っていなければ見送る。
+ *  `visibilitychange` は既に2箇所で使われているが、どちらも `stopImmediatePropagation()` を
+ *  呼ばないので、3つ目を足しても既存の動作は変わらない。 */
+const hiddenAutosaveHandler = () => {
+  if (document.visibilityState !== "hidden") return;
+  if (!editorOpen || !editor.dirty) return;
+  const now = Date.now();
+  if (now - lastGuardAutosaveAt < GUARD_AUTOSAVE_MIN_INTERVAL) return;
+  lastGuardAutosaveAt = now;
+  void editor.autosaveNow();
+};
 
 // 開発用: ブラウザ検証からエディタ内部状態へアクセスするためのフック（本番ビルドでは無効）
 if (import.meta.env.DEV) {
@@ -201,20 +350,22 @@ function showErrorDialog(detail: string) {
   errorDialogOpen = true;
   void modal((close) => {
     const box = document.createElement("div");
+    // M12-1a: 既存の HTML テンプレートはそのままに、日本語だけ ${t(...)} に置き換える
+    // （textContent へ移すと DOM 構造が変わり「見た目が1ドットも変わらない」の検証が難しくなるため）
     box.innerHTML = `
-      <p class="modal-msg"><b>⚠ 予期しないエラーが起きました</b><br>
-      作業内容はオートセーブで保護されています。続行できない場合はアプリを再起動してください。</p>
+      <p class="modal-msg"><b>${t("err.unexpected.label")}</b><br>
+      ${t("err.unexpected.msg")}</p>
       <pre class="err-detail"></pre>
       <div class="modal-actions">
-        <button class="btn" id="err-copy">📋 詳細をコピー</button>
+        <button class="btn" id="err-copy">${t("err.copyDetail.btn")}</button>
         <span style="flex:1"></span>
-        <button class="btn primary" id="err-close">閉じる</button>
+        <button class="btn primary" id="err-close">${t("common.close.btn")}</button>
       </div>`;
     (box.querySelector(".err-detail") as HTMLElement).textContent = detail;
     (box.querySelector("#err-copy") as HTMLElement).addEventListener("click", () => {
       navigator.clipboard?.writeText(detail).then(
-        () => toast("コピーしました"),
-        () => toast("コピーに失敗しました")
+        () => toast(t("common.copied.toast")),
+        () => toast(t("common.copyFailed.toast"))
       );
     });
     (box.querySelector("#err-close") as HTMLElement).addEventListener("click", () => {
@@ -240,15 +391,21 @@ window.addEventListener("unhandledrejection", (e) => {
   showErrorDialog(detail);
 });
 
-function confirmDialog(msg: string): Promise<boolean> {
+/** M11-23: `labels` で ボタン文言を差し替えられる（既定は はい/いいえ＝従来の呼び出しは1文字も変わらない）。
+ *  改行を含むメッセージは `white-space: pre-line` で行ごとに表示する（CSS ファイルは触らない） */
+function confirmDialog(msg: string, labels?: { yes: string; no: string }): Promise<boolean> {
   return modal((close) => {
     const box = document.createElement("div");
     box.innerHTML = `<p class="modal-msg"></p>
       <div class="modal-actions">
-        <button class="btn primary" data-v="1">はい</button>
-        <button class="btn" data-v="0">いいえ</button>
+        <button class="btn primary" data-v="1"></button>
+        <button class="btn" data-v="0"></button>
       </div>`;
-    (box.querySelector(".modal-msg") as HTMLElement).textContent = msg;
+    (box.querySelector('[data-v="1"]') as HTMLElement).textContent = labels?.yes ?? t("common.yes.btn");
+    (box.querySelector('[data-v="0"]') as HTMLElement).textContent = labels?.no ?? t("common.no.btn");
+    const msgEl = box.querySelector(".modal-msg") as HTMLElement;
+    if (msg.includes("\n")) msgEl.style.whiteSpace = "pre-line";
+    msgEl.textContent = msg;
     box.querySelectorAll("button").forEach((b) =>
       b.addEventListener("click", () => close(b.dataset.v === "1"))
     );
@@ -263,7 +420,7 @@ function promptDialog(msg: string, def: string): Promise<string | null> {
       <input class="modal-input" type="text" />
       <div class="modal-actions">
         <button class="btn primary" data-v="ok">OK</button>
-        <button class="btn" data-v="cancel">キャンセル</button>
+        <button class="btn" data-v="cancel">${t("common.cancel.btn")}</button>
       </div>`;
     (box.querySelector(".modal-msg") as HTMLElement).textContent = msg;
     const input = box.querySelector(".modal-input") as HTMLInputElement;
@@ -317,10 +474,10 @@ const EXTRACT_MAX_MB = 512;
 async function pickAudioFile(): Promise<{ bytes: Uint8Array; mime: string; name: string } | null> {
   const sel = await open({
     multiple: false,
-    title: "音声・動画ファイルを選択（動画は音声だけ取り込みます）",
+    title: t("ed.audio.pick.title"),
     filters: [
-      { name: "音声", extensions: ["mp3", "wav", "ogg", "m4a"] },
-      { name: "動画（音声を取り込み）", extensions: ["mp4", "mov", "webm", "mkv"] },
+      { name: t("ed.audio.pick.audioFilter.label"), extensions: ["mp3", "wav", "ogg", "m4a"] },
+      { name: t("ed.audio.pick.videoFilter.label"), extensions: ["mp4", "mov", "webm", "mkv"] },
     ],
   });
   if (!sel || typeof sel !== "string") return null;
@@ -332,14 +489,12 @@ async function pickAudioFile(): Promise<{ bytes: Uint8Array; mime: string; name:
   const sizeGuard = async (len: number): Promise<boolean> => {
     const mb = len / 1024 / 1024;
     if (mb > 64) {
-      toast(`音声が大きすぎます（${mb.toFixed(0)}MB）。64MB以下のファイルを選んでください`);
+      toast(t("ed.audio.tooLarge.toast", { mb: mb.toFixed(0) }));
       return false;
     }
     if (mb > 16) {
-      return await confirmDialog(
-        `音声が大きめです（${mb.toFixed(0)}MB）。プロジェクトファイルに埋め込まれるためファイルが肥大し、` +
-          `保存・読み込みが重くなる場合があります。続行しますか？`
-      );
+      // M12-1a: 元は2つのリテラルを + で連結していた。辞書では1キーにまとめる（訳文を分断しないため）
+      return await confirmDialog(t("ed.audio.largeWarn.msg", { mb: mb.toFixed(0) }));
     }
     return true;
   };
@@ -365,26 +520,26 @@ async function pickAudioFile(): Promise<{ bytes: Uint8Array; mime: string; name:
       if (m) {
         const mb = Number(m[1]) / 1024 / 1024;
         toast(
-          `動画が大きすぎます（${mb.toFixed(0)}MB）。${EXTRACT_MAX_MB}MB以下のファイルにしてください`
+          t("ed.audio.videoTooLarge.toast", { mb: mb.toFixed(0), max: EXTRACT_MAX_MB })
         );
         return null;
       }
-      logError("audio", `動画の読み込みに失敗: ${e}`);
-      toast(`ファイルを読み込めませんでした: ${e}`);
+      logError("audio", t("err.log.videoRead.msg", { err: e }));
+      toast(t("ed.audio.readFailed.toast", { err: e }));
       return null;
     }
-    toast("動画から音声を取り出しています…");
+    toast(t("ed.audio.extracting.toast"));
     let mp3: Uint8Array | null = null;
     try {
       const { extractAudioToMp3 } = await import("./editor/exporter");
       mp3 = await extractAudioToMp3(src, ext);
     } catch (e) {
       // 例外は上へ投げない（呼び出し元は null=キャンセルとして扱う）
-      logError("audio", `音声抽出で例外: ${e}`);
+      logError("audio", t("err.log.audioExtract.msg", { err: e }));
       mp3 = null;
     }
     if (!mp3) {
-      toast("この動画から音声を取り出せませんでした（音声トラックが無いか、未対応の形式です）");
+      toast(t("ed.audio.extractFailed.toast"));
       return null;
     }
     if (!(await sizeGuard(mp3.byteLength))) return null;
@@ -400,7 +555,7 @@ async function pickAudioFile(): Promise<{ bytes: Uint8Array; mime: string; name:
   // ガードだけ抽出経路と共有する sizeGuard に括り出してある（しきい値・文言・戻り値は同一）
   const mime = mimeFromExt(sel);
   if (!mime) {
-    toast("対応形式は mp3 / wav / ogg / m4a と動画（mp4 / mov / webm / mkv）です");
+    toast(t("ed.audio.unsupported.toast"));
     return null;
   }
   const bytes = await invoke<number[]>("read_file_bytes", { path: sel });
@@ -424,37 +579,42 @@ function openExportDialog(
     const fmtButtons = (Object.keys(FORMAT_INFO) as ExportFormat[])
       .map(
         (f) =>
-          `<button type="button" class="lv${f === "mp4" ? " on" : ""}" data-f="${f}">${FORMAT_INFO[f].label}</button>`
+          `<button type="button" class="lv${f === "mp4" ? " on" : ""}" data-f="${f}">${t(FORMAT_INFO[f].labelKey)}</button>`
       )
       .join("");
-    const scaleButtons = [1, 2, 3, 4]
-      .map(
-        (n) =>
-          `<button type="button" class="lv${n === 1 ? " on" : ""}" data-n="${n}">×${n}</button>`
-      )
-      .join("");
+    // M11-22: 倍率は [×1 ×2 ×4 ×8]（×3 廃止・×8 解禁）。既定は前回選んだ値（settings.exportScale）・
+    // 無ければ ×4。×4 に「おすすめ」バッジ。選択中の寸法＋用途は #ex-scale-note に常時表示
+    const scale0: ExportScale = sanitizeExportScale(settings.exportScale);
+    const scaleButtons = EXPORT_SCALES.map(
+      (n) =>
+        `<button type="button" class="lv${n === scale0 ? " on" : ""}" data-n="${n}">×${n}${
+          n === 4 ? `<span class="rec">${t("export.scale.recommended.label")}</span>` : ""
+        }</button>`
+    ).join("");
+    // M12-1a: HTML の骨格はそのまま・日本語だけ ${t(...)} へ（DOM を変えない）
     box.innerHTML = `
-      <p class="modal-msg"><b>⬇ 書き出し</b>　全${source.count}コマ・${source.fps}fps</p>
-      <div class="modal-field"><span>形式</span><div class="oni" id="ex-fmt" style="flex:1;flex-wrap:wrap">${fmtButtons}</div></div>
+      <p class="modal-msg"><b>${t("export.dialog.title")}</b>　${t("export.dialog.summary.hint", { count: source.count, fps: source.fps })}</p>
+      <div class="modal-field"><span>${t("export.format.label")}</span><div class="oni" id="ex-fmt" style="flex:1;flex-wrap:wrap">${fmtButtons}</div></div>
       <p class="modal-path" id="ex-note"></p>
-      <div class="modal-field"><span>倍率</span><div class="oni" id="ex-scale" style="flex:1">${scaleButtons}</div></div>
-      <div class="modal-field"><span>背景</span>
+      <div class="modal-field"><span>${t("export.scale.label")}</span><div class="oni" id="ex-scale" style="flex:1">${scaleButtons}</div></div>
+      <p class="modal-path" id="ex-scale-note"></p>
+      <div class="modal-field"><span>${t("export.background.label")}</span>
         <div class="sw2" id="ex-whitebg"></div>
-        <span style="font-weight:700;font-size:12px">背景を白にする</span>
+        <span style="font-weight:700;font-size:12px">${t("export.whiteBg.label")}</span>
       </div>
-      <p class="modal-path">透過部分を白で塗ります（3DS本体の書き出しと同じ）。APNG で透過を残したい場合は OFF に。</p>
-      <div class="modal-field"><span>範囲</span>
-        <label style="font-weight:700;font-size:12px"><input type="radio" name="ex-range" value="all" checked> 全体</label>
-        <label style="font-weight:700;font-size:12px"><input type="radio" name="ex-range" value="part"> 範囲</label>
+      <p class="modal-path" id="ex-whitebg-hint">${t("export.whiteBg.hint")}</p>
+      <div class="modal-field"><span>${t("export.range.label")}</span>
+        <label style="font-weight:700;font-size:12px"><input type="radio" name="ex-range" value="all" checked> ${t("export.range.all.label")}</label>
+        <label style="font-weight:700;font-size:12px"><input type="radio" name="ex-range" value="part"> ${t("export.range.part.label")}</label>
         <input id="ex-a" type="number" min="1" max="${source.count}" value="${(defaultRange?.a ?? 0) + 1}" style="width:70px" disabled>
-        〜
+        ${t("export.range.separator.label")}
         <input id="ex-b" type="number" min="1" max="${source.count}" value="${(defaultRange?.b ?? source.count - 1) + 1}" style="width:70px" disabled>
       </div>
       <div id="ex-len-wrap" hidden>
-        <div class="modal-field"><span>書き出す長さ</span>
+        <div class="modal-field"><span>${t("export.syncMode.label")}</span>
           <div class="oni" style="flex:1;flex-wrap:wrap">
-            <button type="button" class="lv" data-l="audioToAnim">アニメの長さで書き出す</button>
-            <button type="button" class="lv" data-l="animToAudio">曲の長さで書き出す</button>
+            <button type="button" class="lv" data-l="audioToAnim">${t("export.syncMode.audioToAnim.btn")}</button>
+            <button type="button" class="lv" data-l="animToAudio">${t("export.syncMode.animToAudio.btn")}</button>
           </div>
         </div>
         <p class="modal-path" id="ex-len-note"></p>
@@ -464,9 +624,12 @@ function openExportDialog(
         <p class="modal-path" id="ex-phase"></p>
       </div>
       <div class="modal-actions">
-        <button class="btn primary" id="ex-go">書き出し</button>
-        <button class="btn" id="ex-close">閉じる</button>
+        <button class="btn primary" id="ex-go">${t("export.run.btn")}</button>
+        <button class="btn" id="ex-close">${t("export.close.btn")}</button>
       </div>`;
+    // M12-1b-2（R-2 案1）: 属性へ訳文を埋めると、訳に " が入ったとき属性が割れる。
+    // テンプレートには入れず、組んだあとにプロパティで入れる（DOM の形も表示も同じ）
+    (box.querySelector("#ex-whitebg-hint") as HTMLElement).title = t("export.whiteBg.title");
     // 実行中は背面クリックで閉じない（modal共通ハンドラより先に capture で止める）
     // M10-17: modal() の閉じ判定は M10-11 で pointerdown 化済み — 止める側もそれに追従
     setTimeout(() => {
@@ -481,7 +644,22 @@ function openExportDialog(
     }, 0);
 
     let format: ExportFormat = "mp4";
-    let scale = 1;
+    let scale: ExportScale = scale0;
+    // M11-22: 選択中倍率の寸法＋用途（GIF×8 は容量注意を添える）。倍率・形式のどちらを変えても更新。
+    // 注意だけを赤くしたいので、本文は textContent・注意は <span class="warn"> を足す（innerHTML は使わない）
+    const scaleNoteEl = box.querySelector("#ex-scale-note") as HTMLElement;
+    const updateScaleNote = () => {
+      const s = scaleNote(scale);
+      // M11-24: 但し書き（拡大はドット等倍・なましなし）は常時表示から title へ
+      scaleNoteEl.textContent = t("export.scale.note.hint", { px: s.px, use: s.use });
+      scaleNoteEl.title = s.dots;
+      if (format === "gif" && scale === 8) {
+        const warn = document.createElement("span");
+        warn.className = "warn";
+        warn.textContent = `　${gifX8Warning()}`;
+        scaleNoteEl.appendChild(warn);
+      }
+    };
     // M10-13: 「背景を白にする」。デフォルトは形式ごと（mp4/gif=ON・apng/pngzip=OFF）。
     // 形式を切り替えたら**その形式のデフォルトへリセット**する（APNG に切り替えたのに
     // 白が乗ったままで透過が失われる事故の防止。直前の操作より予測可能性を優先）
@@ -513,8 +691,8 @@ function openExportDialog(
       );
       lenNote.textContent =
         syncMode === "animToAudio"
-          ? "曲の長さに合わせてアニメをループします"
-          : "音はアニメの長さに合わせてトリム/ループします";
+          ? t("export.syncMode.animToAudio.hint")
+          : t("export.syncMode.audioToAnim.hint");
     };
     box.querySelectorAll("[data-l]").forEach((b) =>
       b.addEventListener("click", () => {
@@ -527,17 +705,18 @@ function openExportDialog(
     const updateNote = () => {
       if (format === "mp4") {
         noteEl.textContent = hasAudio
-          ? "音声付きで書き出します（BGM＋配置SEをミックス）"
+          ? t("export.audio.withAudio.hint")
           : audioSrc?.has && audioSrc.allMuted
-            ? "音声はミュート中のため無音で書き出します"
-            : "この作品に音声はありません（無音）";
+            ? t("export.audio.muted.hint")
+            : t("export.audio.none.hint");
       } else {
         noteEl.textContent =
-          FORMAT_INFO[format].note ?? (hasAudio ? "この形式は無音です（音声はMP4のみ）" : "");
+          FORMAT_INFO[format].note ?? (hasAudio ? t("export.audio.formatSilent.hint") : "");
       }
       updateLenUI();
     };
     updateNote();
+    updateScaleNote();
     box.querySelectorAll("#ex-fmt .lv").forEach((b) =>
       b.addEventListener("click", () => {
         if (running) return;
@@ -547,14 +726,19 @@ function openExportDialog(
         whiteBg = WHITEBG_DEFAULT[format]; // M10-13: 形式のデフォルトへリセット
         syncWhiteBgUI();
         updateNote();
+        updateScaleNote(); // GIF×8 の注意は形式切替でも出し入れ
       })
     );
     box.querySelectorAll("#ex-scale .lv").forEach((b) =>
       b.addEventListener("click", () => {
         if (running) return;
-        scale = Number((b as HTMLElement).dataset.n);
+        scale = sanitizeExportScale(Number((b as HTMLElement).dataset.n));
         box.querySelectorAll("#ex-scale .lv").forEach((x) => x.classList.remove("on"));
         b.classList.add("on");
+        updateScaleNote();
+        // M11-22: 変えた瞬間に記憶（shelfSort / miniDock と同じ流儀）
+        settings.exportScale = scale;
+        invoke("save_settings", { settings }).catch(() => {});
       })
     );
     const aIn = box.querySelector("#ex-a") as HTMLInputElement;
@@ -580,7 +764,7 @@ function openExportDialog(
       if (running) {
         cancel.cancelled = true;
         closeBtn.disabled = true;
-        closeBtn.textContent = "中断中…";
+        closeBtn.textContent = t("export.close.aborting.btn");
       } else {
         close(null);
       }
@@ -591,7 +775,7 @@ function openExportDialog(
       running = true;
       const goBtn = box.querySelector("#ex-go") as HTMLButtonElement;
       goBtn.disabled = true;
-      closeBtn.textContent = "キャンセル";
+      closeBtn.textContent = t("export.close.cancel.btn");
       const progress = box.querySelector("#ex-progress") as HTMLElement;
       progress.hidden = false;
       const bar = box.querySelector("#ex-bar") as HTMLElement;
@@ -609,17 +793,83 @@ function openExportDialog(
           rangeSel = { a, b };
         }
         // M5-1: MP4 かつ音声ありなら最終ミックス（BGM＋SE）を1本レンダして mux へ渡す
+        // （M11-23: **見積もりより前**に作る。「曲の長さで書き出す」は映像を曲の尺までループさせるので、
+        //   実際にエンコードされるコマ数は exportAudio.durationSec×fps ＝ ミックスを作らないと分からない）
         let exportAudio = null;
         if (format === "mp4" && hasAudio && audioSrc) {
-          phaseEl.textContent = "音声ミックスを準備中…";
+          phaseEl.textContent = t("export.progress.audioMix.hint");
           progress.hidden = false;
           try {
             exportAudio = await audioSrc.build(rangeSel, syncMode);
           } catch (err) {
-            toast(`音声のミックスに失敗したため無音で書き出します: ${err}`);
+            toast(t("err.export.audioMix.toast", { err }));
             exportAudio = null;
           }
         }
+        // M11-23: 実行直前の見積もり（コマ数・倍率・形式・GIF は実使用色数）。**危険域のときだけ**確認を出す。
+        // 見積もりの色数は書き出しと同じ `collectGifPalette`（>256色＝null は従来の NeuQuant 経路）
+        const gifPal = format === "gif" ? collectGifPalette(src, whiteBg) : null;
+        // 「曲の長さで書き出す」= 映像を -stream_loop で曲の尺まで回すので、x264 が実際に処理するコマ数はこれ
+        const encodedFrames =
+          exportAudio && exportAudio.syncMode === "animToAudio"
+            ? Math.max(src.count, Math.ceil(exportAudio.durationSec * src.fps))
+            : src.count;
+        const est = estimateExport({
+          format,
+          scale,
+          frames: src.count,
+          encodedFrames,
+          gifColors: format === "gif" ? (gifPal ? gifPal.length / 3 : null) : null,
+        });
+        if (est.risky) {
+          // 代替案は「1段下の倍率」。ただし**そこも危険域なら「確実です」とは言わない**
+          // （例: 200コマ・246色を ×8 → ×4 に下げても 64 秒で危険域のまま）
+          const altScale = scale > 1 ? ((scale / 2) as ExportScale) : null;
+          const altEst = altScale
+            ? estimateExport({
+                format,
+                scale: altScale,
+                frames: src.count,
+                encodedFrames,
+                gifColors: est.gifColors,
+              })
+            : null;
+          const alt = !altScale
+            ? t("export.estimate.alt.split.msg")
+            : !altEst!.risky
+              ? t("export.estimate.alt.safe.msg", { scale: altScale, w: altEst!.w, h: altEst!.h })
+              : t("export.estimate.alt.stillRisky.msg", { scale: altScale, w: altEst!.w, h: altEst!.h });
+          // M11-24: 仕組みの説明（メモリを多く使うため／コマを全部ためてから…）は落とし、
+          // 「何が起きるか」と判断に要る数字だけにする（UI_TEXT_guide 5）
+          const lines = [
+            t("export.estimate.confirm.head.msg"),
+            t("export.estimate.spec.msg", { w: est.w, h: est.h, scale, frames: est.frames, format: t(FORMAT_INFO[format].labelKey) }),
+            est.encodedFrames > est.frames
+              ? t("export.estimate.loopedFrames.msg", { frames: est.encodedFrames })
+              : "",
+            est.memBytes > 0 ? t("export.estimate.memory.msg", { size: formatBytes(est.memBytes) }) : "",
+            t("export.estimate.time.msg", { time: formatDuration(est.seconds) }),
+            est.reasons.includes("memory")
+              ? t("export.estimate.riskMemory.msg")
+              : t("export.estimate.riskTime.msg"),
+            alt,
+            t("export.estimate.confirm.msg"),
+          ].filter((s) => s);
+          const go = await confirmDialog(lines.join("\n"), { yes: t("export.estimate.confirm.yes.btn"), no: t("export.estimate.confirm.no.btn") });
+          if (!go) {
+            // 「やめる」= 何も起きない。押す前の状態へ戻すだけ（書き出しは始めない）
+            running = false;
+            goBtn.disabled = false;
+            closeBtn.disabled = false;
+            closeBtn.textContent = t("export.close.btn");
+            progress.hidden = true;
+            phaseEl.textContent = "";
+            bar.style.width = "0%";
+            return;
+          }
+        }
+        // M11-23: 残り時間の目安（実測の外挿・事前見積もりを下限に使う）
+        const eta = createEtaEstimator(est.seconds);
         const blob = await runExport(src, {
           format,
           scale,
@@ -628,35 +878,39 @@ function openExportDialog(
           whiteBg,
           onProgress: (done, total, phase) => {
             bar.style.width = `${Math.round((done / Math.max(1, total)) * 100)}%`;
-            phaseEl.textContent = `${phase}… ${Math.min(done, total).toFixed(0)} / ${total}`;
+            // M11-23: 残り時間は「出せるようになってから」だけ添える（短い書き出しでは最後まで出ない）
+            const rest = eta.update(done, total, phase, performance.now());
+            phaseEl.textContent =
+              `${exportPhaseLabel(phase)}… ${Math.min(done, total).toFixed(0)} / ${total}` +
+              (rest ? t("export.progress.eta.hint", { rest }) : "");
           },
         });
         if (!blob || cancel.cancelled) {
-          toast("書き出しを中断しました");
+          toast(t("export.cancelled.toast"));
           close(null);
           return;
         }
         const info = FORMAT_INFO[format];
         const path = await save({
-          title: "書き出し先を選択",
+          title: t("export.save.dialog.title"),
           defaultPath: `${baseName}.${info.ext}`,
-          filters: [{ name: info.label, extensions: [info.ext] }],
+          filters: [{ name: t(info.labelKey), extensions: [info.ext] }],
         });
         if (!path || typeof path !== "string") {
-          toast("保存先が選択されなかったため破棄しました");
+          toast(t("export.noSavePath.toast"));
           close(null);
           return;
         }
-        phaseEl.textContent = "ファイルへ書き込み中…";
+        phaseEl.textContent = t("export.progress.writeFile.hint");
         await saveBlobToPath(path, blob);
-        toast(`書き出しました: ${path}`);
+        toast(t("export.done.toast", { path }));
         close(true);
       } catch (e) {
-        toast(`書き出しに失敗: ${e}`);
+        toast(t("err.export.failed.toast", { err: e }));
         running = false;
         goBtn.disabled = false;
         closeBtn.disabled = false;
-        closeBtn.textContent = "閉じる";
+        closeBtn.textContent = t("export.close.btn");
         progress.hidden = true;
       }
     });
@@ -671,32 +925,34 @@ function openExportDialog(
 function openImageExportDialog(p: Project, frameIndex: number, baseName: string) {
   return modal((close) => {
     const box = document.createElement("div");
-    const scaleButtons = [1, 2, 4, 8]
-      .map(
-        (n) =>
-          `<button type="button" class="lv${n === 1 ? " on" : ""}" data-n="${n}">×${n}</button>`
-      )
-      .join("");
+    // M11-22: 既定は前回選んだ値（settings.imageSaveScale・アニメ書き出しとは別に記憶）・無ければ ×4。×4 に「おすすめ」
+    const scale0: ExportScale = sanitizeExportScale(settings.imageSaveScale);
+    const scaleButtons = EXPORT_SCALES.map(
+      (n) =>
+        `<button type="button" class="lv${n === scale0 ? " on" : ""}" data-n="${n}">×${n}${
+          n === 4 ? `<span class="rec">${t("export.scale.recommended.label")}</span>` : ""
+        }</button>`
+    ).join("");
     box.innerHTML = `
-      <p class="modal-msg"><b>🖼 画像で保存</b>　いま見ているコマ（${frameIndex + 1}コマ目）だけを1枚の画像にします</p>
-      <div class="modal-field"><span>形式</span>
+      <p class="modal-msg"><b>${t("export.image.dialog.title")}</b>　${t("export.image.dialog.msg", { n: frameIndex + 1 })}</p>
+      <div class="modal-field"><span>${t("export.image.format.label")}</span>
         <div class="oni" id="ie-fmt" style="flex:1">
           <button type="button" class="lv on" data-f="png">PNG</button>
           <button type="button" class="lv" data-f="jpeg">JPEG</button>
         </div>
       </div>
-      <div class="modal-field"><span>大きさ</span><div class="oni" id="ie-scale" style="flex:1">${scaleButtons}</div></div>
-      <div class="modal-field" id="ie-tr-row"><span>背景</span>
+      <div class="modal-field"><span>${t("export.image.scale.label")}</span><div class="oni" id="ie-scale" style="flex:1">${scaleButtons}</div></div>
+      <div class="modal-field" id="ie-tr-row"><span>${t("export.image.background.label")}</span>
         <div class="sw2" id="ie-transparent"></div>
-        <span style="font-weight:700;font-size:12px">背景を透明にする（PNG のみ）</span>
+        <span style="font-weight:700;font-size:12px">${t("export.image.transparent.label")}</span>
       </div>
       <p class="modal-path" id="ie-note"></p>
       <div class="modal-actions">
-        <button class="btn primary" id="ie-go">保存…</button>
-        <button class="btn" id="ie-close">閉じる</button>
+        <button class="btn primary" id="ie-go">${t("export.image.save.btn")}</button>
+        <button class="btn" id="ie-close">${t("export.image.close.btn")}</button>
       </div>`;
     let format: "png" | "jpeg" = "png";
-    let scale = 1;
+    let scale: ExportScale = scale0;
     let transparent = false;
     const noteEl = box.querySelector("#ie-note") as HTMLElement;
     const trRow = box.querySelector("#ie-tr-row") as HTMLElement;
@@ -711,13 +967,17 @@ function openImageExportDialog(p: Project, frameIndex: number, baseName: string)
         .forEach((b) => b.classList.toggle("on", Number((b as HTMLElement).dataset.n) === scale));
       trEl.classList.toggle("on", transparent && format === "png");
       trRow.hidden = format !== "png"; // JPEG は透過を持てないので行ごと隠す
+      // M11-22: 寸法＋用途の一言（アニメ書き出しと同じ scaleNote）。
+      // M11-24: 但し書きは title へ。透過の説明も一言に詰める
+      const sn = scaleNote(scale);
+      noteEl.title = sn.dots;
       noteEl.textContent =
-        `${W * scale}×${H * scale} ピクセルで保存します（ドット等倍の拡大・なましなし）。` +
+        t("export.image.size.hint", { px: sn.px, use: sn.use }) +
         (format === "png"
           ? transparent
-            ? "紙の色は入らず、描いた所だけが残ります。"
-            : "紙の色ごと保存します。"
-          : "JPEG は透明を持てないため、紙の色ごと保存します。");
+            ? t("export.image.transparentOn.hint")
+            : t("export.image.transparentOff.hint")
+          : t("export.image.jpegNoAlpha.hint"));
     };
     box.querySelectorAll("#ie-fmt .lv").forEach((b) =>
       b.addEventListener("click", () => {
@@ -727,8 +987,11 @@ function openImageExportDialog(p: Project, frameIndex: number, baseName: string)
     );
     box.querySelectorAll("#ie-scale .lv").forEach((b) =>
       b.addEventListener("click", () => {
-        scale = Number((b as HTMLElement).dataset.n);
+        scale = sanitizeExportScale(Number((b as HTMLElement).dataset.n));
         sync();
+        // M11-22: 変えた瞬間に記憶（アニメ書き出しとは別キー）
+        settings.imageSaveScale = scale;
+        invoke("save_settings", { settings }).catch(() => {});
       })
     );
     trEl.addEventListener("click", () => {
@@ -743,27 +1006,27 @@ function openImageExportDialog(p: Project, frameIndex: number, baseName: string)
         // 既定のファイル名は「作品名_p03」＝あとから見てどのコマか分かる形
         const defName = `${baseName}_p${String(frameIndex + 1).padStart(3, "0")}.${ext}`;
         const path = await save({
-          title: "画像の保存先を選択",
+          title: t("export.image.savePicker.title"),
           defaultPath: defName,
-          filters: [{ name: format === "png" ? "PNG 画像" : "JPEG 画像", extensions: [ext] }],
+          filters: [{ name: format === "png" ? t("export.image.filter.png.label") : t("export.image.filter.jpeg.label"), extensions: [ext] }],
         });
         if (!path || typeof path !== "string") {
-          toast("保存先が選択されなかったため中止しました");
+          toast(t("export.image.canceled.toast"));
           goBtn.disabled = false;
           return;
         }
-        noteEl.textContent = "画像を作っています…";
+        noteEl.textContent = t("export.image.rendering.hint");
         const blob = await frameToImageBlob(p, frameIndex, {
           scale,
           type: format === "png" ? "image/png" : "image/jpeg",
           transparent,
         });
-        if (!blob) throw new Error("画像を作れませんでした");
+        if (!blob) throw new Error(t("err.image.render.msg"));
         await saveBlobToPath(path, blob);
-        toast(`保存しました: ${path}`);
+        toast(t("export.image.saved.toast", { path }));
         close(true);
       } catch (e) {
-        toast(`画像の保存に失敗: ${e}`);
+        toast(t("err.image.save.toast", { err: e }));
         goBtn.disabled = false;
         sync();
       }
@@ -795,19 +1058,19 @@ async function pickAlbum(
   // 今いるアルバムは選んでも何も起きないので候補から外す（押しても無反応、を作らない）
   const list = albums.filter((a) => a !== current);
   if (list.length === 0) {
-    toast("移動先になる別のアルバムがありません（先にアルバムを作ってください）");
+    toast(t("lib.moveTo.noAlbums.toast"));
     return null;
   }
   return modal((close) => {
     const box = document.createElement("div");
     box.innerHTML = `
-      <p class="modal-msg"><b>📁 移動先を選ぶ</b><br><span id="pa-title"></span></p>
-      <div class="modal-field"><span>アルバム</span>
+      <p class="modal-msg"><b>${t("lib.moveTo.dialog.title")}</b><br><span id="pa-title"></span></p>
+      <div class="modal-field"><span>${t("common.album.label")}</span>
         <select id="pa-album">${list.map(() => `<option></option>`).join("")}</select>
       </div>
       <div class="modal-actions">
-        <button class="btn primary" id="pa-ok">移動</button>
-        <button class="btn" id="pa-cancel">キャンセル</button>
+        <button class="btn primary" id="pa-ok">${t("lib.moveTo.ok.btn")}</button>
+        <button class="btn" id="pa-cancel">${t("common.cancel.btn")}</button>
       </div>`;
     (box.querySelector("#pa-title") as HTMLElement).textContent = title;
     const sel = box.querySelector("#pa-album") as HTMLSelectElement;
@@ -825,9 +1088,15 @@ async function pickAlbum(
   });
 }
 
-/** F-4: 保存先ピッカー（既存アルバム一覧＋新規フォルダ作成＋ファイル名＋保存先パス表示） */
+/** F-4: 保存先ピッカー（既存アルバム一覧＋新規フォルダ作成＋ファイル名＋保存先パス表示）
+ *
+ *  M12-D: 第1引数は **「このアルバムに入れたい」or null（＝おまかせ）**。
+ *  以前は `defaultAlbum === DEFAULT_ALBUM` という**文字列比較**で「呼び出し側が既定でよいと
+ *  言っているのか」を判定していた。既定名が UI 言語で変わるようになると、この比較は
+ *  **訳文どうしの比較**になって壊れる（保存済みのアルバム名と今の言語の既定名は一致しない）。
+ *  引数を null 許容にして、**意図を型で表す**ようにした＝訳文を比較する経路がゼロになる。 */
 async function pickSaveTarget(
-  defaultAlbum: string,
+  album: string | null,
   defaultName: string
 ): Promise<{ album: string; baseName: string } | null> {
   let albums: string[] = [];
@@ -836,26 +1105,27 @@ async function pickSaveTarget(
   } catch {
     /* Tauri外（dev）では空 */
   }
+  // おまかせ（null）のときだけ「前回の保存先」を優先する。指定があればそれを尊重する
   const def =
-    defaultAlbum === "未分類" && settings.lastAlbum && albums.includes(settings.lastAlbum)
+    album === null && settings.lastAlbum && albums.includes(settings.lastAlbum)
       ? settings.lastAlbum
-      : defaultAlbum;
+      : (album ?? defaultAlbumName());
   if (!albums.includes(def)) albums.unshift(def);
   return modal((close) => {
     const box = document.createElement("div");
     box.innerHTML = `
-      <p class="modal-msg"><b>💾 保存先を選ぶ</b></p>
-      <div class="modal-field"><span>アルバム</span>
+      <p class="modal-msg"><b>${t("common.saveTarget.dialog.title")}</b></p>
+      <div class="modal-field"><span>${t("common.album.label")}</span>
         <select id="ps-album">${albums
           .map((a) => `<option${a === def ? " selected" : ""}></option>`)
           .join("")}</select>
-        <button class="minibtn" id="ps-newalbum" type="button">＋ 新規フォルダ</button>
+        <button class="minibtn" id="ps-newalbum" type="button">${t("common.saveTarget.newFolder.btn")}</button>
       </div>
-      <div class="modal-field"><span>ファイル名</span><input id="ps-name" type="text" /></div>
+      <div class="modal-field"><span>${t("common.saveTarget.fileName.label")}</span><input id="ps-name" type="text" /></div>
       <p class="modal-path" id="ps-path"></p>
       <div class="modal-actions">
-        <button class="btn primary" id="ps-ok">保存</button>
-        <button class="btn" id="ps-cancel">キャンセル</button>
+        <button class="btn primary" id="ps-ok">${t("common.save.btn")}</button>
+        <button class="btn" id="ps-cancel">${t("common.cancel.btn")}</button>
       </div>`;
     const sel = box.querySelector("#ps-album") as HTMLSelectElement;
     // option の textContent はエスケープのため後から代入
@@ -868,13 +1138,13 @@ async function pickSaveTarget(
     const pathEl = box.querySelector("#ps-path") as HTMLElement;
     const updatePath = () => {
       const nm = (nameInput.value.trim() || defaultName).replace(/\.(memoanima|animemo)$/i, "");
-      pathEl.textContent = `保存先: ${settings.libraryDir ?? ""}\\${sel.value}\\${nm}.memoanima`;
+      pathEl.textContent = t("common.saveTarget.path.hint", { dir: settings.libraryDir ?? "", album: sel.value, name: nm });
     };
     sel.addEventListener("change", updatePath);
     nameInput.addEventListener("input", updatePath);
     updatePath();
     (box.querySelector("#ps-newalbum") as HTMLElement).addEventListener("click", async () => {
-      const name = await promptDialog("新しいフォルダ名", "新しいアルバム");
+      const name = await promptDialog(t("common.saveTarget.newFolder.msg"), newAlbumName());
       if (!name) return;
       try {
         const created = await invoke<string>("create_album", {
@@ -929,15 +1199,15 @@ async function decodeImageFile(path: string): Promise<SourceImage> {
  *  現状の到達経路は DEV 限定フック `__animemo.imageImport` のみ（本番ビルドでは削除される）。 */
 async function openImageImportFlow(paths?: string[]) {
   if (!settings.libraryDir) {
-    toast("先にライブラリフォルダを設定してください（⚙）");
+    toast(t("img.libraryDir.toast"));
     return;
   }
   let sel: string[] | string | null = paths ?? null;
   if (!sel) {
     sel = await open({
       multiple: true,
-      title: "取り込む画像を選択（複数=ページ送りのアニメ背景）",
-      filters: [{ name: "画像 (png/jpg)", extensions: ["png", "jpg", "jpeg"] }],
+      title: t("img.pick.title"),
+      filters: [{ name: t("img.pick.filter.label"), extensions: ["png", "jpg", "jpeg"] }],
     });
   }
   if (!sel) return;
@@ -948,11 +1218,11 @@ async function openImageImportFlow(paths?: string[]) {
     try {
       images.push(await decodeImageFile(f));
     } catch (e) {
-      toast(`読み込めませんでした: ${f.split(/[\\/]/).pop()}（${e}）`);
+      toast(t("img.decodeFail.toast", { name: f.split(/[\\/]/).pop(), err: e }));
     }
   }
   if (!images.length) return;
-  const defaultTitle = stripExt(files[0].split(/[\\/]/).pop() ?? "画像取り込み");
+  const defaultTitle = stripExt(files[0].split(/[\\/]/).pop() ?? imageProjectTitle());
   await openImageImportDialog(images, defaultTitle);
 }
 
@@ -962,8 +1232,8 @@ async function openImageImportFlowForEditor(path?: string) {
   if (!sel) {
     sel = await open({
       multiple: false,
-      title: "このページに配置する画像を選択（1枚）",
-      filters: [{ name: "画像 (png/jpg)", extensions: ["png", "jpg", "jpeg"] }],
+      title: t("img.pickEditor.title"),
+      filters: [{ name: t("img.pick.filter.label"), extensions: ["png", "jpg", "jpeg"] }],
     });
   }
   if (!sel || typeof sel !== "string") return;
@@ -971,11 +1241,11 @@ async function openImageImportFlowForEditor(path?: string) {
   try {
     image = await decodeImageFile(sel);
   } catch (e) {
-    toast(`読み込めませんでした: ${sel.split(/[\\/]/).pop()}（${e}）`);
+    toast(t("img.decodeFail.toast", { name: sel.split(/[\\/]/).pop(), err: e }));
     return;
   }
   const info = editor.placementInfo();
-  await openImageImportDialog([image], stripExt(sel.split(/[\\/]/).pop() ?? "画像"), {
+  await openImageImportDialog([image], stripExt(sel.split(/[\\/]/).pop() ?? IMG_DEFAULT_TITLE_EDITOR), {
     layerName: info.layerName,
     frameNo: info.frameNo,
     onPlace: (proj, transparentPaper) => editor.placeConvertedImage(proj, transparentPaper),
@@ -1007,11 +1277,13 @@ function openImageImportDialog(
     const paperSwatches = ["#ffffff", "#fbefd6", "#9aa4b2", "#141414"];
     const fpsChoices = [1, 2, 4, 6, 8, 12];
     const headNote = editorCtx
-      ? `配置先: いま選択中のレイヤー「${escapeHtml(editorCtx.layerName)}」（コマ ${editorCtx.frameNo}）`
-      : `${images.length}枚 → ${images.length}ページ${images.length > 1 ? "（アニメ背景）" : ""}`;
+      ? t("img.dialog.target.hint", { layer: escapeHtml(editorCtx.layerName), frame: editorCtx.frameNo })
+      : t("img.dialog.pages.hint", { n: images.length }) +
+        (images.length > 1 ? t("img.dialog.pagesAnime.hint") : "");
+    // M11-24: 「複数ページのアニメ背景は、ライブラリ画面の📷を…」の案内を削除した。
+    // M8-2b でライブラリの📷ボタン自体を撤去しており、**存在しない導線を案内していた**
     box.innerHTML = `
-      <p class="modal-msg"><b>📷 画像を取り込む</b>　${headNote}</p>
-      ${editorCtx ? `<p class="modal-path">複数ページのアニメ背景にしたいときは、ライブラリ画面の📷（新規メモとして取り込み→ページコピー）を使ってください。</p>` : ""}
+      <p class="modal-msg"><b>${t("img.dialog.title")}</b>　${headNote}</p>
       <div class="imgimp">
         <div class="imgimp-left">
           <canvas id="ii-cv" width="${W}" height="${H}"></canvas>
@@ -1022,61 +1294,70 @@ function openImageImportDialog(
           </div>
         </div>
         <div class="imgimp-right">
-          <div class="modal-field"><span>モード</span><div class="oni" id="ii-mode" style="flex:1">
-            <button type="button" class="lv on" data-m="color">カラー</button>
-            <button type="button" class="lv" data-m="tone">トーン（さつえい）</button>
-            <button type="button" class="lv" data-m="lineart">線画</button>
+          <div class="modal-field"><span>${t("img.mode.label")}</span><div class="oni" id="ii-mode" style="flex:1">
+            <button type="button" class="lv on" data-m="color">${t("img.mode.color.btn")}</button>
+            <button type="button" class="lv" data-m="tone">${t("img.mode.tone.btn")}</button>
+            <button type="button" class="lv" data-m="lineart">${t("img.mode.lineart.btn")}</button>
           </div></div>
           <div id="ii-sec-color">
-            <div class="modal-field"><span>パレット</span><div class="oni" id="ii-pal" style="flex:1">
-              <button type="button" class="lv on" data-p="auto">おまかせ</button>
-              <button type="button" class="lv" data-p="ugo">うごメモ6色</button>
-              <button type="button" class="lv" data-p="retro">レトロ14色</button>
+            <div class="modal-field"><span>${t("img.palette.label")}</span><div class="oni" id="ii-pal" style="flex:1">
+              <button type="button" class="lv on" data-p="auto">${t("img.palette.auto.btn")}</button>
+              <button type="button" class="lv" data-p="ugo">${t("img.palette.ugo.btn")}</button>
+              <button type="button" class="lv" data-p="retro">${t("img.palette.retro.btn")}</button>
             </div></div>
-            <div class="modal-field" id="ii-colors-row"><span>色数 <b id="ii-colors-v">${o.colors}</b></span><div class="ii-sl" id="ii-colors"></div></div>
-            <div class="modal-field"><span>ディザ</span><div class="oni" id="ii-dither" style="flex:1">
-              <button type="button" class="lv on" data-d="fs">なめらか</button>
-              <button type="button" class="lv" data-d="ordered">網点</button>
-              <button type="button" class="lv" data-d="none">なし</button>
+            <div class="modal-field" id="ii-colors-row"><span>${t("img.colors.label")} <b id="ii-colors-v">${o.colors}</b></span><div class="ii-sl" id="ii-colors"></div></div>
+            <div class="modal-field"><span>${t("img.dither.label")}</span><div class="oni" id="ii-dither" style="flex:1">
+              <button type="button" class="lv on" data-d="fs">${t("img.dither.fs.btn")}</button>
+              <button type="button" class="lv" data-d="ordered">${t("img.dither.ordered.btn")}</button>
+              <button type="button" class="lv" data-d="none">${t("img.dither.none.btn")}</button>
             </div></div>
           </div>
           <div id="ii-sec-tone" hidden>
-            <div class="modal-field"><span>しきい値 <b id="ii-thr-v">${o.threshold}</b></span><div class="ii-sl" id="ii-thr"></div></div>
-            <div class="modal-field"><span>ディザ量 <b id="ii-amt-v">${o.ditherAmt}</b></span><div class="ii-sl" id="ii-amt"></div></div>
+            <div class="modal-field"><span>${t("img.threshold.label")} <b id="ii-thr-v">${o.threshold}</b></span><div class="ii-sl" id="ii-thr"></div></div>
+            <div class="modal-field"><span>${t("img.ditherAmt.label")} <b id="ii-amt-v">${o.ditherAmt}</b></span><div class="ii-sl" id="ii-amt"></div></div>
           </div>
           <div id="ii-sec-line" hidden>
-            <div class="modal-field"><span>輪郭の強さ <b id="ii-edge-v">${o.edge}</b></span><div class="ii-sl" id="ii-edge"></div></div>
+            <div class="modal-field"><span>${t("img.edge.label")} <b id="ii-edge-v">${o.edge}</b></span><div class="ii-sl" id="ii-edge"></div></div>
           </div>
           <div id="ii-inkrow" hidden>
-            <div class="modal-field"><span>インク色</span><div class="ii-swatches" id="ii-ink">
+            <div class="modal-field"><span>${t("img.ink.label")}</span><div class="ii-swatches" id="ii-ink">
               ${inkSwatches.map((c) => `<button type="button" class="ii-sw${c === o.ink ? " on" : ""}" data-c="${c}" style="background:${c}"></button>`).join("")}
-              <input type="color" id="ii-ink-custom" value="${o.ink}" title="好きな色">
+              <input type="color" id="ii-ink-custom" value="${o.ink}">
             </div></div>
-            <div class="modal-field"><span>反転</span><button type="button" class="lv" id="ii-invert">◱ 明暗反転</button></div>
+            <div class="modal-field"><span>${t("img.invert.label")}</span><button type="button" class="lv" id="ii-invert">${t("img.invert.btn")}</button></div>
           </div>
-          <div class="modal-field"><span>明るさ <b id="ii-br-v">0</b></span><div class="ii-sl" id="ii-br"></div></div>
-          <div class="modal-field"><span>コントラスト <b id="ii-ct-v">0</b></span><div class="ii-sl" id="ii-ct"></div></div>
-          <div class="modal-field"><span>おさめ方</span><div class="oni" id="ii-fit" style="flex:1">
-            <button type="button" class="lv on" data-f="cover">画面いっぱい</button>
-            <button type="button" class="lv" data-f="contain">全体を入れる（余白=紙）</button>
+          <div class="modal-field"><span>${t("img.brightness.label")} <b id="ii-br-v">0</b></span><div class="ii-sl" id="ii-br"></div></div>
+          <div class="modal-field"><span>${t("img.contrast.label")} <b id="ii-ct-v">0</b></span><div class="ii-sl" id="ii-ct"></div></div>
+          <div class="modal-field"><span>${t("img.fit.label")}</span><div class="oni" id="ii-fit" style="flex:1">
+            <button type="button" class="lv on" data-f="cover">${t("img.fit.cover.btn")}</button>
+            <button type="button" class="lv" data-f="contain">${t("img.fit.contain.btn")}</button>
           </div></div>
-          <div class="modal-field"><span>紙の色</span><div class="ii-swatches" id="ii-paper">
+          <div class="modal-field"><span>${t("img.paper.label")}</span><div class="ii-swatches" id="ii-paper">
             ${paperSwatches.map((c) => `<button type="button" class="ii-sw${c === o.paper ? " on" : ""}" data-c="${c}" style="background:${c}"></button>`).join("")}
-            <input type="color" id="ii-paper-custom" value="${o.paper}" title="好きな色">
+            <input type="color" id="ii-paper-custom" value="${o.paper}">
           </div></div>
-          <div class="modal-field" ${images.length > 1 ? "" : "hidden"}><span>速さ</span><div class="oni" id="ii-fps" style="flex:1">
+          <div class="modal-field" ${images.length > 1 ? "" : "hidden"}><span>${t("img.fps.label")}</span><div class="oni" id="ii-fps" style="flex:1">
             ${fpsChoices.map((f) => `<button type="button" class="lv${f === o.fps ? " on" : ""}" data-fps="${f}">${f}fps</button>`).join("")}
           </div></div>
-          ${editorCtx ? `<div class="modal-field"><span>紙色を透過</span><button type="button" class="lv on" id="ii-transparent" title="紙色の画素を透明にして、いまの絵の上に重ねられるようにする">ON（絵の上に重ねる）</button></div>` : ""}
+          ${editorCtx ? `<div class="modal-field"><span>${t("img.transparent.label")}</span><button type="button" class="lv on" id="ii-transparent">${t("img.transparent.on.btn")}</button></div>` : ""}
         </div>
       </div>
       <div class="modal-actions">
-        <button class="btn primary" id="ii-ok">${editorCtx ? "このページに配置" : "取り込む"}</button>
-        <button class="btn" id="ii-cancel">キャンセル</button>
+        <button class="btn primary" id="ii-ok">${editorCtx ? t("img.place.btn") : t("img.import.btn")}</button>
+        <button class="btn" id="ii-cancel">${t("common.cancel.btn")}</button>
       </div>`;
 
     const q = <T extends HTMLElement = HTMLElement>(s: string) =>
       box.querySelector(s) as T;
+    // M12-1b-2（R-2 案1）: 属性へ訳文を埋めない。組んだあとにプロパティで入れる
+    for (const sel of ["#ii-ink-custom", "#ii-paper-custom"]) {
+      const el = box.querySelector(sel) as HTMLElement | null;
+      if (el) el.title = t("img.customColor.title");
+    }
+    {
+      const el = box.querySelector("#ii-transparent") as HTMLElement | null;
+      if (el) el.title = t("img.transparent.title");
+    }
     const cv = q<HTMLCanvasElement>("#ii-cv");
     const cctx = cv.getContext("2d")!;
 
@@ -1182,8 +1463,8 @@ function openImageImportDialog(
         transparentPaper = !transparentPaper;
         q("#ii-transparent").classList.toggle("on", transparentPaper);
         q("#ii-transparent").textContent = transparentPaper
-          ? "ON（絵の上に重ねる）"
-          : "OFF（背景として敷く）";
+          ? t("img.transparent.on.btn")
+          : t("img.transparent.off.btn");
       });
     }
 
@@ -1207,12 +1488,12 @@ function openImageImportDialog(
           close(true);
           editorCtx.onPlace(proj, transparentPaper);
         } catch (e) {
-          toast(`配置に失敗: ${e}`);
+          toast(t("img.placeFail.toast", { err: e }));
           busy = false;
         }
         return;
       }
-      const target = await pickSaveTarget("未分類", o.title || defaultTitle);
+      const target = await pickSaveTarget(null, o.title || defaultTitle); // M12-D: おまかせ
       if (!target) return;
       busy = true;
       (q("#ii-ok") as HTMLButtonElement).disabled = true;
@@ -1238,11 +1519,11 @@ function openImageImportDialog(
         );
         settings.lastAlbum = target.album;
         invoke("save_settings", { settings }).catch(() => {});
-        toast(`取り込みました: ${target.album} / ${target.baseName}.memoanima`);
+        toast(t("img.importDone.toast", { album: target.album, name: target.baseName }));
         close(true);
         library.refresh();
       } catch (e) {
-        toast(`取り込みに失敗: ${e}`);
+        toast(t("img.importFail.toast", { err: e }));
         busy = false;
         (q("#ii-ok") as HTMLButtonElement).disabled = false;
       }
@@ -1265,7 +1546,7 @@ function packRawSave(meta: Record<string, unknown>, parts: Uint8Array[]): Uint8A
   // u32 長接頭辞の折り返し（≥4GiB で setUint32 が下位32bitに丸まる）を決定的に遮断
   //（現実の .memoanima では到達しない理論値ガード — レビュー指摘）
   for (const p of [metaBytes, ...parts]) {
-    if (p.length > 0xffffffff) throw new Error("保存データが大きすぎます");
+    if (p.length > 0xffffffff) throw new Error(t("err.save.tooLarge.msg"));
   }
   let total = 4 + metaBytes.length;
   for (const p of parts) total += 4 + p.length;
@@ -1305,6 +1586,15 @@ function showEditor(
   editorOpen = true;
   // M10-1c: 文字ツールの書体・サイズ・太さを settings.json から復元（不正値は既定へ）
   editor.restoreTextSettings(settings.text);
+  // M11-16: HUD の隠す/出す（hudHidden）も同じ流儀で復元（true 以外は表示）。旧 miniHidden は読まない
+  editor.restoreHudHidden(settings.hudHidden);
+  // M11-17: パネル寸法（スプリッター）も同じ流儀で復元（項目ごとに不正値・範囲外は既定へ）
+  editor.restoreLayout(settings.layout);
+  // M11-18: ミニの置き場（"float" 以外は収納）・個別の畳み（true 以外は開く）。集中は復元しない
+  editor.restoreMiniDock(settings.miniDock);
+  editor.restoreCollapsed(settings.collapsed);
+  // M12-C: カーソル（点/十字/矢印・輪・ドット枠）。無い・不正値は既定（点＋輪 ON・枠 OFF）
+  editor.restoreCursor(settings.cursor);
   editor.mount(
     project,
     ctx,
@@ -1318,6 +1608,21 @@ function showEditor(
       // M10-1c: 文字設定は変えた瞬間に保存する（display と同じ流儀）
       onTextSettingsChange: (t) => {
         settings.text = t;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      // M11-16: HUD の隠す/出すも変えた瞬間に保存する（同じ流儀）。旧 miniHidden は書かない
+      onHudHiddenChange: (hidden) => {
+        settings.hudHidden = hidden;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      // M11-17: スプリッターの確定・既定復帰の瞬間に保存する（ドラッグ中は呼ばれない）
+      onLayoutChange: (layout) => {
+        settings.layout = layout;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      // M11-18: 個別の畳み状態も同じ流儀（つまみ・畳むボタンの瞬間だけ。集中トグルは保存しない）
+      onCollapsedChange: (collapsed) => {
+        settings.collapsed = collapsed;
         invoke("save_settings", { settings }).catch(() => {});
       },
       saveProject: async (c, data, thumb) => {
@@ -1367,7 +1672,7 @@ function stripExt(name: string): string {
 
 async function openEditorWithNote(item: LibraryView) {
   try {
-    toast("読み込み中…");
+    toast(t("common.loading.toast"));
     const bytes = await invoke<number[]>("read_file_bytes", { path: item.path });
     const { project } = await importFlipnote(
       new Uint8Array(bytes).buffer,
@@ -1379,7 +1684,7 @@ async function openEditorWithNote(item: LibraryView) {
       baseName: stripExt(item.name),
     });
   } catch (e) {
-    toast(`開けませんでした: ${e}`);
+    toast(t("err.open.toast", { err: e }));
   }
 }
 
@@ -1393,7 +1698,7 @@ async function openEditorWithProject(item: LibraryView) {
       baseName: stripExt(item.name),
     });
   } catch (e) {
-    toast(`開けませんでした: ${e}`);
+    toast(t("err.open.toast", { err: e }));
   }
 }
 
@@ -1404,7 +1709,7 @@ function newNote(album: string) {
   ).padStart(2, "0")}-${String(d.getHours()).padStart(2, "0")}${String(
     d.getMinutes()
   ).padStart(2, "0")}`;
-  const project = newProject(`新規メモ ${stamp}`);
+  const project = newProject(t("lib.newNote.name.label", { stamp }));
   // F-4: 新規メモは初回保存時に必ず保存先ピッカーを出す（既定=開いていたアルバム）
   showEditor(
     project,
@@ -1426,30 +1731,32 @@ async function checkAutosave() {
     return;
   }
   if (!payload) return;
-  const title = payload.meta?.title ?? "無題";
+  const title = payload.meta?.title ?? untitledTitle();
   // 3値: "restore" / "discard" / null（背面クリック等）。
   // null では絶対に消さない（誤クリックで唯一の復元データを失わない — Codexレビュー指摘#5）
   const choice = await modal((close) => {
     const box = document.createElement("div");
+    // M12-1a: 文中に作品名が入る箇所は、{title} に**空の span** を差して DOM をそのまま保ち、
+    // 中身は下の textContent で入れる（ユーザーのデータを HTML に混ぜない）
     box.innerHTML = `
-      <p class="modal-msg"><b>🛟 前回の編集を復元しますか？</b><br>
-      保存されていない編集データが見つかりました:「<span id="as-title"></span>」<br>
+      <p class="modal-msg"><b>${t("lib.autosave.restore.label")}</b><br>
+      ${t("lib.autosave.restore.msg", { title: `<span id="as-title"></span>` })}<br>
       <span class="modal-path"></span></p>
       <div class="modal-actions">
-        <button class="btn primary" data-v="restore">復元して開く</button>
-        <button class="btn" data-v="discard">破棄する</button>
-        <button class="btn" data-v="">あとで</button>
+        <button class="btn primary" data-v="restore">${t("lib.autosave.restore.btn")}</button>
+        <button class="btn" data-v="discard">${t("lib.autosave.discard.btn")}</button>
+        <button class="btn" data-v="">${t("lib.autosave.later.btn")}</button>
       </div>`;
     (box.querySelector("#as-title") as HTMLElement).textContent = title;
     (box.querySelector(".modal-path") as HTMLElement).textContent =
-      `場所: ${payload!.path}`;
+      t("lib.autosave.path.hint", { path: payload!.path });
     box.querySelectorAll("button").forEach((b) =>
       b.addEventListener("click", () => close(b.dataset.v || null))
     );
     return box;
   });
   if (choice === "discard") {
-    const sure = await confirmDialog("復元データを完全に破棄します。よろしいですか？");
+    const sure = await confirmDialog(t("lib.autosave.discardConfirm.msg"));
     if (sure) await invoke("clear_autosave").catch(() => {});
     return;
   }
@@ -1473,7 +1780,7 @@ async function checkAutosave() {
     });
     editor.dirty = true; // 復元直後から未保存扱い（オートセーブ継続）
   } catch (e) {
-    toast(`復元に失敗しました: ${e}`);
+    toast(t("err.autosaveRestore.toast", { err: e }));
   }
 }
 
@@ -1521,8 +1828,8 @@ async function applyDisplaySettings(d?: DisplaySettings, notify = false): Promis
     });
     return true;
   } catch (e) {
-    logError("display", `ディスプレイ設定の適用に失敗: ${e}`);
-    if (notify) toast(`ディスプレイ設定の適用に失敗: ${e}`);
+    logError("display", t("err.display.apply.toast", { err: e }));
+    if (notify) toast(t("err.display.apply.toast", { err: e }));
     return false;
   }
 }
@@ -1540,60 +1847,117 @@ async function openSettingsMenu() {
           ? settings.display!.size.join("x")
           : "1280x800";
     const ver = appInfoCache?.version ?? "?";
+    // M11-24: プレビュー小窓は3ボタンの説明を並べ立てない（既定の一言だけ・詳細は各ボタンの title へ）
     box.innerHTML = `
-      <p class="modal-msg"><b>⚙ 設定</b></p>
+      <p class="modal-msg"><b>${t("set.dialog.label")}</b></p>
       <div class="set-sec">
-        <b>📁 ライブラリフォルダ</b>
-        <p class="modal-path" id="set-dir-path"></p>
-        <button class="minibtn" id="set-dir">変更…</button>
+        <b>${t("set.lang.label")}</b>
+        <div class="oni" style="flex:1" id="set-lang">
+          <button type="button" class="lv" data-lang="ja"></button>
+          <button type="button" class="lv" data-lang="en"></button>
+          <button type="button" class="lv" data-lang="es"></button>
+          <button type="button" class="lv" data-lang="pt-BR"></button>
+          <button type="button" class="lv" data-lang="ko"></button>
+        </div>
+        <p class="hintline">${t("set.lang.hint")}</p>
       </div>
       <div class="set-sec">
-        <b>🖥 ディスプレイ設定</b>
-        <div class="modal-field"><span>モード</span>
+        <b>${t("set.libdir.label")}</b>
+        <p class="modal-path" id="set-dir-path"></p>
+        <button class="minibtn" id="set-dir">${t("set.libdir.btn")}</button>
+      </div>
+      <div class="set-sec">
+        <b>${t("set.display.label")}</b>
+        <div class="modal-field"><span>${t("set.display.mode.label")}</span>
           <div class="oni" style="flex:1" id="set-modes">
-            <button type="button" class="lv" data-mode="windowed">ウィンドウ</button>
-            <button type="button" class="lv" data-mode="fullscreen">フルスクリーン</button>
-            <button type="button" class="lv" data-mode="borderless">ボーダーレス</button>
+            <button type="button" class="lv" data-mode="windowed">${t("set.mode.windowed.btn")}</button>
+            <button type="button" class="lv" data-mode="fullscreen">${t("set.mode.fullscreen.btn")}</button>
+            <button type="button" class="lv" data-mode="borderless">${t("set.mode.borderless.btn")}</button>
           </div>
         </div>
-        <div class="modal-field"><span>サイズ</span>
+        <div class="modal-field"><span>${t("set.display.size.label")}</span>
           <div class="oni" style="flex:1" id="set-sizes">
             <button type="button" class="lv" data-size="1280x800">1280×800</button>
             <button type="button" class="lv" data-size="1600x900">1600×900</button>
             <button type="button" class="lv" data-size="1920x1080">1920×1080</button>
-            <button type="button" class="lv" data-size="max">画面に合わせる</button>
+            <button type="button" class="lv" data-size="max">${t("set.size.max.btn")}</button>
           </div>
         </div>
-        <p class="hintline" id="set-size-hint">サイズはウィンドウモードのときに使えます</p>
+        <p class="hintline" id="set-size-hint">${t("set.size.hint")}</p>
       </div>
       <div class="set-sec">
-        <b>⌨ ショートカットキー</b>
+        <b>${t("set.minidock.label")}</b>
+        <div class="modal-field"><span>${t("set.minidock.place.label")}</span>
+          <div class="oni" style="flex:1" id="set-minidock">
+            <button type="button" class="lv" data-dock="timeline">${t("set.minidock.timeline.btn")}</button>
+            <button type="button" class="lv" data-dock="float">${t("set.minidock.float.btn")}</button>
+            <button type="button" class="lv" data-dock="off">${t("set.minidock.off.btn")}</button>
+          </div>
+        </div>
+        <!-- M11-24: 3ボタンの説明を並べ立てない。既定の一言だけ残し、詳細は各ボタンの title へ -->
+        <p class="hintline">${t("set.minidock.hint")}</p>
+      </div>
+      <div class="set-sec">
+        <b>${t("set.cursor.label")}</b>
+        <div class="modal-field"><span>${t("set.cursor.style.label")}</span>
+          <div class="oni" style="flex:1" id="set-cursor-style">
+            <button type="button" class="lv" data-cur="dot">${t("set.cursor.dot.btn")}</button>
+            <button type="button" class="lv" data-cur="cross">${t("set.cursor.cross.btn")}</button>
+            <button type="button" class="lv" data-cur="arrow">${t("set.cursor.arrow.btn")}</button>
+          </div>
+        </div>
+        <div class="modal-field"><span>${t("set.cursor.guide.label")}</span>
+          <div class="oni" style="flex:1" id="set-cursor-guide">
+            <button type="button" class="lv" data-flag="ring">${t("set.cursor.ring.btn")}</button>
+            <button type="button" class="lv" data-flag="cell">${t("set.cursor.cell.btn")}</button>
+          </div>
+        </div>
+        <p class="hintline">${t("set.cursor.hint")}</p>
+      </div>
+      <div class="set-sec">
+        <b>${t("set.keys.label")}</b>
         <p class="modal-path" id="set-keys-cur"></p>
-        <button class="minibtn" id="set-keys">割り当てを見る・変える…</button>
+        <button class="minibtn" id="set-keys">${t("set.keys.btn")}</button>
       </div>
       <div class="set-sec">
-        <button class="minibtn" id="set-guide">🛟 ガイドをもう一度見る</button>
+        <button class="minibtn" id="set-guide">${t("set.guide.btn")}</button>
       </div>
       <div class="set-sec">
-        <b>ℹ バージョン情報</b>
-        <p class="modal-path">メモアニマ (MemoAnima) v${ver}<br>作者: アルカナ (arcana)&nbsp;&nbsp;X: @Arcana_Proxy</p>
+        <b>${t("set.about.label")}</b>
+        <p class="modal-path">${t("set.about.version.label", { ver })}<br>${t("set.about.author.label")}&nbsp;&nbsp;X: @Arcana_Proxy</p>
         <div class="legal-note">
-          <p>本ソフトは個人制作の非公式・非営利ファンツールです。任天堂株式会社およびその関連会社とは一切関係がなく、許諾・後援・提携を受けたものではありません。</p>
-          <p>本ソフトが扱うのは、利用者ご自身が作成した作品データです。ゲームソフトを動作させる機能はありません。暗号の解除も行いません。第三者の作品をインターネット等から取得・配信する機能もありません。読み込めるのは、お手元のPCにあるファイルだけです。任天堂株式会社が権利を有するプログラム・画像・音声・データ・鍵等は含まれていません。</p>
-          <p>「ニンテンドー3DS」「うごくメモ帳」「Flipnote Studio」は任天堂株式会社の商標または登録商標です。対応形式の説明目的でのみ言及しています。</p>
-          <p>本アプリはインターネット通信を一切行いません。</p>
-          <p>本ソフト本体のソースコードは GNU GPL v3 以降で公開しています（入手先: https://github.com/OFF-Proxy/MemoAnima）。同梱フォントは対象外で、それぞれのライセンスに従います。あなたが作成した作品にこのライセンスは及びません。</p>
-          <p>権利に関するお問い合わせ → aru.oribo@gmail.com ／ X @Arcana_Proxy</p>
+          <p>${t("set.legal.disclaimer.msg")}</p>
+          <p>${t("set.legal.scope.msg")}</p>
+          <p>${t("set.legal.trademark.msg")}</p>
+          <p>${t("set.legal.offline.msg")}</p>
+          <p>${t("set.legal.license.msg")}</p>
+          <p>${t("set.legal.contact.msg")}</p>
         </div>
         <p class="credits">${CREDITS.map((c) => escapeHtml(c)).join("<br>")}</p>
       </div>
       <div class="modal-actions">
-        <button class="btn" id="set-quit">🚪 アプリを終了</button>
+        <button class="btn" id="set-quit">${t("set.quit.btn")}</button>
         <span style="flex:1"></span>
-        <button class="btn primary" id="set-close">閉じる</button>
+        <button class="btn primary" id="set-close">${t("common.close.btn")}</button>
       </div>`;
     (box.querySelector("#set-dir-path") as HTMLElement).textContent =
-      settings.libraryDir ?? "（未設定）";
+      settings.libraryDir ?? t("set.libdir.unset.label");
+    // M12-1b-2（R-2 案1）: ミニ収納の tooltip も属性ではなくプロパティで入れる
+    for (const { dock, titleKey } of [
+      { dock: "float", titleKey: "set.minidock.float.title" },
+      { dock: "off", titleKey: "set.minidock.off.title" },
+    ] as const) {
+      const el = box.querySelector(`#set-minidock [data-dock="${dock}"]`) as HTMLElement | null;
+      if (el) el.title = t(titleKey);
+    }
+    // M12-C: カーソルの2つのトグルも同じ作法（属性に埋めずプロパティで入れる）
+    for (const { flag, titleKey } of [
+      { flag: "ring", titleKey: "set.cursor.ring.title" },
+      { flag: "cell", titleKey: "set.cursor.cell.title" },
+    ] as const) {
+      const el = box.querySelector(`#set-cursor-guide [data-flag="${flag}"]`) as HTMLElement | null;
+      if (el) el.title = t(titleKey);
+    }
     const syncButtons = () => {
       const mode = settings.display?.mode ?? "windowed";
       box.querySelectorAll("#set-modes .lv").forEach((b) =>
@@ -1642,15 +2006,99 @@ async function openSettingsMenu() {
         void changeDisplay({ ...(settings.display ?? {}), mode: "windowed", size });
       })
     );
+    // M11-18: ミニプレビューの置き場（収納／フロート）。押した瞬間に保存し、エディタが開いていれば即反映
+    const syncMiniDock = () => {
+      const dock = sanitizeMiniDock(settings.miniDock);
+      box.querySelectorAll("#set-minidock .lv").forEach((b) =>
+        b.classList.toggle("on", (b as HTMLElement).dataset.dock === dock)
+      );
+    };
+    syncMiniDock();
+    box.querySelectorAll("#set-minidock .lv").forEach((b) =>
+      b.addEventListener("click", () => {
+        settings.miniDock = sanitizeMiniDock((b as HTMLElement).dataset.dock);
+        editor.restoreMiniDock(settings.miniDock);
+        invoke("save_settings", { settings }).catch(() => {});
+        syncMiniDock();
+      })
+    );
+    // M12-C: カーソル。押した瞬間に保存し、エディタが開いていれば即反映（miniDock と同じ流儀）。
+    // 輪とドット枠は独立した ON/OFF なので、3択の style とは別の行に分けている
+    const syncCursor = () => {
+      const cur = sanitizeCursor(settings.cursor);
+      box.querySelectorAll("#set-cursor-style .lv").forEach((b) =>
+        b.classList.toggle("on", (b as HTMLElement).dataset.cur === cur.style)
+      );
+      box.querySelectorAll("#set-cursor-guide .lv").forEach((b) => {
+        const f = (b as HTMLElement).dataset.flag;
+        b.classList.toggle("on", f === "ring" ? cur.ring : cur.cell);
+      });
+    };
+    const saveCursor = (next: { style?: string; ring?: boolean; cell?: boolean }) => {
+      settings.cursor = sanitizeCursor(next);
+      editor.restoreCursor(settings.cursor);
+      invoke("save_settings", { settings }).catch(() => {});
+      syncCursor();
+    };
+    syncCursor();
+    box.querySelectorAll("#set-cursor-style .lv").forEach((b) =>
+      b.addEventListener("click", () => {
+        const cur = sanitizeCursor(settings.cursor);
+        saveCursor({ ...cur, style: (b as HTMLElement).dataset.cur });
+      })
+    );
+    box.querySelectorAll("#set-cursor-guide .lv").forEach((b) =>
+      b.addEventListener("click", () => {
+        const cur = sanitizeCursor(settings.cursor);
+        const f = (b as HTMLElement).dataset.flag;
+        saveCursor(f === "ring" ? { ...cur, ring: !cur.ring } : { ...cur, cell: !cur.cell });
+      })
+    );
+    // M12-2: 表示言語。押した瞬間に保存し、**再起動せずに**ホーム画面ごと作り直す。
+    // 設定は ⚙（#lib-change-dir）＝**ホーム画面からしか開けない**ので、エディタの再描画は要らない。
+    // M12-3: 辞書が5言語そろったので5つとも出す（M12-2 で「ja / en の2つだけ」にしていたのは、
+    // 選べるのに英語が出る＝不具合に見えるのを避けるため。その理由はもう無い）。LANGS は元から5言語
+    // 言語名は**その言語の自称**をそのまま出す。全ての言語で同じ並び・同じ文字にする
+    //（間違って知らない言語にしてしまった人が、自分の言語を見つけて戻れる必要がある）。
+    // 文字はテンプレートに埋めずプロパティで入れる（M12-1b-2 の R-2 案1 と同じ作法）
+    // M12-3: 5言語。**1行のまま**にしている（`i18n-exempt` は行単位なので、折り返すと
+    // 日本語 と 한국어 が載る行それぞれに目印が要る＝付け忘れの事故が起きる）
+    const LANG_NAMES: Record<string, string> = { ja: "日本語", en: "English", es: "Español", "pt-BR": "Português (BR)", ko: "한국어" }; // i18n-exempt: 言語名は自称のまま（REQ_M12_2 §2-b）
+    box.querySelectorAll("#set-lang .lv").forEach((b) => {
+      const l = (b as HTMLElement).dataset.lang ?? "";
+      (b as HTMLElement).textContent = LANG_NAMES[l] ?? l;
+    });
+    const syncLang = () => {
+      const cur = getLang();
+      box.querySelectorAll("#set-lang .lv").forEach((b) =>
+        b.classList.toggle("on", (b as HTMLElement).dataset.lang === cur)
+      );
+    };
+    syncLang();
+    box.querySelectorAll("#set-lang .lv").forEach((b) =>
+      b.addEventListener("click", async () => {
+        const l = sanitizeLang((b as HTMLElement).dataset.lang);
+        if (!l || l === getLang()) return;
+        setLang(l);
+        settings.lang = l;
+        invoke("save_settings", { settings }).catch(() => {});
+        applyI18n(document); // index.html の静的 DOM（data-i18n / -title / -placeholder）
+        close(null);
+        // ホームを作り直す（アルバム一覧・ヘッダ・空状態）。ライブラリ未設定なら空状態を出し直す
+        if (settings.libraryDir) await library.mount(settings.libraryDir, libraryCallbacks);
+        else showMissingLibraryState();
+        void openSettingsMenu(); // 同じ場所を開き直す（スクロールは先頭でよい）
+      })
+    );
     (box.querySelector("#set-dir") as HTMLElement).addEventListener("click", async () => {
       close(null);
       if (await chooseLibraryDir()) {
         await library.mount(settings.libraryDir!, libraryCallbacks);
-        toast(`ライブラリ: ${settings.libraryDir}`);
+        toast(t("lib.dirChanged.toast", { dir: settings.libraryDir }));
       }
     });
     (box.querySelector("#set-keys-cur") as HTMLElement).textContent =
-      `いま使っている組み合わせ: ${activePreset(keys).name}`;
+      t("set.keys.current.label", { name: presetName(activePreset(keys)) });
     (box.querySelector("#set-keys") as HTMLElement).addEventListener("click", () => {
       close(null);
       void openKeymapSettings();
@@ -1662,7 +2110,7 @@ async function openSettingsMenu() {
     (box.querySelector("#set-quit") as HTMLElement).addEventListener("click", async () => {
       if (editorOpen && editor.dirty) {
         const ok = await confirmDialog(
-          "保存していない変更があります。破棄してアプリを終了しますか？"
+          t("set.quit.dirty.msg")
         );
         if (!ok) return;
       }
@@ -1702,7 +2150,7 @@ async function ensureEditablePreset(): Promise<boolean> {
   const cur = currentPreset();
   if (!cur.builtin) return true;
   const ok = await confirmDialog(
-    `「${cur.name}」は組み込みのため編集できません。複製して編集しますか？`
+    t("keys.preset.builtin.msg", { name: presetName(cur) })
   );
   if (!ok) return false;
   return duplicateCurrentPreset();
@@ -1712,7 +2160,7 @@ async function ensureEditablePreset(): Promise<boolean> {
 async function duplicateCurrentPreset(): Promise<boolean> {
   if (keys.presets.length >= MAX_USER_PRESETS) {
     await confirmDialog(
-      `自分で作れる組み合わせは ${MAX_USER_PRESETS} 組までです。どれかを削除してから作ってください。`
+      t("keys.preset.max.msg", { max: MAX_USER_PRESETS })
     );
     return false;
   }
@@ -1754,22 +2202,22 @@ async function openKeymapSettings() {
     const box = document.createElement("div");
     box.className = "settings-menu keymap-menu";
     box.innerHTML = `
-      <p class="modal-msg"><b>⌨ ショートカットキー</b></p>
+      <p class="modal-msg"><b>${t("keys.dialog.title")}</b></p>
       <div class="set-sec">
-        <div class="modal-field"><span>組み合わせ</span>
+        <div class="modal-field"><span>${t("keys.preset.label")}</span>
           <select id="km-preset" style="flex:1"></select>
         </div>
         <div class="km-ops">
-          <button class="minibtn" id="km-dup">複製して新規</button>
-          <button class="minibtn" id="km-rename">名前を変更</button>
-          <button class="minibtn danger" id="km-del">削除</button>
+          <button class="minibtn" id="km-dup">${t("keys.preset.duplicate.btn")}</button>
+          <button class="minibtn" id="km-rename">${t("keys.preset.rename.btn")}</button>
+          <button class="minibtn danger" id="km-del">${t("keys.preset.delete.btn")}</button>
         </div>
         <p class="hintline" id="km-note"></p>
       </div>
       <div class="km-list" id="km-list"></div>
       <div class="modal-actions">
         <span style="flex:1"></span>
-        <button class="btn primary" id="km-close">閉じる</button>
+        <button class="btn primary" id="km-close">${t("keys.dialog.close.btn")}</button>
       </div>`;
     const listEl = box.querySelector("#km-list") as HTMLElement;
     const selEl = box.querySelector("#km-preset") as HTMLSelectElement;
@@ -1784,37 +2232,51 @@ async function openKeymapSettings() {
       selEl.innerHTML = all
         .map(
           (p) =>
-            `<option value="${escapeHtml(p.id)}"${p.id === cur.id ? " selected" : ""}>${escapeHtml(
-              p.name
-            )}${p.builtin ? "（組み込み）" : ""}</option>`
+            `<option value="${escapeHtml(p.id)}"${p.id === cur.id ? " selected" : ""}>${escapeHtml(presetName(p))}${p.builtin ? t("keys.preset.builtinSuffix.label") : ""}</option>`
         )
         .join("");
       noteEl.textContent = cur.builtin
-        ? "組み込みの組み合わせは編集できません。変更するときは「複製して新規」を押してください。"
-        : "行の「変更」を押して、割り当てたいキーを押してください（Esc で取消）。";
+        ? t("keys.preset.builtin.hint")
+        : t("keys.assign.hint");
       (box.querySelector("#km-rename") as HTMLButtonElement).disabled = !!cur.builtin;
       (box.querySelector("#km-del") as HTMLButtonElement).disabled = !!cur.builtin;
       listEl.innerHTML = "";
       for (const group of COMMAND_GROUPS) {
         const h = document.createElement("div");
         h.className = "km-group";
-        h.textContent = group;
+        h.textContent = t(group.labelKey);
         listEl.appendChild(h);
-        for (const c of COMMANDS.filter((x) => x.group === group)) {
+        // M11-15: 「道具」グループには巡回の説明を常設する（作者指定）
+        // M11-24: 1行に縮め、例と仕組みは title へ逃がす
+        // M12-1c-1: 判定は**識別子** group.id（表示名 t(group.labelKey) とは別物）。
+        // 以前は表示名と識別子が同じ日本語で、訳した瞬間に判定が壊れる形だった
+        if (group.id === TOOL_GROUP) {
+          const p = document.createElement("p");
+          p.className = "hintline km-cycle-note";
+          p.textContent = t("keys.toolCycle.hint");
+          p.title =
+            t("keys.toolCycle.title");
+          listEl.appendChild(p);
+        }
+        for (const c of COMMANDS.filter((x) => x.group === group.id)) {
           const b = cur.bindings[c.id as CommandId];
           const row = document.createElement("div");
           row.className = "km-row";
           row.dataset.cmd = c.id;
           const label = keyLabel(b);
+          // M11-15: 同じキーを共有している道具の行は、それと分かるように印を付ける
+          const mates = sharedToolMates(cur, c.id as CommandId);
+          const shared = mates.length > 0;
+          if (shared) row.classList.add("km-shared");
+          const mateNames = mates.map(commandLabel).join(t("keys.row.mates.separator.label"));
+          const note = (c as { noteKey?: string }).noteKey;
           row.innerHTML = `
-            <span class="km-name">${escapeHtml(c.label)}${
-              (c as { note?: string }).note
-                ? `<em>${escapeHtml((c as { note?: string }).note!)}</em>`
-                : ""
-            }</span>
-            <span class="km-key${label ? "" : " none"}">${escapeHtml(label || "未割り当て")}</span>
-            <button class="minibtn km-set">変更</button>
-            <button class="minibtn km-clr"${label ? "" : " disabled"}>消す</button>`;
+            <span class="km-name">${escapeHtml(commandLabel(c.id))}${
+              note ? `<em>${escapeHtml(t(note))}</em>` : ""
+            }${shared ? `<em class="km-shared-note">${t("keys.row.sharedMates.label", { names: escapeHtml(mateNames) })}</em>` : ""}</span>
+            <span class="km-key${label ? "" : " none"}">${escapeHtml(label || t("keys.row.unassigned.label"))}${shared ? " 🔁" : ""}</span>
+            <button class="minibtn km-set">${t("keys.row.set.btn")}</button>
+            <button class="minibtn km-clr"${label ? "" : " disabled"}>${t("keys.row.clear.btn")}</button>`;
           listEl.appendChild(row);
         }
       }
@@ -1837,11 +2299,11 @@ async function openKeymapSettings() {
       }
       const cur = currentPreset(); // 複製後の実体を取り直す
       if (b) {
+        // M11-15: 道具どうしは衝突ではなく**共存**（同キー巡回）。findConflict は道具どうしなら null
         const conflict = findConflict(cur, b, cmd);
         if (conflict) {
-          const other = COMMANDS.find((c) => c.id === conflict);
           const ok = await confirmDialog(
-            `${keyLabel(b)} は「${other?.label ?? conflict}」に割り当てられています。置き換えますか？`
+            t("keys.conflict.replace.msg", { key: keyLabel(b), cmd: commandLabel(conflict) })
           );
           if (!ok) {
             render();
@@ -1850,6 +2312,21 @@ async function openKeymapSettings() {
           delete cur.bindings[conflict];
         }
         cur.bindings[cmd] = b;
+        // 道具どうしで同キーになったときは、置き換えではなく巡回の案内を出す（共存済み）
+        const mates = sharedToolMates(cur, cmd);
+        if (mates.length) {
+          const names = [cmd, ...mates]
+            .sort(
+              (x, y) =>
+                COMMANDS.findIndex((c) => c.id === x) - COMMANDS.findIndex((c) => c.id === y)
+            )
+            .map(commandLabel)
+            .join(t("keys.toolCycle.arrow.label"));
+          toast(t("keys.toolCycle.toast", { key: keyLabel(b), names }));
+        }
+        // M11-15: Backspace など「条件つきで先に別の動作が走るキー」の案内
+        const caveat = bindingCaveat(b.code);
+        if (caveat) toast(caveat);
       } else {
         delete cur.bindings[cmd];
       }
@@ -1871,7 +2348,7 @@ async function openKeymapSettings() {
       capturing = true;
       const keyEl = row.querySelector(".km-key") as HTMLElement;
       const prev = keyEl.textContent;
-      keyEl.textContent = "キーを押してください…";
+      keyEl.textContent = t("keys.capture.waiting.hint");
       keyEl.classList.add("waiting");
       const cap = captureKey();
       cancelCapture = cap.cancel;
@@ -1901,7 +2378,7 @@ async function openKeymapSettings() {
     (box.querySelector("#km-rename") as HTMLElement).addEventListener("click", () => {
       const cur = currentPreset();
       if (cur.builtin) return;
-      void promptDialog("組み合わせの名前", cur.name).then((v) => {
+      void promptDialog(t("keys.preset.rename.label"), cur.name).then((v) => {
         if (!v) return;
         cur.name = v.slice(0, 40);
         saveKeys();
@@ -1911,7 +2388,7 @@ async function openKeymapSettings() {
     (box.querySelector("#km-del") as HTMLElement).addEventListener("click", () => {
       const cur = currentPreset();
       if (cur.builtin) return;
-      void confirmDialog(`「${cur.name}」を削除しますか？`).then((ok) => {
+      void confirmDialog(t("keys.preset.delete.msg", { name: cur.name })).then((ok) => {
         if (!ok) return;
         keys.presets = keys.presets.filter((p) => p.id !== cur.id);
         keys.activeId = "standard";
@@ -1951,27 +2428,27 @@ function escapeHtml(s: string): string {
 function guideSteps(): GuideStep[] {
   return [
     {
-      title: "メモアニマへようこそ！",
-      text: "3DSのお絵かきアニメ作品をPCで編集・書き出しできる、非公式・非営利のファンツールです。元のデータは読み取りのみで、絶対に書き換えません。",
+      title: t("guide.welcome.label"),
+      text: t("guide.welcome.msg"),
     },
     {
-      title: "ライブラリフォルダ",
-      text: "作品のコピーを保存するPC上のフォルダを決めます（SDカード自体は選ばないでください）。⚙設定の「ライブラリフォルダ」からいつでも変更できます。",
+      title: t("guide.libDir.label"),
+      text: t("guide.libDir.msg"),
       target: "#lib-change-dir",
     },
     {
-      title: "3DS作品の取り込み",
-      text: "SDカードの保存フォルダ（private → …3DS → app → JKZJ）、またはそのコピーを選ぶと、作品がライブラリへコピーされます。元のファイルはそのまま残ります。",
+      title: t("guide.import.label"),
+      text: t("guide.import.msg"),
       target: "#lib-import",
     },
     {
-      title: "編集",
-      text: "作品をダブルクリックすると編集画面が開きます。ペン・ブラシ（トーン）・レイヤー・♪音声は左右のパネルにあります。",
+      title: t("guide.edit.label"),
+      text: t("guide.edit.msg"),
       target: "#shelf-grid",
     },
     {
-      title: "書き出し",
-      text: "MP4 / GIF / APNG / PNG連番で書き出せます。作品を選んで「⬇ 書き出し」、または編集画面の右上からどうぞ。完成したらここから！",
+      title: t("guide.export.label"),
+      text: t("guide.export.msg"),
       target: "#stage-meta .chip.export",
     },
   ];
@@ -2005,11 +2482,11 @@ async function chooseLibraryDir(): Promise<boolean> {
     dir = await open({
       directory: true,
       multiple: false,
-      title: "PCライブラリの保存先フォルダを選択",
+      title: t("lib.chooseDir.label"),
     });
   } catch (e) {
-    logError("library", `フォルダ選択ダイアログを開けませんでした: ${e}`);
-    toast(`フォルダを選べませんでした: ${e}`);
+    logError("library", t("err.log.chooseDir.msg", { err: e }));
+    toast(t("err.library.chooseDir.toast", { err: e }));
     return false;
   }
   if (!dir || typeof dir !== "string") return false;
@@ -2020,8 +2497,8 @@ async function chooseLibraryDir(): Promise<boolean> {
     // 保存だけ失敗した場合、settings.libraryDir は**戻さない**。
     // 戻すとようこそ画面から先に進めなくなる（＝詰む）。
     // このセッションは動くが次回起動時に選び直しになる、と伝えるだけにする。
-    logError("library", `ライブラリ設定の保存に失敗: ${e}`);
-    toast(`設定を保存できませんでした。次回起動時にもう一度選んでください: ${e}`);
+    logError("library", t("err.log.settingsSave.msg", { err: e }));
+    toast(t("err.settings.save.toast", { err: e }));
   }
   return true;
 }
@@ -2030,11 +2507,11 @@ async function firstRunGate(): Promise<void> {
   while (!settings.libraryDir) {
     await modal((close) => {
       const box = document.createElement("div");
+      // M12-1a: 本文は2文が <br> で並ぶ。辞書では1キー（改行 \n）にして、ここで <br> に変える
       box.innerHTML = `
-        <p class="modal-msg"><b>ようこそ メモアニマへ！</b><br>
-        まず、メモライブラリの保存場所（PCの好きなフォルダ）を選んでください。<br>
-        取り込んだ作品と、あなたの新しい作品はここに保存されます。</p>
-        <div class="modal-actions"><button class="btn primary">📁 フォルダを選ぶ</button></div>`;
+        <p class="modal-msg"><b>${t("lib.firstRun.label")}</b><br>
+        ${t("lib.firstRun.msg").split("\n").join("<br>")}</p>
+        <div class="modal-actions"><button class="btn primary">${t("lib.firstRun.chooseDir.btn")}</button></div>`;
       (box.querySelector("button") as HTMLElement).addEventListener("click", async () => {
         if (await chooseLibraryDir()) close(true);
       });
@@ -2048,15 +2525,15 @@ function projectDropDialog(paths: string[]): Promise<"import" | "edit" | null> {
   const fname = paths[0].split(/[\\/]/).pop() ?? paths[0];
   const msg =
     paths.length === 1
-      ? `「${fname}」をどうしますか？`
-      : `${paths.length}件の作品ファイルをどうしますか？`;
+      ? t("lib.drop.one.msg", { fname })
+      : t("lib.drop.many.msg", { count: paths.length });
   return modal((close) => {
     const box = document.createElement("div");
     box.innerHTML = `<p class="modal-msg"></p>
       <div class="modal-actions">
-        <button class="btn primary" data-v="import">📥 今のアルバムに取り込む</button>
-        <button class="btn" data-v="edit">✏ すぐ編集で開く</button>
-        <button class="btn" data-v="cancel">キャンセル</button>
+        <button class="btn primary" data-v="import">${t("lib.drop.import.btn")}</button>
+        <button class="btn" data-v="edit">${t("lib.drop.edit.btn")}</button>
+        <button class="btn" data-v="cancel">${t("common.cancel.btn")}</button>
       </div>`;
     (box.querySelector(".modal-msg") as HTMLElement).textContent = msg;
     box.querySelectorAll("button").forEach((b) =>
@@ -2095,17 +2572,17 @@ function openImportProgressModal(total: number): {
   finish: () => void;
   cancelRequested: () => boolean;
 } {
-  const STAGE_LABEL = ["読み込み中…", "確認中…", "保存中…"] as const;
+  const STAGE_LABEL = [t("imp.stage.read.label"), t("imp.stage.verify.label"), t("imp.stage.save.label")] as const;
   let closeFn: ((v: unknown) => void) | null = null;
   let cancel = false;
   void modal((close) => {
     closeFn = close;
     const box = document.createElement("div");
-    box.innerHTML = `<p class="modal-msg"><b>📥 取り込み中…</b></p>
+    box.innerHTML = `<p class="modal-msg"><b>${t("imp.progress.label")}</b></p>
       <div class="bar"><i id="ip-bar" style="width:0%"></i></div>
       <p class="modal-path" id="ip-text"></p>
       <div class="modal-actions">
-        <button class="btn" id="ip-cancel">キャンセル</button>
+        <button class="btn" id="ip-cancel">${t("common.cancel.btn")}</button>
       </div>`;
     // 実行中は背面クリックで閉じない（modal 共通の pointerdown ハンドラより先に capture で止める）
     setTimeout(() => {
@@ -2121,8 +2598,9 @@ function openImportProgressModal(total: number): {
     box.querySelector("#ip-cancel")!.addEventListener("click", () => {
       cancel = true;
       (box.querySelector("#ip-cancel") as HTMLButtonElement).disabled = true;
-      const t = box.querySelector("#ip-text") as HTMLElement | null;
-      if (t) t.textContent = "キャンセル中…（現在のファイルの完了を待っています）";
+      // M12-1a: ローカル名 t は翻訳関数 t() と衝突するので txt に改名（挙動は同じ）
+      const txt = box.querySelector("#ip-text") as HTMLElement | null;
+      if (txt) txt.textContent = t("imp.cancelling.label");
     });
     return box;
   });
@@ -2130,11 +2608,12 @@ function openImportProgressModal(total: number): {
     setStage(fileIdx, name, stage) {
       if (cancel) return; // 「キャンセル中…」表示を維持
       const bar = document.querySelector("#ip-bar") as HTMLElement | null;
-      const t = document.querySelector("#ip-text") as HTMLElement | null;
+      // M12-1a: ローカル名 t は翻訳関数 t() と衝突するので txt に改名（挙動は同じ）
+      const txt = document.querySelector("#ip-text") as HTMLElement | null;
       // 全体進捗 = (完了ファイル数×3 + 段階) / (総数×3)
       const pct = Math.round(((fileIdx * 3 + stage) / (total * 3)) * 100);
       if (bar) bar.style.width = `${pct}%`;
-      if (t) t.textContent = `${fileIdx + 1} / ${total} 件目: ${name}（${STAGE_LABEL[stage]}）`;
+      if (txt) txt.textContent = t("imp.progress.hint", { index: fileIdx + 1, total, name, stage: STAGE_LABEL[stage] });
     },
     finish() {
       closeFn?.(null);
@@ -2151,10 +2630,10 @@ function openImportProgressModal(total: number): {
 async function importDroppedProjects(paths: string[]) {
   const libRoot = settings.libraryDir;
   if (!libRoot) {
-    toast("先にライブラリフォルダを設定してください（⚙）");
+    toast(t("err.library.noDir.toast"));
     return;
   }
-  const album = library.currentAlbum || settings.lastAlbum || "未分類";
+  const album = library.currentAlbum || settings.lastAlbum || defaultAlbumName();
   // 衝突チェック用に、対象アルバムの既存プロジェクト名（拡張子抜き・小文字）を集める
   //（編集中は library.items が古い可能性があるので必ず取り直す）
   const used = new Set<string>();
@@ -2188,7 +2667,7 @@ async function importDroppedProjects(paths: string[]) {
         const blob = await frameToPngBlob(project, project.thumbFrame ?? 0);
         const thumb = blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
         // 「名前 (2)」方式（同時ドロップ内の衝突も used に積んで回避）
-        const base = stripExt(fname) || "無題";
+        const base = stripExt(fname) || untitledTitle();
         let name = base;
         for (let k = 2; used.has(name.toLowerCase()); k++) name = `${base} (${k})`;
         used.add(name.toLowerCase());
@@ -2201,17 +2680,17 @@ async function importDroppedProjects(paths: string[]) {
           thumbPng: Array.from(thumb),
         });
         okCount++;
-        if (paths.length === 1) toast(`取り込みました: ${album} / ${name}.memoanima`);
+        if (paths.length === 1) toast(t("lib.drop.imported.toast", { album, name }));
       } catch {
-        toast("このファイルは開けませんでした");
+        toast(t("err.file.open.toast"));
       }
     }
   } finally {
     prog.finish();
     importRunning = false;
   }
-  if (cancelled) toast(`${paths.length}件中${okCount}件を取り込みました（中断）`);
-  else if (paths.length > 1 && okCount > 0) toast(`${okCount}件を取り込みました`);
+  if (cancelled) toast(t("lib.drop.importedPartial.toast", { total: paths.length, ok: okCount }));
+  else if (paths.length > 1 && okCount > 0) toast(t("lib.drop.importedMany.toast", { n: okCount }));
   if (okCount === 0) return;
   if (editorOpen) return; // 編集中は裏で取り込むだけ（画面を離れない。戻ったとき refresh される）
   await library.refresh();
@@ -2231,7 +2710,7 @@ async function importDroppedProjects(paths: string[]) {
 async function handleDroppedPaths(paths: string[]) {
   // M10-16: 取り込み実行中の追加ドロップは無視（ダイアログも出さない・フラグ1本）
   if (importRunning) {
-    toast("取り込み中です。完了までお待ちください");
+    toast(t("imp.busy.toast"));
     return;
   }
   // M10-14: .kwz/.ppm は従来どおり即取り込み、.memoanima/.animemo は選択ダイアログへ
@@ -2249,7 +2728,7 @@ async function handleDroppedPaths(paths: string[]) {
     // ※ .kwz/.ppm を含むときだけ聞く（.memoanima だけのドロップで二重に聞かないため）
     if (editorOpen) {
       const ok = await editor.confirmLeave(
-        "編集中の作品に、保存していない変更があります。破棄して、ドロップされた作品を取り込みますか？"
+        t("ed.leave.dropImport.msg")
       );
       if (!ok) return;
       showLibrary();
@@ -2262,7 +2741,7 @@ async function handleDroppedPaths(paths: string[]) {
     await importDroppedProjects(projPaths);
   } else if (choice === "edit") {
     // 従来挙動（M10-14 以前の即編集）。複数は先頭の1件のみ
-    if (projPaths.length > 1) toast("複数のため最初の1件のみ開きました");
+    if (projPaths.length > 1) toast(t("lib.drop.onlyFirst.toast"));
     try {
       // M10-16: こちらも raw 読み（number[] JSON をやめる）
       // M11-6: 先に読む（開けないファイルのために未保存の確認をさせない）
@@ -2272,14 +2751,14 @@ async function handleDroppedPaths(paths: string[]) {
       if (
         editorOpen &&
         !(await editor.confirmLeave(
-          "編集中の作品に、保存していない変更があります。破棄して、ドロップされた作品を開きますか？"
+          t("ed.leave.dropOpen.msg")
         ))
       ) {
         return;
       }
       showEditor(project, null);
     } catch (e) {
-      toast(`開けませんでした: ${e}`);
+      toast(t("err.file.open.detail.toast", { err: e }));
     }
   }
 }
@@ -2324,7 +2803,8 @@ window.addEventListener("DOMContentLoaded", async () => {
       <p style="margin:0 0 12px;font-size:12px">各スウォッチは 96×96 実画素（1画素=1px・320×240等倍と同スケール）。3DS写真と見比べる。</p>
       <div id="tones" style="display:flex;flex-wrap:wrap;gap:14px"></div></div>`;
     const host = document.getElementById("tones")!;
-    for (const t of TONE_TILES) {
+    // M12-1c-2: ループ変数は tone（`t` は翻訳関数）
+    for (const tone of TONE_TILES) {
       const wrap = document.createElement("div");
       wrap.style.cssText = "text-align:center;font-size:11px;font-weight:700";
       const cv = document.createElement("canvas");
@@ -2337,9 +2817,9 @@ window.addEventListener("DOMContentLoaded", async () => {
       ctx.fillStyle = "#2c2621";
       for (let y = 0; y < 96; y++)
         for (let x = 0; x < 96; x++)
-          if (!t.tile || toneAt(t.tile, x, y)) ctx.fillRect(x, y, 1, 1);
+          if (!tone.tile || toneAt(tone.tile, x, y)) ctx.fillRect(x, y, 1, 1);
       wrap.appendChild(cv);
-      wrap.appendChild(document.createTextNode(t.name));
+      wrap.appendChild(document.createTextNode(t(tone.nameKey)));
       host.appendChild(wrap);
     }
     return;
@@ -3600,7 +4080,7 @@ window.addEventListener("DOMContentLoaded", async () => {
           note = `　diff=${r.best} (${r.at}) / 1文字あたり ${(r.best / chars).toFixed(2)} 画素`;
           results[`${f.key}@${px}`] = { diff: r.best, at: r.at, perChar: r.best / chars };
         }
-        row.textContent = `${f.label} ${px}px${note}`;
+        row.textContent = `${t(f.labelKey)} ${px}px${note}`;
         host.appendChild(row);
         if (mask) {
           const cv = document.createElement("canvas");
@@ -3649,6 +4129,13 @@ window.addEventListener("DOMContentLoaded", async () => {
   } catch {
     settings = {};
   }
+  // M12-1a: 表示言語を決めて静的 DOM へ流し込む（settings.lang → navigator.language → 既定 en）。
+  // 切替 UI は M12-2。ここでは「読む・不正値を弾く・判定する」までを配線する
+  setLang(detectLang(settings.lang));
+  applyI18n(document);
+  // 動的に書き換わるノード（data-i18n を振っていない）の初期値。どちらも起動時は hidden
+  $("#ed-title").textContent = t("ed.title.newNote.label");
+  $("#import-label").textContent = t("imp.progress.label");
   // M10-20: 並び順を設定から復元（項目なし・不正値は "manual"＝従来挙動）
   library.shelfSort =
     settings.shelfSort === "name" || settings.shelfSort === "date"
@@ -3657,13 +4144,12 @@ window.addEventListener("DOMContentLoaded", async () => {
   // M7-1 R-A: settings.json 破損回復（.broken 退避済み・既定値で起動）の案内
   if ((settings as Record<string, unknown>).__recovered) {
     delete (settings as Record<string, unknown>).__recovered;
-    logError("recovery", "settings.json が破損していたため初期化（settings.json.broken へ退避）");
+    logError("recovery", t("err.settings.recovered.log.msg"));
     await modal((close) => {
       const box = document.createElement("div");
       box.innerHTML = `
-        <p class="modal-msg"><b>設定を初期化しました</b><br>
-        設定ファイルが壊れていたため、初期状態で起動しました（元のファイルは settings.json.broken に退避）。<br>
-        ライブラリフォルダを選び直してください。取り込み済みの作品ファイルはそのまま残っています。</p>
+        <p class="modal-msg"><b>${t("err.settings.recovered.label")}</b><br>
+        ${t("err.settings.recovered.msg").split("\n").join("<br>")}</p>
         <div class="modal-actions"><button class="btn primary">OK</button></div>`;
       (box.querySelector("button") as HTMLElement).addEventListener("click", () => close(null));
       return box;
@@ -3674,6 +4160,11 @@ window.addEventListener("DOMContentLoaded", async () => {
   applyKeys();
   // M7-2b: ⚙ = 設定メニュー（エクスプローラー直結を廃止。フォルダ変更はメニュー内へ移設）
   $("#lib-change-dir").addEventListener("click", () => void openSettingsMenu());
+  // M12-E: 誤リロードのガードと、危ない操作の直前オートセーブ。**アプリの生存中ずっと**張る
+  // （エディタの mount/unmount には紐づけない。中の判定は `editorOpen` で行う）。
+  // keydown は **capture** ＝ 既存の bubble のハンドラとは別の口。順序は変えない。
+  window.addEventListener("keydown", reloadGuardHandler, true);
+  document.addEventListener("visibilitychange", hiddenAutosaveHandler);
   // M7-2b: ディスプレイ設定の復元（破損値は既定へ）
   await applyDisplaySettings(settings.display);
   await firstRunGate();
@@ -3692,9 +4183,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   if (indexRecovered) {
     logError(
       "recovery",
-      `索引が破損していたため再構築（${settings.libraryDir}/animemo-library.json.broken へ退避）`
+      t("err.libraryIndex.rebuilt.log.msg", { dir: settings.libraryDir })
     );
-    toast("ライブラリ索引を再構築しました（取り込み済みのファイルは無事です）");
+    toast(t("lib.indexRebuilt.toast"));
   }
   await library.mount(settings.libraryDir!, libraryCallbacks);
   library.bindTransport();
@@ -3709,17 +4200,17 @@ function showMissingLibraryState() {
   const shelf = $("#shelf-grid");
   const albums = $("#albums-list");
   const title = $("#shelf-title");
-  if (title) title.textContent = "フォルダが見つかりません";
+  if (title) title.textContent = t("lib.missing.heading.label");
   if (albums) albums.innerHTML = "";
   if (shelf) {
     shelf.innerHTML = "";
     const box = document.createElement("div");
     box.className = "lib-missing";
     box.innerHTML = `
-      <p><b>ライブラリフォルダが見つかりません</b></p>
-      <p class="hintline">${settings.libraryDir ?? ""}</p>
-      <p class="hintline">USBメモリを抜いた・フォルダ名を変えた場合は、元に戻してアプリを再起動するか、下のボタンで選び直してください（設定は保持されています）。</p>
-      <button class="btn primary" id="lib-missing-pick">📁 フォルダを選び直す</button>`;
+      <p><b>${t("lib.missing.label")}</b></p>
+      <p class="hintline">${escapeHtml(settings.libraryDir ?? "")}</p>
+      <p class="hintline">${t("lib.missing.hint")}</p>
+      <button class="btn primary" id="lib-missing-pick">${t("lib.missing.pick.btn")}</button>`;
     shelf.appendChild(box);
     (box.querySelector("#lib-missing-pick") as HTMLElement).addEventListener("click", async () => {
       if (await chooseLibraryDir()) {
@@ -3727,7 +4218,7 @@ function showMissingLibraryState() {
         library.bindTransport();
         await setupFileDrop();
         await checkAutosave();
-        toast(`ライブラリ: ${settings.libraryDir}`);
+        toast(t("lib.dirChanged.toast", { dir: settings.libraryDir }));
       }
     });
   }

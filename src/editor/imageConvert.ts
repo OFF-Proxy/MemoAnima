@@ -10,13 +10,15 @@ import {
   PIXELS,
   FPS_TABLE,
   UGO_COLORS,
-  DEFAULT_PALETTE,
+  RETRO_PALETTE,
   newProject,
   ensureColor,
   allocIndexBuf,
   type Project,
   type Frame,
 } from "./model";
+// M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ
+import { imageLayerName, imageProjectTitle } from "../i18n/defaults";
 
 // ---------------- 型・オプション ----------------
 
@@ -228,7 +230,9 @@ export const BAYER4 = [
 /** 変換に使うパレットを決定（auto=全ページまとめて量子化＝アニメでちらつかない） */
 export function resolvePalette(canvases: SourceImage[], o: ConvertOptions): RGB[] {
   if (o.palette === "ugo") return Object.values(UGO_COLORS).map(hexToRgb);
-  if (o.palette === "retro") return DEFAULT_PALETTE.map(hexToRgb);
+  // M11-14b: 既定パレットが6色になったので、「レトロ14色」は独立した RETRO_PALETTE を使う
+  //（中身は従来の DEFAULT_PALETTE と同一＝ドット化の結果は変わらない）
+  if (o.palette === "retro") return RETRO_PALETTE.map(hexToRgb);
   return medianCut(canvases, Math.max(2, Math.min(255, o.colors)));
 }
 
@@ -385,8 +389,8 @@ export function lineartBinarize(
 /** 変換一式: 元画像群＋オプション → 素材集 Project（「背景」1レイヤー×ページ数） */
 export function convertToProject(images: SourceImage[], o: ConvertOptions): Project {
   const canvases = images.map((img) => prepareCanvas(img, o));
-  const p = newProject(o.title || "画像取り込み");
-  p.layerDefs = [{ id: "L1", name: "背景", visible: true, opacity: 1 }];
+  const p = newProject(o.title || imageProjectTitle());
+  p.layerDefs = [{ id: "L1", name: imageLayerName(), visible: true, opacity: 1 }];
   p.nextLayerId = 2;
   p.colorTable = [""];
   p.indexBits = 8;

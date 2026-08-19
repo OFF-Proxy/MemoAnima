@@ -11,6 +11,8 @@ import {
   buildLut,
   allocIndexBuf,
   effectiveLayerStates,
+  hasClipLayers,
+  clipBaseMap,
 } from "./model";
 
 export interface CompositeOptions {
@@ -44,13 +46,31 @@ function blendPixel(out: Uint32Array, i: number, rgba: number, alpha: number) {
   out[i] = (r | (g << 8) | (b << 16) | (0xff << 24)) >>> 0;
 }
 
-/** 1レイヤーを out に合成（索引は 8/16bit どちらでも同一コードで動く） */
+/** 1レイヤーを out に合成（索引は 8/16bit どちらでも同一コードで動く）。
+ *  M11-20: `mask`（クリッピングの土台バッファ）を渡すと、**土台の同じ画素が非0のときだけ**描く。
+ *  判定は添字の非0チェックのみ（色演算なし）。mask なしの 2 ループは M11-19 以前と 1 命令も変えていない
+ *  （clip なし作品のホットパスを守る）。 */
 function blendLayer(
   out: Uint32Array,
   buf: IndexBuf,
   lut: Uint32Array,
-  opacity: number
+  opacity: number,
+  mask: IndexBuf | null = null
 ) {
+  if (mask) {
+    if (opacity >= 1) {
+      for (let i = 0; i < PIXELS; i++) {
+        const v = buf[i];
+        if (v !== 0 && mask[i] !== 0) out[i] = lut[v];
+      }
+    } else if (opacity > 0) {
+      for (let i = 0; i < PIXELS; i++) {
+        const v = buf[i];
+        if (v !== 0 && mask[i] !== 0) blendPixel(out, i, lut[v], opacity);
+      }
+    }
+    return;
+  }
   if (opacity >= 1) {
     for (let i = 0; i < PIXELS; i++) {
       const v = buf[i];
@@ -64,11 +84,29 @@ function blendLayer(
   }
 }
 
-/** オニオン用: フレームのシルエットを単色 tint で薄く重ねる（実効可視=フォルダ祖先の積で判定） */
+/** M11-20: clip レイヤー ld の**土台バッファ**を返す。土台なし／土台が実効非表示／土台のバッファが
+ *  そのコマに無い → null（＝この clip レイヤーは描かない）。bases が null なら clip なし作品＝常に「マスクなし」。
+ *  戻り値の意味: `undefined` = 通常描画（マスクなし）／`null` = 描かない／IndexBuf = そのマスクで描く */
+function clipMaskFor(
+  ld: Project["layerDefs"][number],
+  frame: Frame,
+  eff: ReturnType<typeof effectiveLayerStates>,
+  bases: Map<string, string | null> | null
+): IndexBuf | null | undefined {
+  if (!bases || ld.clip !== true) return undefined;
+  const baseId = bases.get(ld.id);
+  if (!baseId) return null;
+  if (!(eff.get(baseId)?.visible ?? true)) return null;
+  return frame.layers[baseId] ?? null;
+}
+
+/** オニオン用: フレームのシルエットを単色 tint で薄く重ねる（実効可視=フォルダ祖先の積で判定）。
+ *  M11-20: clip レイヤーはそのコマの土台でマスクする（編集画面・書き出しと同じ見え方） */
 function blendOnion(
   out: Uint32Array,
   p: Project,
   eff: ReturnType<typeof effectiveLayerStates>,
+  bases: Map<string, string | null> | null,
   frameIndex: number,
   tintR: number,
   tintG: number,
@@ -83,6 +121,14 @@ function blendOnion(
     if (!(eff.get(ld.id)?.visible ?? ld.visible)) continue;
     const buf = f.layers[ld.id];
     if (!buf) continue;
+    const mask = clipMaskFor(ld, f, eff, bases);
+    if (mask === null) continue;
+    if (mask) {
+      for (let i = 0; i < PIXELS; i++) {
+        if (buf[i] !== 0 && mask[i] !== 0) blendPixel(out, i, rgba, alpha);
+      }
+      continue;
+    }
     for (let i = 0; i < PIXELS; i++) {
       if (buf[i] !== 0) blendPixel(out, i, rgba, alpha);
     }
@@ -123,11 +169,19 @@ export function flattenIndexFrame(p: Project, frameIndex: number): IndexBuf {
   const frame = p.frames[frameIndex];
   if (!frame) return out;
   const eff = effectiveLayerStates(p);
+  // M11-20: クリッピングは「見えている絵」で判定する（見えない画素を境界にしない）
+  const bases = hasClipLayers(p) ? clipBaseMap(p) : null;
   for (const ld of orderedLayerDefs(p, frame)) {
     const e = eff.get(ld.id) ?? { visible: ld.visible, opacity: ld.opacity };
     if (!e.visible) continue;
     const lb = frame.layers[ld.id];
     if (!lb) continue;
+    const mask = clipMaskFor(ld, frame, eff, bases);
+    if (mask === null) continue;
+    if (mask) {
+      for (let i = 0; i < PIXELS; i++) if (lb[i] !== 0 && mask[i] !== 0) out[i] = lb[i];
+      continue;
+    }
     // 下→上へ非0を上書き＝結果として各画素は最前面の非0添字になる
     for (let i = 0; i < PIXELS; i++) if (lb[i] !== 0) out[i] = lb[i];
   }
@@ -153,19 +207,27 @@ export function compositeFrame(
   }
   if (opts.skipPaper) {
     buf.fill(0);
+  } else if (frame.paper === 0) {
+    // M11-16: 透明の紙（paper=0 は透明予約の添字）。skipPaper と同じ「0 のまま」＝合成バッファには
+    // 何も焼かない（市松は表示層＝#ed-canvas の背景で出す）。旧ビルドはこの分岐が無く
+    // `lut[0] || 白` に落ちるので、同じファイルを開くと「白い紙」として表示される（互換）
+    buf.fill(0);
   } else {
     buf.fill(lut[frame.paper] || 0xffffffff);
   }
   // M3.7: フォルダの実効可視/不透明度（祖先の積）。オニオンも同じ実効可視で判定する
   const eff = effectiveLayerStates(p);
+  // M11-20: クリッピングの土台（構造順・同じ親内・1 パス）。clip レイヤーが 1 枚も無ければ null＝
+  // 以下の分岐はすべて「マスクなし」に落ち、clip なし作品の合成は従来と同じ経路を通る
+  const bases = hasClipLayers(p) ? clipBaseMap(p) : null;
   const onion = opts.onion ?? 0;
   if (onion > 0) {
     for (let k = onion; k >= 1; k--) {
       const a = 0.28 / k;
       if (frameIndex - k >= 0)
-        blendOnion(buf, p, eff, frameIndex - k, 0xff, 0x3b, 0x3b, a);
+        blendOnion(buf, p, eff, bases, frameIndex - k, 0xff, 0x3b, 0x3b, a);
       if (frameIndex + k < p.frames.length)
-        blendOnion(buf, p, eff, frameIndex + k, 0x1f, 0xa2, 0xff, a);
+        blendOnion(buf, p, eff, bases, frameIndex + k, 0x1f, 0xa2, 0xff, a);
     }
   }
   const defs = orderedLayerDefs(p, frame);
@@ -173,7 +235,11 @@ export function compositeFrame(
     const e = eff.get(ld.id) ?? { visible: ld.visible, opacity: ld.opacity };
     if (!e.visible || ld.id === opts.excludeLayer) continue;
     const lb = frame.layers[ld.id];
-    if (lb) blendLayer(buf, lb, lut, e.opacity);
+    if (!lb) continue;
+    // clip: 土台の同じ画素が非0の所だけ描く。土台なし／土台非表示／土台バッファなし → 描かない
+    const mask = clipMaskFor(ld, frame, eff, bases);
+    if (mask === null) continue;
+    blendLayer(buf, lb, lut, e.opacity, mask ?? null);
   }
   return buf;
 }

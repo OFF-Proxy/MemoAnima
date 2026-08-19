@@ -2,6 +2,12 @@
 // - 対象要素が無い画面状態でも文字のみで成立（要素依存で壊れない）
 // - 背面操作は暗幕でブロック（誤操作防止）・Esc=スキップ
 // - 文言は M7-1 の中立表記に準拠（うごメモ/Flipnote 等は使わない）
+//
+// M12-1c-1（i18n）: ステップの title / text は**呼び出し側（main.ts）で既に t() 済み**なので、
+// このファイルがキー化するのは吹き出しの操作ボタンだけ。
+// "1 / 5" のような番号表示は日本語を含まない＝そのまま（訳す語が無い）。
+
+import { t } from "./i18n";
 
 export interface GuideStep {
   title: string;
@@ -91,11 +97,11 @@ export function runGuide(steps: GuideStep[]): Promise<void> {
         <h4></h4>
         <p></p>
         <div class="g-actions">
-          <button class="minibtn" data-g="skip">スキップ</button>
+          <button class="minibtn" data-g="skip">${t("guide.skip.btn")}</button>
           <span style="flex:1"></span>
-          ${isFirst ? "" : '<button class="minibtn" data-g="prev">← 戻る</button>'}
+          ${isFirst ? "" : `<button class="minibtn" data-g="prev">${t("guide.prev.btn")}</button>`}
           <button class="btn primary" data-g="next">${
-            isLast ? "はじめる" : isFirst ? "ガイドを見る →" : "次へ →"
+            isLast ? t("guide.start.btn") : isFirst ? t("guide.begin.btn") : t("guide.next.btn")
           }</button>
         </div>`;
       (bubble.querySelector("h4") as HTMLElement).textContent = step.title;

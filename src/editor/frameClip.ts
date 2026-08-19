@@ -14,7 +14,7 @@ import {
 } from "./model";
 
 export interface FrameClipEntry {
-  /** 紙色（hex） */
+  /** 紙色（hex）。M11-16: **`""` は透明の紙（paper=0）**＝貼り付け先でも 0 に戻す（色解決しない） */
   paperHex: string;
   /** 「下→上」の実効描画順（frame.order 解決済み）で保持 */
   layers: IndexBuf[];
@@ -51,7 +51,8 @@ export function makeClip(p: Project, indices: number[]): FrameClip {
     const f = p.frames[fi];
     const ids = effectiveLayerIds(p, f);
     return {
-      paperHex: p.colorTable[f.paper] || "#ffffff",
+      // M11-16: 透明の紙（0）は "" のまま持つ。壊れた添字（colorTable に無い）は従来どおり白へ
+      paperHex: f.paper === 0 ? "" : p.colorTable[f.paper] || "#ffffff",
       layers: ids.map((id) => copyIndexBuf(f.layers[id] ?? allocIndexBuf(p))),
       se: f.se && f.se.length > 0 ? [...f.se] : undefined,
     };
@@ -83,8 +84,9 @@ export function buildFramesFromClip(p: Project, clip: FrameClip): Frame[] {
     const hex = clip.palette[idx];
     remap[idx] = hex ? ensureColor(p, hex.toLowerCase()) : 0;
   }
+  // M11-16: 透明の紙（""）は予約添字 0 をそのまま使う（ensureColor を通さない＝色を登録しない）
   const paperIdx = clip.frames.map((e) =>
-    ensureColor(p, (e.paperHex || "#ffffff").toLowerCase())
+    e.paperHex === "" ? 0 : ensureColor(p, e.paperHex.toLowerCase())
   );
   // 3) バッファ確保と転写（色解決後なので幅は確定済み）
   const defs = p.layerDefs;

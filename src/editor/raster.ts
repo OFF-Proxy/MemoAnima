@@ -44,107 +44,155 @@ const BAYER4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
 
 // ---------------- M5-4: トーンパターン（うごメモ「ぶつぶつペイント」準拠） ----------------
 
-/** 8×8 タイル（1bit）。tile[y*8+x] が 1 なら塗る */
-export type ToneTile = Uint8Array; // 長さ64
+/** 正方形タイル（1bit）。tile[y*s+x] が 1 なら塗る（s=辺長）。
+ *  M11-14: 従来は 8×8（長さ64）固定だったが、3px ピッチ（8 で割り切れない）の柄の
+ *  ために辺長可変にした。辺長は length から引く（64→8 / 9→3）。 */
+export type ToneTile = Uint8Array;
+
+/** 8×8 以外のタイルの辺長（length → 辺長）。増えたらここに足す */
+const TONE_SIDE: Record<number, number> = { 9: 3 };
 
 /** パターンは**キャンバス座標に固定**（coordinate-anchored）。
- *  ストロークを何度重ねても柄が継ぎ目なく繋がる（うごメモのトーン感の正体）。 */
+ *  ストロークを何度重ねても柄が継ぎ目なく繋がる（うごメモのトーン感の正体）。
+ *
+ *  ここは描画のホットパスなので、**既存の 8×8 はビット演算の従来経路のまま**
+ *  （結果・速度ともに不変）。可変サイズ（今は 3×3 の1種）だけ剰余で敷き詰める。
+ *  x, y はキャンバス座標＝常に非負なので % で正しい。 */
 export function toneAt(tile: ToneTile, x: number, y: number): boolean {
-  return tile[(y & 7) * 8 + (x & 7)] !== 0;
+  if (tile.length === 64) return tile[(y & 7) * 8 + (x & 7)] !== 0;
+  const s = TONE_SIDE[tile.length] ?? (Math.sqrt(tile.length) | 0);
+  return tile[(y % s) * s + (x % s)] !== 0;
 }
 
-/** 8行×8文字（'#'=塗る）からタイルを作る */
+/** N行×N文字（'#'=塗る）からタイルを作る（行数＝辺長。従来の8行はそのまま8×8になる） */
 function T(...rows: string[]): ToneTile {
-  const t = new Uint8Array(64);
-  for (let y = 0; y < 8; y++)
-    for (let x = 0; x < 8; x++) t[y * 8 + x] = rows[y]?.[x] === "#" ? 1 : 0;
+  const s = rows.length;
+  const t = new Uint8Array(s * s);
+  for (let y = 0; y < s; y++)
+    for (let x = 0; x < s; x++) t[y * s + x] = rows[y]?.[x] === "#" ? 1 : 0;
   return t;
 }
 
 export interface ToneDef {
   id: string;
-  name: string;
+  /** M12-1c-2: 表示名の辞書キー（旧 name）。トーンピッカーの d.title に出る */
+  nameKey: string;
   /** null=ベタ（パターンなし全塗り） */
   tile: ToneTile | null;
   group: string;
 }
 
-/** 3DSピッカー準拠の柄ファミリー（各 大/小）＋ベタ。データ駆動で後から追加可能 */
+/** 3DSピッカー準拠の柄ファミリー（各 大/小）＋ベタ。データ駆動で後から追加可能。
+ *
+ *  M11-14b: **配列順＝ピッカーの表示順**を「ベタ先頭 → ざこメモの並び → メモアニマ特有」に
+ *  並べ替えた（REQ_M11_14_batch.md §9 の 1〜22）。既存エントリの id・名前・グループ・
+ *  タイル定義は1バイトも変えていない（順序のみ）。 */
 export const TONE_TILES: ToneDef[] = [
+  // 1. ベタ（先頭＝既定・最頻）
+  { id: "solid", nameKey: "ed.tone.solid.label", group: "ベタ", tile: null },
+  // ---- 2〜12: ざこメモのピッカーの並び（ピクセル解析で確定） ----
+  // M11-14: ざこメモ／うごメモ準拠の整列（aligned）ドット。既存のドット疎・網点は
+  // 互い違い（staggered）配置なので別グループ。タイル定義は REQ_M11_14_batch.md §5 が正
   {
-    id: "dot-sparse-l", name: "ドット疎（大）", group: "ドット疎",
-    tile: T("##......", "##......", "........", "........", "....##..", "....##..", "........", "........"),
+    id: "dot-grid-l", nameKey: "ed.tone.dotGridL.label", group: "整列ドット",
+    // 1pxドット・3pxピッチ・全行同位相。8 は 3 で割り切れないため 3×3 タイル（辺長可変の初出）
+    tile: T("#..", "...", "..."),
   },
   {
-    id: "dot-sparse-s", name: "ドット疎（小）", group: "ドット疎",
-    tile: T("#.......", "........", "........", "........", "....#...", "........", "........", "........"),
+    id: "dot-grid-s", nameKey: "ed.tone.dotGridS.label", group: "整列ドット",
+    // 1pxドット・2pxピッチ・全行同位相
+    tile: T("#.#.#.#.", "........", "#.#.#.#.", "........", "#.#.#.#.", "........", "#.#.#.#.", "........"),
   },
   {
-    id: "halftone-l", name: "網点（大）", group: "網点",
-    tile: T("##..##..", "##..##..", "........", "........", "..##..##", "..##..##", "........", "........"),
-  },
-  {
-    id: "halftone-s", name: "網点（小）", group: "網点",
-    tile: T("#.#.#.#.", "........", ".#.#.#.#", "........", "#.#.#.#.", "........", ".#.#.#.#", "........"),
-  },
-  // M5-5 T-2: 細密化 — 小=1pxピッチ基調・大=小の約2倍ピッチ（うごメモのトーン感へ）
-  {
-    id: "hatch-l", name: "斜め網掛け（大）", group: "斜め網掛け",
-    // 1px斜線クロス・ピッチ8（X字格子。交点=ドット混合の見え）
-    tile: T("#.......", ".#.....#", "..#...#.", "...#.#..", "....#...", "...#.#..", "..#...#.", ".#.....#"),
-  },
-  {
-    id: "hatch-s", name: "斜め網掛け（小）", group: "斜め網掛け",
-    // 1px斜線クロス・ピッチ4（旧・大）
-    tile: T("#...#...", ".#.#.#.#", "..#...#.", ".#.#.#.#", "#...#...", ".#.#.#.#", "..#...#.", ".#.#.#.#"),
-  },
-  {
-    id: "vline-l", name: "縦線（大）", group: "縦線",
-    // 幅1px・間隔3（旧: 幅2間隔2のブロック状を細線化）
-    tile: T("#...#...", "#...#...", "#...#...", "#...#...", "#...#...", "#...#...", "#...#...", "#...#..."),
-  },
-  {
-    id: "vline-s", name: "縦線（小）", group: "縦線",
-    // 幅1px・間隔1（最細）
-    tile: T("#.#.#.#.", "#.#.#.#.", "#.#.#.#.", "#.#.#.#.", "#.#.#.#.", "#.#.#.#.", "#.#.#.#.", "#.#.#.#."),
-  },
-  {
-    id: "hline-l", name: "横線（大）", group: "横線",
+    id: "hline-l", nameKey: "ed.tone.hlineL.label", group: "横線",
     // 高さ1px・間隔3
     tile: T("########", "........", "........", "........", "########", "........", "........", "........"),
   },
   {
-    id: "hline-s", name: "横線（小）", group: "横線",
+    id: "hline-s", nameKey: "ed.tone.hlineS.label", group: "横線",
     // 高さ1px・間隔1（最細）
     tile: T("########", "........", "########", "........", "########", "........", "########", "........"),
   },
   {
-    id: "checker-l", name: "市松（大）", group: "市松",
+    id: "vline-l", nameKey: "ed.tone.vlineL.label", group: "縦線",
+    // 幅1px・間隔3（旧: 幅2間隔2のブロック状を細線化）
+    tile: T("#...#...", "#...#...", "#...#...", "#...#...", "#...#...", "#...#...", "#...#...", "#...#..."),
+  },
+  {
+    id: "vline-s", nameKey: "ed.tone.vlineS.label", group: "縦線",
+    // 幅1px・間隔1（最細）
+    tile: T("#.#.#.#.", "#.#.#.#.", "#.#.#.#.", "#.#.#.#.", "#.#.#.#.", "#.#.#.#.", "#.#.#.#.", "#.#.#.#."),
+  },
+  {
+    id: "checker-l", nameKey: "ed.tone.checkerL.label", group: "市松",
     // 2pxチェッカー（旧4pxのブロック状を細分化）
     tile: T("##..##..", "##..##..", "..##..##", "..##..##", "##..##..", "##..##..", "..##..##", "..##..##"),
   },
   {
-    id: "checker-s", name: "市松（小）", group: "市松",
+    id: "checker-s", nameKey: "ed.tone.checkerS.label", group: "市松",
     // 1pxチェッカー（古典ディザ・最細）
     tile: T("#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#"),
   },
   {
-    id: "grid-l", name: "格子（大）", group: "格子",
+    id: "solid-holes", nameKey: "ed.tone.solidHoles.label", group: "ベタ抜き",
+    // ベタに1pxの穴・2pxピッチ・整列（75%塗り）
+    tile: T("########", "#.#.#.#.", "########", "#.#.#.#.", "########", "#.#.#.#.", "########", "#.#.#.#."),
+  },
+  // M11-14b: 新規2柄（ざこメモのピッカーをピクセル解析・REQ §9 が正）
+  {
+    id: "solid-holes-sparse", nameKey: "ed.tone.solidHolesSparse.label", group: "ベタ抜き",
+    // ベタに1pxの穴・4pxピッチ・整列（穴の位置は (2,2) と (6,2) を基準に 4px おき）
+    tile: T("########", "########", "##.###.#", "########", "########", "########", "##.###.#", "########"),
+  },
+  {
+    id: "diag-grid", nameKey: "ed.tone.diagGrid.label", group: "斜め格子",
+    // 密ドット行（#.#.#.#.）と疎ドット行（.#...#.. / ...#...#）の交互＝ひし形の格子
+    tile: T("#.#.#.#.", ".#...#..", "#.#.#.#.", "...#...#", "#.#.#.#.", ".#...#..", "#.#.#.#.", "...#...#"),
+  },
+  // ---- 13〜22: メモアニマ特有の柄（M5-4 / M5-5 のまま） ----
+  {
+    id: "dot-sparse-l", nameKey: "ed.tone.dotSparseL.label", group: "ドット疎",
+    tile: T("##......", "##......", "........", "........", "....##..", "....##..", "........", "........"),
+  },
+  {
+    id: "dot-sparse-s", nameKey: "ed.tone.dotSparseS.label", group: "ドット疎",
+    tile: T("#.......", "........", "........", "........", "....#...", "........", "........", "........"),
+  },
+  {
+    id: "halftone-l", nameKey: "ed.tone.halftoneL.label", group: "網点",
+    tile: T("##..##..", "##..##..", "........", "........", "..##..##", "..##..##", "........", "........"),
+  },
+  {
+    id: "halftone-s", nameKey: "ed.tone.halftoneS.label", group: "網点",
+    tile: T("#.#.#.#.", "........", ".#.#.#.#", "........", "#.#.#.#.", "........", ".#.#.#.#", "........"),
+  },
+  // M5-5 T-2: 細密化 — 小=1pxピッチ基調・大=小の約2倍ピッチ（うごメモのトーン感へ）
+  {
+    id: "hatch-l", nameKey: "ed.tone.hatchL.label", group: "斜め網掛け",
+    // 1px斜線クロス・ピッチ8（X字格子。交点=ドット混合の見え）
+    tile: T("#.......", ".#.....#", "..#...#.", "...#.#..", "....#...", "...#.#..", "..#...#.", ".#.....#"),
+  },
+  {
+    id: "hatch-s", nameKey: "ed.tone.hatchS.label", group: "斜め網掛け",
+    // 1px斜線クロス・ピッチ4（旧・大）
+    tile: T("#...#...", ".#.#.#.#", "..#...#.", ".#.#.#.#", "#...#...", ".#.#.#.#", "..#...#.", ".#.#.#.#"),
+  },
+  {
+    id: "grid-l", nameKey: "ed.tone.gridL.label", group: "格子",
     tile: T("########", "#.......", "#.......", "#.......", "#.......", "#.......", "#.......", "#......."),
   },
   {
-    id: "grid-s", name: "格子（小）", group: "格子",
+    id: "grid-s", nameKey: "ed.tone.gridS.label", group: "格子",
     tile: T("########", "#...#...", "#...#...", "#...#...", "########", "#...#...", "#...#...", "#...#..."),
   },
   {
-    id: "cross-l", name: "クロスドット（大）", group: "クロスドット",
+    id: "cross-l", nameKey: "ed.tone.crossL.label", group: "クロスドット",
     tile: T("..#.....", "..#.....", "#####...", "..#.....", "..#.....", "........", "........", "........"),
   },
   {
-    id: "cross-s", name: "クロスドット（小）", group: "クロスドット",
+    id: "cross-s", nameKey: "ed.tone.crossS.label", group: "クロスドット",
     tile: T(".#......", "###.....", ".#......", "........", ".....#..", "....###.", ".....#..", "........"),
   },
-  { id: "solid", name: "ベタ", group: "ベタ", tile: null },
 ];
 
 export function toneById(id: string): ToneDef | undefined {
@@ -779,6 +827,91 @@ export function contractMask(mask: Uint8Array): Uint8Array {
     }
   }
   return m;
+}
+
+// ---------- M11-19: 線を太らせる／細らせる（索引バッファの 1px モルフォロジー） ----------
+// M11-8 の選択範囲用（expandMask / contractMask・0/1 マスク）とは**別関数**（あちらは無改変）。
+// 索引バッファの原則どおり、やることは「色番号のコピー」と「透明化（0）」だけ。補間・平均・混色はしない。
+// どちらも src（変更しない）を読んで dst に書く＝走査順に依存しない決定的な結果。
+
+/** 膨張で透明画素の8近傍を見る順（**決定的な固定規則**）:
+ *  上 → 左 → 右 → 下（4近傍）を先に、次に 左上 → 右上 → 左下 → 右下（斜め）。
+ *  最初に見つかった不透明画素の色番号をコピーする。4近傍を優先するのは、2色が接する所で
+ *  斜めの隣（角）の色が辺へ漏れないようにするため。同じ入力なら常に同じ出力 */
+const THICKEN_ORDER: ReadonlyArray<readonly [number, number]> = [
+  [0, -1],
+  [-1, 0],
+  [1, 0],
+  [0, 1],
+  [-1, -1],
+  [1, -1],
+  [-1, 1],
+  [1, 1],
+];
+
+/** 太らせる（1px 膨張）。透明(0)の画素の8近傍に不透明画素があれば、その色番号をコピーして埋める。
+ *  - src は読むだけ・dst に全画素を書く（dst は src と同じ幅の別バッファ。同一バッファは不可）
+ *  - clip（0/1・任意）: 書き込み先も**コピー元も** clip の中だけ。範囲外へは広がらず、範囲外からも取り込まない
+ *    （範囲の境界をキャンバスの端と同じ扱いにする）。キャンバスの外へは広がらない
+ *  戻り値: 変わった画素数（0 なら呼び出し側は履歴に積まない） */
+export function thickenIndex(src: IndexBuf, dst: IndexBuf, clip: Uint8Array | null): number {
+  dst.set(src);
+  let changed = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      if (src[i] !== 0) continue;
+      if (clip && !clip[i]) continue;
+      for (const [dx, dy] of THICKEN_ORDER) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+        const j = ny * W + nx;
+        if (clip && !clip[j]) continue;
+        const v = src[j];
+        if (v !== 0) {
+          dst[i] = v;
+          changed++;
+          break;
+        }
+      }
+    }
+  }
+  return changed;
+}
+
+/** 細らせる（1px 収縮）。不透明画素の8近傍に透明(0)があれば透明にする。
+ *  - **キャンバスの外は「不透明」扱い**（端に接した絵が端側から痩せない。M11-8 の選択収縮とは逆・REQ §1）
+ *  - clip（任意）: 対象は clip の中だけ。**範囲外も「不透明」扱い**（範囲の境界では痩せない）
+ *  戻り値: 変わった画素数 */
+export function thinIndex(src: IndexBuf, dst: IndexBuf, clip: Uint8Array | null): number {
+  dst.set(src);
+  let changed = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      if (src[i] === 0) continue;
+      if (clip && !clip[i]) continue;
+      let erode = false;
+      for (let ny = y - 1; ny <= y + 1 && !erode; ny++) {
+        if (ny < 0 || ny >= H) continue; // 外は不透明扱い
+        for (let nx = x - 1; nx <= x + 1; nx++) {
+          if (nx < 0 || nx >= W) continue;
+          const j = ny * W + nx;
+          if (clip && !clip[j]) continue; // 範囲外も不透明扱い
+          if (src[j] === 0) {
+            erode = true;
+            break;
+          }
+        }
+      }
+      if (erode) {
+        dst[i] = 0;
+        changed++;
+      }
+    }
+  }
+  return changed;
 }
 
 export function maskBBox(

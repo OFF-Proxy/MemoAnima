@@ -1,4 +1,4 @@
-//! アニメモ (AniMemo) — Tauri バックエンド
+//! メモアニマ (MemoAnima) — Tauri バックエンド
 //!
 //! 公開コマンド:
 //! - `app_info`             : アプリ名・バージョン・マイルストン
@@ -19,7 +19,7 @@ use tauri::{Emitter, Manager};
 #[tauri::command]
 fn app_info() -> serde_json::Value {
     serde_json::json!({
-        // M7-2c: 商標衝突回避のため改名（旧称アニメモ/AniMemo・2026-07-27）
+        // M7-2c: 商標衝突回避のため 2026-07-27 に改名（旧称は非公開の開発記録を参照）
         "name": "メモアニマ (MemoAnima)",
         "version": env!("CARGO_PKG_VERSION"),
         // M7-1 R-C: タイトル下の表示（バージョン＋非公式表明）に使う

@@ -1,4 +1,4 @@
-// アニメモ エディタ（M3）コントローラ
+// メモアニマ (MemoAnima) エディタ（M3）コントローラ
 // - キャンバスは 320×240 の canvas を CSS 整数倍＋image-rendering:pixelated で表示（ドット等倍）
 // - 全ツールの結果は 320×240 格子に確定（SPEC §4）
 // - レイヤー無制限・色両対応（パレット/フルカラー）・描き味トグル（OFFで3DS準拠）
@@ -23,11 +23,27 @@ import {
   cloneFrame,
   conformFrameWidth,
   UGO_COLORS,
+  UGO3D_BLUE,
+  clipBaseMap,
+  effectiveLayerStates,
 } from "./model";
 import { compositeFrame, presentToCanvas, frameToPngBlob, flattenIndexFrame } from "./render";
 import { History, bufferChangeEntry, multiBufferChangeEntry } from "./history";
 // M10-2a: 変位マップエンジン（歪み3方式と M10-3 のゆらゆらが共有する適用側）
 import { WarpField, applyWarp, isConvexQuad } from "./warp";
+import { buildWobbleFrames, type WobbleKind, type WobbleStrength } from "./wobble";
+// M12-C: カーソルの純関数（DOM に触らない側）は cursor.ts に分けてある
+import {
+  type CursorSettings,
+  CURSOR_DEFAULTS,
+  sanitizeCursor,
+  cursorFor,
+  cursorLayerHidden,
+  hasRing,
+  footprintEdges,
+  antColor,
+  canvasCursorFor,
+} from "./cursor";
 import * as R from "./raster";
 import { FrameClip, makeClip, buildFramesFromClip } from "./frameClip";
 import { FrameSource, projectSource, ExportAudioSource } from "./exporter";
@@ -41,6 +57,9 @@ import {
 import type { BgmTrack, SeTrack, ProjectAudio, Frame } from "./model";
 import { newSeId, sanitizeAudio } from "./model";
 import { createSlider, SliderHandle } from "../ui/slider";
+import { t } from "../i18n";
+// M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
+import { folderBaseName, layerBaseName, untitledTitle } from "../i18n/defaults";
 import { moveNodes, wouldCycle, topNodesOf, DropTarget } from "./layerTree";
 // M11-10: ショートカット（キー → コマンドID → 実行）。定義とプリセットは src/keymap.ts に集約
 import {
@@ -90,9 +109,10 @@ type ShapeKind = "line" | "rect" | "ellipse";
 /** M10-2a: 歪みの方式。M10-2a で動くのは push のみ（残りは M10-2b/2c） */
 type WarpMode = "push" | "bulge" | "pinch" | "corner";
 
-// M10-3: ゆらゆら差分。種類と強さ（弱/中/強）
-export type WobbleKind = "line" | "whole";
-export type WobbleStrength = 0 | 1 | 2;
+// M10-3: ゆらゆら差分。種類と強さ（弱/中/強）— M11-20 で純関数部分を wobble.ts へ切り出し。
+// main.ts（`?wobble` 診断）が editor から WOBBLE_TABLE を import しているので再エクスポートを残す
+export type { WobbleKind, WobbleStrength } from "./wobble";
+export { WOBBLE_TABLE } from "./wobble";
 
 /** M10-2c: 四隅モード中だけ無効化する浮遊UI。×2 ズームでキャンバスの右上・右下の
  *  ハンドルに重なっていて、そのままでは4つ中2つが物理的に掴めない（実機で確認）。 */
@@ -101,30 +121,25 @@ const MUTED_OVERLAY_SELECTORS = [".cvright", "#ed-mini"];
  *  `".4"` と書いて `"0.4"` で比べる形だと、CSSOM の正規化に依存して静かに壊れる。 */
 const MUTED_OPACITY = "0.4";
 
-/** M10-3 P-6: ゆらゆらの波長(L)と振幅(A)。**波長は固定**し、枚ごとの違いはシードだけで作る。
- *  振幅の下限を REQ の 1.5 / 0.5 ちょうどにしていないのは意図的で、0.5px だと
- *  `Math.round` で動く画素がごくわずかになり「押したのに何も起きない」に見えるため。 */
-export const WOBBLE_TABLE: Record<WobbleKind, { L: number; A: number }[]> = {
-  whole: [
-    { L: 44, A: 1.8 },
-    { L: 36, A: 2.4 },
-    { L: 28, A: 3.0 },
-  ],
-  line: [
-    { L: 7, A: 0.8 },
-    { L: 6, A: 1.1 },
-    { L: 5, A: 1.5 },
-  ],
-};
-
 const PEN_SIZES = [1, 2, 3, 5, 8, 12];
 // M5-4 B-3: ペンは「ベタ＋スプレー系」のみに整理。
 // 旧 dot(点線)・halftone(網点=ブラシのトーンへ)は撤去、rough(かすれ)は sand（スプレー粗）へ集約・廃止。
 // 既存作品の画素は不変（ツール状態は保存対象外・UIのみの整理）。
-const TEXTURES: { key: PenTexture; label: string; icon: string }[] = [
-  { key: "solid", label: "ベタ", icon: "━" },
-  { key: "spray", label: "スプレー（細）", icon: "░" },
-  { key: "sand", label: "スプレー（粗）", icon: "▒" },
+/**
+ * M12-1b-2: `innerHTML` のテンプレートへ**ユーザーのデータ**（レイヤー名・音声ファイル名）を差すときだけ通す。
+ * `textContent` / `title` / `placeholder` へ入れるときは**通さない**（通すと `&lt;` が文字として見える）。
+ * 属性値そのものはテンプレートに埋めない（R-2 案1＝組んだあとに `el.title = t(...)`）。
+ */
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// M12-1b: 表示名は i18n のキーで持つ（値は ja.ts。t() は使う直前に呼ぶ＝言語切替に追従する）
+// **動的キーの規約**: 変数で引くキーは `*Key: "…"` という名前のプロパティで持つ（検査4 がこの形を見る）
+const TEXTURES: { key: PenTexture; labelKey: string; icon: string }[] = [
+  { key: "solid", labelKey: "ed.pen.tex.solid.title", icon: "━" },
+  { key: "spray", labelKey: "ed.pen.tex.spray.title", icon: "░" },
+  { key: "sand", labelKey: "ed.pen.tex.sand.title", icon: "▒" },
 ];
 
 export interface EditorSaveContext {
@@ -132,6 +147,85 @@ export interface EditorSaveContext {
   album: string;
   /** 拡張子なしのファイル名ベース */
   baseName: string;
+}
+
+/** M11-17: パネル寸法（px）。settings.json の `layout` に保存する3つの数値 */
+export interface EditorLayout {
+  /** 左ツール列の幅 */
+  toolsW: number;
+  /** 右パネルの幅 */
+  sideW: number;
+  /** タイムラインの高さ */
+  tlH: number;
+}
+export type LayoutKey = keyof EditorLayout;
+
+/** 既定値＝M11-16 までの固定値（styles.css の `--ed-*` 初期値と一致させる） */
+export const LAYOUT_DEFAULT: Readonly<EditorLayout> = { toolsW: 88, sideW: 268, tlH: 148 };
+
+/** 上下限（px）。根拠は M11_17_report §2:
+ *  - toolsW 88..176: 88 はボタン66＋バー8＋padding4＋枠6 の一列ぶん（これ未満はボタンが欠ける）。
+ *    176 は二列（66×2＋gap7＋chrome18＝157）が入る幅＋余白。三列は道具列としては広すぎるので許さない
+ *  - sideW 220..420: 220 で中身幅 177（一番幅を食うトーン横長スウォッチ 144 が入る）。
+ *    420 は 1280 幅でもキャンバスが 2倍表示（640＋40）を保てる上限
+ *  - tlH 148..400: 下限は**既定と同じ 148**＝「タイムラインは今より高くはできるが低くはできない」。
+ *    見出し1行＋サムネ1段の理論最小は 130.5（見出し 38＋余白 6＋帯の padding 8＋サムネ 58.5＋
+ *    カード padding 14＋枠 6）だが、フィルムに横スクロールバー（約 17px）が出るとサムネが帯から
+ *    はみ出して縦バーが二重に出る（レビュー指摘）。148 未満で得られるのは十数 px の余白だけなので、
+ *    壊れ得る領域ごと切った。見出しが折り返して2行になる幅（1280×800 の既定など）では、
+ *    ドラッグ中に実測の見出し高から下限を動的に持ち上げる（clampLayoutLive）。400 は 800 高でも
+ *    キャンバスが 1倍表示（240＋40）を保てる上限。ドラッグ中はさらに実寸から動的に狭める（同） */
+export const LAYOUT_RANGE: Readonly<Record<LayoutKey, readonly [number, number]>> = {
+  toolsW: [88, 176],
+  sideW: [220, 420],
+  tlH: [148, 400],
+};
+
+/** ドラッグ用: 値を静的な上下限へ丸める（整数化）。数でなければ既定 */
+export function clampLayoutValue(key: LayoutKey, v: unknown): number {
+  const [lo, hi] = LAYOUT_RANGE[key];
+  if (typeof v !== "number" || !Number.isFinite(v)) return LAYOUT_DEFAULT[key];
+  return Math.max(lo, Math.min(hi, Math.round(v)));
+}
+
+/** 復元用: 数でない・範囲外は**既定へ倒す**（REQ §1「壊れた値や範囲外は既定へ」。丸めて採用はしない） */
+export function sanitizeLayoutValue(key: LayoutKey, v: unknown): number {
+  const [lo, hi] = LAYOUT_RANGE[key];
+  if (typeof v !== "number" || !Number.isFinite(v)) return LAYOUT_DEFAULT[key];
+  const r = Math.round(v);
+  return r < lo || r > hi ? LAYOUT_DEFAULT[key] : r;
+}
+
+/** M11-18: ミニプレビューの置き場。"timeline"=タイムライン左端に収納（既定）／"float"=従来のフロート
+ *  M11-21: "off"=表示しない（DOM 非表示・合成もしない・slot ごと消える・大画面切替の入口も無し）。
+ *  未知の値・壊れた値は既定（収納）へ */
+export type MiniDock = "timeline" | "float" | "off";
+export function sanitizeMiniDock(v: unknown): MiniDock {
+  return v === "float" || v === "off" ? v : "timeline";
+}
+
+/** M11-18: 個別の畳み状態（settings.collapsed に保存）。true 以外はすべて「開いている」 */
+export interface CollapsedState {
+  tools: boolean;
+  side: boolean;
+  tl: boolean;
+}
+export type CollapseKey = keyof CollapsedState;
+export function sanitizeCollapsed(v: unknown): CollapsedState {
+  const o = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  return { tools: o.tools === true, side: o.side === true, tl: o.tl === true };
+}
+/** 畳んだパネル（つまみ）の幅/高さ（px）。カード枠 3×2＋縦書き 11px 文字が入る最小 */
+export const COLLAPSED_PX = 22;
+
+/** settings.json の値（何が入っていても）→ 正常な EditorLayout。項目ごとに独立して既定へ倒す */
+export function sanitizeLayout(v: unknown): EditorLayout {
+  const o = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  return {
+    toolsW: sanitizeLayoutValue("toolsW", o.toolsW),
+    sideW: sanitizeLayoutValue("sideW", o.sideW),
+    tlH: sanitizeLayoutValue("tlH", o.tlH),
+  };
 }
 
 export interface EditorCallbacks {
@@ -142,6 +236,15 @@ export interface EditorCallbacks {
   /** M10-1c: 文字ツールの書体・サイズ・太さが変わったら settings.json へ保存する
    *  （変えた瞬間だけ。文字を置くたびには呼ばない） */
   onTextSettingsChange?: (t: TextSettings) => void;
+  /** M11-13: ミニプレビューを隠す/出すが変わったら settings.json へ保存する
+   *  （文字設定と同じ「変えた瞬間に保存」の流儀） */
+  onHudHiddenChange?: (hidden: boolean) => void;
+  /** M11-17: スプリッターで幅/高さを変えたら settings.json へ保存する（ドラッグ確定・既定復帰の瞬間だけ。
+   *  ドラッグ中は呼ばない）。渡す値は clamp 済み */
+  onLayoutChange?: (layout: EditorLayout) => void;
+  /** M11-18: 個別の畳み状態が変わったら settings.json へ保存する（つまみ・畳むボタンの瞬間だけ。
+   *  集中トグルは一時的な見方なので呼ばない） */
+  onCollapsedChange?: (collapsed: CollapsedState) => void;
   /** ライブラリ保存（Rust呼び出し）を委譲 */
   saveProject: (
     ctx: EditorSaveContext,
@@ -150,7 +253,8 @@ export interface EditorCallbacks {
   ) => Promise<string>;
   /** F-4: 保存先ピッカー（既存アルバム一覧＋新規作成＋ファイル名） */
   pickSaveTarget: (
-    defaultAlbum: string,
+    /** M12-D: 入れたいアルバム。**null＝おまかせ**（呼び出し側は既定名の文字列を作らない） */
+    album: string | null,
     defaultName: string
   ) => Promise<{ album: string; baseName: string } | null>;
   /** F-3: オートセーブ（アプリ設定領域へ・原子的保存はRust側） */
@@ -234,6 +338,17 @@ export class Editor {
     brush: 3,
     eraser: 3,
   };
+  /** M12-C: カーソルの設定（`settings.cursor` を正規化したもの）。 */
+  private cursorCfg: CursorSettings = CURSOR_DEFAULTS;
+  /** M12-C: 2階（輪・ドット枠）のどちらかが ON か。**false のときホバーは従来どおり素通り**。
+   *  `onPointerMove` の判定を1つの真偽値で済ませるために持つ */
+  private cursorLive = CURSOR_DEFAULTS.ring || CURSOR_DEFAULTS.cell;
+  /** M12-C: 最後に見たドット位置（同じなら描き直さない） */
+  private cursorDot: { x: number; y: number } | null = null;
+  /** M12-C: 予約中の rAF（1フレーム1回に間引く） */
+  private cursorRaf: number | null = null;
+  /** M12-C: いま描いてある内容の指紋（位置・太さ・寸法。同じなら clearRect すらしない） */
+  private cursorPainted = "";
   /** 現在のツールの太さ。**実体は sizeByTool 側**にしかない（二重状態を持たない）。
    *  こうしておかないと setTool を経由しないツール変更（貼り付け・画像配置・変形の
    *  離脱/確定）で「記憶値と実際の太さ」が食い違う — レビュー検出 */
@@ -242,12 +357,21 @@ export class Editor {
   }
   set penSize(v: number) {
     this.sizeByTool[this.sizeSlot(this.tool)] = v;
+    // M12-C: 太さが変わったら輪も描き直す。**ここが唯一の書き込み口**なので、
+    // ピッカーのクリックもショートカットも同じように反映される。
+    // ポインタが動かないと直らない（＝太さを変えても輪が古いまま）のを防ぐ
+    this.cursorPainted = "";
+    this.paintCursorLayer();
   }
   texture: PenTexture = "solid";
   /** M5-4: ブラシのトーンパターン（ペンの texture とは独立に記憶。既定=網点大） */
   brushToneId = "halftone-l";
   /** M5-5 T-3: バケツ塗りのトーン（ブラシとは独立に記憶。既定=ベタ） */
   fillToneId = "solid";
+  /** M11-14: かすり消し（消しゴムのトーン）。ブラシ・バケツと同じく**独立に記憶**し、
+   *  既定はベタ＝従来どおりの全消し。ブラシと共有すると、ブラシの既定（網点大）のせいで
+   *  **消しゴムが最初からかすれてしまい**「ベタ時は従来どおり」が初期状態で成立しない */
+  eraserToneId = "solid";
   onionLevel = 0;
   stabilizer = true;
   pressureEnabled = true;
@@ -283,6 +407,11 @@ export class Editor {
   } | null = null;
   /** 浮動テキストを掴んでいる位置（掴んだ点と左上の差） */
   private textDrag: { ox: number; oy: number } | null = null;
+  /** M11-15: レイヤー専用クリップボード（アクティブレイヤーの現在コマの索引バッファ1枚）。
+   *  選択範囲のクリップボード（frameClip / edit.copy）とは**別枠**で互いに上書きしない。
+   *  値は colorTable の添字なので**同じ作品の編集セッション内でのみ有効**＝`mount()` で必ず破棄
+   *（別作品へ持ち出すと色化けする。破棄は `clearLayerClip()` 1箇所に集約） */
+  private layerClip: IndexBuf | null = null;
   /** E-2: ピクセル格子（1ドット≥8px で表示・既定ON） */
   gridEnabled = true;
   /** E-1: Space押下中の一時手のひら */
@@ -300,6 +429,50 @@ export class Editor {
   viewRot = 0; // 0/90/180/270
   viewFlipH = false;
   previewLarge = false;
+  /** M11-16: HUD（ミニプレビュー・左下バッジ・倍率表示）をまとめて隠しているか。
+   *  M11-13 の miniHidden（ミニ単独）を置き換え・統合。**設定 `hudHidden` に保存**して次回も維持
+   *（既定は表示＝従来どおり）。四隅変形の `muteFloatingOverlays()` とは別物で、
+   *  あちらは opacity/pointer-events を一時的に触るだけ・こちらは hidden 属性なので衝突しない */
+  hudHidden = false;
+  /** M11-16: ストローク中（pointerdown〜up）の自動非表示が立っているか。設定には保存しない */
+  private hudStroke = false;
+  /** ストローク終了 → HUD を戻すまでの遅延タイマー（連続ストロークの点滅防止） */
+  private hudRestoreTimer: number | null = null;
+  /** HUD を戻すまでの遅延（ms）。次のストロークがこの間に始まれば消えたまま */
+  private static readonly HUD_RESTORE_MS = 350;
+
+  /** M11-17: パネル寸法（設定 `layout` に保存・セッションを跨いで持ち越す）。DOM への反映は applyLayout() 1つ */
+  layout: EditorLayout = { ...LAYOUT_DEFAULT };
+  /** M11-18: ミニプレビューの置き場（設定 `miniDock`）。反映は applyHud() */
+  miniDock: MiniDock = "timeline";
+  /** M11-18: 個別の畳み状態（設定 `collapsed`・持ち越す）。反映は applyLayout() */
+  collapsed: CollapsedState = { tools: false, side: false, tl: false };
+  /** M11-18: キャンバス集中（3パネル一括畳み）。**保存しない**（mount でリセット・previewLarge と同じ扱い）。
+   *  発動時に個別状態を focusSnap に控え、解除で戻す。集中中につまみで個別に開いたら focusSnap は捨てて
+   *  「現状」を個別状態の新しい基準にする（2重管理の食い違い防止・REQ §3） */
+  private focusActive = false;
+  private focusSnap: CollapsedState | null = null;
+  /** M11-18: 見出しの子要素の元の並び順（全部）。reflowTlHead はまずこの順に組み直してから測る */
+  private tlHeadOrder: HTMLElement[] = [];
+  /** M11-18: 見出しの「…」メニューへ送れる要素（元の並び順）。reflowTlHead が後ろから送る */
+  private tlHeadItems: HTMLElement[] = [];
+  /** M11-18: 直前の applyLayout でタイムラインが畳まれていたか（開いた瞬間に収納ミニを描き直すため） */
+  private tlWasCollapsed = false;
+  /** 「…」メニューを閉じる関数（開いている間だけ非 null） */
+  private tlMoreClose: (() => void) | null = null;
+  /** M11-17: 進行中のスプリッタードラッグ。frameDrag と同じ「window リスナー＋mine() で id を絞る」作法。
+   *  終わり方は finishSplitDrag() 1経路（pointerup / pointercancel / blur / unmount / Esc）＝掴んだまま残らない */
+  private splitDrag: {
+    key: LayoutKey;
+    el: HTMLElement;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    startVal: number;
+    onMove: (e: PointerEvent) => void;
+    onUp: (e: PointerEvent) => void;
+    onBlur: () => void;
+  } | null = null;
 
   // 再生
   playing = false;
@@ -330,7 +503,20 @@ export class Editor {
   private dashAcc = { d: 0 };
   private lastPt: { x: number; y: number } | null = null;
   private smoothPt: { x: number; y: number } | null = null;
-  private pointerDown = false;
+  private _pointerDown = false;
+  /** 接触中フラグ。M11-16: **書き込みを1箇所に集約**し、立つ瞬間に HUD を薄く・下りる瞬間に
+   *  戻す（setStrokeHud）。pointerup / pointercancel / blur→endPointerSession / スポイトの早期解放 /
+   *  mount のリセット…どこから下ろしても必ずここを通るので「消えたまま戻らない」が起きない */
+  private get pointerDown(): boolean {
+    return this._pointerDown;
+  }
+  private set pointerDown(v: boolean) {
+    if (this._pointerDown === v) return;
+    this._pointerDown = v;
+    // 手のひら/Space のパンは「描いている」わけではないので薄くしない（倍率表示を見ながら動かせる）。
+    // panState は pointerDown=true より前に立つ（onPointerDown のパン分岐）ので、ここで判定できる
+    this.setStrokeHud(v && !this.panState);
+  }
   /** M11-5: いま #ed-cvwrap が掴んでいるポインタ。pointerup/pointercancel が届かないまま
    *  終わった接触を後から解放するために覚えておく（掴みっぱなしだと、その入力機器の
    *  イベントが全部キャンバスへ配送され続け、ボタン類が押せなくなる） */
@@ -489,6 +675,8 @@ export class Editor {
   private filmScratch: HTMLCanvasElement | null = null;
   private filmObserver: IntersectionObserver | null = null;
   private resizeObs: ResizeObserver | null = null;
+  /** M11-17: タイムライン見出しの高さ（1行/2行）を追う。--ed-tlhead-h の更新だけ */
+  private headObs: ResizeObserver | null = null;
 
   // ---------------- 起動/終了 ----------------
 
@@ -521,6 +709,15 @@ export class Editor {
     this.rangeAnchor = null;
     // フォルダ選択も持ち越さない（別プロジェクトの dangling parent 防止・Codexレビュー指摘#3）
     this.selectedFolderId = null;
+    // M11-19 レビュー検出の既存バグ: 複数選択（selectedNodeIds/selAnchorId）も持ち越されていた。
+    // 新規メモはレイヤー id が毎回同じなので、前の作品で選んでいた行が次の作品でも「選択中」のまま残り、
+    // 行ドラッグの「選択外の行から掴んだら単独選択に切替」が効かなかった（起動直後＝空集合と同じにする）
+    this.selectedNodeIds = new Set();
+    this.selAnchorId = null;
+    // M11-15: レイヤー専用クリップボードは**作品を跨がない**（値は colorTable の添字＝別作品では色化け）。
+    // 破棄は clearLayerClip() 1箇所（ボタンはこの後 buildSidePanel が作り直すので、
+    // ここでの無効化は空振りしてよい）
+    this.clearLayerClip();
     $("#ed-stage").classList.remove("swapped");
 
     // M10-21: 入力診断フラグ（?inputlog または VITE_INPUTLOG=1 の診断ビルド）。
@@ -547,6 +744,11 @@ export class Editor {
     window.addEventListener("keyup", this.keyupHandler);
     window.addEventListener("resize", this.resizeHandler);
     window.addEventListener("blur", this.blurHandler);
+    // M12-C: キャンバスから出たらカーソル層を消す。**addEventListener で足す**
+    //（診断ビルドが `wrap.onpointerleave` プロパティを使っているので、上書きし合わないように）
+    document
+      .querySelector("#ed-cvwrap")
+      ?.addEventListener("pointerleave", this.cursorLeaveHandler);
     this.spaceHeld = false;
     // M11-5: 前のセッションの接触状態を持ち越さない（pointerup が届かないまま閉じた場合、
     // 開き直しても「かざしただけで線が引かれる」等が残っていた）。
@@ -559,7 +761,31 @@ export class Editor {
     this.releaseCapture();
     this.cancelRowDrag();
     this.cancelFrameDrag(); // M11-7: 掴んだまま別の作品を開かない
-    $("#ed-title").textContent = `✏ ${project.meta.title || "無題"}`;
+    this.finishSplitDrag(false); // M11-17: スプリッターも同じ
+    $("#ed-title").textContent = `✏ ${project.meta.title || untitledTitle()}`;
+    // M11-18: キャンバス集中は**持ち越さない**（previewLarge と同じ一時的な見方）。個別の畳み（collapsed）と
+    // ミニの置き場（miniDock）は設定から復元済みで、applyLayout / applyHud が DOM へ反映する
+    this.focusActive = false;
+    this.focusSnap = null;
+    this.bindPanelFolds();
+    // M11-17: パネル寸法は hudHidden と同じく**セッションを跨ぐ**状態。設定から復元済みの値を DOM へ
+    //（applyZoom より前＝復元後の stage 寸法で倍率を決める）。スプリッターの配線もここで
+    this.bindSplitters();
+    this.applyLayout();
+    // M11-13/16: 隠す/出す（hudHidden）は**セッションを跨いで持ち越す**状態なので、上の表示リセット
+    //（previewLarge/回転/ズーム）とは別に、設定から復元した値をここで DOM へ反映する。
+    // ストロークの自動非表示は**持ち越さない**（前の作品で押しっぱなしのまま閉じても薄いまま始まらない）
+    if (this.hudRestoreTimer != null) {
+      clearTimeout(this.hudRestoreTimer);
+      this.hudRestoreTimer = null;
+    }
+    this.hudStroke = false;
+    this.applyHud();
+    // M12-C: 1階のカーソルを今のツールに合わせる（設定は main 側から restoreCursor で入る）。
+    // 2階は位置が決まってから描くので、ここでは触らない
+    this.applyCanvasCursor();
+    this.cursorDot = null;
+    this.cursorPainted = "";
     this.applyZoom();
     this.refreshAll();
     // F-0対策: レイアウト確定後にサイズ確定＋再描画（表示直後は clientWidth が不定になり得る）。
@@ -579,6 +805,14 @@ export class Editor {
       });
     });
     this.resizeObs.observe($("#ed-stage"));
+    // M11-17: 見出しの実高を --ed-tlhead-h へ（サムネの伸びの上限に使う）。
+    // M11-18: 見出しは常に1行になったが、幅が変わったらあふれの振り分け（reflowTlHead）もここで。
+    // reflow は見出しの寸法を変えない（1行固定・幅は親由来）ので観測ループにならない
+    this.headObs = new ResizeObserver(() => {
+      this.publishTlHeadHeight();
+      this.reflowTlHead();
+    });
+    this.headObs.observe($("#ed-tlhead"));
     // M11-8: 手のひら/スクロールでキャンバスが動いたらランチャーも追従させる
     // （M3.9 H-1 でスクロールは内側の #ed-scroll に限定されている。#ed-stage は動かない）
     $("#ed-scroll").addEventListener("scroll", this.stageScrollHandler);
@@ -599,6 +833,11 @@ export class Editor {
     window.removeEventListener("keyup", this.keyupHandler);
     window.removeEventListener("resize", this.resizeHandler);
     window.removeEventListener("blur", this.blurHandler);
+    // M12-C: 同一参照で外す。予約している rAF も畳む（画面を離れてから描かない）
+    document
+      .querySelector("#ed-cvwrap")
+      ?.removeEventListener("pointerleave", this.cursorLeaveHandler);
+    this.cancelCursorFrame();
     // M11-5: 診断ビルドで張った分（張っていなければ何も起きない）
     window.removeEventListener("keydown", this.keyLogHandler);
     window.removeEventListener("keyup", this.keyLogHandler);
@@ -609,6 +848,8 @@ export class Editor {
     // M11-7: 進行中の自前ドラッグ（window リスナー）を残さない
     this.cancelRowDrag();
     this.cancelFrameDrag();
+    this.finishSplitDrag(true); // M11-17: 掴んだまま画面を離れない（変わっていれば保存してから）
+    this.closeTlMore(); // M11-18: 「…」メニューを開いたまま画面を離れない
     // M11-10: 矢印キーの移動セッションを持ったまま画面を離れない（確定してから閉じる）
     this.endArrowSession();
     // M11-12: 浮動テキストも同じ（保険。⟵もどる等の通常経路では xformGuard で既に焼けている）。
@@ -622,6 +863,8 @@ export class Editor {
     this.hideSelectionLauncher();
     this.resizeObs?.disconnect();
     this.resizeObs = null;
+    this.headObs?.disconnect(); // M11-17
+    this.headObs = null;
     this.filmObserver?.disconnect();
     this.filmObserver = null;
     if (this.autosaveTimer != null) {
@@ -709,7 +952,7 @@ export class Editor {
       // 直前にライブラリ保存/破棄が完了していたら、この古いスナップショットは書かない
       if (epoch !== this.autosaveEpoch || !this.mounted) return;
       await this.cb.autosave(data, {
-        title: this.project.meta.title ?? "無題",
+        title: this.project.meta.title ?? untitledTitle(),
         album: this.saveCtx?.album ?? null,
         baseName: this.saveCtx?.baseName ?? null,
         libRoot: this.saveCtx?.libRoot || null,
@@ -740,7 +983,7 @@ export class Editor {
    *  ※ 設定メニューの「終了」は**この経路を通さない**（オートセーブを残したまま終わる
    *    従来の挙動を維持する。M11-6 P-1-5） */
   async confirmLeave(
-    message = "保存していない変更があります。破棄してライブラリへ戻りますか？"
+    message = t("ed.leave.discard.msg")
   ): Promise<boolean> {
     if (!this.mounted) return true;
     if (this.xformGuard()) return false; // E-4: 変形中は確定/取消が先
@@ -759,30 +1002,47 @@ export class Editor {
     await this.cb.clearAutosave().catch(() => {});
   }
 
+  /** M12-E: **危ない操作の直前に、オートセーブをもう1回だけ走らせる**。
+   *
+   *  15秒の周期（`mount()` の setInterval）は**変えない**。これはその周期に加えて、
+   *  「再読み込みされるかもしれない」「背面に回った」といった**取りこぼしが起きうる瞬間**に
+   *  1回だけ差し込むための入口。`runAutosave()` は private なので公開ラッパを置く。
+   *
+   *  `runAutosave()` の入口ガードはそのまま効く。したがって次のときは**何も書かない**:
+   *   - 変更が無い（`autosavePending` が false）… 書く必要が無い
+   *   - 前の便が飛行中（`autosaveInFlight`）… 既に書いている最中
+   *   - ペン接触中・変形中・浮動中・四隅中 … **中途半端な状態を焼き付けないための既存の判断**
+   *  「書けなかった」ことは戻り値に出ない（`runAutosave` は成否を返さない）。
+   *  呼び出し側は**待つだけ**にして、書けたかどうかで分岐しないこと。 */
+  async autosaveNow(): Promise<void> {
+    if (!this.mounted) return;
+    await this.runAutosave();
+  }
+
   // ---------------- UI 構築 ----------------
 
   private buildToolsPanel() {
     const tools: { key: Tool; icon: string; label: string }[] = [
       // M3.10 G-2: 手のひらは最上段（ペンの上）。H/Space の割当は不変
-      { key: "hand", icon: "✋", label: "手のひら" },
-      { key: "pen", icon: "✏", label: "ペン" },
-      { key: "brush", icon: "🖌", label: "ブラシ" },
-      { key: "eraser", icon: "🧽", label: "消しゴム" },
-      { key: "fill", icon: "🪣", label: "塗り" },
-      { key: "shape", icon: "⬛", label: "図形" },
-      { key: "text", icon: "Ａ", label: "文字" },
-      { key: "eyedrop", icon: "💧", label: "スポイト" },
+      { key: "hand", icon: "✋", label: t("ed.tool.hand.label") },
+      { key: "pen", icon: "✏", label: t("ed.tool.pen.label") },
+      { key: "brush", icon: "🖌", label: t("ed.tool.brush.label") },
+      { key: "eraser", icon: "🧽", label: t("ed.tool.eraser.label") },
+      { key: "fill", icon: "🪣", label: t("ed.tool.fill.label") },
+      { key: "shape", icon: "⬛", label: t("ed.tool.shape.label") },
+      { key: "text", icon: "Ａ", label: t("ed.tool.text.label") },
+      { key: "eyedrop", icon: "💧", label: t("ed.tool.eyedrop.label") },
     ];
     const edits: { key: Tool | "copyprev" | "clear"; icon: string; label: string }[] = [
       // M11-8 P-2: 絵を動かすのはこのツール（選択範囲内のドラッグは枠だけが動く）
-      { key: "move", icon: "✥", label: "移動" },
-      { key: "select", icon: "⬚", label: "範囲選択" },
-      { key: "transform", icon: "🔀", label: "変形" },
+      { key: "move", icon: "✥", label: t("ed.tool.move.label") },
+      { key: "select", icon: "⬚", label: t("ed.tool.select.label") },
+      { key: "transform", icon: "🔀", label: t("ed.tool.transform.label") },
       // M10-2a: 方式（押す/ふくらませ/へこませ/四隅）はツールオプション内で切り替える。
       // 方式ごとにボタンを増やすと段組みが崩れるので、ツールは1つだけ（REQ §3.6）
-      { key: "warp", icon: "🌊", label: "歪み" },
-      { key: "copyprev", icon: "🗐", label: "複写" },
-      { key: "clear", icon: "🌀", label: "消す" },
+      { key: "warp", icon: "🌊", label: t("ed.tool.warp.label") },
+      { key: "copyprev", icon: "🗐", label: t("ed.tool.copyprev.label") },
+      { key: "clear", icon: "🌀", label: t("ed.tool.clear.label") },
     ];
     const host = $("#ed-tools");
     host.innerHTML = "";
@@ -800,7 +1060,7 @@ export class Editor {
     }
     const lbl = document.createElement("div");
     lbl.className = "tlabel";
-    lbl.textContent = "─ 編集 ─";
+    lbl.textContent = t("ed.tool.editGroup.label");
     host.appendChild(lbl);
     for (const t of edits) {
       const b = mk(t.icon, t.label, t.key);
@@ -813,9 +1073,9 @@ export class Editor {
     }
     // M8-2b: 画像取り込みは左ツール列の「♪ 音声」直上（上部バーから移設）。
     // ツール選択ではないので dataset.tool は既存ツールと重ならない値にする（"on" が付かない）
-    const img = mk("📷", "画像", "image");
+    const img = mk("📷", t("ed.tool.image.label"), "image");
     img.id = "ed-tool-image";
-    img.title = "画像を取り込む（このページに配置）";
+    img.title = t("ed.tool.image.title");
     img.addEventListener("click", () => {
       if (this.xformGuard()) return;
       if (this.playing) this.stopPlayback();
@@ -823,7 +1083,7 @@ export class Editor {
     });
     host.appendChild(img);
     // M6-3 A-3: 音声は左ツール列のボタン → 波形調整パネル（モーダル）
-    const au = mk("♪", "音声", "audio");
+    const au = mk("♪", t("ed.tool.audio.label"), "audio");
     au.id = "ed-tool-audio";
     au.addEventListener("click", () => void this.openAudioPanel());
     host.appendChild(au);
@@ -842,14 +1102,23 @@ export class Editor {
     const em = b.querySelector(".em") as HTMLElement;
     em.textContent = has && allMuted ? "🔇" : "♪";
     b.style.opacity = has ? "1" : "0.55";
-    const bgmLabel = !a?.bgm
-      ? "BGMなし"
-      : a.bgm.source === "kwz"
-        ? "BGM: 元の音（3DS作品由来）"
-        : `BGM: ${a.bgm.name ?? "外部音声"}`;
+    // M12-1b-2（監査 #6 / R-3）: 断片を連結せず、BGM の状態 × 全ミュート有無で**完全文**を選ぶ。
+    // 差し込み先は title プロパティなので escHtml は通さない（通すと &lt; が字として見える）
+    const count = a?.se.length ?? 0;
+    const name = a?.bgm?.name ?? t("ed.tool.audio.bgmUnnamed.label");
     b.title = !has
-      ? "音声なし（クリックで読み込み）"
-      : `${bgmLabel}・SE ${a!.se.length}本${allMuted ? "・全ミュート中" : ""}`;
+      ? t("ed.tool.audio.none.title")
+      : !a?.bgm
+        ? allMuted
+          ? t("ed.tool.audio.summaryNoneMuted.title", { count })
+          : t("ed.tool.audio.summaryNone.title", { count })
+        : a.bgm.source === "kwz"
+          ? allMuted
+            ? t("ed.tool.audio.summaryKwzMuted.title", { count })
+            : t("ed.tool.audio.summaryKwz.title", { count })
+          : allMuted
+            ? t("ed.tool.audio.summaryExtMuted.title", { name, count })
+            : t("ed.tool.audio.summaryExt.title", { name, count });
   }
 
   /** M5-4 B-3/M5-5 T-3: ペン=テクスチャ3種 / ブラシ・バケツ=トーンピッカー（2列・大小並び・各自独立記憶） */
@@ -858,50 +1127,86 @@ export class Editor {
     const tex = document.querySelector("#ed-tex") as HTMLElement | null;
     if (!head || !tex) return;
     tex.innerHTML = "";
+    // M11-14: 消しゴムにも同じピッカーを出す（かすり消し）。選択はツールごとに独立記憶
     const toneMode =
-      this.tool === "brush" ? "brush" : this.tool === "fill" ? "fill" : null;
+      this.tool === "brush"
+        ? "brush"
+        : this.tool === "fill"
+          ? "fill"
+          : this.tool === "eraser"
+            ? "eraser"
+            : null;
     if (toneMode) {
+      // M11-24: 見出しは道具名を繰り返さない（選んでいる道具は左の道具列で分かる）。
+      // 「ベタ=全部消す」は title へ逃がす（画面に出しっぱなしにしない）
       head.textContent =
-        toneMode === "brush" ? "トーンパターン（ブラシ）" : "塗りのトーン（バケツ）";
+        toneMode === "brush" ? t("ed.tone.head.brush.label") : toneMode === "fill" ? t("ed.tone.head.fill.label") : t("ed.tone.head.eraser.label");
+      head.title = toneMode === "eraser" ? t("ed.tone.head.eraser.title") : "";
       tex.classList.add("tonegrid");
-      const getId = () => (toneMode === "brush" ? this.brushToneId : this.fillToneId);
+      const getId = () =>
+        toneMode === "brush"
+          ? this.brushToneId
+          : toneMode === "fill"
+            ? this.fillToneId
+            : this.eraserToneId;
       const setId = (id: string) => {
         if (toneMode === "brush") this.brushToneId = id;
-        else this.fillToneId = id;
+        else if (toneMode === "fill") this.fillToneId = id;
+        else this.eraserToneId = id;
       };
-      for (const t of R.TONE_TILES) {
+      // M11-19→M11-24: グループの区切り。**文字は出さない**（「ざこメモの柄／メモアニマの柄」は削除・
+      // 作者指摘）。並び・id・タイルは一切変えない。斜め格子（diag-grid）の下に細い線を1本だけ引いて、
+      // 3DS 由来の柄と本アプリで足した柄の切れ目だけ残す（先頭には引かない＝上に何も無いので不要）。
+      // 2列グリッドの行またぎを起こさないよう区切りは 1行ぶち抜き（.tone-sep・grid-column: 1 / -1）。
+      // 選択の付け外しは .tone-btn を querySelectorAll しているので、区切りが混ざっても壊れない
+      const sep = () => {
+        const s = document.createElement("div");
+        s.className = "tone-sep";
+        tex.appendChild(s);
+      };
+      // M12-1c-2: ループ変数は tone（`t` は翻訳関数。M12-1b の TEXTURES と同じ作法）
+      for (const tone of R.TONE_TILES) {
         const d = document.createElement("button");
-        d.className = "tone-btn" + (t.id === getId() ? " on" : "");
-        d.title = t.name;
-        // スウォッチ: 32×32 バッキング（8×8タイル×4リピート・等倍描画）→ CSS ×2 pixelated
+        // M11-14b: 大/小のペアを**同じ行**に揃えるため、ペアを持たない柄（ベタ・斜め格子）は
+        // 2列ぶちぬきにする。REQ §9 の並びをそのまま2列に流すと、ベタ（1個）と
+        // ベタ抜き系（3個）が奇数なので、以降のペアが全部行をまたいでしまう。
+        // ベタ抜きドット/（疎）は同グループの2個で1行に収まる
+        const wide = tone.tile === null || tone.id === "diag-grid";
+        d.className =
+          "tone-btn" + (wide ? " tone-wide" : "") + (tone.id === getId() ? " on" : "");
+        d.title = t(tone.nameKey);
+        // スウォッチ: 32×32 バッキング（8×8タイル×4リピート・等倍描画）→ CSS ×2 pixelated。
+        // 2列ぶちぬきの柄は 72×16（横長・同じ ×2 でドット感を保つ）
         const cv = document.createElement("canvas");
-        cv.width = 32;
-        cv.height = 32;
+        cv.width = wide ? 72 : 32;
+        cv.height = wide ? 16 : 32;
         const ctx = cv.getContext("2d")!;
         ctx.fillStyle = "#fff";
-        ctx.fillRect(0, 0, 32, 32);
+        ctx.fillRect(0, 0, cv.width, cv.height);
         ctx.fillStyle = "#2c2621";
-        for (let y = 0; y < 32; y++)
-          for (let x = 0; x < 32; x++)
-            if (!t.tile || R.toneAt(t.tile, x, y)) ctx.fillRect(x, y, 1, 1);
+        for (let y = 0; y < cv.height; y++)
+          for (let x = 0; x < cv.width; x++)
+            if (!tone.tile || R.toneAt(tone.tile, x, y)) ctx.fillRect(x, y, 1, 1);
         d.appendChild(cv);
         d.addEventListener("click", () => {
-          setId(t.id);
+          setId(tone.id);
           tex.querySelectorAll(".tone-btn").forEach((e) => e.classList.remove("on"));
           d.classList.add("on");
         });
         tex.appendChild(d);
+        if (tone.id === "diag-grid") sep(); // 斜め格子の下に区切り線（文字なし）
       }
     } else {
-      head.textContent = "ペンの種類";
+      head.textContent = t("ed.pen.kind.label");
       tex.classList.remove("tonegrid");
-      for (const t of TEXTURES) {
+      // M12-1b: ループ変数は tx（`t` は翻訳関数）
+      for (const tx of TEXTURES) {
         const d = document.createElement("button");
-        d.className = "tx" + (t.key === this.texture ? " on" : "");
-        d.title = t.label;
-        d.textContent = t.icon;
+        d.className = "tx" + (tx.key === this.texture ? " on" : "");
+        d.title = t(tx.labelKey);
+        d.textContent = tx.icon;
         d.addEventListener("click", () => {
-          this.texture = t.key;
+          this.texture = tx.key;
           tex.querySelectorAll(".tx").forEach((e) => e.classList.remove("on"));
           d.classList.add("on");
         });
@@ -950,6 +1255,11 @@ export class Editor {
     this.buildToolOptions();
     this.rebuildTexPicker(); // M5-4: ペン⇄ブラシでピッカー切替（各自の選択を記憶）
     this.redrawOverlay();
+    // M12-C: 1階（CSS の cursor）と2階（輪・枠）をツールに合わせ直す。
+    // ここは既にある redrawOverlay の直後で、ホバー経路とは無関係（頻度はツール切替のときだけ）
+    this.applyCanvasCursor();
+    this.cursorPainted = "";
+    this.paintCursorLayer();
     this.revealToolOptions();
   }
 
@@ -974,34 +1284,64 @@ export class Editor {
   private buildSidePanel() {
     const host = $("#ed-side");
     host.innerHTML = `
-      <h3>ペンの太さ</h3><div class="sizes" id="ed-sizes"></div>
-      <h3 id="ed-texhead">ペンの種類</h3><div class="tex" id="ed-tex"></div>
-      <h3 id="ed-colhead">カラー（パレット）</h3>
+      <h3>${t("ed.pen.size.label")}</h3><div class="sizes" id="ed-sizes"></div>
+      <h3 id="ed-texhead">${t("ed.pen.kind.label")}</h3><div class="tex" id="ed-tex"></div>
+      <h3 id="ed-colhead">${t("ed.color.head.palette.label")}</h3>
       <div class="pal" id="ed-pal"></div>
       <div class="row" style="margin-top:2px">
-        <span class="tog">フルカラー</span><div class="sw2" id="ed-fullcolor"></div>
+        <span class="tog">${t("ed.color.fullcolor.label")}</span><div class="sw2" id="ed-fullcolor"></div>
         <input type="color" id="ed-colorpick" value="#141414" style="width:40px;height:28px;border:3px solid var(--ink);border-radius:8px;padding:0;background:#fff" hidden />
       </div>
-      <div class="row"><span class="tog">紙の色</span><div id="ed-paperpal" class="pal" style="flex:1"></div></div>
-      <h3>レイヤー <button class="minibtn" id="ed-layer-add">＋</button>
-        <button class="minibtn" id="ed-folder-add" title="フォルダ追加（選択レイヤーを包む）">📁</button>
+      <div class="row"><span class="tog">${t("ed.color.paper.label")}</span><div id="ed-paperpal" class="pal" style="flex:1"></div></div>
+      <h3>${t("ed.layer.head.label")} <button class="minibtn" id="ed-layer-add">＋</button>
+        <button class="minibtn" id="ed-folder-add">📁</button>
         <button class="minibtn" id="ed-layer-del">🗑</button>
-        <button class="minibtn" id="ed-layer-merge" title="下と統合">⇓統合</button></h3>
+        <button class="minibtn" id="ed-layer-merge">${t("ed.layer.mergeDown.btn")}</button></h3>
       <div id="ed-layers"></div>
-      <h3>透かす（オニオンスキン）</h3><div class="oni" id="ed-onion"></div>
-      <h3>描き味（PC拡張・OFFで3DS準拠）</h3>
-      <div class="row"><span class="tog">手ブレ補正</span><div class="sw2 on" id="ed-tog-stab"></div></div>
-      <div class="row"><span class="tog">筆圧で太さ</span><div class="sw2 on" id="ed-tog-press"></div></div>
-      <div class="row"><span class="tog">ピクセル格子（高倍率時）</span><div class="sw2 on" id="ed-tog-grid"></div></div>
+      <!-- M11-15: レイヤーのコピー＆ペースト（コマ1枚ぶん・レイヤー専用の控え） -->
+      <div class="selacts" id="ed-layerclip">
+        <button class="minibtn" id="ed-lc-copy">${t("ed.layerclip.copy.btn")}</button>
+        <button class="minibtn" id="ed-lc-paste">${t("ed.layerclip.paste.btn")}</button>
+        <button class="minibtn" id="ed-lc-paste-new">${t("ed.layerclip.pasteNew.btn")}</button>
+        <button class="minibtn" id="ed-lc-paste-all">${t("ed.layerclip.pasteAll.btn")}</button>
+      </div>
+      <!-- M11-19: 線を太らせる／細らせる（選択中レイヤーのこのコマ・選択範囲があれば範囲内だけ） -->
+      <h3>${t("ed.linew.head.label")}</h3>
+      <div class="selacts" id="ed-linew">
+        <button class="minibtn" id="ed-lw-thicken">${t("ed.linew.thicken.btn")}</button>
+        <button class="minibtn" id="ed-lw-thin">${t("ed.linew.thin.btn")}</button>
+      </div>
+      <!-- M11-24: 「1回で1ドット。選択範囲があれば範囲内だけ・Ctrl+Z で戻せます」は削除。
+           ボタンの title に同じことが書いてあり、Ctrl+Z はアプリ全体の常識（UI_TEXT_guide 2・6） -->
+      <h3>${t("ed.onion.head.label")}</h3><div class="oni" id="ed-onion"></div>
+      <h3>${t("ed.feel.head.label")}</h3>
+      <div class="row"><span class="tog">${t("ed.feel.stabilizer.label")}</span><div class="sw2 on" id="ed-tog-stab"></div></div>
+      <div class="row"><span class="tog">${t("ed.feel.pressure.label")}</span><div class="sw2 on" id="ed-tog-press"></div></div>
+      <div class="row"><span class="tog">${t("ed.feel.grid.label")}</span><div class="sw2 on" id="ed-tog-grid"></div></div>
       <div id="ed-toolopts"></div>
     `;
+    // R-2 案1: 属性はテンプレートに埋めず、組んだあとにプロパティで入れる
+    //（訳文に " が入っても属性が割れない。DOM の形・表示は上のテンプレートのまま）
+    for (const { sel, titleKey } of [
+      { sel: "#ed-folder-add", titleKey: "ed.layer.folderAdd.title" },
+      { sel: "#ed-layer-merge", titleKey: "ed.layer.mergeDown.title" },
+      { sel: "#ed-lc-copy", titleKey: "ed.layerclip.copy.title" },
+      { sel: "#ed-lc-paste", titleKey: "ed.layerclip.paste.title" },
+      { sel: "#ed-lc-paste-new", titleKey: "ed.layerclip.pasteNew.title" },
+      { sel: "#ed-lc-paste-all", titleKey: "ed.layerclip.pasteAll.title" },
+      { sel: "#ed-lw-thicken", titleKey: "ed.linew.thicken.title" },
+      { sel: "#ed-lw-thin", titleKey: "ed.linew.thin.title" },
+    ] as const) {
+      const el = host.querySelector(sel) as HTMLElement | null;
+      if (el) el.title = t(titleKey);
+    }
     // 太さ
     const sizes = $("#ed-sizes");
     for (const s of PEN_SIZES) {
       const d = document.createElement("button");
       d.className = "sz" + (s === this.penSize ? " on" : "");
       d.innerHTML = `<i style="width:${Math.min(18, s + 2)}px;height:${Math.min(18, s + 2)}px"></i>`;
-      d.title = `${s}ドット`;
+      d.title = t("ed.pen.sizePick.title", { n: s });
       d.addEventListener("click", () => {
         this.penSize = s; // setter が「今のツールの枠」へ書く（図形などはペンの枠）
         sizes.querySelectorAll(".sz").forEach((e) => e.classList.remove("on"));
@@ -1023,8 +1363,8 @@ export class Editor {
       $("#ed-colorpick").hidden = this.project.colorMode !== "fullcolor";
       $("#ed-colhead").textContent =
         this.project.colorMode === "fullcolor"
-          ? "カラー（フルカラー）"
-          : "カラー（パレット）";
+          ? t("ed.color.head.fullcolor.label")
+          : t("ed.color.head.palette.label");
       this.dirty = true;
     });
     ($("#ed-colorpick") as HTMLInputElement).addEventListener("input", (e) => {
@@ -1035,12 +1375,21 @@ export class Editor {
     $("#ed-layer-add").addEventListener("click", () => this.addLayer());
     $("#ed-folder-add").addEventListener("click", () => this.addFolder());
     $("#ed-layer-del").addEventListener("click", () => this.deleteLayer());
+    // M11-15: レイヤーのコピー＆ペースト
+    $("#ed-lc-copy").addEventListener("click", () => this.copyLayerFrame());
+    $("#ed-lc-paste").addEventListener("click", () => this.pasteLayerFrame());
+    $("#ed-lc-paste-new").addEventListener("click", () => this.pasteLayerToNew());
+    $("#ed-lc-paste-all").addEventListener("click", () => void this.pasteLayerAllFrames());
+    this.updateLayerClipButtons();
+    // M11-19: 線を太らせる／細らせる（ランチャー・コマンドと同じ実体）
+    $("#ed-lw-thicken").addEventListener("click", () => this.morphActiveLayer("thicken"));
+    $("#ed-lw-thin").addEventListener("click", () => this.morphActiveLayer("thin"));
     // M3.8: ▲▼はDnD（挿入線）で代替・撤去
     $("#ed-layer-merge").addEventListener("click", () => this.mergeLayerDown());
     this.rebuildLayers();
     // オニオン
     const oni = $("#ed-onion");
-    ["切", "1", "2", "3"].forEach((label, lv) => {
+    [t("ed.onion.off.btn"), "1", "2", "3"].forEach((label, lv) => {
       const d = document.createElement("button");
       d.className = "lv" + (lv === this.onionLevel ? " on" : "");
       d.textContent = label;
@@ -1206,7 +1555,7 @@ export class Editor {
     };
     const setTrialButton = (playing: boolean) => {
       const b = box.querySelector("#ap-trial") as HTMLButtonElement | null;
-      if (b) b.textContent = playing ? "■ 停止" : "▶ ここから試す";
+      if (b) b.textContent = playing ? t("ed.audio.trial.stop.btn") : t("ed.audio.trial.play.btn");
     };
     const stopTrial = () => {
       pausedAt = null; // R-5: 完全停止（再開位置は持ち越さない）
@@ -1227,7 +1576,10 @@ export class Editor {
     };
     const drawTrialFrame = () => {
       const cv = box.querySelector("#ap-mini") as HTMLCanvasElement | null;
-      if (cv) presentToCanvas(compositeFrame(proj, trialFrame), cv);
+      if (!cv) return;
+      presentToCanvas(compositeFrame(proj, trialFrame), cv);
+      // M11-19: 透明の紙は薄い市松（M11-16 のミニ・フィルムと同じ・データには触れない）
+      cv.classList.toggle("paper-clear", proj.frames[trialFrame]?.paper === 0);
     };
     const startHeadRaf = () => {
       const tickHead = () => {
@@ -1333,7 +1685,9 @@ export class Editor {
       const zl = box.querySelector("#ap-zoomv") as HTMLElement | null;
       if (zl)
         zl.textContent =
-          vd >= dur - 1e-9 ? "全体" : `表示: ${vd >= 10 ? vd.toFixed(0) : vd.toFixed(1)}秒`;
+          vd >= dur - 1e-9
+            ? t("ed.audio.zoom.fit.label")
+            : t("ed.audio.zoom.window.label", { sec: vd >= 10 ? vd.toFixed(0) : vd.toFixed(1) });
       const sc = box.querySelector("#ap-scroll") as HTMLElement | null;
       if (sc) {
         const zoomed = vd < dur - 1e-9;
@@ -1455,7 +1809,12 @@ export class Editor {
       // 情報
       ctx2.fillStyle = "#7a6f60";
       ctx2.fillText(
-        `音源 ${dur.toFixed(2)}s / アニメ ${(frameCount / fps).toFixed(2)}s（${frameCount}コマ・${fps}fps）`,
+        t("ed.audio.wave.info.label", {
+          src: dur.toFixed(2),
+          anim: (frameCount / fps).toFixed(2),
+          count: frameCount,
+          fps,
+        }),
         6,
         H2 - 6
       );
@@ -1511,54 +1870,66 @@ export class Editor {
       this.audioWaveEndDrag?.();
       this.audioWaveEndDrag = null;
       const baseFps = FPS_TABLE[w.baseSpeedIndex] ?? fps;
-      const statusText = w.deleted || !w.bytes
-        ? "BGMなし"
-        : `${w.source === "kwz" ? "元の音（3DS作品由来）" : `差し替え${w.name ? `（${w.name}）` : ""}`}・速度連動の基準: ${baseFps}fps`;
+      // M12-1b-2: この文字列は **innerHTML** へ入るので、ユーザーのデータ（音声ファイル名）は escHtml を通す。
+      // 「差し替え」＋「・速度連動の基準」の連結もやめ、状態ごとの完全文にした（訳で語順を変えられる）
+      const statusText =
+        w.deleted || !w.bytes
+          ? t("ed.audio.status.none.label")
+          : w.source === "kwz"
+            ? t("ed.audio.status.kwz.label", { fps: baseFps })
+            : w.name
+              ? t("ed.audio.status.replacedName.label", { name: escHtml(w.name), fps: baseFps })
+              : t("ed.audio.status.replaced.label", { fps: baseFps });
       if (!w.bytes || w.deleted) {
         box.innerHTML = `
-          <p class="modal-msg"><b>♪ 音声</b>　${statusText}</p>
+          <p class="modal-msg"><b>${t("ed.audio.panel.label")}</b>　${statusText}</p>
           <div class="modal-field">
-            <button class="btn blue" id="ap-load">🎵 BGMを読み込む（音声・動画）</button>
+            <button class="btn blue" id="ap-load">${t("ed.audio.load.btn")}</button>
           </div>
           <div id="ap-se"></div>
           <div class="modal-actions">
             <span style="flex:1"></span>
-            <button class="btn primary" id="ap-apply">適用して閉じる</button>
-            <button class="btn" id="ap-cancel">キャンセル</button>
+            <button class="btn primary" id="ap-apply">${t("ed.audio.apply.btn")}</button>
+            <button class="btn" id="ap-cancel">${t("common.cancel.btn")}</button>
           </div>`;
       } else {
         box.innerHTML = `
-          <p class="modal-msg"><b>♪ 音声の調整</b>　${statusText}</p>
+          <p class="modal-msg"><b>${t("ed.audio.panelEdit.label")}</b>　${statusText}</p>
           <!-- M5-5 T-1: 広幅レイアウト（プレビュー左＋SE右・波形は全幅が主役） -->
           <div class="ap-top">
-            <canvas id="ap-mini" width="320" height="240" class="ap-big" title="クリックで再生 / 一時停止"></canvas>
+            <canvas id="ap-mini" width="320" height="240" class="ap-big"></canvas>
             <div id="ap-se"></div>
           </div>
           <canvas id="ap-wave" width="1440" height="170" class="ap-wave"></canvas>
           <!-- M5-3 S-2: 高さは常時確保（出現/消滅でパネル寸法がガタつかないよう visibility で切替） -->
           <div class="ap-scroll" id="ap-scroll" style="visibility:hidden"><div></div></div>
-          <div class="modal-field"><span>ズーム</span>
+          <div class="modal-field"><span>${t("ed.audio.zoom.label")}</span>
             <span id="ap-zoom"></span>
-            <span id="ap-zoomv" style="font-weight:700;font-size:12px;width:86px">全体</span>
-            <button class="minibtn ok" id="ap-trial">▶ ここから試す</button>
+            <span id="ap-zoomv" style="font-weight:700;font-size:12px;width:86px">${t("ed.audio.zoom.fit.label")}</span>
+            <button class="minibtn ok" id="ap-trial">${t("ed.audio.trial.play.btn")}</button>
           </div>
           <div class="modal-field">
-            <span>頭出し</span><input id="ap-start" type="number" min="0" step="0.001" style="width:100px"> 秒
-            <span>終わり</span><input id="ap-end" type="number" min="0" step="0.001" placeholder="最後まで" style="width:100px"> 秒
+            <span>${t("ed.audio.trimStart.label")}</span><input id="ap-start" type="number" min="0" step="0.001" style="width:100px"> ${t("ed.audio.trim.sec.label")}
+            <span>${t("ed.audio.trimEnd.label")}</span><input id="ap-end" type="number" min="0" step="0.001" style="width:100px"> ${t("ed.audio.trim.sec.label")}
           </div>
-          <div class="modal-field"><span>音量</span>
+          <div class="modal-field"><span>${t("ed.audio.volume.label")}</span>
             <span id="ap-vol"></span>
             <span id="ap-volv" style="font-weight:700;font-size:12px;width:44px">${Math.round(w.volume * 100)}%</span>
-            <span class="tog">ミュート</span><div class="sw2${w.muted ? " on" : ""}" id="ap-mute"></div>
+            <span class="tog">${t("ed.audio.mute.label")}</span><div class="sw2${w.muted ? " on" : ""}" id="ap-mute"></div>
           </div>
           <div class="modal-actions">
-            <button class="minibtn" id="ap-load">🎵 差し替え</button>
-            <button class="minibtn" id="ap-del">🗑 削除</button>
+            <button class="minibtn" id="ap-load">${t("ed.audio.replace.btn")}</button>
+            <button class="minibtn" id="ap-del">${t("ed.audio.delete.btn")}</button>
             <span style="flex:1"></span>
-            <button class="btn primary" id="ap-apply">適用して閉じる</button>
-            <button class="btn" id="ap-cancel">キャンセル</button>
+            <button class="btn primary" id="ap-apply">${t("ed.audio.apply.btn")}</button>
+            <button class="btn" id="ap-cancel">${t("common.cancel.btn")}</button>
           </div>`;
       }
+      // R-2 案1: 属性はテンプレートに埋めず、組んだあとにプロパティで入れる
+      const endInput = box.querySelector("#ap-end") as HTMLInputElement | null;
+      if (endInput) endInput.placeholder = t("ed.audio.trimEnd.placeholder");
+      const miniCv = box.querySelector("#ap-mini") as HTMLElement | null;
+      if (miniCv) miniCv.title = t("ed.audio.preview.title");
       bind();
       renderSeSection();
       syncInputs();
@@ -1585,7 +1956,7 @@ export class Editor {
         try {
           buffer = await decodeAudio(w.bytes);
         } catch {
-          self.cb.toast("音声のデコードに失敗しました");
+          self.cb.toast(t("ed.audio.decodeFailed.toast"));
         }
         render();
       });
@@ -1668,7 +2039,7 @@ export class Editor {
           const v = (e.target as HTMLInputElement).value.trim();
           let endMs = v === "" ? null : Math.max(0, Math.round(Number(v) * 1000) || 0);
           if (endMs != null && endMs <= w.trimStartMs) {
-            self.cb.toast("「終わり」は「頭出し」より後にしてください（最後までに戻しました）");
+            self.cb.toast(t("ed.audio.trimEndInvalid.toast"));
             endMs = null;
           }
           w.trimEndMs = endMs;
@@ -1856,63 +2227,67 @@ export class Editor {
       const head = document.createElement("div");
       head.className = "ap-se-head";
       const selFrames = self.selectedFrameIndices();
-      head.innerHTML = `<b>効果音（SE）</b><span class="hintline">配置先: ${
+      head.innerHTML = `<b>${t("ed.audio.se.head.label")}</b><span class="hintline">${
         selFrames.length > 1
-          ? `コマ ${selFrames[0] + 1}〜${selFrames[selFrames.length - 1] + 1}（${selFrames.length}コマ）`
-          : `コマ ${self.frameIndex + 1}`
+          ? t("ed.audio.se.targetRange.hint", {
+              from: selFrames[0] + 1,
+              to: selFrames[selFrames.length - 1] + 1,
+              count: selFrames.length,
+            })
+          : t("ed.audio.se.target.hint", { frame: self.frameIndex + 1 })
       }</span>`;
       host.appendChild(head);
-      const mkRow = (t: SeTrack) => {
+      const mkRow = (se1: SeTrack) => {
         const row = document.createElement("div");
         row.className = "ap-se-row";
         const nm = document.createElement("span");
         nm.className = "nm";
-        nm.textContent = `♪ ${t.name}`;
-        nm.title = "ダブルクリックで名前変更";
+        nm.textContent = `♪ ${se1.name}`;
+        nm.title = t("ed.audio.se.rename.title");
         nm.addEventListener("dblclick", async () => {
-          const v = await self.cb.prompt("SEの名前", t.name);
-          if (v) self.renameSeTrack(t.id, v);
+          const v = await self.cb.prompt(t("ed.audio.se.rename.msg"), se1.name);
+          if (v) self.renameSeTrack(se1.id, v);
         });
         let volBefore: number | null = null;
         const vol = createSlider({
           min: 0,
           max: 100,
-          value: Math.round(t.volume * 100),
+          value: Math.round(se1.volume * 100),
           className: "lay-op",
-          title: "音量",
-          onDown: () => (volBefore = t.volume),
+          title: t("ed.audio.se.volume.title"),
+          onDown: () => (volBefore = se1.volume),
           onInput: (v) => {
-            t.volume = v / 100;
+            se1.volume = v / 100;
             self.dirty = true;
           },
           onChange: () => {
-            if (volBefore != null && volBefore !== t.volume)
-              self.pushSeVolumeHistory(t.id, volBefore, t.volume);
+            if (volBefore != null && volBefore !== se1.volume)
+              self.pushSeVolumeHistory(se1.id, volBefore, se1.volume);
             volBefore = null;
           },
         });
         const mute = document.createElement("div");
-        mute.className = "sw2" + (t.muted ? " on" : "");
-        mute.title = "ミュート";
-        mute.addEventListener("click", () => self.toggleSeMute(t.id));
+        mute.className = "sw2" + (se1.muted ? " on" : "");
+        mute.title = t("ed.audio.se.mute.title");
+        mute.addEventListener("click", () => self.toggleSeMute(se1.id));
         const listen = document.createElement("button");
         listen.className = "minibtn";
         listen.textContent = "🔊";
-        listen.title = "試聴";
-        listen.addEventListener("click", () => self.audioPreview.fireSe(t));
+        listen.title = t("ed.audio.se.listen.title");
+        listen.addEventListener("click", () => self.audioPreview.fireSe(se1));
         const place = document.createElement("button");
         const placedAll =
-          selFrames.length > 0 && selFrames.every((i) => proj.frames[i]?.se?.includes(t.id));
+          selFrames.length > 0 && selFrames.every((i) => proj.frames[i]?.se?.includes(se1.id));
         place.className = "minibtn" + (placedAll ? " ok" : "");
-        place.textContent = placedAll ? "🎯配置中" : "🎯配置";
+        place.textContent = placedAll ? t("ed.audio.se.placeActive.btn") : t("ed.audio.se.place.btn");
         place.title =
-          "選択コマに配置/解除（フィルムでShift+クリックすると範囲にまとめて配置できます）";
-        place.addEventListener("click", () => self.toggleSePlacement(t.id, selFrames));
+          t("ed.audio.se.place.title");
+        place.addEventListener("click", () => self.toggleSePlacement(se1.id, selFrames));
         const del = document.createElement("button");
         del.className = "minibtn";
         del.textContent = "🗑";
-        del.title = "SEを削除（配置も外れます）";
-        del.addEventListener("click", () => self.deleteSeTrack(t.id));
+        del.title = t("ed.audio.se.delete.title");
+        del.addEventListener("click", () => self.deleteSeTrack(se1.id));
         row.append(nm, vol.root, mute, listen, place, del);
         return row;
       };
@@ -1921,10 +2296,10 @@ export class Editor {
       for (let i = se.length; i < 4; i++) {
         const empty = document.createElement("div");
         empty.className = "ap-se-row empty";
-        empty.innerHTML = `<span class="nm">（空きスロット）</span>`;
+        empty.innerHTML = `<span class="nm">${t("ed.audio.se.empty.label")}</span>`;
         const add = document.createElement("button");
         add.className = "minibtn";
-        add.textContent = "＋追加";
+        add.textContent = t("ed.audio.se.addEmpty.btn");
         add.addEventListener("click", () => void addSe());
         empty.appendChild(add);
         host.appendChild(empty);
@@ -1933,7 +2308,7 @@ export class Editor {
       addRow.className = "ap-se-add";
       const addBtn = document.createElement("button");
       addBtn.className = "minibtn ok";
-      addBtn.textContent = "＋ SEを追加（音声・動画）";
+      addBtn.textContent = t("ed.audio.se.add.btn");
       addBtn.addEventListener("click", () => void addSe());
       addRow.appendChild(addBtn);
       host.appendChild(addRow);
@@ -1967,7 +2342,7 @@ export class Editor {
       try {
         buffer = await decodeAudio(w.bytes);
       } catch {
-        this.cb.toast("音声のデコードに失敗しました（波形は表示できません）");
+        this.cb.toast(t("ed.audio.waveDecodeFailed.toast"));
       }
     }
     render();
@@ -2227,30 +2602,38 @@ export class Editor {
     // 透明（＝消し色）
     const tp = document.createElement("button");
     tp.className = "sw tp" + (this.colorHex === "" ? " on" : "");
-    tp.title = "透明（消す）";
+    tp.title = t("ed.color.transparent.title");
     tp.addEventListener("click", () => {
       this.colorHex = "";
       this.rebuildPalette();
     });
     pal.appendChild(tp);
-    // 紙色ボタン列
+    // 紙色ボタン列。M11-14b: 既定パレットと同じうごメモ3Dの6色（白先頭＝既定紙色）。
+    // 水色 #06aeff は #0038ce に置き換え（UGO_COLORS 定数そのものは不変）
     const pp = $("#ed-paperpal");
     pp.innerHTML = "";
     for (const hex of [
       UGO_COLORS.white,
       UGO_COLORS.black,
       UGO_COLORS.red,
+      UGO3D_BLUE,
       UGO_COLORS.yellow,
       UGO_COLORS.green,
-      UGO_COLORS.blue,
     ]) {
       const d = document.createElement("button");
       d.className = "sw sm";
       d.style.background = hex;
-      d.title = `紙色: ${hex}`;
+      d.title = t("ed.color.paper.swatch.title", { hex });
       d.addEventListener("click", () => this.setPaper(hex));
       pp.appendChild(d);
     }
+    // M11-16: 透明の紙（paper=0）。パレットの透明ボタン `.sw.tp` と同じ見た目の流儀。
+    // 用途は透過素材の書き出し（APNG・PNG連番）。編集画面では市松で表示する
+    const ptp = document.createElement("button");
+    ptp.className = "sw sm tp";
+    ptp.title = t("ed.color.paper.transparent.title");
+    ptp.addEventListener("click", () => this.setPaper(""));
+    pp.appendChild(ptp);
     // M11-12: 浮動テキストのプレビューは現在の色で描いているので、色が変わったら描き直す
     //（色の変更は必ずここを通る＝スポイト・カラーピッカー・パレット・透明のすべて）
     if (this.textDraft) this.redrawOverlay();
@@ -2356,6 +2739,9 @@ export class Editor {
           r.el.classList.toggle("sel", this.selectedNodeIds.has(r.id));
           if (r.kind === "layer") r.el.classList.toggle("active", r.id === this.activeLayerId);
         });
+        // M11-19: ここは rebuildLayers を通らずに activeLayerId が変わる唯一の経路なので、
+        // 貼り付けボタンの貼り先名もここで追従させる（移動が成立すればあとで rebuildLayers がもう一度呼ぶ＝無害）
+        this.updateLayerClipButtons();
       }
       const order = this.displayRows.map((r) => r.id);
       this.dragNodes = topNodesOf(this.project, [...this.selectedNodeIds]).sort(
@@ -2369,7 +2755,8 @@ export class Editor {
           ? `📁 ${this.folderById(d.id)?.name ?? ""}`
           : this.project.layerDefs.find((l) => l.id === d.id)?.name ?? "";
       const n = this.dragNodes.length;
-      g.textContent = n > 1 ? `${name} ほか${n - 1}件` : name;
+      // textContent なので escHtml は通さない（レイヤー名・フォルダ名はユーザーのデータ）
+      g.textContent = n > 1 ? t("ed.layer.dragGhostMulti.label", { name, count: n - 1 }) : name;
       document.body.appendChild(g);
       d.ghost = g;
     }
@@ -2591,7 +2978,7 @@ export class Editor {
       const id = newFolderId(this.project);
       const folder: LayerFolder = {
         id,
-        name: `フォルダ${folders.length + 1}`,
+        name: `${folderBaseName()}${folders.length + 1}`,
         visible: true,
         opacity: 1,
         collapsed: false,
@@ -2608,13 +2995,13 @@ export class Editor {
     if (this.xformGuard()) return;
     const folder = this.folderById(id);
     if (!folder) return;
-    const ok = await this.cb.confirm(`フォルダ「${folder.name}」を削除しますか？`);
+    const ok = await this.cb.confirm(t("ed.layer.folderDeleteConfirm.msg", { name: folder.name }));
     if (!ok) return;
     const memberIdx = this.folderLayerIndices(id);
     const withContents =
       memberIdx.length > 0 &&
       (await this.cb.confirm(
-        `中のレイヤー（${memberIdx.length}枚）も削除しますか？\n「いいえ」でフォルダだけ削除（中身は1つ外へ出します）`
+        t("ed.layer.folderDeleteContents.msg", { count: memberIdx.length })
       ));
     if (!withContents) {
       this.pushStructure("フォルダ削除", () => {
@@ -2630,7 +3017,7 @@ export class Editor {
     }
     // 中身ごと削除: レイヤーバッファも履歴に退避（deleteLayer と同等の可逆性）
     if (memberIdx.length >= this.project.layerDefs.length) {
-      this.cb.toast("全レイヤーを削除することはできません");
+      this.cb.toast(t("ed.layer.deleteAllBlocked.toast"));
       return;
     }
     const structBefore = this.captureStructure();
@@ -2766,7 +3153,7 @@ export class Editor {
       return;
     }
     if (res.changedPhys && this.clearFrameOrders())
-      this.cb.toast("コマごとの描画順（3D由来）を標準化しました");
+      this.cb.toast(t("ed.layer.frameOrderNormalized.toast"));
     const after = this.captureStructure();
     if (JSON.stringify(after) === JSON.stringify(before)) {
       this.afterLayerChange();
@@ -2818,7 +3205,7 @@ export class Editor {
       const col = document.createElement("span");
       col.className = "eye";
       col.textContent = f.collapsed ? "▶" : "▼";
-      col.title = "折りたたみ";
+      col.title = t("ed.layer.folderCollapse.title");
       col.addEventListener("click", (e) => {
         e.stopPropagation();
         f.collapsed = !f.collapsed;
@@ -2839,10 +3226,10 @@ export class Editor {
       const nm = document.createElement("span");
       nm.className = "nm";
       nm.textContent = `📁 ${f.name}`;
-      nm.title = "ダブルクリックでリネーム";
+      nm.title = t("ed.layer.rename.title");
       nm.addEventListener("dblclick", async (e) => {
         e.stopPropagation();
-        const v = await this.cb.prompt("フォルダ名", f.name);
+        const v = await this.cb.prompt(t("ed.layer.folderName.msg"), f.name);
         if (v)
           this.pushStructure("フォルダ名変更", () => {
             f.name = v;
@@ -2855,7 +3242,7 @@ export class Editor {
         max: 100,
         value: Math.round(f.opacity * 100),
         className: "lay-op",
-        title: "フォルダ不透明度（中身に乗算）",
+        title: t("ed.layer.folderOpacity.title"),
         onDown: () => (opBefore = f.opacity),
         onInput: (v) => {
           f.opacity = v / 100;
@@ -2890,7 +3277,7 @@ export class Editor {
       const del = document.createElement("button");
       del.className = "minibtn";
       del.textContent = "🗑";
-      del.title = "フォルダ削除";
+      del.title = t("ed.layer.folderDelete.title");
       del.addEventListener("click", (e) => {
         e.stopPropagation();
         void this.deleteFolder(f.id);
@@ -2923,6 +3310,11 @@ export class Editor {
       });
     };
 
+    // M11-20: クリッピングの土台と実効可視（合成側 render.ts と**同じ関数**で解決＝UI と描画が食い違わない）
+    const clipBases = clipBaseMap(this.project);
+    const effStates = effectiveLayerStates(this.project);
+    const nameOf = (id: string) => this.project.layerDefs.find((l) => l.id === id)?.name ?? "";
+
     // 上→下で表示（配列は下→上）。同一フォルダの子は連続配置の不変条件を前提に、
     // 各レイヤーの祖先チェーンに沿ってフォルダ見出しを挿入する
     for (let i = this.project.layerDefs.length - 1; i >= 0; i--) {
@@ -2931,13 +3323,35 @@ export class Editor {
       emitFolderChain(chain);
       if (isCollapsedUnder(chain)) continue; // 折りたたみ中
       const depth = chain.length;
+      const clipOn = ld.clip === true;
+      const baseId = clipOn ? (clipBases.get(ld.id) ?? null) : null;
+      const baseShown = baseId ? (effStates.get(baseId)?.visible ?? true) : false;
       const row = document.createElement("div");
       row.className =
         "lay" +
         (ld.visible ? " on" : "") +
         (this.selectedNodeIds.has(ld.id) ? " sel" : "") +
-        (ld.id === this.activeLayerId ? " active" : "");
-      row.style.marginLeft = `${depth * 14}px`;
+        (ld.id === this.activeLayerId ? " active" : "") +
+        (clipOn ? " clipped" : "");
+      // clip 中の行は 12px 引っ込めて「土台にぶら下がっている」見た目（クリスタの左帯＋インデント）
+      row.style.marginLeft = `${depth * 14 + (clipOn ? 12 : 0)}px`;
+      // M11-20: クリッピングのトグル（👁 の右隣・クリスタの「下のレイヤーでクリッピング」）
+      const cm = document.createElement("span");
+      cm.className = "eye lay-clipmask" + (clipOn ? " on" : "") + (clipOn && !baseShown ? " nobase" : "");
+      cm.textContent = "⤵";
+      // M11-24: 仕組みの説明（データはそのまま・はみ出して描ける）は落とし、何が起きるかだけ残す
+      cm.title = !clipOn
+        ? t("ed.layer.clip.off.title")
+        : !baseId
+          ? t("ed.layer.clip.noBase.title")
+          : !baseShown
+            ? t("ed.layer.clip.baseHidden.title", { name: nameOf(baseId) })
+            : t("ed.layer.clip.on.title", { name: nameOf(baseId) });
+      cm.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (this.xformGuard()) return; // E-4
+        this.toggleLayerClipping(ld.id);
+      });
       const eye = document.createElement("span");
       eye.className = "eye";
       eye.textContent = ld.visible ? "👁" : "🚫";
@@ -2955,10 +3369,10 @@ export class Editor {
       const nm = document.createElement("span");
       nm.className = "nm";
       nm.textContent = ld.name;
-      nm.title = "ダブルクリックでリネーム";
+      nm.title = t("ed.layer.rename.title");
       nm.addEventListener("dblclick", async (e) => {
         e.stopPropagation();
-        const v = await this.cb.prompt("レイヤー名", ld.name);
+        const v = await this.cb.prompt(t("ed.layer.name.msg"), ld.name);
         if (v) {
           ld.name = v;
           this.rebuildLayers();
@@ -2971,7 +3385,7 @@ export class Editor {
         max: 100,
         value: Math.round(ld.opacity * 100),
         className: "lay-op",
-        title: "不透明度（PC拡張）",
+        title: t("ed.layer.opacity.title"),
         onInput: (v) => {
           ld.opacity = v / 100;
           this.renderCanvas();
@@ -2979,6 +3393,7 @@ export class Editor {
         },
       });
       row.appendChild(eye);
+      row.appendChild(cm);
       row.appendChild(nm);
       row.appendChild(op.root);
       row.addEventListener("click", (e) => {
@@ -2995,6 +3410,9 @@ export class Editor {
       const chain = [...this.ancestorChain(f.parent), f.id];
       emitFolderChain(chain);
     }
+    // M11-19: 貼り付けボタンの「貼り先」表示をアクティブレイヤーに追従させる（レイヤー選択・改名・追加削除は
+    // すべてここを通る。例外は行ドラッグ確定時の updateRowDrag＝あちらでも呼ぶ）
+    this.updateLayerClipButtons();
   }
 
   private buildToolOptions() {
@@ -3002,12 +3420,15 @@ export class Editor {
     host.innerHTML = "";
     if (this.tool === "fill") {
       // M10-19: バケツ塗りの参照レイヤー選択（トーンは従来どおり #ed-tex 側のピッカー）
-      host.innerHTML = `<h3>塗り</h3>
-        <div class="row"><span class="tog">参照</span><div class="oni" style="flex:1" id="ed-fillref">
-          <button class="lv${this.fillRefAll ? "" : " on"}" data-v="self">このレイヤー</button>
-          <button class="lv${this.fillRefAll ? " on" : ""}" data-v="all">全レイヤー</button>
-        </div></div>
-        <p class="hintline">全レイヤー: 表示中の全レイヤーの絵を境界として、このレイヤーに塗ります。</p>`;
+      host.innerHTML = `<h3>${t("ed.fill.head.label")}</h3>
+        <div class="row"><span class="tog">${t("ed.fill.ref.label")}</span><div class="oni" style="flex:1" id="ed-fillref">
+          <button class="lv${this.fillRefAll ? "" : " on"}" data-v="self">${t("ed.fill.refSelf.btn")}</button>
+          <button class="lv${
+            this.fillRefAll ? " on" : ""
+          }" data-v="all">${t("ed.fill.refAll.btn")}</button>
+        </div></div>`;
+      // R-2 案1: 属性はプロパティで
+      (host.querySelector('#ed-fillref [data-v="all"]') as HTMLElement).title = t("ed.fill.refAll.title");
       host.querySelectorAll("#ed-fillref .lv").forEach((b) =>
         b.addEventListener("click", () => {
           this.fillRefAll = (b as HTMLElement).dataset.v === "all";
@@ -3015,12 +3436,12 @@ export class Editor {
         })
       );
     } else if (this.tool === "shape") {
-      host.innerHTML = `<h3>図形</h3><div class="oni">
-        <button class="lv${this.shapeKind === "line" ? " on" : ""}" data-k="line">／直線</button>
-        <button class="lv${this.shapeKind === "rect" ? " on" : ""}" data-k="rect">□四角</button>
-        <button class="lv${this.shapeKind === "ellipse" ? " on" : ""}" data-k="ellipse">○丸</button>
+      host.innerHTML = `<h3>${t("ed.shape.head.label")}</h3><div class="oni">
+        <button class="lv${this.shapeKind === "line" ? " on" : ""}" data-k="line">${t("ed.shape.line.btn")}</button>
+        <button class="lv${this.shapeKind === "rect" ? " on" : ""}" data-k="rect">${t("ed.shape.rect.btn")}</button>
+        <button class="lv${this.shapeKind === "ellipse" ? " on" : ""}" data-k="ellipse">${t("ed.shape.ellipse.btn")}</button>
       </div>
-      <div class="row"><span class="tog">塗りつぶし</span><div class="sw2${this.shapeFill ? " on" : ""}" id="ed-shapefill"></div></div>`;
+      <div class="row"><span class="tog">${t("ed.shape.fill.label")}</span><div class="sw2${this.shapeFill ? " on" : ""}" id="ed-shapefill"></div></div>`;
       host.querySelectorAll(".lv").forEach((b) =>
         b.addEventListener("click", () => {
           this.shapeKind = (b as HTMLElement).dataset.k as ShapeKind;
@@ -3036,12 +3457,12 @@ export class Editor {
       const def = fontDef(this.textFamily);
       // M11-12: 浮動テキストがあるときだけ入力欄と確定/取消を使える状態にする
       const drafting = !!this.textDraft;
-      host.innerHTML = `<h3>文字</h3>
-        <div class="row"><span class="tog">書体</span>
+      host.innerHTML = `<h3>${t("ed.text.head.label")}</h3>
+        <div class="row"><span class="tog">${t("ed.text.font.label")}</span>
           <select id="ed-textfont">${FONTS.map(
-            (f) => `<option value="${f.key}"${f.key === this.textFamily ? " selected" : ""}>${f.label}</option>`
+            (f) => `<option value="${f.key}"${f.key === this.textFamily ? " selected" : ""}>${t(f.labelKey)}</option>`
           ).join("")}</select></div>
-        <div class="row"><span class="tog">サイズ</span>
+        <div class="row"><span class="tog">${t("ed.text.size.label")}</span>
           <select id="ed-textsize">${def.sizes
             .map((s) => `<option value="${s}"${s === this.textSize ? " selected" : ""}>${s}px</option>`)
             .join("")}</select></div>
@@ -3049,27 +3470,30 @@ export class Editor {
           // M10-15: 太字を持つ書体だけ行を出す（手ブレ補正と同型＝スイッチ右端寄せ）。
           // 太字なし書体では行ごと非表示（M10-1c の「薄く残す」設計は作者判断で廃止）
           def.hasBold
-            ? `<div class="row"><span class="tog">太さ</span>
+            ? `<div class="row"><span class="tog">${t("ed.text.bold.label")}</span>
           <div class="sw2${this.textBold ? " on" : ""}" id="ed-textbold"></div></div>`
             : ""
         }
-        <div class="row"><span class="tog">向き</span>
+        <div class="row"><span class="tog">${t("ed.text.dir.label")}</span>
           <div class="oni" style="flex:1" id="ed-textdir">
-            <button type="button" class="lv${this.textVertical ? "" : " on"}" data-v="h">横書き</button>
-            <button type="button" class="lv${this.textVertical ? " on" : ""}" data-v="v">縦書き</button>
+            <button type="button" class="lv${this.textVertical ? "" : " on"}" data-v="h">${t("ed.text.dirH.btn")}</button>
+            <button type="button" class="lv${this.textVertical ? " on" : ""}" data-v="v">${t("ed.text.dirV.btn")}</button>
           </div></div>
         <textarea id="ed-textinput" class="tinput" rows="3" spellcheck="false"
-          placeholder="${drafting ? "ここに入力（Enter で改行）" : "キャンバスをクリックしてから入力"}"
           ${drafting ? "" : "disabled"}></textarea>
         <div class="selacts">
-          <button class="minibtn ok" id="ed-text-ok"${drafting ? "" : " disabled"}>✔ 確定</button>
-          <button class="minibtn" id="ed-text-cancel"${drafting ? "" : " disabled"}>✖ 取り消し</button>
+          <button class="minibtn ok" id="ed-text-ok"${drafting ? "" : " disabled"}>${t("ed.common.commit.btn")}</button>
+          <button class="minibtn" id="ed-text-cancel"${drafting ? "" : " disabled"}>${t("ed.text.cancel.btn")}</button>
         </div>
-        <p class="hintline">${
-          drafting
-            ? "Ctrl+Enter か ✔ で確定。Esc で取り消し。文字をドラッグして動かせます（そのあとは矢印キーで1ドット・Shift で10ドット）。"
-            : "キャンバスをクリックすると、その位置に文字を置けます。確定するまで何度でも直せます。"
+        <p class="hintline" id="ed-text-hint">${
+          drafting ? t("ed.text.draftingHint.hint") : t("ed.text.idleHint.hint")
         }</p>`;
+      // R-2 案1: 属性はテンプレートに埋めず、組んだあとにプロパティで入れる
+      //（訳文に " が入っても属性が割れない。DOM の形は上のテンプレートのまま＝見た目は不変）
+      ($("#ed-textinput") as HTMLTextAreaElement).placeholder = drafting
+        ? t("ed.text.input.placeholder")
+        : t("ed.text.inputIdle.placeholder");
+      $("#ed-text-hint").title = drafting ? t("ed.text.draftingHint.title") : t("ed.text.idleHint.title");
       $("#ed-textfont").addEventListener("change", (e) => {
         this.textFamily = (e.target as HTMLSelectElement).value as FontKey;
         const d = fontDef(this.textFamily);
@@ -3142,21 +3566,21 @@ export class Editor {
       // M10-2a: モードボタンは最初から4つ置き、未実装の3つは無効表示で残す。
       // M10-2b/2c で並びが変わって段組みが崩れる（M5-3→M5-5 の再演）のを避けるため。
       const modes: { k: WarpMode; label: string; ready: boolean }[] = [
-        { k: "push", label: "🫱 押す", ready: true },
-        { k: "bulge", label: "◍ ふくらませ", ready: true },
-        { k: "pinch", label: "◌ へこませ", ready: true },
-        { k: "corner", label: "⛶ 四隅", ready: true }, // M10-2c
+        { k: "push", label: t("ed.warp.push.btn"), ready: true },
+        { k: "bulge", label: t("ed.warp.bulge.btn"), ready: true },
+        { k: "pinch", label: t("ed.warp.pinch.btn"), ready: true },
+        { k: "corner", label: t("ed.warp.corner.btn"), ready: true }, // M10-2c
       ];
       // M10-2c: 四隅は半径・強さが意味を持たないが、行は残して disabled にする
       // （消すとパネルの高さが跳ねる。M10-2a でボタンを disabled で残したのと同じ理由）
       const isCorner = this.warpMode === "corner";
       const warpHint = isCorner
-        ? "四隅をドラッグして台形にできます。Enter で確定、Esc で取り消し。"
+        ? t("ed.warp.cornerHint.hint")
         : this.warpMode === "bulge"
-          ? "押した場所を中心にふくらみます。押しっぱなしで強くなります。"
+          ? t("ed.warp.bulgeHint.hint")
           : this.warpMode === "pinch"
-            ? "押した場所を中心にへこみます。押しっぱなしで強くなります。"
-            : "ドラッグした向きに絵が引っ張られます。範囲選択があるとその中だけ。";
+            ? t("ed.warp.pinchHint.hint")
+            : t("ed.warp.pushHint.hint");
       // M11-2: 4つを1本の .oni に並べると `.oni .lv{flex:1}` ＋ `white-space:nowrap` で
       // ラベルがパネル右端からはみ出す（作者報告）。**2個ずつ2行**の .oni に分ける
       // （styles.css は触らない・既存クラスのみ。行間は .oni の gap と同じ 5px）
@@ -3164,18 +3588,18 @@ export class Editor {
         `<button class="lv${m.k === this.warpMode ? " on" : ""}" data-m="${m.k}"${
           m.ready ? "" : " disabled"
         }>${m.label}</button>`;
-      host.innerHTML = `<h3>歪み</h3>
+      host.innerHTML = `<h3>${t("ed.warp.head.label")}</h3>
         <div id="ed-warpmode">
           <div class="oni">${modes.slice(0, 2).map(modeBtn).join("")}</div>
           <div class="oni" style="margin-top:5px">${modes.slice(2).map(modeBtn).join("")}</div>
         </div>
-        <div class="row"><span class="tog">半径 <b id="ed-warpr-v">${this.warpRadius}</b>px</span><div id="ed-warpr" style="flex:1"></div></div>
-        <div class="row"><span class="tog">強さ <b id="ed-warps-v">${this.warpStrength}</b>%</span><div id="ed-warps" style="flex:1"></div></div>
+        <div class="row"><span class="tog">${t("ed.warp.radius.label")} <b id="ed-warpr-v">${this.warpRadius}</b>px</span><div id="ed-warpr" style="flex:1"></div></div>
+        <div class="row"><span class="tog">${t("ed.warp.strength.label")} <b id="ed-warps-v">${this.warpStrength}</b>%</span><div id="ed-warps" style="flex:1"></div></div>
         <p class="hintline">${warpHint}</p>${
           isCorner
             ? `<div class="selacts">
-        <button class="minibtn ok" id="ed-corner-ok">✔ 確定</button>
-        <button class="minibtn" id="ed-corner-cancel">✖ キャンセル</button>
+        <button class="minibtn ok" id="ed-corner-ok">${t("ed.common.commit.btn")}</button>
+        <button class="minibtn" id="ed-corner-cancel">${t("ed.common.cancelMark.btn")}</button>
       </div>`
             : ""
         }`;
@@ -3233,34 +3657,34 @@ export class Editor {
       }
     } else if (this.tool === "select") {
       // M10-19: 3種目「✨ 自動」（クリックで同添字領域を即選択）。auto 時のみ参照/範囲の2行を出す
-      host.innerHTML = `<h3>範囲選択</h3><div class="oni">
-        <button class="lv${this.selectKind === "rect" ? " on" : ""}" data-k="rect">⬚ 矩形</button>
-        <button class="lv${this.selectKind === "lasso" ? " on" : ""}" data-k="lasso">➰ 自由</button>
-        <button class="lv${this.selectKind === "auto" ? " on" : ""}" data-k="auto">✨ 自動</button>
+      host.innerHTML = `<h3>${t("ed.sel.head.label")}</h3><div class="oni">
+        <button class="lv${this.selectKind === "rect" ? " on" : ""}" data-k="rect">${t("ed.sel.rect.btn")}</button>
+        <button class="lv${this.selectKind === "lasso" ? " on" : ""}" data-k="lasso">${t("ed.sel.lasso.btn")}</button>
+        <button class="lv${this.selectKind === "auto" ? " on" : ""}" data-k="auto">${t("ed.sel.auto.btn")}</button>
       </div>
       ${
         this.selectKind === "auto"
-          ? `<div class="row"><span class="tog">参照</span><div class="oni" style="flex:1" id="ed-selref">
-          <button class="lv${this.selectRefAll ? "" : " on"}" data-v="self">このレイヤー</button>
-          <button class="lv${this.selectRefAll ? " on" : ""}" data-v="all">全レイヤー</button>
+          ? `<div class="row"><span class="tog">${t("ed.sel.ref.label")}</span><div class="oni" style="flex:1" id="ed-selref">
+          <button class="lv${this.selectRefAll ? "" : " on"}" data-v="self">${t("ed.sel.refSelf.btn")}</button>
+          <button class="lv${this.selectRefAll ? " on" : ""}" data-v="all">${t("ed.sel.refAll.btn")}</button>
         </div></div>
-        <div class="row"><span class="tog">範囲</span><div class="oni" style="flex:1" id="ed-selscope">
-          <button class="lv${this.selectAutoGlobal ? "" : " on"}" data-v="conn">つながり</button>
-          <button class="lv${this.selectAutoGlobal ? " on" : ""}" data-v="global">全体</button>
+        <div class="row"><span class="tog">${t("ed.sel.scope.label")}</span><div class="oni" style="flex:1" id="ed-selscope">
+          <button class="lv${this.selectAutoGlobal ? "" : " on"}" data-v="conn">${t("ed.sel.scopeConn.btn")}</button>
+          <button class="lv${this.selectAutoGlobal ? " on" : ""}" data-v="global">${t("ed.sel.scopeGlobal.btn")}</button>
         </div></div>`
           : ""
       }
       <div class="selacts">
-        <button class="minibtn" id="ed-sel-copy">コピー</button>
-        <button class="minibtn" id="ed-sel-cut">切り取り</button>
-        <button class="minibtn" id="ed-sel-paste">貼り付け</button>
-        <button class="minibtn" id="ed-sel-del">削除</button>
-        <button class="minibtn" id="ed-sel-none">解除</button>
+        <button class="minibtn" id="ed-sel-copy">${t("ed.sel.copy.btn")}</button>
+        <button class="minibtn" id="ed-sel-cut">${t("ed.sel.cut.btn")}</button>
+        <button class="minibtn" id="ed-sel-paste">${t("ed.sel.paste.btn")}</button>
+        <button class="minibtn" id="ed-sel-del">${t("ed.sel.delete.btn")}</button>
+        <button class="minibtn" id="ed-sel-none">${t("ed.sel.deselect.btn")}</button>
       </div>
       <p class="hintline">${
         this.selectKind === "auto"
-          ? "クリックした場所と同じ色の範囲を選択します。選択内ドラッグで枠だけ移動。"
-          : "選択内ドラッグで枠だけ移動。絵を動かすには ✥ 移動ツール。"
+          ? t("ed.sel.auto.hint")
+          : t("ed.sel.drag.hint")
       }</p>`;
       // M10-19: 種別切替は data-k のボタンだけに束ねる（参照/範囲の .lv と混線させない）
       host.querySelectorAll("[data-k]").forEach((b) =>
@@ -3294,30 +3718,39 @@ export class Editor {
     } else if (this.tool === "transform") {
       // M11-11: 数値の行は畳める（変形の状態には一切触らない・見た目だけ）
       const fold = this.xformNumFold;
-      host.innerHTML = `<h3>変形（高精度・結果はドット確定）</h3>
+      host.innerHTML = `<h3>${t("ed.xform.head.label")}</h3>
       <div class="selacts">
-        <button class="minibtn" id="ed-x-fold" title="回転・拡縮の数値を畳む/開く">${
-          fold ? "▸ 数値をひらく" : "▾ 数値をたたむ"
+        <button class="minibtn" id="ed-x-fold">${
+          fold ? t("ed.xform.numsOpen.btn") : t("ed.xform.numsClose.btn")
         }</button>
-        <button class="minibtn" id="ed-x-peek" title="押している間だけ下の絵を透かして見る">👁 下を見る</button>
+        <button class="minibtn" id="ed-x-peek">${t("ed.xform.peek.btn")}</button>
       </div>
       <div id="ed-x-nums"${fold ? " hidden" : ""}>
-        <div class="row"><span class="tog">回転</span><input type="number" id="ed-x-angle" value="${Math.round(
+        <div class="row"><span class="tog">${t("ed.xform.angle.label")}</span><input type="number" id="ed-x-angle" value="${Math.round(
           (this.xform.angle * 180) / Math.PI
         )}" step="1" style="width:64px"> °
-          <div class="sw2${this.snap15 ? " on" : ""}" id="ed-x-snap" title="15°スナップ"></div><span class="tog">15°</span></div>
-        <div class="row"><span class="tog">拡縮</span><input type="number" id="ed-x-scale" value="${(
+          <div class="sw2${this.snap15 ? " on" : ""}" id="ed-x-snap"></div><span class="tog">${t("ed.xform.snap15.label")}</span></div>
+        <div class="row"><span class="tog">${t("ed.xform.scale.label")}</span><input type="number" id="ed-x-scale" value="${(
           this.xform.sx * 100
         ).toFixed(0)}" step="1" style="width:64px"> %</div>
         <div class="selacts">
-          <button class="minibtn" id="ed-x-fliph">↔ 左右反転</button>
-          <button class="minibtn" id="ed-x-flipv">↕ 上下反転</button>
+          <button class="minibtn" id="ed-x-fliph">${t("ed.xform.flipH.btn")}</button>
+          <button class="minibtn" id="ed-x-flipv">${t("ed.xform.flipV.btn")}</button>
         </div>
       </div>
       <div class="selacts">
-        <button class="minibtn ok" id="ed-x-ok">✔ 確定</button>
-        <button class="minibtn" id="ed-x-cancel">✖ キャンセル</button>
+        <button class="minibtn ok" id="ed-x-ok">${t("ed.common.commit.btn")}</button>
+        <button class="minibtn" id="ed-x-cancel">${t("ed.common.cancelMark.btn")}</button>
       </div>`;
+      // R-2 案1: 属性はプロパティで
+      for (const { sel, titleKey } of [
+        { sel: "#ed-x-fold", titleKey: "ed.xform.numsFold.title" },
+        { sel: "#ed-x-peek", titleKey: "ed.xform.peek.title" },
+        { sel: "#ed-x-snap", titleKey: "ed.xform.snap15.title" },
+      ] as const) {
+        const el = host.querySelector(sel) as HTMLElement | null;
+        if (el) el.title = t(titleKey);
+      }
       $("#ed-x-fold").addEventListener("click", () => {
         this.xformNumFold = !this.xformNumFold;
         this.buildToolOptions();
@@ -3401,27 +3834,73 @@ export class Editor {
   private buildTimeline() {
     const head = $("#ed-tlhead");
     head.innerHTML = `
-      <button class="ic" id="ed-first" title="先頭">⏮</button>
-      <button class="ic" id="ed-prev" title="前のコマ">◀</button>
-      <button class="ic play" id="ed-play" title="再生">▶</button>
-      <button class="ic" id="ed-next" title="次のコマ">▶︎▍</button>
-      <button class="ic" id="ed-last" title="末尾">⏭</button>
-      <button class="ic${this.project.loop ? " onb" : ""}" id="ed-loop" title="ループ">🔁</button>
-      <span class="t" style="margin-left:4px">タイムライン</span>
+      <button class="ic" id="ed-first">⏮</button>
+      <button class="ic" id="ed-prev">◀</button>
+      <button class="ic play" id="ed-play">▶</button>
+      <button class="ic" id="ed-next">▶︎▍</button>
+      <button class="ic" id="ed-last">⏭</button>
+      <button class="ic${this.project.loop ? " onb" : ""}" id="ed-loop">🔁</button>
+      <span class="t" style="margin-left:4px">${t("ed.tl.head.label")}</span>
       <span class="sp"></span>
-      <span class="speed">速さ <select id="ed-speed">${FPS_TABLE.map(
+      <span class="speed">${t("ed.tl.speed.label")} <select id="ed-speed">${FPS_TABLE.map(
         (f, i) =>
           // M10-11: 表記を原作準拠の 0〜10 に（FPS_TABLE は添字0=0.2fps で元から原作の並び）。
           // value は従来どおり添字なので、保存値・速度連動 rate・書き出し fps は一切変わらない
-          `<option value="${i}"${i === this.project.speedIndex ? " selected" : ""}>${i}（${f}fps）</option>`
+          `<option value="${i}"${i === this.project.speedIndex ? " selected" : ""}>${t("ed.tl.speedOption.label", { n: i, fps: f })}</option>`
       ).join("")}</select></span>
-      <button class="hb" id="ed-addframe">＋ ついか</button>
-      <button class="hb" id="ed-dupframe" title="このコマをその場に複製">⧉ 複製</button>
-      <button class="hb" id="ed-wobble" title="このコマから、少し揺れた差分を数枚つくる">〰️ ゆらゆら</button>
-      <button class="hb" id="ed-copypage" title="選択中のコマをコピー（Shift+クリックで範囲選択 / Ctrl+Shift+C）">🗐 コピー</button>
-      <button class="hb" id="ed-pastepage" title="1枚=このコマに上書き / 複数=このコマの後ろに挿入（Ctrl+Shift+V）" disabled>📋 はりつけ</button>
-      <button class="hb danger" id="ed-delframe">🗑 さくじょ</button>
+      <button class="hb" id="ed-addframe">${t("ed.tl.addFrame.btn")}</button>
+      <button class="hb" id="ed-dupframe">${t("ed.tl.dupFrame.btn")}</button>
+      <button class="hb" id="ed-wobble">${t("ed.tl.wobble.btn")}</button>
+      <button class="hb" id="ed-copypage">${t("ed.tl.copyFrames.btn")}</button>
+      <button class="hb" id="ed-pastepage" disabled>${t("ed.tl.pasteFrames.btn")}</button>
+      <button class="hb danger" id="ed-delframe">${t("ed.tl.delFrame.btn")}</button>
+      <button class="ic tl-ic" id="ed-tlmore" hidden>…</button>
+      <button class="ic tl-ic" id="ed-fold-tl">▾</button>
     `;
+    // R-2 案1: 属性はテンプレートに埋めず、組んだあとにプロパティで入れる
+    for (const { sel, titleKey } of [
+      { sel: "#ed-first", titleKey: "ed.tl.first.title" },
+      { sel: "#ed-prev", titleKey: "ed.tl.prev.title" },
+      { sel: "#ed-play", titleKey: "ed.tl.play.title" },
+      { sel: "#ed-next", titleKey: "ed.tl.next.title" },
+      { sel: "#ed-last", titleKey: "ed.tl.last.title" },
+      { sel: "#ed-loop", titleKey: "ed.tl.loop.title" },
+      { sel: "#ed-dupframe", titleKey: "ed.tl.dupFrame.title" },
+      { sel: "#ed-wobble", titleKey: "ed.tl.wobble.title" },
+      { sel: "#ed-copypage", titleKey: "ed.tl.copyFrames.title" },
+      { sel: "#ed-pastepage", titleKey: "ed.tl.pasteFrames.title" },
+      { sel: "#ed-tlmore", titleKey: "ed.tl.more.title" },
+      { sel: "#ed-fold-tl", titleKey: "ed.panel.foldTl.title" },
+    ] as const) {
+      const el = head.querySelector(sel) as HTMLElement | null;
+      if (el) el.title = t(titleKey);
+    }
+    // M11-18: 見出しの子要素の**元の並び順**（全部）と、そのうち「…」へ送れるもの。
+    // 余白（.sp）・見出し文字（.t）・「…」・畳むは送らない（reflowTlHead は元の順序を丸ごと組み直す）
+    this.closeTlMore();
+    this.tlHeadOrder = [...head.children] as HTMLElement[];
+    this.tlHeadItems = this.tlHeadOrder.filter(
+      (el) =>
+        !el.classList.contains("sp") &&
+        !el.classList.contains("t") &&
+        el.id !== "ed-tlmore" &&
+        el.id !== "ed-fold-tl"
+    );
+    let pop = document.getElementById("ed-tlmore-pop");
+    if (!pop) {
+      pop = document.createElement("div");
+      pop.id = "ed-tlmore-pop";
+      pop.className = "tl-more-pop";
+      pop.hidden = true;
+      // 中のボタンを押したらメニューは閉じる（ボタン自身の click が先に走る＝バブリング順）
+      pop.addEventListener("click", (e) => {
+        if ((e.target as HTMLElement).closest("button")) this.closeTlMore();
+      });
+      $("#screen-editor").appendChild(pop);
+    } else {
+      pop.innerHTML = ""; // 前の作品の要素（別 DOM）を残さない
+    }
+    $("#ed-tlmore").addEventListener("click", () => this.toggleTlMore());
     $("#ed-first").addEventListener("click", () => this.gotoFrame(0));
     $("#ed-prev").addEventListener("click", () => this.gotoFrame(this.frameIndex - 1));
     $("#ed-next").addEventListener("click", () => this.gotoFrame(this.frameIndex + 1));
@@ -3474,43 +3953,33 @@ export class Editor {
   /**
    * M10-3: ゆらゆら差分を作る。**現在のコマは読むだけで一切変更しない。**
    * 戻り値は「原本の直後に挿入する N−1 枚」。`project.frames` には触らない。
+   * 本体は wobble.ts の純関数（M11-20 で切り出し）。ここは「現在コマ・選択範囲」を渡す薄い殻。
    *
    * `seedBase` を**引数で受け取る**のは意図的。内部で `hashCurrentFrame()` を呼ぶと
    * `?wobble` から固定シードを渡して決定性を検証できなくなる。ハッシュは呼び出し側の仕事。
+   * `targetLayerId`（M11-20）: null=全レイヤー（従来）／id=そのレイヤーだけ歪め、他は複製のまま
    */
   private buildWobbleFrames(
     count: number, // 2 | 3 | 4（原本を含めた総枚数）
     kind: WobbleKind,
     strength: WobbleStrength,
-    seedBase: number
+    seedBase: number,
+    targetLayerId: string | null = null
   ): Frame[] {
     const cur = this.project.frames[this.frameIndex];
     if (!cur) return [];
-    const { L, A } = WOBBLE_TABLE[kind][strength];
-    const field = new WarpField();
-    const out: Frame[] = [];
     // M11-8 P-4（REQ 表D）: 選択範囲があるときは**範囲内だけ**を揺らす（歪みツールと揃える）。
     // 全コマ共通の場（field）は変えず、適用時にマスクで弾く
-    const clip = this.selMask ?? null;
-    for (let k = 0; k < count - 1; k++) {
-      const seedK = (seedBase + Math.imul(k + 1, 0x9e3779b9)) >>> 0;
-      // dx と dy に別シード（同じだと全画素が斜めにずれるだけで「ゆれ」に見えない）
-      field.setValueNoise(seedK, (seedK ^ 0x6d2b79f5) >>> 0, L, A);
-      const nf = cloneFrame(cur);
-      // 効果音は複製しない（同じ音が N 回鳴るのは誰も望まない）
-      nf.se = undefined;
-      // **1枚につき変位場は1つ**。全レイヤーに同じ場を当てるのでレイヤー間でズレない。
-      // 非表示レイヤーも含める（除外すると絵の整合が崩れる）
-      for (const ld of this.project.layerDefs) {
-        const src = cur.layers[ld.id];
-        const dst = nf.layers[ld.id];
-        // src と dst は別実体（cloneFrame → copyIndexBuf が新しい typed array を作る）。
-        // 適用元は**常に原本**で、直前の生成結果には絶対に再適用しない。
-        if (src && dst) applyWarp(src, dst, field, clip);
-      }
-      out.push(nf);
-    }
-    return out;
+    return buildWobbleFrames(
+      this.project,
+      cur,
+      count,
+      kind,
+      strength,
+      seedBase,
+      this.selMask ?? null,
+      targetLayerId
+    );
   }
 
   private async onWobbleClick(): Promise<void> {
@@ -3518,13 +3987,30 @@ export class Editor {
     if (!this.project.frames[this.frameIndex]) return;
     const opt = await this.openWobbleDialog();
     if (!opt) return;
+    // M11-20: 「選択中のレイヤーだけ」の対象はアクティブレイヤー1枚。フォルダを選んでいても
+    // activeLayerId は生きているので、その旨を案内して続行（REQ「フォルダ選択中はトースト等で案内」）
+    let targetLayerId: string | null = null;
+    let targetName = "";
+    if (opt.target === "active") {
+      const ld = this.project.layerDefs.find((l) => l.id === this.activeLayerId);
+      if (!ld || !this.activeBuffer()) {
+        this.cb.toast(t("ed.common.needLayer.toast"));
+        return;
+      }
+      targetLayerId = ld.id;
+      targetName = ld.name;
+      if (this.selectedFolderId)
+        this.cb.toast(t("ed.wobble.folderSkipped.toast", { name: ld.name }));
+    }
     const n = opt.count - 1;
     if (this.project.frames.length + n > 65535) {
-      this.cb.toast("コマ数が上限（65,535）を超えるため生成できません");
+      this.cb.toast(t("ed.wobble.limitExceeded.toast"));
       return;
     }
     const willWarn = this.project.frames.length + n >= 2000;
     const kindIndex = opt.kind === "line" ? 0 : 1;
+    // シード式は M10-3 のまま（対象種別は混ぜない）。「全レイヤー」は従来とビット同一・
+    // 単体モードの対象レイヤーは全レイヤーモードの同じレイヤーとビット同一＝機械検証できる不変条件
     const seedBase =
       (this.hashCurrentFrame() ^
         Math.imul(this.project.frames.length, 0x9e3779b1) ^
@@ -3535,7 +4021,8 @@ export class Editor {
       opt.count,
       opt.kind,
       opt.strength,
-      seedBase
+      seedBase,
+      targetLayerId
     );
     if (newFrames.length === 0) return;
     const at = this.frameIndex + 1;
@@ -3556,14 +4043,19 @@ export class Editor {
     this.history.push({ label: "ゆらゆら差分", undo: revert, redo: apply });
     apply();
     if (willWarn)
-      this.cb.toast("⚠ コマ数が非常に多くなっています（動作が重くなる場合があります）");
+      this.cb.toast(t("ed.common.manyFrames.toast"));
     // 速度ヒント。**速度は勝手に変えない。** トーストが2連続で重なって読めないので、
     // 生成枚数のトーストにヒントを混ぜて1つにまとめる（P-9-2 の許容範囲）
     const fps = FPS_TABLE[this.project.speedIndex] ?? 8;
+    // M12-1b-2（監査 #44）: 断片（「…」だけ ）の連結をやめ、対象×fps ヒントの**完全文4キー**にした
     this.cb.toast(
-      fps >= 12
-        ? `${newFrames.length}枚を生成しました（8fps くらいがゆらゆらに合います）`
-        : `${newFrames.length}枚を生成しました`
+      targetLayerId
+        ? fps >= 12
+          ? t("ed.wobble.doneLayerFpsHint.toast", { name: targetName, count: newFrames.length })
+          : t("ed.wobble.doneLayer.toast", { name: targetName, count: newFrames.length })
+        : fps >= 12
+          ? t("ed.wobble.doneFpsHint.toast", { count: newFrames.length })
+          : t("ed.wobble.done.toast", { count: newFrames.length })
     );
   }
 
@@ -3574,52 +4066,87 @@ export class Editor {
     count: number;
     kind: WobbleKind;
     strength: WobbleStrength;
+    /** M11-20: 対象。all=全レイヤー（従来どおり・既定）／active=選択中のレイヤーだけ */
+    target: "all" | "active";
   } | null> {
+    // M11-20: 「選択中のレイヤーだけ」の行に、いま対象になるレイヤー名を出す（何が揺れるか迷わせない）。
+    // 長い名前は M11-19 の貼り付けボタンと同じくコードポイント 12 字＋…（label は nowrap で、
+    // .modal-box 480px を突き抜けないように。フル名は title に）
+    const activeFull =
+      this.project.layerDefs.find((l) => l.id === this.activeLayerId)?.name ?? "";
+    const activeCps = [...activeFull];
+    const activeName = activeCps.length > 12 ? `${activeCps.slice(0, 12).join("")}…` : activeFull;
+    const esc = (s: string) =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     return new Promise((resolve) => {
       const back = document.createElement("div");
       back.className = "modal-back";
       const box = document.createElement("div");
       box.className = "modal-box";
       back.appendChild(box);
+      // R-2 案1: title は属性に埋めず、組んだあとにプロパティで入れる（訳文に " が入っても割れない）。
+      // 付ける先・付ける順番は元と同じ（style の次に title）なので DOM の形は変わらない
+      const pendingTitles: { name: string; v: string; title: string }[] = [];
       const radios = (
         name: string,
-        items: { v: string; label: string }[],
+        items: { v: string; label: string; title?: string }[],
         def: string
       ) =>
         items
-          .map(
-            (it) =>
-              `<label style="margin-right:14px;white-space:nowrap"><input type="radio" name="${name}" value="${it.v}"${
-                it.v === def ? " checked" : ""
-              }> ${it.label}</label>`
-          )
+          .map((it) => {
+            if (it.title) pendingTitles.push({ name, v: it.v, title: it.title });
+            return `<label style="margin-right:14px;white-space:nowrap"><input type="radio" name="${name}" value="${it.v}"${
+              it.v === def ? " checked" : ""
+            }> ${it.label}</label>`;
+          })
           .join("");
-      box.innerHTML = `<p class="modal-msg">〰️ ゆらゆら差分をつくる</p>
+      box.innerHTML = `<p class="modal-msg">${t("ed.wobble.dialog.label")}</p>
         <div class="modal-msg" style="text-align:left">
-          <div style="margin-bottom:8px">枚数 ${radios("wb-n", [
-            { v: "2", label: "2枚" },
-            { v: "3", label: "3枚" },
-            { v: "4", label: "4枚" },
+          <div style="margin-bottom:8px">${t("ed.wobble.count.label")} ${radios("wb-n", [
+            { v: "2", label: t("ed.wobble.count2.label") },
+            { v: "3", label: t("ed.wobble.count3.label") },
+            { v: "4", label: t("ed.wobble.count4.label") },
           ], "3")}</div>
-          <div style="margin-bottom:8px">揺れの強さ ${radios("wb-s", [
-            { v: "0", label: "弱" },
-            { v: "1", label: "中" },
-            { v: "2", label: "強" },
+          <div style="margin-bottom:8px">${t("ed.wobble.strength.label")} ${radios("wb-s", [
+            { v: "0", label: t("ed.wobble.strengthWeak.label") },
+            { v: "1", label: t("ed.wobble.strengthMid.label") },
+            { v: "2", label: t("ed.wobble.strengthStrong.label") },
           ], "1")}</div>
-          <div>種類 ${radios("wb-k", [
-            { v: "line", label: "線がふるえる" },
-            { v: "whole", label: "全体がゆれる" },
+          <div style="margin-bottom:8px">${t("ed.wobble.kind.label")} ${radios("wb-k", [
+            { v: "line", label: t("ed.wobble.kindLine.label") },
+            { v: "whole", label: t("ed.wobble.kindWhole.label") },
           ], "line")}</div>
+          <div>${t("ed.wobble.target.label")} ${radios("wb-t", [
+            { v: "all", label: t("ed.wobble.targetAll.label") },
+            {
+              v: "active",
+              // label は innerHTML へ入るので**レイヤー名は esc() を通す**（ユーザーのデータ）
+              label: activeName
+                ? t("ed.wobble.targetActiveNamed.label", { name: esc(activeName) })
+                : t("ed.wobble.targetActive.label"),
+              // title は**プロパティ代入**になったので esc は不要（付けると &lt; が字として見える）
+              title: activeFull ? t("ed.wobble.targetActiveNamed.title", { name: activeFull }) : undefined,
+            },
+          ], "all")}</div>
         </div>
         <div class="modal-actions">
-          <button class="btn" id="wb-cancel">キャンセル</button>
-          <button class="btn primary" id="wb-ok">つくる</button>
+          <button class="btn" id="wb-cancel">${t("common.cancel.btn")}</button>
+          <button class="btn primary" id="wb-ok">${t("ed.wobble.ok.btn")}</button>
         </div>`;
+      for (const p of pendingTitles) {
+        const label = box.querySelector(`input[name="${p.name}"][value="${p.v}"]`)?.closest("label") as HTMLElement | null;
+        if (label) label.title = p.title;
+      }
       document.body.appendChild(back);
 
       let done = false;
       const close = (
-        r: { count: number; kind: WobbleKind; strength: WobbleStrength } | null
+        r: {
+          count: number;
+          kind: WobbleKind;
+          strength: WobbleStrength;
+          target: "all" | "active";
+        } | null
       ) => {
         if (done) return;
         done = true;
@@ -3657,6 +4184,7 @@ export class Editor {
           count: Number(val("wb-n")),
           kind: val("wb-k") as WobbleKind,
           strength: Number(val("wb-s")) as WobbleStrength,
+          target: val("wb-t") === "active" ? "active" : "all",
         });
       (box.querySelector("#wb-ok") as HTMLElement).addEventListener("click", pick);
       (box.querySelector("#wb-cancel") as HTMLElement).addEventListener(
@@ -3735,8 +4263,10 @@ export class Editor {
     const add = document.createElement("button");
     add.className = "fradd";
     add.textContent = "＋";
-    add.title = "コマをついか";
-    add.addEventListener("click", () => this.addFrame(false));
+    add.title = t("ed.tl.addLast.title");
+    // M11-14: フィルム末尾の「＋」は**常に最後尾**へ（うごメモ仕様）。
+    // ヘッダの「＋ ついか」とショートカットは従来どおり選択中の次
+    add.addEventListener("click", () => this.addFrame(false, true));
     film.appendChild(add);
     this.updateBadge();
     this.updateFilmSeMarks(); // M5-1: SE配置マーク
@@ -3828,7 +4358,7 @@ export class Editor {
       this.suppressFrameClick = true;
       const g = document.createElement("div");
       g.className = "drag-ghost"; // 既存クラス（レイヤー行・カードと共用）
-      g.textContent = `コマ ${d.from + 1}`;
+      g.textContent = t("ed.tl.dragGhost.label", { n: d.from + 1 });
       document.body.appendChild(g);
       d.ghost = g;
       // 挿入位置の手がかり。新しいクラスを作らず、既存色をインラインで当てる
@@ -3976,6 +4506,8 @@ export class Editor {
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, el.width, el.height);
     ctx.drawImage(this.filmScratch, 0, 0, el.width, el.height);
+    // M11-16: 透明の紙は canvas の背景で薄い市松にする（データには触れない・実色の紙と見分けるため）
+    el.classList.toggle("paper-clear", this.project.frames[i]?.paper === 0);
   }
 
   private updateFilmSelection() {
@@ -3991,7 +4523,7 @@ export class Editor {
   }
 
   private updateBadge() {
-    $("#ed-badge").textContent = `コマ ${this.frameIndex + 1} / ${this.project.frames.length}`;
+    $("#ed-badge").textContent = t("ed.view.badge.label", { frame: this.frameIndex + 1, total: this.project.frames.length });
   }
 
   // ---------------- ヘッダー ----------------
@@ -4011,7 +4543,7 @@ export class Editor {
       if (this.playing) this.stopPlayback();
       this.cb.openExport(
         projectSource(this.project),
-        (this.project.meta.title || "無題").replace(/\.[^.]+$/, ""),
+        (this.project.meta.title || untitledTitle()).replace(/\.[^.]+$/, ""),
         this.rangeSel,
         this.buildExportAudioSource(),
         (m) => {
@@ -4031,7 +4563,7 @@ export class Editor {
       this.cb.openImageExport?.(
         this.project,
         this.frameIndex,
-        (this.project.meta.title || "無題").replace(/\.[^.]+$/, "")
+        (this.project.meta.title || untitledTitle()).replace(/\.[^.]+$/, "")
       );
     };
     this.history.onchange = () => {
@@ -4050,11 +4582,570 @@ export class Editor {
     };
     $("#ed-zoom-in").onclick = () => this.adjustZoom(+1);
     $("#ed-zoom-out").onclick = () => this.adjustZoom(-1);
-    $("#ed-mini").onclick = () => {
-      this.previewLarge = !this.previewLarge;
-      $("#ed-stage").classList.toggle("swapped", this.previewLarge);
+    $("#ed-mini").onclick = () => this.togglePreviewLarge();
+    // M11-16: HUD をまとめて隠す/出す（M11-13 の 🖼＝ミニ単独トグルを置き換え・統合）。
+    // ボタンは .cvright（隠す対象の外）にあるので、隠しても戻せる
+    $("#ed-mini-toggle").onclick = () => this.toggleHudHidden();
+  }
+
+  // ---------------- M11-16: HUD の非表示（自動＋まとめトグル） ----------------
+  //
+  // 表示への反映は **applyHud() 1つ**に集約する（M11-5 の endPointerSession・M11-13 の
+  // applyMiniHidden と同じ作法）。ストロークの自動非表示は「消えたまま戻らない」が最頻の事故なので、
+  // ストロークのあらゆる終了経路（pointerup / pointercancel / blur / endPointerSession）が
+  // 同じ setStrokeHud(false) を通る。四隅変形の muteFloatingOverlays（opacity/pointer-events）は
+  // 別物・無改変で、こちらは CSS クラス（見た目だけ・当たり判定は奪わない）なので衝突しない。
+
+  /** 大画面（`swapped`）との入れ替え。**隠している間は何も起きない**（トーストも出さない）。
+   *  小窓のクリックとコマンドの両方がここを通る（M11-13 の規則を引き継ぐ） */
+  private togglePreviewLarge() {
+    // M11-21: 「表示しない」の間は大画面切替の入口も無し（ミニは hidden で click 自体届かないが構造的にも閉じる）
+    if (this.miniDock === "off") return;
+    // M11-18: 収納ミニは HUD の隠す対象外（見えている）ので、隠している間でも大画面切替が効く。
+    // フロート時は従来どおり無反応
+    if (this.hudHidden && this.miniDock !== "timeline") return;
+    this.previewLarge = !this.previewLarge;
+    $("#ed-stage").classList.toggle("swapped", this.previewLarge);
+    // M11-18: 大画面は「ミニが stage の中にある」前提の CSS（.stage.swapped .mini）なので、
+    // 収納中でも大画面の間はミニを stage へ戻す。置き場の決定は applyHud（1関数集約）
+    this.applyHud();
+    this.applyZoom();
+  }
+
+  /** まとめて隠す／出すを切り替えて設定へ保存する。
+   *  大画面のまま隠すと**キャンバスが小窓のまま取り残される**ので、先に大画面を解除する（M11-13） */
+  private toggleHudHidden() {
+    const next = !this.hudHidden;
+    if (next && this.previewLarge) {
+      this.previewLarge = false;
+      $("#ed-stage").classList.remove("swapped");
       this.applyZoom();
+    }
+    this.hudHidden = next;
+    this.applyHud();
+    this.cb.onHudHiddenChange?.(this.hudHidden);
+  }
+
+  /** ストローク中の自動非表示を立てる/戻す。**戻し側は少し遅らせる**（連続ストロークで
+   *  HUD が点滅しないように）。立てる側は即時＝描き始めた瞬間に消える。
+   *  戻しの遅延中に次のストロークが始まったら、タイマーを捨てて消えたままにする */
+  private setStrokeHud(on: boolean) {
+    if (this.hudRestoreTimer != null) {
+      clearTimeout(this.hudRestoreTimer);
+      this.hudRestoreTimer = null;
+    }
+    if (on) {
+      if (!this.hudStroke) {
+        this.hudStroke = true;
+        this.applyHud();
+      }
+      return;
+    }
+    if (!this.hudStroke) return;
+    this.hudRestoreTimer = window.setTimeout(() => {
+      this.hudRestoreTimer = null;
+      this.hudStroke = false;
+      this.applyHud();
+    }, Editor.HUD_RESTORE_MS);
+  }
+
+  /** M11-18: いまミニが**タイムラインに収納されている**か（設定が timeline で、大画面中でない）。
+   *  大画面（swapped）の間は CSS の都合でフロート位置（stage の中）へ戻す */
+  private miniDocked(): boolean {
+    return this.miniDock === "timeline" && !this.previewLarge;
+  }
+
+  /** ミニが見えている（描き直す価値がある）か。
+   *  - フロート: hudHidden でなければ見えている
+   *  - 収納: hudHidden の対象外だが、**タイムラインが畳まれていれば見えない**（合成を走らせない・M11-13 の趣旨）
+   *  - 大画面（swapped）: 収納から入った場合 hudHidden でも大画面ミニは見せる（隠すとキャンバスが小窓のまま
+   *    取り残されるので、そこだけ hudHidden より優先） */
+  private miniShown(): boolean {
+    // M11-21: 「表示しない」は何があっても描かない（renderCanvas / applyHud / applyLayout の paintMini が全部止まる）
+    if (this.miniDock === "off") return false;
+    if (this.previewLarge) return true;
+    if (this.miniDocked()) return !this.isCollapsed("tl");
+    return !this.hudHidden;
+  }
+
+  /** 状態を DOM へ反映する（復元・トグル・ストロークの共通経路）。
+   *  - miniDock（M11-18）: ミニ要素そのものを **stage ⇄ タイムラインの置き場（#ed-mini-slot）へ移す**
+   *    （要素は同一＝canvas・click（大画面切替）・muteFloatingOverlays の対象は変わらない）
+   *  - hudHidden（トグル）: ミニ・バッジ・倍率を **hidden**（.cvright は残す）。**収納ミニは対象外**
+   *  - hudStroke（描画中）: 4つ全部を **薄く**（.hud-stroke クラス・見た目だけ）。**収納ミニは対象外**
+   *  出したときは**ミニをその場で描き直す** — 隠している間は renderCanvas がミニを更新しないため */
+  private applyHud() {
+    const mini = document.querySelector("#ed-mini") as HTMLElement | null;
+    const badge = document.querySelector("#ed-badge") as HTMLElement | null;
+    const zoom = document.querySelector("#ed-zoominfo") as HTMLElement | null;
+    const right = document.querySelector(".cvright") as HTMLElement | null;
+    const btn = document.querySelector("#ed-mini-toggle") as HTMLElement | null;
+    const dock = this.miniDocked();
+    const off = this.miniDock === "off"; // M11-21: 表示しない
+    // 置き場（stage の最後の子＝従来の DOM 位置／収納スロット）
+    if (mini) {
+      const slot = document.querySelector("#ed-mini-slot") as HTMLElement | null;
+      const stage = document.querySelector("#ed-stage") as HTMLElement | null;
+      // off のときは stage 側へ戻して hidden にする＝slot が :empty になり、CSS の
+      // `.tl-mini-slot:empty { display:none }` で slot ごと消えてフィルムが左端まで使える
+      if (dock && slot && mini.parentElement !== slot) slot.appendChild(mini);
+      else if (!dock && stage && mini.parentElement !== stage) stage.appendChild(mini);
+      mini.classList.toggle("docked", dock);
+      // hidden は「フロートで hudHidden」のときだけ。収納中は対象外。**大画面の間は隠さない**
+      //（収納から hudHidden のまま大画面に入る経路がある。隠すとキャンバスが小窓のまま取り残される＝
+      //  レビュー指摘）。フロートでは hudHidden && previewLarge は到達しない（toggleHudHidden が先に解除・
+      //  togglePreviewLarge は hudHidden で早期 return）ので従来と同じ。
+      // M11-21: off は常に hidden・薄化（hud-stroke）の対象外
+      mini.hidden = off || (this.hudHidden && !dock && !this.previewLarge);
+      mini.classList.toggle("hud-stroke", this.hudStroke && !dock && !off);
+    }
+    for (const el of [badge, zoom]) if (el) el.hidden = this.hudHidden;
+    for (const el of [badge, zoom, right]) el?.classList.toggle("hud-stroke", this.hudStroke);
+    if (btn) {
+      btn.classList.toggle("onb", this.hudHidden); // 隠している間は色を変える（既存の .ic.onb）
+      // 収納中／表示しないときはミニは対象外なので文言も「表示情報」だけにする
+      // M12-1b-2: 断片（{what}を出す/隠す）の連結をやめ、4通りの完全文にした
+      btn.title =
+        this.miniDock === "float"
+          ? this.hudHidden
+            ? t("ed.mini.hudToggleShowAll.title")
+            : t("ed.mini.hudToggleHideAll.title")
+          : this.hudHidden
+            ? t("ed.mini.hudToggleShowInfo.title")
+            : t("ed.mini.hudToggleHideInfo.title");
+    }
+    if (this.miniShown()) this.paintMini();
+  }
+
+  /** ミニプレビューだけを描き直す（オニオン無し・renderCanvas と同じ内容） */
+  private paintMini() {
+    const mini = document.querySelector("#ed-mini-canvas") as HTMLCanvasElement | null;
+    if (!mini) return;
+    presentToCanvas(compositeFrame(this.project, this.frameIndex), mini);
+    // M11-16: 透明の紙は薄い市松（データには触れない）
+    mini.classList.toggle("paper-clear", this.project.frames[this.frameIndex]?.paper === 0);
+  }
+
+  // ---------------- M11-17: スプリッター（パネル寸法） ----------------
+
+  /** settings.json の `layout` から復元する。**何が入っていても起動する**（項目ごとに既定へ倒す・clamp）。
+   *  mount() より前に呼ばれ、mount() の applyLayout() で DOM へ反映される */
+  restoreLayout(v: unknown) {
+    this.layout = sanitizeLayout(v);
+  }
+
+  /** M11-18: settings.json の `miniDock` から復元（"float"/"off" 以外はすべて既定＝収納）。
+   *  ⚙ 設定で変えたときも main.ts がこれを呼ぶ（エディタが開いていれば即反映） */
+  restoreMiniDock(v: unknown) {
+    this.miniDock = sanitizeMiniDock(v);
+    if (!this.mounted) return;
+    // M11-21: 大画面のまま「表示しない」にするとキャンバスが小窓のまま取り残されるので先に解除
+    //（toggleHudHidden と同じ作法。現状 ⚙ はライブラリ画面からしか開けないので保険）
+    if (this.miniDock === "off" && this.previewLarge) {
+      this.previewLarge = false;
+      $("#ed-stage").classList.remove("swapped");
+      this.applyZoom();
+    }
+    this.applyHud();
+  }
+
+  /** M11-18: settings.json の `collapsed` から復元（true 以外は開いている）。mount() の applyLayout() で反映 */
+  restoreCollapsed(v: unknown) {
+    this.collapsed = sanitizeCollapsed(v);
+  }
+
+  /** いま実際に畳まれているか（個別状態 or 集中） */
+  private isCollapsed(key: CollapseKey): boolean {
+    return this.focusActive || this.collapsed[key];
+  }
+
+  /** 3つの寸法を CSS 変数へ（DOM への反映はここ1つ）。grid が変わると #ed-stage の ResizeObserver が
+   *  applyZoom＋renderCanvas を呼ぶので、キャンバスの整数倍表示はここでは触らない。
+   *  M11-18: 畳んでいるパネルは変数を COLLAPSED_PX（つまみ幅）にし、.ed-main に c-tools/c-side/c-tl を
+   *  付ける（layout の値そのものは触らない＝復帰で元の幅/高さ）。そのスプリッターは disabled */
+  private applyLayout() {
+    const main = document.querySelector(".ed-main") as HTMLElement | null;
+    if (!main) return;
+    const cT = this.isCollapsed("tools");
+    const cS = this.isCollapsed("side");
+    const cL = this.isCollapsed("tl");
+    main.style.setProperty("--ed-tools-w", `${cT ? COLLAPSED_PX : this.layout.toolsW}px`);
+    main.style.setProperty("--ed-side-w", `${cS ? COLLAPSED_PX : this.layout.sideW}px`);
+    main.style.setProperty("--ed-tl-h", `${cL ? COLLAPSED_PX : this.layout.tlH}px`);
+    main.classList.toggle("c-tools", cT);
+    main.classList.toggle("c-side", cS);
+    main.classList.toggle("c-tl", cL);
+    document.getElementById("ed-split-tools")?.classList.toggle("disabled", cT);
+    document.getElementById("ed-split-side")?.classList.toggle("disabled", cS);
+    document.getElementById("ed-split-tl")?.classList.toggle("disabled", cL);
+    const fb = document.getElementById("ed-focus-toggle");
+    if (fb) {
+      fb.classList.toggle("onb", this.focusActive);
+      fb.title = this.focusActive
+        ? t("ed.panel.focusOff.title")
+        : t("ed.panel.focusOn.title");
+    }
+    if (cL) this.closeTlMore(); // 畳んだ見出しのメニューは開いたままにしない
+    this.publishTlHeadHeight();
+    this.reflowTlHead();
+    // 畳んでいる間は収納ミニを描かない（miniShown）ので、開いた瞬間に描き直す
+    if (this.tlWasCollapsed && !cL && this.mounted && this.miniShown()) this.paintMini();
+    this.tlWasCollapsed = cL;
+  }
+
+  // ---------------- M11-18: 畳む（3パネル）とキャンバス集中 ----------------
+
+  /** 畳むボタン（.ed-fold）とつまみ（.ed-tab）を3パネルに用意する。buildToolsPanel / buildSidePanel は
+   *  innerHTML を作り直すので、mount のたびに（build の後で）呼び直す。つまみはカード直下の最後の子＝
+   *  畳んだとき CSS が中身を消してもこれだけ残る */
+  private bindPanelFolds() {
+    const mk = (cls: string, id: string, title: string, text: string, onClick: () => void) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = cls;
+      b.id = id;
+      b.title = title;
+      b.textContent = text;
+      b.addEventListener("click", onClick);
+      return b;
     };
+    // 道具列: 畳むボタンは先頭行（2列組でも1行を占める）・つまみは最後
+    const tools = $("#ed-tools");
+    tools.querySelectorAll(".ed-fold, .ed-tab").forEach((e) => e.remove());
+    tools.prepend(
+      mk("ed-fold", "ed-fold-tools", t("ed.panel.foldTools.title"), t("ed.panel.foldTools.btn"), () => this.setCollapsed("tools", true))
+    );
+    tools.appendChild(
+      mk("ed-tab v", "ed-tab-tools", t("ed.panel.tabTools.title"), t("ed.panel.tabTools.btn"), () => this.setCollapsed("tools", false))
+    );
+    // 右パネル: 畳むボタンは先頭行の右端・つまみは最後
+    const side = $("#ed-side");
+    side.querySelectorAll(".ed-fold-row, .ed-tab").forEach((e) => e.remove());
+    const row = document.createElement("div");
+    row.className = "ed-fold-row";
+    row.appendChild(
+      mk("ed-fold", "ed-fold-side", t("ed.panel.foldSide.title"), t("ed.panel.foldSide.btn"), () => this.setCollapsed("side", true))
+    );
+    side.prepend(row);
+    side.appendChild(
+      mk("ed-tab v", "ed-tab-side", t("ed.panel.tabSide.title"), t("ed.panel.tabSide.btn"), () => this.setCollapsed("side", false))
+    );
+    // タイムライン: 畳むボタンは見出しの右端（buildTimeline が作る #ed-fold-tl）・つまみは最後
+    const tl = $("#ed-timeline");
+    tl.querySelectorAll(":scope > .ed-tab").forEach((e) => e.remove());
+    tl.appendChild(
+      mk("ed-tab h", "ed-tab-tl", t("ed.panel.tabTl.title"), t("ed.panel.tabTl.btn"), () =>
+        this.setCollapsed("tl", false)
+      )
+    );
+    const foldTl = document.getElementById("ed-fold-tl");
+    if (foldTl) foldTl.onclick = () => this.setCollapsed("tl", true);
+    const focus = document.getElementById("ed-focus-toggle");
+    if (focus) focus.onclick = () => this.toggleFocus();
+  }
+
+  /** つまみ・畳むボタンからの個別操作。**集中中なら**、いま見えている状態（全部畳み）を個別状態の
+   *  新しい基準にして復元スナップショットは捨てる（REQ §3: 2重管理の食い違い防止）。集中フラグ自体は
+   *  ボタン/コマンドで下ろすまで残す＝そのとき復元するものが無いので何も動かない（「二重に動かない」） */
+  private setCollapsed(key: CollapseKey, v: boolean) {
+    if (this.focusActive && this.focusSnap) {
+      this.collapsed = { tools: true, side: true, tl: true };
+      this.focusSnap = null;
+    }
+    if (this.collapsed[key] === v && !this.focusActive) return;
+    this.collapsed[key] = v;
+    if (this.focusActive) {
+      // 個別に開いた分は集中の上書きから外れる＝集中は「残りのパネルを畳んだまま」の状態へ
+      // （effective = focusActive || collapsed[key] のままだと開けないので、フラグを下ろして
+      //   個別状態だけで表現する。ボタンの点灯は消え、次に押せば再び発動）
+      this.focusActive = false;
+    }
+    this.finishSplitDrag(false);
+    this.applyLayout();
+    this.cb.onCollapsedChange?.({ ...this.collapsed });
+  }
+
+  /** キャンバス集中: 発動＝3パネル一括畳み（個別状態は focusSnap に控える）／解除＝控えへ戻す。
+   *  保存しない（個別状態は発動前と同じなので保存も不要） */
+  private toggleFocus() {
+    if (!this.focusActive) {
+      this.focusSnap = { ...this.collapsed };
+      this.focusActive = true;
+    } else {
+      if (this.focusSnap) this.collapsed = { ...this.focusSnap };
+      this.focusSnap = null;
+      this.focusActive = false;
+    }
+    this.finishSplitDrag(false);
+    this.applyLayout();
+  }
+
+  // ---------------- M11-18: タイムライン見出しの「…」（あふれメニュー） ----------------
+
+  /** 見出しの幅に入りきらないボタンを**後ろから**「…」メニューへ送る（見出しは常に1行）。
+   *  幅が変わるたびに呼ばれる（headObs）。要素は移動するだけ＝id・listener・disabled はそのまま。
+   *  測定は「全部戻してから scrollWidth > clientWidth の間、末尾から1つずつ送る」＝順序が保たれ、
+   *  「…」ボタン自身の幅も込みで判定できる（1つでも送るときは「…」を出してから測る） */
+  private reflowTlHead() {
+    const head = document.getElementById("ed-tlhead");
+    const pop = document.getElementById("ed-tlmore-pop");
+    const more = document.getElementById("ed-tlmore");
+    if (!head || !pop || !more || this.tlHeadItems.length === 0) return;
+    if (this.isCollapsed("tl") || head.clientWidth === 0) return; // 畳み中・未レイアウトは触らない
+    // 1) 全部を見出しへ戻す＝**元の並び順を丸ごと組み直す**（先頭から順に appendChild すると、
+    //    pop に居た要素も含めて元の順に並ぶ。「…」の手前へまとめて差し込むと ⏮◀▶ が見出し文字の後ろへ
+    //    移ってしまう＝レビュー指摘）
+    for (const el of this.tlHeadOrder) head.appendChild(el);
+    more.hidden = true;
+    const fits = () => head.scrollWidth <= head.clientWidth + 1;
+    if (!fits()) {
+      more.hidden = false;
+      // 2) 末尾から1つずつ送る（pop の中は元の順序になるよう先頭へ差し込む）
+      for (let i = this.tlHeadItems.length - 1; i >= 0 && !fits(); i--) {
+        pop.prepend(this.tlHeadItems[i]);
+      }
+    }
+    if (pop.childElementCount === 0) {
+      more.hidden = true;
+      this.closeTlMore();
+    } else if (this.tlMoreClose) {
+      this.positionTlMore(); // 開いたままなら位置だけ追従
+    }
+  }
+
+  private toggleTlMore() {
+    if (this.tlMoreClose) this.closeTlMore();
+    else this.openTlMore();
+  }
+
+  /** 「…」の上へ開く（position:fixed）。閉じ方: 外側の pointerdown（capture）／Esc（capture・エディタの
+   *  ショートカットへ渡さない）／ウィンドウ resize・blur／中のボタンを押した／unmount・畳み */
+  private openTlMore() {
+    const pop = document.getElementById("ed-tlmore-pop");
+    const more = document.getElementById("ed-tlmore");
+    if (!pop || !more || pop.childElementCount === 0) return;
+    pop.hidden = false;
+    more.classList.add("onb");
+    this.positionTlMore();
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node | null;
+      if (t && (pop.contains(t) || more.contains(t))) return;
+      this.closeTlMore();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "Escape") return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      this.closeTlMore();
+    };
+    const onAway = () => this.closeTlMore();
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("resize", onAway);
+    window.addEventListener("blur", onAway);
+    this.tlMoreClose = () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("resize", onAway);
+      window.removeEventListener("blur", onAway);
+      pop.hidden = true;
+      more.classList.remove("onb");
+    };
+  }
+
+  private closeTlMore() {
+    const fn = this.tlMoreClose;
+    this.tlMoreClose = null;
+    fn?.();
+  }
+
+  /** 「…」ボタンの真上に右揃えで（上に入らなければ下へ）。画面内に収める */
+  private positionTlMore() {
+    const pop = document.getElementById("ed-tlmore-pop");
+    const more = document.getElementById("ed-tlmore");
+    if (!pop || !more || pop.hidden) return;
+    const r = more.getBoundingClientRect();
+    const w = pop.offsetWidth || 160;
+    const h = pop.offsetHeight || 40;
+    let left = Math.round(r.right - w);
+    left = Math.max(8, Math.min(window.innerWidth - w - 8, left));
+    let top = Math.round(r.top - 6 - h);
+    if (top < 8) top = Math.min(window.innerHeight - h - 8, Math.round(r.bottom + 6));
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+  }
+
+  /** タイムライン見出し（#ed-tlhead）の実高を CSS 変数 --ed-tlhead-h として公開する。フィルムのサムネの
+   *  伸びの上限（styles.css .fr）がこれを使う。見出しはステージ幅で1行/2行に折り返すので、
+   *  スプリッター操作・ウィンドウ resize のたびに measure し直す（ResizeObserver＝headObs） */
+  private publishTlHeadHeight() {
+    const main = document.querySelector(".ed-main") as HTMLElement | null;
+    const head = document.querySelector("#ed-tlhead") as HTMLElement | null;
+    if (!main || !head) return;
+    const h = Math.ceil(head.getBoundingClientRect().height);
+    if (h > 0) main.style.setProperty("--ed-tlhead-h", `${h}px`);
+  }
+
+  /** ドラッグ中の動的な上限: 静的レンジに加えて「キャンバス領域が潰れない」ぶんだけ狭める。
+   *  横: stage が最低 360px（1倍 320＋余白 40）残るように。縦: stage が最低 280px（240＋40）残るように。
+   *  .ed-main の実寸が取れないとき（0）は静的レンジだけ */
+  private clampLayoutLive(key: LayoutKey, v: number): number {
+    let val = clampLayoutValue(key, v);
+    const main = document.querySelector(".ed-main") as HTMLElement | null;
+    if (!main) return val;
+    const SPLIT = 10;
+    const PAD = 20; // .ed-main padding 10×2
+    if (key === "toolsW" || key === "sideW") {
+      const w = main.clientWidth;
+      if (w > 0) {
+        const other = key === "toolsW" ? this.layout.sideW : this.layout.toolsW;
+        const maxHere = w - PAD - SPLIT * 2 - other - 360;
+        val = Math.max(LAYOUT_RANGE[key][0], Math.min(val, maxHere));
+      }
+    } else {
+      const h = main.clientHeight;
+      if (h > 0) {
+        const maxHere = h - PAD - SPLIT - 280;
+        val = Math.max(LAYOUT_RANGE[key][0], Math.min(val, maxHere));
+      }
+      // 下限も実測から: 見出し行が折り返して2行になっていると（stage が狭いとき）、静的な 148 では
+      // フィルム帯が潰れてサムネ1段が入らない。見出しの実高＋余白6＋帯の padding 8＋サムネ 58.5＋
+      // カードの padding 14＋枠 6 を下限にする（見出しが1行なら 130.5 → 静的下限 148 のまま）。
+      // ただし**掴んだ時点の値より上へは押し上げない**（既定 148 が既にこの下限を割っている
+      // 1280×800 では「縮めようと掴んだら伸びる」になってしまう。その場合は縮まないだけ。
+      // 副作用として、見出し2行のときは 149〜(下限−1) の帯（どれもサムネが帯に収まらない値）へは
+      // ドラッグでは入れない＝ダブルクリックで 148 へ戻す。M11_17_report §6）
+      const head = document.querySelector("#ed-tlhead") as HTMLElement | null;
+      if (head) {
+        const minHere = Math.ceil(head.getBoundingClientRect().height + 6 + 8 + 58.5 + 14 + 6);
+        const floor = Math.min(minHere, this.splitDrag?.startVal ?? minHere, LAYOUT_RANGE[key][1]);
+        val = Math.max(val, floor);
+      }
+    }
+    return Math.round(val);
+  }
+
+  /** 3本のバーへ pointerdown / dblclick を配線する。mount のたびに呼ばれるので addEventListener でなく
+   *  プロパティ代入（二重登録しない）。**touch-action: none は CSS 側で最初から**（.ed-split） */
+  private bindSplitters() {
+    const bind = (id: string, key: LayoutKey) => {
+      const el = document.getElementById(id) as HTMLElement | null;
+      if (!el) return;
+      el.onpointerdown = (e) => this.startSplitDrag(e, key, el);
+      el.ondblclick = (e) => {
+        e.preventDefault();
+        this.resetLayoutValue(key);
+      };
+      // 保険: ネイティブのドラッグ/選択が始まると pointermove を奪われる（M11-3 の実害）
+      el.ondragstart = (e) => e.preventDefault();
+    };
+    bind("ed-split-tools", "toolsW");
+    bind("ed-split-side", "sideW");
+    bind("ed-split-tl", "tlH");
+  }
+
+  /** ダブルクリック: その境界だけ既定値へ（誤ドラッグからの1発復帰）。変わったときだけ保存 */
+  private resetLayoutValue(key: LayoutKey) {
+    if (this.splitDisabled(key)) return; // M11-18: 畳んでいる間は無効
+    this.finishSplitDrag(false); // 万一ドラッグ中なら畳んでから
+    if (this.layout[key] === LAYOUT_DEFAULT[key]) return;
+    this.layout[key] = LAYOUT_DEFAULT[key];
+    this.applyLayout();
+    this.cb.onLayoutChange?.({ ...this.layout });
+  }
+
+  /** M11-18: そのスプリッターが担当するパネルが畳まれているか（畳み中は掴めない・dblclick も無効） */
+  private splitDisabled(key: LayoutKey): boolean {
+    return this.isCollapsed(key === "toolsW" ? "tools" : key === "sideW" ? "side" : "tl");
+  }
+
+  private startSplitDrag(e: PointerEvent, key: LayoutKey, el: HTMLElement) {
+    if (e.button !== 0) return; // 右/中ボタンでは掴まない（ペンの長押し右クリック化も含む）
+    if (this.splitDrag) return;
+    if (this.splitDisabled(key)) return; // M11-18: 畳んでいる間は無効（CSS の pointer-events:none の保険）
+    e.preventDefault();
+    // 掴んだポインタ以外（別の指・別のペン）のイベントは無視する（frameDrag と同じ）
+    const mine = (ev: PointerEvent) => this.splitDrag?.pointerId === ev.pointerId;
+    const onMove = (ev: PointerEvent) => {
+      if (!mine(ev)) return;
+      // M11-5 の自己修復と同じ: ボタンが離れているのに move が来る＝up を取りこぼした → ここで畳む
+      if (ev.buttons === 0) {
+        this.finishSplitDrag(true);
+        return;
+      }
+      this.updateSplitDrag(ev);
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (!mine(ev)) return;
+      // pointerup も pointercancel も「いまの位置で確定」。パネル寸法は途中値でも害が無く、
+      // 巻き戻すと（ペンの接触が切れただけで）作者の意図した位置が失われる方が困る
+      this.finishSplitDrag(true);
+    };
+    const onBlur = () => this.finishSplitDrag(true);
+    this.splitDrag = {
+      key,
+      el,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      startVal: this.layout[key],
+      onMove,
+      onUp,
+      onBlur,
+    };
+    el.classList.add("on");
+    // バーが掴めていれば、ウィンドウの外へ出ても move/up が届く（frameDrag は無捕捉だが、
+    // スプリッターは細いので捕捉した方が「外れて止まる」が起きない）
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch {
+      /* 合成イベント等で捕捉できなくても window リスナーで続行できる */
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("blur", onBlur);
+  }
+
+  private updateSplitDrag(ev: PointerEvent) {
+    const d = this.splitDrag;
+    if (!d) return;
+    let raw: number;
+    if (d.key === "toolsW") raw = d.startVal + (ev.clientX - d.startX);
+    else if (d.key === "sideW") raw = d.startVal - (ev.clientX - d.startX);
+    else raw = d.startVal - (ev.clientY - d.startY);
+    const v = this.clampLayoutLive(d.key, raw);
+    if (v === this.layout[d.key]) return;
+    this.layout[d.key] = v;
+    this.applyLayout(); // 見た目はリアルタイム。保存は finish のときだけ
+  }
+
+  /** ドラッグの終わり方はこの1経路（pointerup / pointercancel / blur / unmount / mount / Esc）。
+   *  save=true なら、開始時から値が変わっていれば settings へ保存する */
+  private finishSplitDrag(save: boolean) {
+    const d = this.splitDrag;
+    if (!d) return;
+    window.removeEventListener("pointermove", d.onMove);
+    window.removeEventListener("pointerup", d.onUp);
+    window.removeEventListener("pointercancel", d.onUp);
+    window.removeEventListener("blur", d.onBlur);
+    try {
+      d.el.releasePointerCapture(d.pointerId);
+    } catch {
+      /* すでに解放済み */
+    }
+    d.el.classList.remove("on");
+    this.splitDrag = null;
+    if (save && this.layout[d.key] !== d.startVal) this.cb.onLayoutChange?.({ ...this.layout });
+  }
+
+  /** Esc: 掴んだまま開始時の値へ戻して終わる（保存しない） */
+  private cancelSplitDrag() {
+    const d = this.splitDrag;
+    if (!d) return;
+    this.layout[d.key] = d.startVal;
+    this.applyLayout();
+    this.finishSplitDrag(false);
   }
 
   // ---------------- 保存 ----------------
@@ -4064,10 +5155,12 @@ export class Editor {
     if (this.xformGuard()) return false; // E-4
     if (this.askSaveTarget || !this.saveCtx) {
       // F-4: 既存アルバムのピッカー（＋新規フォルダ作成）で保存先を選ぶ
-      const defAlbum = this.saveCtx?.album ?? "未分類";
+      // M12-D: 保存済みのアルバムがあればそれ、無ければ **null（おまかせ）**。
+      // 以前は既定名の文字列を作って渡し、受け側が文字列比較していた
+      const defAlbum = this.saveCtx?.album ?? null;
       const defName =
         this.saveCtx?.baseName ??
-        (this.project.meta.title || "無題").replace(/\.[^.]+$/, "");
+        (this.project.meta.title || untitledTitle()).replace(/\.[^.]+$/, "");
       const picked = await this.cb.pickSaveTarget(defAlbum, defName);
       if (!picked) return false;
       this.saveCtx = {
@@ -4093,11 +5186,11 @@ export class Editor {
       this.askSaveTarget = false;
       // 進行中の古いオートセーブが保存後に復活しないよう世代を進めてから消す
       await this.invalidateAutosave();
-      this.cb.toast(`保存しました: ${path}`);
+      this.cb.toast(t("ed.file.saved.toast", { path }));
       this.cb.onSaved(path);
       return true;
     } catch (e) {
-      this.cb.toast(`保存に失敗: ${e}`);
+      this.cb.toast(t("ed.file.saveFailed.toast", { err: e }));
       return false;
     }
   }
@@ -4118,7 +5211,7 @@ export class Editor {
     // 変形/選択移動の浮動中は、切り出されたピクセルが本体に無く欠損コピーになる
     // M10-2c: 四隅変形中は未確定のプレビューをそのままコピーしてしまうので同様に止める
     if (this.xformActive || this.floatBuf || this.cornerActive) {
-      this.cb.toast("変形・移動を確定（またはキャンセル）してからコピーしてください");
+      this.cb.toast(t("ed.frameclip.xformGuard.toast"));
       return;
     }
     const last = this.project.frames.length - 1;
@@ -4137,11 +5230,14 @@ export class Editor {
     let bytes = 0;
     for (const f of Editor.frameClip.frames)
       for (const lay of f.layers) bytes += lay.byteLength;
-    const sizeNote = bytes > 20 * 1024 * 1024 ? `（約${Math.round(bytes / 1024 / 1024)}MB保持）` : "";
+    const mb = Math.round(bytes / 1024 / 1024);
+    const large = bytes > 20 * 1024 * 1024;
     this.cb.toast(
       idxs.length === 1
-        ? "ページをコピーしました"
-        : `${idxs.length}枚コピーしました${sizeNote}`
+        ? t("ed.tl.copiedOne.toast")
+        : large
+          ? t("ed.tl.copiedMultiLarge.toast", { count: idxs.length, mb })
+          : t("ed.tl.copiedMulti.toast", { count: idxs.length })
     );
   }
 
@@ -4149,7 +5245,7 @@ export class Editor {
   pasteFrames() {
     const clip = Editor.frameClip;
     if (!clip || clip.frames.length === 0) {
-      this.cb.toast("コピーされたページがありません");
+      this.cb.toast(t("ed.tl.clipEmpty.toast"));
       return;
     }
     if (this.xformGuard()) return; // E-4: copy側と統一（暗黙キャンセルしない）
@@ -4203,16 +5299,16 @@ export class Editor {
       });
       restore(afterLayers, afterPaper, undefined, afterSe);
       if (bitsBefore === 8 && this.project.indexBits === 16) {
-        this.cb.toast("パレットを拡張しました（最大65,536色・高精細モード）");
+        this.cb.toast(t("ed.color.promote16.toast"));
       }
-      this.cb.toast("ページを貼り付けました");
+      this.cb.toast(t("ed.frameclip.pastedOne.toast"));
       return;
     }
 
     // --- 複数ページ: 現在コマの後ろに挿入 ---
     const n = clip.frames.length;
     if (this.project.frames.length + n > 65535) {
-      this.cb.toast("コマ数が上限（65,535）を超えるため貼り付けできません");
+      this.cb.toast(t("ed.tl.pasteLimit.toast"));
       return;
     }
     const newFrames = buildFramesFromClip(this.project, clip);
@@ -4232,9 +5328,9 @@ export class Editor {
     this.history.push({ label: "ページ挿入", undo: revert, redo: apply });
     apply();
     if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.cb.toast("パレットを拡張しました（最大65,536色・高精細モード）");
+      this.cb.toast(t("ed.color.promote16.toast"));
     }
-    this.cb.toast(`${n}枚を挿入しました`);
+    this.cb.toast(t("ed.tl.insertedMulti.toast", { count: n }));
   }
 
   // ---------------- キャンバス表示 ----------------
@@ -4256,9 +5352,13 @@ export class Editor {
     }
     wrap.style.width = `${W * z}px`;
     wrap.style.height = `${H * z}px`;
-    $("#ed-zoominfo").textContent = `🔍 320×240 を ${z}.0倍表示（ドット等倍）`;
+    $("#ed-zoominfo").textContent = t("ed.view.zoominfo.label", { zoom: `${z}.0` });
     // E-2/M3.10 G-1: ピクセル格子（1ドット≥8pxで表示・実測ピッチで再描画）
     this.updateGridOverlay(z);
+    // M12-C: カーソル層も同じ寸法で取り直す（格子と同じ集約点に乗せる）。
+    // 指紋を捨ててから描き直すので、ズーム後に古い大きさの輪が残らない
+    this.cursorPainted = "";
+    this.paintCursorLayer();
     this.applyViewTransform();
     this.refreshSelectionLauncher(); // M11-8: ズーム/リサイズ/回転反転に追従
   }
@@ -4291,6 +5391,155 @@ export class Editor {
     const py = (cssH * dpr) / H;
     for (let i = 1; i < W; i++) ctx.fillRect(Math.round(i * px), 0, 1, ph);
     for (let j = 1; j < H; j++) ctx.fillRect(0, Math.round(j * py), pw, 1);
+  }
+
+  // ---------------- M12-C: カーソル（1階＝CSS / 2階＝#ed-cursor レイヤー） ----------------
+
+  /** M12-C: キャンバスから出たらカーソル層を消す（点が置き去りにならないように） */
+  private cursorLeaveHandler = () => {
+    this.cursorDot = null;
+    this.cancelCursorFrame();
+    this.clearCursorLayer();
+  };
+
+  /** M12-C: 予約した rAF を畳む */
+  private cancelCursorFrame() {
+    if (this.cursorRaf != null) {
+      cancelAnimationFrame(this.cursorRaf);
+      this.cursorRaf = null;
+    }
+  }
+
+  /** M12-C: 設定を受け取って反映する（`restoreMiniDock` と同じ流儀）。 */
+  restoreCursor(v: unknown) {
+    this.cursorCfg = sanitizeCursor(v);
+    // 2階が両方 OFF なら **ホバーの経路に一切入らない**（M11-24 と同じ早期 return に戻す）
+    this.cursorLive = this.cursorCfg.ring || this.cursorCfg.cell;
+    if (!this.mounted) return;
+    this.applyCanvasCursor();
+    this.cursorPainted = "";
+    if (!this.cursorLive) {
+      this.cursorDot = null;
+      this.cancelCursorFrame();
+      this.clearCursorLayer();
+    } else {
+      this.paintCursorLayer();
+    }
+  }
+
+  /** M12-C: 1階。`#ed-canvas` の cursor を今のツールと設定から決める。
+   *  `null`（手のひら・変形）のときは**代入しない**＝既存の見た目のまま。 */
+  private applyCanvasCursor() {
+    const cv = document.querySelector("#ed-canvas") as HTMLElement | null;
+    if (!cv) return;
+    const s = cursorFor(this.tool, this.cursorCfg.style);
+    // M12-G: `null` は「触らない」＝変形のように**当たり判定ごとに変わる**もの。
+    // ここで空にすると、ホバーで決まったカーソルを消してしまう
+    if (s !== null) cv.style.cursor = s;
+  }
+
+  /** M12-G: 手のひら・変形の**動的なカーソル**を `#ed-canvas` にも出す。
+   *
+   *  従来は `#ed-cvwrap` にしか代入しておらず、`#ed-canvas { cursor: crosshair }` が
+   *  継承に勝つので**枠の 4px にしか出ていなかった**（M12-C §2-a の実測で判明）。
+   *  M11-24 で変形の当たり判定を直したのに、それを伝える手がかりが見えていなかった。
+   *
+   *  **`#ed-cvwrap` への代入は残したまま**、キャンバスへの代入を足している
+   *  （枠の 4px の見え方を v1.2.0 から変えないため）。
+   *  値は `xformHitTest` の返り値をそのまま流すだけで、**判定も文字列も触らない**。 */
+  private setCanvasCursor(value: string) {
+    const cv = document.querySelector("#ed-canvas") as HTMLElement | null;
+    if (!cv) return;
+    cv.style.cursor = canvasCursorFor(value, this.cursorCfg.style);
+  }
+
+  /** M12-C: ポインタの位置を覚えて、**1フレームに1回だけ**描き直す。
+   *  ドット位置が前フレームと同じなら `clearRect` すらしない（ホバーは元々ただの早期 return
+   *  だった経路なので、足したぶんがそのまま新規コストになる）。 */
+  private trackCursor(e: PointerEvent) {
+    const pt = this.clientToPixel(e.clientX, e.clientY);
+    if (this.cursorDot && this.cursorDot.x === pt.x && this.cursorDot.y === pt.y) return;
+    this.cursorDot = pt;
+    if (this.cursorRaf != null) return; // すでにこのフレームぶんは予約済み
+    this.cursorRaf = requestAnimationFrame(() => {
+      this.cursorRaf = null;
+      this.paintCursorLayer();
+    });
+  }
+
+  private clearCursorLayer() {
+    const cv = document.querySelector("#ed-cursor") as HTMLCanvasElement | null;
+    if (!cv || cv.hidden) return;
+    cv.hidden = true;
+    this.cursorPainted = "";
+  }
+
+  /** M12-C: 2階の描画。**ここから `redrawOverlay()` を絶対に呼ばない**
+   *  （選択範囲があると 320×240=76,800 回のループ＋ImageData 生成が走るため）。
+   *
+   *  バッキングの確保も1ドットの物理px幅も `updateGridOverlay` と**同じ式**にしてあるので、
+   *  ドット枠は格子の線とピッタリ重なる（半ドットずれない）。 */
+  private paintCursorLayer() {
+    const cv = document.querySelector("#ed-cursor") as HTMLCanvasElement | null;
+    const canvas = document.querySelector("#ed-canvas") as HTMLCanvasElement | null;
+    if (!cv || !canvas) return;
+    const dot = this.cursorDot;
+    const show =
+      this.cursorLive &&
+      !!dot &&
+      !cursorLayerHidden(this.tool) &&
+      dot.x >= 0 &&
+      dot.y >= 0 &&
+      dot.x < W &&
+      dot.y < H;
+    if (!show) {
+      this.clearCursorLayer();
+      return;
+    }
+    const size = this.penSize;
+    const ring = this.cursorCfg.ring && hasRing(this.tool);
+    // 同じ絵をもう一度描かない（位置・太さ・ツール・寸法が全部同じなら何もしない）
+    const cssW = canvas.offsetWidth;
+    const cssH = canvas.offsetHeight;
+    const key = `${dot!.x},${dot!.y},${size},${ring ? 1 : 0},${this.cursorCfg.cell ? 1 : 0},${cssW}x${cssH}`;
+    if (key === this.cursorPainted && !cv.hidden) return;
+    if (!cssW || !cssH) return;
+    const dpr = window.devicePixelRatio || 1;
+    const pw = Math.max(1, Math.round(cssW * dpr));
+    const ph = Math.max(1, Math.round(cssH * dpr));
+    if (cv.width !== pw) cv.width = pw;
+    if (cv.height !== ph) cv.height = ph;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    cv.hidden = false;
+    ctx.clearRect(0, 0, pw, ph);
+    const px = (cssW * dpr) / W; // 1ドットの物理px幅（updateGridOverlay と同じ）
+    const py = (cssH * dpr) / H;
+    const L = (dx: number) => Math.round((dot!.x + dx) * px);
+    const T = (dy: number) => Math.round((dot!.y + dy) * py);
+    // ドット枠: カーソル直下の1ドットを囲む（格子と同じ Math.round(i*px) の位置に乗る）
+    if (this.cursorCfg.cell) {
+      const x0 = L(0), x1 = L(1), y0 = T(0), y1 = T(1);
+      ctx.fillStyle = antColor(dot!.x, dot!.y);
+      ctx.fillRect(x0, y0, x1 - x0, 1);
+      ctx.fillRect(x0, y1 - 1, x1 - x0, 1);
+      ctx.fillRect(x0, y0, 1, y1 - y0);
+      ctx.fillRect(x1 - 1, y0, 1, y1 - y0);
+    }
+    // ペン先の輪: いま置いたら塗られるドット集合の**外周だけ**を描く
+    if (ring) {
+      for (const e of footprintEdges(size)) {
+        const ax = dot!.x + e.dx;
+        const ay = dot!.y + e.dy;
+        const x0 = L(e.dx), x1 = L(e.dx + 1), y0 = T(e.dy), y1 = T(e.dy + 1);
+        ctx.fillStyle = antColor(ax, ay);
+        if (e.side === "top") ctx.fillRect(x0, y0, x1 - x0, 1);
+        else if (e.side === "bottom") ctx.fillRect(x0, y1 - 1, x1 - x0, 1);
+        else if (e.side === "left") ctx.fillRect(x0, y0, 1, y1 - y0);
+        else ctx.fillRect(x1 - 1, y0, 1, y1 - y0);
+      }
+    }
+    this.cursorPainted = key;
   }
 
   private adjustZoom(delta: number) {
@@ -4340,10 +5589,14 @@ export class Editor {
     compositeFrame(this.project, this.frameIndex, this.composite, {
       onion: this.playing ? 0 : this.onionLevel,
     });
-    presentToCanvas(this.composite, $("#ed-canvas") as unknown as HTMLCanvasElement);
-    // ミニプレビュー（オニオン無し）
-    const mini = $("#ed-mini-canvas") as unknown as HTMLCanvasElement;
-    presentToCanvas(compositeFrame(this.project, this.frameIndex), mini);
+    const cv = $("#ed-canvas") as unknown as HTMLCanvasElement;
+    presentToCanvas(this.composite, cv);
+    // M11-16: 透明の紙は合成バッファでは alpha=0（何も焼かない）。市松は**表示層**＝canvas 要素の
+    // 背景で出す（.paper-clear の CSS）。紙が実色ならクラスを外して従来の白背景（見えない）
+    cv.classList.toggle("paper-clear", this.project.frames[this.frameIndex]?.paper === 0);
+    // ミニプレビュー（オニオン無し）。M11-13: 隠している間は合成そのものを走らせない
+    //（compositeFrame は全レイヤーを毎回合成するので、描画1回ぶんまるごと省ける）
+    if (this.miniShown()) this.paintMini(); // M11-18: 収納ミニは hudHidden でも見えている
   }
 
   private overlayCtx(): CanvasRenderingContext2D {
@@ -4619,13 +5872,13 @@ export class Editor {
     const lenBefore = this.project.colorTable.length;
     const idx = ensureColor(this.project, this.colorHex);
     if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.cb.toast("パレットを拡張しました（最大65,536色・高精細モード）");
+      this.cb.toast(t("ed.color.promote16.toast"));
       this.dirty = true;
     } else if (
       lenBefore >= 65536 &&
       this.project.colorTable[idx] !== this.colorHex.toLowerCase()
     ) {
-      this.cb.toast("パレットが上限（65,536色）に達したため、最も近い色を使いました");
+      this.cb.toast(t("ed.color.paletteFull.toast"));
     }
     return idx;
   }
@@ -4642,6 +5895,10 @@ export class Editor {
       // 消しゴムは色を解決しない（未使用色の登録＝不要な16bit昇格を避ける）
       color = 0;
       texture = "solid";
+      // M11-14: かすり消し — ベタ以外のトーンを選んでいたら、柄に当たる画素だけを
+      // 透明(0)にする（柄はキャンバス座標固定＝なぞり直しても位相が揃う）。
+      // ベタ（tile=null）なら tone を渡さない＝従来の全消しとビット単位で同じ経路
+      tone = R.toneById(this.eraserToneId)?.tile ?? null;
     } else {
       color = this.currentColorIndex();
       if (this.tool === "brush") {
@@ -4670,6 +5927,11 @@ export class Editor {
     if (this.panState || grabbing) wrap.style.cursor = "grabbing";
     else if (this.tool === "hand" || this.spaceHeld) wrap.style.cursor = "grab";
     else wrap.style.cursor = "";
+    // M12-G: キャンバスの上にも出す（従来は枠の 4px にしか出ていなかった）。
+    // 手のひら／Space パン以外のときは**今のツールのカーソルへ戻す**（空にすると点が消える）
+    if (this.panState || grabbing) this.setCanvasCursor("grabbing");
+    else if (this.tool === "hand" || this.spaceHeld) this.setCanvasCursor("grab");
+    else this.applyCanvasCursor();
   }
 
   /** M11-5: 掴んでいるポインタを解放する（掴んでいなければ何もしない） */
@@ -4948,6 +6210,11 @@ export class Editor {
       this.updateXformHoverCursor(e);
       return;
     }
+    // M12-C: カーソル層の追従。**描いている最中も通る**（太さが分かる価値はストローク中にもある）。
+    // 2階が両方 OFF なら `cursorLive` が false で、この行は真偽値1つの判定で終わる＝
+    // ホバーは M11-24 と同じく下の早期 return まで素通りする。
+    // getCoalescedEvents() は**使わない**（カーソルは最後の1点だけでよい。描線側だけが使う）
+    if (this.cursorLive) this.trackCursor(e);
     if (!this.pointerDown) return;
     const events =
       "getCoalescedEvents" in e ? (e as any).getCoalescedEvents() as PointerEvent[] : [e];
@@ -5110,7 +6377,7 @@ export class Editor {
             if (y > mxy) mxy = y;
           }
       if (mxx < 0) {
-        this.cb.toast("変形する内容がありません");
+        this.cb.toast(t("ed.xform.nothingToTransform.toast"));
         return;
       }
       x0 = mnx;
@@ -5373,6 +6640,7 @@ export class Editor {
       this.hideXformModeLabel(); // R-2: ペンを離したらラベルを消す（hover環境では次のmoveで再表示）
       const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
       if (wrap) wrap.style.cursor = this.xformHitTest(pt).cursor;
+      this.setCanvasCursor(this.xformHitTest(pt).cursor); // M12-G: キャンバス上にも
       this.buildToolOptions(); // 数値表示更新
       return;
     }
@@ -5739,7 +7007,7 @@ export class Editor {
     if (!f) return;
     const ids = this.moveTargetLayerIds().filter((id) => !!f.layers[id]);
     if (ids.length === 0) {
-      this.cb.toast("動かせるレイヤーがありません");
+      this.cb.toast(t("ed.layer.move.noTarget.toast"));
       return;
     }
     const before: Record<string, IndexBuf> = {};
@@ -5897,7 +7165,7 @@ export class Editor {
   private copySelection(cut: boolean) {
     const buf = this.activeBuffer();
     if (!buf || !this.selMask) {
-      this.cb.toast("先に範囲を選択してください");
+      this.cb.toast(t("ed.sel.needSelection.toast"));
       return;
     }
     const before = cut ? copyIndexBuf(buf) : null;
@@ -5912,12 +7180,12 @@ export class Editor {
       this.renderCanvas();
       this.paintFilmThumb(this.frameIndex);
     }
-    this.cb.toast(cut ? "切り取りました" : "コピーしました");
+    this.cb.toast(cut ? t("ed.sel.cut.done.toast") : t("ed.sel.copy.done.toast"));
   }
 
   private pasteClipboard() {
     if (!Editor.clipboard) {
-      this.cb.toast("クリップボードが空です");
+      this.cb.toast(t("ed.sel.paste.empty.toast"));
       return;
     }
     // 16bitプロジェクト由来のクリップボード（索引255超を含み得る）を8bitプロジェクトへ
@@ -5928,7 +7196,7 @@ export class Editor {
       Editor.clipboard.data.some((v) => v > 255)
     ) {
       promoteTo16(this.project);
-      this.cb.toast("パレットを拡張しました（最大65,536色・高精細モード）");
+      this.cb.toast(t("ed.color.promote16.toast"));
       this.dirty = true;
     }
     // 貼り付け → 変形モードで位置決め
@@ -5953,7 +7221,7 @@ export class Editor {
   /** モーダルの「配置先: …」表示用（アクティブレイヤー名＋現在コマ番号） */
   placementInfo(): { layerName: string; frameNo: number } {
     const ld = this.project.layerDefs.find((l) => l.id === this.activeLayerId);
-    return { layerName: ld?.name ?? "（レイヤーなし）", frameNo: this.frameIndex + 1 };
+    return { layerName: ld?.name ?? t("ed.img.place.noLayerName.label"), frameNo: this.frameIndex + 1 };
   }
 
   /** 変換済み1ページ（imageConvert の出力 Project）をアクティブレイヤーへ浮動配置する。
@@ -5964,11 +7232,11 @@ export class Editor {
   placeConvertedImage(src: Project, transparentPaper: boolean) {
     const active = this.activeBuffer();
     if (!active) {
-      this.cb.toast("配置先のレイヤーがありません");
+      this.cb.toast(t("ed.img.place.noLayer.toast"));
       return;
     }
     if (this.xformActive) {
-      this.cb.toast("変形中です。Enterで確定（Escで取消）してから配置してください");
+      this.cb.toast(t("ed.img.place.xformBusy.toast"));
       return;
     }
     const srcBuf = src.frames[0].layers["L1"];
@@ -5986,7 +7254,7 @@ export class Editor {
     let paperIdx = 0;
     if (!transparentPaper) paperIdx = ensureColor(this.project, paperHex);
     if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.cb.toast("パレットを拡張しました（最大65,536色・高精細モード）");
+      this.cb.toast(t("ed.color.promote16.toast"));
       this.dirty = true;
     }
     // ② 昇格後の幅でバッファ確保 → remap（index0=透明は FloatBuf の透明と同義）
@@ -6008,7 +7276,7 @@ export class Editor {
     this.updateToolButtons();
     this.buildToolOptions();
     this.redrawOverlay();
-    this.cb.toast("配置しました — ドラッグで移動・Enterで確定・Escで取消");
+    this.cb.toast(t("ed.img.place.done.toast"));
   }
 
   /** 選択範囲の中を消す。**選択は維持する**（M11-9 P-3）。
@@ -6038,6 +7306,40 @@ export class Editor {
     this.paintFilmThumb(this.frameIndex);
   }
 
+  /** M11-19: 線を太らせる／細らせる（1px モルフォロジー）。**3つの入口（ランチャー・サイドパネル・
+   *  コマンド）の唯一の実体**。対象はアクティブレイヤーの現在コマ、選択範囲があれば範囲内だけ
+   *  （入口によらず同じ規則）。規則は raster.ts thickenIndex / thinIndex（色番号コピーと透明化だけ）。
+   *  undo 1回（pushBufferHistory）・**変化ゼロは履歴に積まない**（deleteSelection と同じ作法） */
+  private morphActiveLayer(kind: "thicken" | "thin") {
+    if (this.xformGuard()) return; // 変形/歪み/浮動の未確定は先に確定させる（他の編集と同じ）
+    if (this.playing) this.stopPlayback();
+    const buf = this.activeBuffer();
+    if (!buf) {
+      this.cb.toast(t("ed.common.needLayer.toast"));
+      return;
+    }
+    const before = copyIndexBuf(buf); // src（読むだけ）。live の buf を dst にする
+    const t0 = performance.now();
+    const changed =
+      kind === "thicken"
+        ? R.thickenIndex(before, buf, this.selMask)
+        : R.thinIndex(before, buf, this.selMask);
+    const ms = performance.now() - t0;
+    if (this.inputLog) {
+      this.inputLogBuf.push(`[inputlog] morph ${kind} changed=${changed} ${ms.toFixed(2)}ms`);
+      this.flushInputLogSoon();
+    }
+    if (changed === 0) {
+      this.cb.toast(
+        kind === "thicken" ? t("ed.linew.thicken.none.toast") : t("ed.linew.thin.none.toast")
+      );
+      return;
+    }
+    this.pushBufferHistory(kind === "thicken" ? "太らせる" : "細らせる", buf, before);
+    this.renderCanvas();
+    this.paintFilmThumb(this.frameIndex);
+  }
+
   // ---------------- M11-8 P-3: 選択範囲ランチャー ----------------
   // 選択範囲の下に浮かぶバー。#ed-cvwrap は表示回転/反転の CSS transform を持つので、
   // その**外側**の #ed-stage に置く（変形モードラベルと同じ作法）。
@@ -6046,14 +7348,17 @@ export class Editor {
    *  「範囲をいじる」3つ ｜ 「絵をどうにかする」4つ ｜ 解除（末尾＝誤爆しにくい位置）。
    *  sep:true の直前に細い区切り線を1本入れる */
   private static readonly SEL_OPS: { op: string; icon: string; title: string; sep?: boolean }[] = [
-    { op: "invert", icon: "⬛⬜", title: "選択範囲を反転" },
-    { op: "expand", icon: "⊕", title: "選択範囲を拡張（1ドット）" },
-    { op: "contract", icon: "⊖", title: "選択範囲を縮小（1ドット）" },
-    { op: "erase", icon: "🧽", title: "選択部分を消去", sep: true },
-    { op: "cut-layer", icon: "✂", title: "切り取って新規レイヤー" },
-    { op: "copy-layer", icon: "⧉", title: "コピーして新規レイヤー" },
-    { op: "transform", icon: "⤢", title: "変形モードを起動" },
-    { op: "deselect", icon: "✕", title: "選択を解除 (Esc)", sep: true },
+    { op: "invert", icon: "⬛⬜", title: t("ed.sel.invert.title") },
+    { op: "expand", icon: "⊕", title: t("ed.sel.expand.title") },
+    { op: "contract", icon: "⊖", title: t("ed.sel.contract.title") },
+    { op: "erase", icon: "🧽", title: t("ed.sel.erase.title"), sep: true },
+    // M11-19: 線を太らせる／細らせる（範囲内だけ）。サイドパネルのボタン・コマンドと同じ実体
+    { op: "thicken", icon: t("ed.linew.thicken.launcher.btn"), title: t("ed.linew.thicken.launcher.title") },
+    { op: "thin", icon: t("ed.linew.thin.launcher.btn"), title: t("ed.linew.thin.launcher.title") },
+    { op: "cut-layer", icon: "✂", title: t("ed.sel.cutToLayer.title") },
+    { op: "copy-layer", icon: "⧉", title: t("ed.sel.copyToLayer.title") },
+    { op: "transform", icon: "⤢", title: t("ed.sel.toTransform.title") },
+    { op: "deselect", icon: "✕", title: t("ed.sel.deselect.title"), sep: true },
   ];
 
   private launcherEl: HTMLElement | null = null;
@@ -6216,6 +7521,12 @@ export class Editor {
       case "erase":
         this.deleteSelection(); // M11-9 P-3: Delete キーと同じ実体（選択は維持）
         break;
+      case "thicken":
+        this.morphActiveLayer("thicken"); // M11-19: 範囲内だけ太らせる（3入口共通の実体）
+        break;
+      case "thin":
+        this.morphActiveLayer("thin");
+        break;
       case "cut-layer":
         this.selectionToNewLayer(true);
         break;
@@ -6237,7 +7548,7 @@ export class Editor {
     this.selMask = empty ? null : next;
     this.pushSelectionHistory(label, before, empty ? null : next.slice());
     this.dirty = true;
-    if (empty) this.cb.toast("選択範囲が無くなりました");
+    if (empty) this.cb.toast(t("ed.sel.becameEmpty.toast"));
     this.redrawOverlay();
   }
 
@@ -6261,7 +7572,7 @@ export class Editor {
         break;
       }
     if (!any) {
-      this.cb.toast("選択範囲に絵がありません");
+      this.cb.toast(t("ed.sel.toLayer.noContent.toast"));
       return;
     }
     const id = newLayerId(this.project);
@@ -6269,7 +7580,7 @@ export class Editor {
     const parent = this.project.layerDefs[idx].parent;
     const def: LayerDef = {
       id,
-      name: `レイヤー${this.project.layerDefs.length + 1}`, // addLayer と同じ規則
+      name: `${layerBaseName()}${this.project.layerDefs.length + 1}`, // addLayer と同じ規則
       visible: true,
       opacity: 1,
       parent,
@@ -6280,7 +7591,11 @@ export class Editor {
     const beforeSrc = copyIndexBuf(src);
     const self = this;
     const apply = () => {
-      self.project.layerDefs.splice(insertAt, 0, def);
+      // M11-20 レビュー: 閉じ込めた def は「作成直後の雛形」として扱い、**コピー**を挿入する。
+      // 同一オブジェクトを入れると、履歴（clip トグル＝id 解決で配列内の実体を書く）と restoreStructure
+      //（配列をクローンに差し替える）を跨いだとき、孤児になった def が古い clip/parent を抱えたまま
+      // redo で復活してしまう（addLayer / pasteLayerToNew も同じ）
+      self.project.layerDefs.splice(insertAt, 0, { ...def });
       for (const f of self.project.frames) {
         f.layers[id] = allocIndexBuf(self.project);
         if (f.order) f.order.push(id); // コマ固有描画順があれば最上位に追加（addLayer と同じ）
@@ -6322,7 +7637,7 @@ export class Editor {
       redo: apply,
     });
     apply();
-    this.cb.toast(cut ? "切り取って新規レイヤーへ移しました" : "新規レイヤーへコピーしました");
+    this.cb.toast(cut ? t("ed.sel.cutToLayer.done.toast") : t("ed.sel.copyToLayer.done.toast"));
   }
 
   // ---------------- 変形 ----------------
@@ -6351,7 +7666,7 @@ export class Editor {
         this.xform = { ...init };
         this.redrawOverlay();
         this.buildToolOptions(); // 数値表示更新
-        this.cb.toast("変形をリセットしました");
+        this.cb.toast(t("ed.xform.reset.toast"));
       } else {
         // 変更なし → モード解除（キャンセルと同じ）
         this.cancelTransform();
@@ -6375,7 +7690,7 @@ export class Editor {
       if (dirty && home) {
         this.cornerPts = home;
         this.updateCornerPreview();
-        this.cb.toast("四隅をリセットしました");
+        this.cb.toast(t("ed.xform.corner.reset.toast"));
       } else {
         this.cancelCornerWarp();
       }
@@ -6392,7 +7707,7 @@ export class Editor {
   /** M3.8 L-B: Ctrl+Y / ↷。変形・浮動中は無効 */
   private handleRedo() {
     if (this.xformActive || this.floatBuf || this.cornerActive) {
-      this.cb.toast("変形中はやり直しできません");
+      this.cb.toast(t("ed.xform.noRedo.toast"));
       return;
     }
     this.applyHistory(() => this.history.redo());
@@ -6432,7 +7747,7 @@ export class Editor {
   private xformGuard(): boolean {
     if (this.textDraft) this.commitTextDraft();
     if (this.xformActive || this.floatBuf || this.cornerActive) {
-      this.cb.toast("変形を確定（Enter）またはキャンセル（Esc）してください");
+      this.cb.toast(t("ed.xform.guard.toast"));
       return true;
     }
     return false;
@@ -6473,7 +7788,7 @@ export class Editor {
       buf.set(this.xformBefore);
       this.xformBefore = null;
       this.xformCutDone = false;
-      this.cb.toast("変形する内容がありません");
+      this.cb.toast(t("ed.xform.nothingToTransform.toast"));
       this.tool = this.prevTool;
       this.updateToolButtons();
       return;
@@ -6487,10 +7802,15 @@ export class Editor {
   }
 
   /** M6-5 Q-4: 変形ハンドルの2段ヒットテスト（発注者確定仕様）。
-   *  四隅の□（±6ドット）=拡縮 / □の少し外側リング（□から+20ドットまで）=回転 /
-   *  上辺中央の棒付き□=回転（残置・共存） / 枠内=移動 / それ以外=何もしない。
+   *  四隅の□（±6ドット）=拡縮 / 上辺中央の棒付き□=回転（残置・共存） /
+   *  **枠の内側=移動** / **枠の外側 12 ドットのリング=回転** / それ以外=何もしない。
    *  単位はキャンバスのドット（表示倍率に応じて描画ハンドルと相似にスケール）。
-   *  座標は枠のローカル系（逆回転）で判定するので、回転後も□の位置と一致する。 */
+   *  座標は枠のローカル系（逆回転）で判定するので、回転後も□の位置と一致する。
+   *
+   *  M11-24: **回転を枠の外側だけに限定**した。以前は「四隅からの距離 ≤ 6+20」だけで見ていたので
+   *  枠の内側にも回転が効き、52×52 ドット以下の枠は中心まで 26 ドット圏内＝**全域が回転で移動できず**、
+   *  大きい枠でも四隅付近の内側が回転になっていた（作者の実使用フィードバック）。
+   *  判定順も「枠内の移動」を回転リングより先にして、内側が回転に飲まれないようにしている。 */
   private xformHitTest(pt: { x: number; y: number }): {
     mode: "" | "move" | "scale" | "rotate";
     cursor: string;
@@ -6509,7 +7829,7 @@ export class Editor {
     const lx = dx * cos + dy * sin;
     const ly = -dx * sin + dy * cos;
     const HIT = 6; // □の当たり半径（ドット）
-    const RING = 20; // □の外側の回転ゾーン幅（ドット）
+    const RING = 12; // M11-24: **枠の外側**の回転ゾーン幅（ドット。20→12 に狭めて誤作動を減らす）
     let best = Infinity;
     let bestCorner: readonly [number, number] = [hw, hh];
     for (const c of [
@@ -6554,9 +7874,13 @@ export class Editor {
         return { mode: "scale", cursor: deg < 90 ? "nwse-resize" : "nesw-resize" };
       }
     }
-    if (best <= HIT + RING) return { mode: "rotate", cursor: ROTATE_CURSOR };
+    // M11-24: 枠の内側は常に移動（四隅の□・棒付き□・寄せたハンドルは上で処理済み）
     if (Math.abs(lx) <= hw && Math.abs(ly) <= hh)
       return { mode: "move", cursor: "move" };
+    // 枠の外側リング＝回転。枠（矩形）からの距離で測るので、辺の外も角の外も同じ 12 ドット
+    const ox = Math.max(0, Math.abs(lx) - hw);
+    const oy = Math.max(0, Math.abs(ly) - hh);
+    if (Math.hypot(ox, oy) <= RING) return { mode: "rotate", cursor: ROTATE_CURSOR };
     return { mode: "", cursor: "" };
   }
 
@@ -6565,7 +7889,7 @@ export class Editor {
    *  回転で歪まないよう #ed-stage（cvwrap の transform の外）に置く。 */
   private xmodeLabelEl: HTMLElement | null = null;
   private showXformModeLabel(mode: string, clientX: number, clientY: number) {
-    const text = mode === "scale" ? "⤡ 拡縮" : mode === "rotate" ? "⟳ 回転" : "";
+    const text = mode === "scale" ? t("ed.xform.mode.scale.label") : mode === "rotate" ? t("ed.xform.mode.rotate.label") : "";
     if (!text) {
       this.hideXformModeLabel();
       return;
@@ -6597,6 +7921,7 @@ export class Editor {
     const pt = this.clientToPixel(e.clientX, e.clientY);
     const hit = this.xformHitTest(pt);
     wrap.style.cursor = hit.cursor;
+    this.setCanvasCursor(hit.cursor); // M12-G: 四隅=リサイズ / 外側=grab / 枠内=move をキャンバス上にも
     this.showXformModeLabel(hit.mode, e.clientX, e.clientY);
   }
 
@@ -6610,6 +7935,7 @@ export class Editor {
     // R-2: 掴んだ瞬間からモードが分かるようカーソルも更新（回転中は grabbing）
     const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
     if (wrap) wrap.style.cursor = hit.mode === "rotate" ? "grabbing" : hit.cursor;
+    this.setCanvasCursor(hit.mode === "rotate" ? "grabbing" : hit.cursor); // M12-G
   }
 
   private updateTransformDrag(pt: { x: number; y: number }, shiftKey = false) {
@@ -6667,6 +7993,8 @@ export class Editor {
     this.hideXformModeLabel(); // R-2
     const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
     if (wrap) wrap.style.cursor = "";
+    // M12-G: 変形を抜けたらキャンバスは**今のツールのカーソル**へ戻す（空にはしない）
+    this.applyCanvasCursor();
     this.xformBefore = null;
     this.xformCutDone = false;
     this.floatBuf = null;
@@ -6690,6 +8018,12 @@ export class Editor {
       bold: this.textBold,
       vertical: this.textVertical,
     };
+  }
+
+  /** M11-13/16: settings.json の `hudHidden` から復元する。**true 以外はすべて既定（表示）へ倒す**
+   *  — 項目なし・null・文字列・数値など、何が入っていても起動する。旧 `miniHidden` は読まない（読み捨て） */
+  restoreHudHidden(v: unknown) {
+    this.hudHidden = v === true;
   }
 
   /** M10-1c: settings.json から復元する。未知の値は fonts.ts 側で既定へ落とされる */
@@ -6919,14 +8253,21 @@ export class Editor {
     this.flushInputLogSoon();
   }
 
+  /** 紙色を変える。M11-16: `hex === ""` は**透明の紙**（paper=0）。透明は colorTable の
+   *  予約添字 0 を直接使い、`ensureColor` を通さない（色を登録しない＝16bit 昇格も起きない） */
   private setPaper(hex: string) {
     const f = this.project.frames[this.frameIndex];
     if (!f) return;
     const oldPaper = f.paper;
-    const bitsBefore = this.project.indexBits;
-    const newPaper = ensureColor(this.project, hex);
-    if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.cb.toast("パレットを拡張しました（最大65,536色・高精細モード）");
+    let newPaper: number;
+    if (hex === "") {
+      newPaper = 0;
+    } else {
+      const bitsBefore = this.project.indexBits;
+      newPaper = ensureColor(this.project, hex);
+      if (bitsBefore === 8 && this.project.indexBits === 16) {
+        this.cb.toast(t("ed.color.promote16.toast"));
+      }
     }
     if (oldPaper === newPaper) return;
     const fi = this.frameIndex;
@@ -6948,7 +8289,7 @@ export class Editor {
 
   private copyPrevFrame() {
     if (this.frameIndex === 0) {
-      this.cb.toast("先頭のコマには複写元がありません");
+      this.cb.toast(t("ed.tl.copyPrev.noSource.toast"));
       return;
     }
     const cur = this.project.frames[this.frameIndex];
@@ -6983,7 +8324,7 @@ export class Editor {
       },
     });
     this.afterStructuralChange();
-    this.cb.toast("前のコマを複写しました");
+    this.cb.toast(t("ed.tl.copyPrev.done.toast"));
   }
 
   /** M11-2: 「消す」は**選択中のレイヤーだけ**を対象にする（従来はページ全体だった）。
@@ -7005,14 +8346,20 @@ export class Editor {
       ? this.project.layerDefs.filter((ld) => this.ancestorChain(ld.parent).includes(folder.id))
       : this.project.layerDefs.filter((ld) => ld.id === this.activeLayerId);
     if (targets.length === 0) {
-      this.cb.toast(folder ? "このフォルダにはレイヤーがありません" : "レイヤーが選ばれていません");
+      this.cb.toast(folder ? t("ed.tl.clearFrame.emptyFolder.toast") : t("ed.tl.clearFrame.noLayer.toast"));
       return;
     }
-    const scope = this.selMask ? "選択した範囲だけ" : "ぜんぶ";
+    // M12-1b-2（監査 #58）: 文の途中へ断片（{scope}）を差し込むのをやめ、
+    // フォルダ×全/範囲・レイヤー×全/範囲の**完全文4キー**にした（語順が変わる言語でも訳せる）
+    const hasSel = !!this.selMask;
     const ok = await this.cb.confirm(
       folder
-        ? `フォルダ「${folder.name}」の中のレイヤー${targets.length}枚について、このページの絵を${scope}消しますか？（レイヤーは残ります）`
-        : `レイヤー「${targets[0].name}」のこのページの絵を${scope}消しますか？`
+        ? hasSel
+          ? t("ed.tl.clearFrame.folderSel.msg", { folder: folder.name, count: targets.length })
+          : t("ed.tl.clearFrame.folderAll.msg", { folder: folder.name, count: targets.length })
+        : hasSel
+          ? t("ed.tl.clearFrame.layerSel.msg", { layer: targets[0].name })
+          : t("ed.tl.clearFrame.layerAll.msg", { layer: targets[0].name })
     );
     if (!ok) return;
     const mask = this.selMask;
@@ -7035,7 +8382,7 @@ export class Editor {
       after[ld.id] = copyIndexBuf(buf);
     }
     if (Object.keys(before).length === 0) {
-      this.cb.toast("消せる絵がありませんでした");
+      this.cb.toast(t("ed.tl.clearFrame.nothing.toast"));
       return;
     }
     // バッファ実体は構造 undo/redo で作り直され得るので、Frame オブジェクト起点で適用時に解決する
@@ -7064,6 +8411,218 @@ export class Editor {
 
   // ---------------- レイヤー操作 ----------------
 
+  // ---------------- M11-15: レイヤーのコピー＆ペースト（コマ1枚ぶん） ----------------
+
+  /** クリップボードを捨てる。**破棄はここ1箇所**（mount から呼ぶ＝作品を跨がない） */
+  private clearLayerClip() {
+    this.layerClip = null;
+    this.updateLayerClipButtons();
+  }
+
+  /** 貼り付け系ボタンの有効/無効を控えの有無に合わせる。
+   *  M11-19: 「貼り付け」ボタンには**今の貼り先（アクティブレイヤー名）**を出す（レイヤー切替に追従＝
+   *  rebuildLayers からも呼ばれる）。長い名前は 8 文字＋…に省略。フォルダが選ばれていれば貼り先なし */
+  private updateLayerClipButtons() {
+    const on = !!this.layerClip;
+    for (const sel of ["#ed-lc-paste", "#ed-lc-paste-new", "#ed-lc-paste-all"]) {
+      const b = document.querySelector(sel) as HTMLButtonElement | null;
+      if (b) b.disabled = !on;
+    }
+    const paste = document.querySelector("#ed-lc-paste") as HTMLButtonElement | null;
+    if (paste) {
+      const ld = this.project.layerDefs.find((l) => l.id === this.activeLayerId);
+      const full = ld?.name ?? "";
+      const cps = [...full]; // 判定も切り出しもコードポイント単位（絵文字名で「…」だけ付かないように）
+      const short = cps.length > 8 ? `${cps.slice(0, 8).join("")}…` : full;
+      paste.textContent = ld ? t("ed.layerclip.pasteTo.btn", { layerShort: short }) : t("ed.layerclip.paste.btn");
+      paste.title = ld
+        ? t("ed.layerclip.pasteTo.title", { layer: full })
+        : t("ed.layerclip.paste.title");
+    }
+  }
+
+  /** M11-19: 貼り付けボタン列（#ed-layerclip）が見えていなければ見える位置へスクロール
+   *  （revealToolOptions と同じ流儀・スムーズにしない） */
+  private revealLayerClip() {
+    const side = document.querySelector("#ed-side") as HTMLElement | null;
+    const host = document.querySelector("#ed-layerclip") as HTMLElement | null;
+    if (!side || !host) return;
+    const sr = side.getBoundingClientRect();
+    const hr = host.getBoundingClientRect();
+    if (hr.bottom > sr.bottom + 1 || hr.top < sr.top - 1) host.scrollIntoView({ block: "nearest" });
+  }
+
+  /** 控えが無いときの案内（全貼り付け経路で共通） */
+  private requireLayerClip(): IndexBuf | null {
+    if (!this.layerClip) {
+      this.cb.toast(t("ed.layerclip.noClip.toast"));
+      return null;
+    }
+    return this.layerClip;
+  }
+
+  /** アクティブレイヤーの現在コマを控えへコピーする（プロジェクトには触れない） */
+  private copyLayerFrame() {
+    if (this.xformGuard()) return; // 変形中の切り出し済みバッファをコピーしない
+    const buf = this.activeBuffer();
+    if (!buf) return;
+    this.layerClip = copyIndexBuf(buf);
+    this.updateLayerClipButtons();
+    this.revealLayerClip(); // M11-19: 貼り付けボタン列が画面外に押し出されていても見えるように
+    const name = this.project.layerDefs.find((l) => l.id === this.activeLayerId)?.name ?? layerBaseName();
+    this.cb.toast(t("ed.layerclip.copied.toast", { layer: name, frame: this.frameIndex + 1 }));
+  }
+
+  /** 控えを**置き換え**で書き込む（8/16bit 整合: dst が 16bit・src が 8bit でも .set は値を保つ。
+   *  逆＝dst 8bit・src 16bit は起きない — コピー後にプロジェクトが降格することは無い） */
+  private static writeClipInto(dst: IndexBuf, src: IndexBuf) {
+    dst.set(src as unknown as ArrayLike<number>);
+  }
+
+  /** ① 今のコマの選んだレイヤーへ（置き換え・履歴1エントリ） */
+  private pasteLayerFrame() {
+    if (this.xformGuard()) return; // E-4
+    const clip = this.requireLayerClip();
+    if (!clip) return;
+    const buf = this.activeBuffer();
+    if (!buf) return;
+    const before = copyIndexBuf(buf);
+    Editor.writeClipInto(buf, clip);
+    // 1画素も変わらなければ履歴に積まない（同じ絵を同じ所へ貼った）
+    let changed = false;
+    for (let i = 0; i < before.length; i++)
+      if (before[i] !== buf[i]) {
+        changed = true;
+        break;
+      }
+    if (!changed) {
+      this.cb.toast(t("ed.layerclip.same.toast"));
+      return;
+    }
+    this.pushBufferHistory("レイヤー貼り付け", buf, before);
+    this.renderCanvas();
+    this.paintFilmThumb(this.frameIndex);
+  }
+
+  /** ③ 新規レイヤーを作ってそこへ（addLayer と同じ規則で作成 → 貼り付け。**履歴1エントリ**） */
+  private pasteLayerToNew() {
+    if (this.xformGuard()) return; // E-4
+    const clip = this.requireLayerClip();
+    if (!clip) return;
+    const id = newLayerId(this.project);
+    const idx = this.project.layerDefs.findIndex((l) => l.id === this.activeLayerId);
+    // addLayer と同じ: 選択中フォルダの中 or 選択レイヤーと同じ親・選択レイヤーの直上
+    const selFolder = this.selectedFolderId ? this.folderById(this.selectedFolderId) : undefined;
+    const def: LayerDef = {
+      id,
+      name: `${layerBaseName()}${this.project.layerDefs.length + 1}`,
+      visible: true,
+      opacity: 1,
+      parent: selFolder
+        ? selFolder.id
+        : this.project.layerDefs.find((l) => l.id === this.activeLayerId)?.parent,
+    };
+    let insertAt = idx >= 0 ? idx + 1 : this.project.layerDefs.length;
+    if (selFolder) {
+      const members = this.folderLayerIndices(selFolder.id);
+      if (members.length > 0) insertAt = members[members.length - 1] + 1;
+    }
+    const frameIdx = this.frameIndex;
+    const prevActive = this.activeLayerId;
+    const clipCopy = copyIndexBuf(clip); // redo 時に控えが変わっていても同じ絵が入るように
+    const self = this;
+    const apply = () => {
+      // M11-20 レビュー: def は雛形＝コピーを挿入（理由は「選択→新規レイヤー」の apply と同じ）
+      self.project.layerDefs.splice(insertAt, 0, { ...def });
+      for (const f of self.project.frames) {
+        f.layers[id] = allocIndexBuf(self.project);
+        if (f.order) f.order.push(id); // コマ固有描画順があれば最上位に追加（addLayer と同じ）
+      }
+      const d = self.project.frames[frameIdx]?.layers[id];
+      if (d) Editor.writeClipInto(d, clipCopy);
+      self.activeLayerId = id;
+      self.afterLayerChange();
+      self.paintFilmThumb(frameIdx);
+    };
+    const revert = () => {
+      const i = self.project.layerDefs.findIndex((l) => l.id === id);
+      if (i >= 0) self.project.layerDefs.splice(i, 1);
+      for (const f of self.project.frames) {
+        delete f.layers[id];
+        if (f.order) f.order = f.order.filter((x) => x !== id);
+      }
+      self.activeLayerId = self.project.layerDefs.some((l) => l.id === prevActive)
+        ? prevActive
+        : (self.project.layerDefs[self.project.layerDefs.length - 1]?.id ?? "");
+      self.afterLayerChange();
+      self.paintFilmThumb(frameIdx);
+    };
+    this.history.push({ label: "新規レイヤーへ貼り付け", undo: revert, redo: apply });
+    apply();
+  }
+
+  /** ④ 全コマの選んだレイヤーへ一括（ID・サイン用。**履歴1エントリ**＝undo 1回で全コマ戻る）。
+   *  before は**変化のあったコマだけ**控える（既に同じ絵のコマは触らない＝メモリと時間の節約）。
+   *  100コマ級でも数十msで終わる見込みだが、念のため長いときは終わりにトーストで知らせる */
+  private async pasteLayerAllFrames() {
+    if (this.xformGuard()) return; // E-4
+    const clip = this.requireLayerClip();
+    if (!clip) return;
+    const layerId = this.activeLayerId;
+    const name = this.project.layerDefs.find((l) => l.id === layerId)?.name ?? layerBaseName();
+    const n = this.project.frames.length;
+    if (n > 1) {
+      const ok = await this.cb.confirm(
+        t("ed.layerclip.pasteAll.msg", { count: n, layer: name })
+      );
+      if (!ok) return;
+    }
+    const t0 = performance.now();
+    const clipCopy = copyIndexBuf(clip);
+    // 変化のあるコマだけ before を取る（Frame オブジェクトで持つ＝並べ替え/挿入があっても正しい実体へ戻す）
+    const touched: { frame: Frame; before: IndexBuf }[] = [];
+    for (const f of this.project.frames) {
+      const buf = f.layers[layerId];
+      if (!buf) continue;
+      let same = buf.length === clipCopy.length;
+      if (same) for (let i = 0; i < buf.length; i++) if (buf[i] !== clipCopy[i]) { same = false; break; }
+      if (same) continue;
+      touched.push({ frame: f, before: copyIndexBuf(buf) });
+    }
+    if (touched.length === 0) {
+      this.cb.toast(t("ed.layerclip.sameAll.toast"));
+      return;
+    }
+    const self = this;
+    // フィルムは全コマの絵が変わるので rebuildFilm（可視分だけ遅延描画＝F-0 の流儀のまま）
+    const apply = () => {
+      for (const t of touched) {
+        const b = t.frame.layers[layerId];
+        if (b) Editor.writeClipInto(b, clipCopy);
+      }
+      self.dirty = true;
+      self.renderCanvas();
+      self.rebuildFilm();
+    };
+    const revert = () => {
+      for (const t of touched) {
+        const b = t.frame.layers[layerId];
+        if (b) Editor.writeClipInto(b, t.before);
+      }
+      self.dirty = true;
+      self.renderCanvas();
+      self.rebuildFilm();
+    };
+    this.history.push({ label: "全コマへレイヤー貼り付け", undo: revert, redo: apply });
+    apply();
+    const ms = Math.round(performance.now() - t0);
+    this.cb.toast(
+      ms >= 500
+        ? t("ed.layerclip.pasteAllDoneSlow.toast", { count: touched.length, layer: name, ms })
+        : t("ed.layerclip.pasteAllDone.toast", { count: touched.length, layer: name })
+    );
+  }
+
   private addLayer() {
     if (this.xformGuard()) return; // E-4
     const id = newLayerId(this.project);
@@ -7076,7 +8635,7 @@ export class Editor {
       : undefined;
     const def: LayerDef = {
       id,
-      name: `レイヤー${this.project.layerDefs.length + 1}`,
+      name: `${layerBaseName()}${this.project.layerDefs.length + 1}`,
       visible: true,
       opacity: 1,
       parent: selFolder
@@ -7090,7 +8649,8 @@ export class Editor {
     }
     const self = this;
     const apply = () => {
-      self.project.layerDefs.splice(insertAt, 0, def);
+      // M11-20 レビュー: def は雛形＝コピーを挿入（理由は「選択→新規レイヤー」の apply と同じ）
+      self.project.layerDefs.splice(insertAt, 0, { ...def });
       for (const f of self.project.frames) {
         f.layers[id] = allocIndexBuf(self.project);
         // コマ固有描画順があれば最上位に追加
@@ -7117,13 +8677,13 @@ export class Editor {
   private async deleteLayer() {
     if (this.xformGuard()) return; // E-4
     if (this.project.layerDefs.length <= 1) {
-      this.cb.toast("最後のレイヤーは削除できません");
+      this.cb.toast(t("ed.layer.deleteLastBlocked.toast"));
       return;
     }
     const idx = this.project.layerDefs.findIndex((l) => l.id === this.activeLayerId);
     if (idx < 0) return;
     const def = this.project.layerDefs[idx];
-    const ok = await this.cb.confirm(`「${def.name}」を削除しますか？（全コマから消えます）`);
+    const ok = await this.cb.confirm(t("ed.layer.delete.msg", { layer: def.name }));
     if (!ok) return;
     const saved: IndexBuf[] = this.project.frames.map((f) =>
       copyIndexBuf(f.layers[def.id] ?? allocIndexBuf(this.project))
@@ -7160,7 +8720,7 @@ export class Editor {
     if (this.xformGuard()) return; // E-4
     const idx = this.project.layerDefs.findIndex((l) => l.id === this.activeLayerId);
     if (idx <= 0) {
-      this.cb.toast("いちばん下のレイヤーです（統合先がありません）");
+      this.cb.toast(t("ed.layer.mergeNoTarget.toast"));
       return;
     }
     const top = this.project.layerDefs[idx];
@@ -7207,16 +8767,19 @@ export class Editor {
 
   // ---------------- コマ操作 ----------------
 
-  private addFrame(duplicate: boolean) {
+  /** @param atEnd M11-14: true=常に最後尾へ追加（フィルム末尾の「＋」＝うごメモ仕様）。
+   *  false=選択中のコマの次（ヘッダの「＋ ついか」・複製・ショートカット＝従来どおり）。
+   *  上限ガード・履歴・afterFrameStructureChange は同じ経路を通る */
+  private addFrame(duplicate: boolean, atEnd = false) {
     if (this.xformGuard()) return; // E-4
     if (this.project.frames.length >= 65535) {
-      this.cb.toast("コマ数が上限（65,535）に達しています");
+      this.cb.toast(t("ed.tl.addFrame.limit.toast"));
       return;
     }
     if (this.project.frames.length >= 2000) {
-      this.cb.toast("⚠ コマ数が非常に多くなっています（動作が重くなる場合があります）");
+      this.cb.toast(t("ed.common.manyFrames.toast"));
     }
-    const at = this.frameIndex + 1;
+    const at = atEnd ? this.project.frames.length : this.frameIndex + 1;
     const cur = this.project.frames[this.frameIndex];
     const nf = duplicate ? cloneFrame(cur) : makeEmptyFrame(this.project, cur.paper);
     const self = this;
@@ -7240,7 +8803,7 @@ export class Editor {
     if (this.xformGuard()) return; // E-4
     const total = this.project.frames.length;
     if (total <= 1) {
-      this.cb.toast("最後のコマは削除できません");
+      this.cb.toast(t("ed.tl.deleteFrame.lastBlocked.toast"));
       return;
     }
     // M11-9 P-4: フィルムで範囲選択（Shift+クリック）しているときは、その範囲をまとめて削除する。
@@ -7255,12 +8818,12 @@ export class Editor {
     const end = useRange ? selB : this.frameIndex;
     const count = end - at + 1;
     if (count >= total) {
-      this.cb.toast("すべてのコマは削除できません（1枚は残す必要があります）");
+      this.cb.toast(t("ed.tl.deleteFrame.allBlocked.toast"));
       return;
     }
     if (count > 1) {
       const ok = await this.cb.confirm(
-        `${count}枚のコマを削除します。よろしいですか？\n（コマ ${at + 1}〜${end + 1}）`
+        t("ed.tl.deleteFrame.range.msg", { count, from: at + 1, to: end + 1 })
       );
       if (!ok) return;
       // 確認の間にコマ構造が変わっていたら中止（ダイアログ中の変更は無いはずだが保険）
@@ -7527,6 +9090,30 @@ export class Editor {
     this.paintFilmThumb(this.frameIndex);
   }
 
+  /** M11-20: レイヤーのクリッピング on/off。**履歴に積む（undo 1回）**。
+   *  フォルダ不透明度（rebuildLayers 内）と同じ「id 解決型」のエントリ＝restoreStructure でオブジェクトが
+   *  差し替わっても id で引き直すので安全・他の属性（visible 等）を巻き戻さない。
+   *  表示側は afterLayerChange（行の再構築＋本体＋ミニ＋現コマのフィルムサムネ）で即追従。
+   *  バッファは触らない（clip は表示時のマスクだけ・REQ_M11_20 §1） */
+  private toggleLayerClipping(id: string) {
+    const ld = this.project.layerDefs.find((l) => l.id === id);
+    if (!ld) return;
+    const to = ld.clip !== true;
+    const apply = (v: boolean) => {
+      const l = this.project.layerDefs.find((x) => x.id === id);
+      if (!l) return;
+      if (v) l.clip = true;
+      else delete l.clip; // false は「キーなし」で表す（保存ファイルにも書かない）
+      this.afterLayerChange();
+    };
+    this.history.push({
+      label: to ? "クリッピング ON" : "クリッピング OFF",
+      undo: () => apply(!to),
+      redo: () => apply(to),
+    });
+    apply(to);
+  }
+
   private afterFrameStructureChange() {
     this.dirty = true;
     // コマの追加/削除/並べ替え/挿入で範囲選択はインデックスがずれるためリセット
@@ -7572,8 +9159,9 @@ export class Editor {
 
   // ---------------- M11-10: ショートカット（コマンド解決） ----------------
 
-  /** キー → コマンドID の引き当て表（キー1打ごとに線形探索しない） */
-  private keyLookup = new Map<string, CommandId>();
+  /** キー → コマンドID列の引き当て表（キー1打ごとに線形探索しない）。
+   *  M11-15: 道具どうしは同じキーを共有できるので値は配列（通常は1件） */
+  private keyLookup = new Map<string, CommandId[]>();
   private static readonly REPEATABLE = new Set<string>(
     COMMANDS.filter((c) => (c as { repeatable?: boolean }).repeatable).map((c) => c.id)
   );
@@ -7652,6 +9240,26 @@ export class Editor {
       case "edit.clearFrame":
         void this.clearFrame();
         break;
+      // M11-19: 線を太らせる／細らせる（非 repeatable＝キーリピートでは1回だけ）
+      case "edit.thicken":
+        this.morphActiveLayer("thicken");
+        break;
+      case "edit.thin":
+        this.morphActiveLayer("thin");
+        break;
+      // M11-15: レイヤーのコピー＆ペースト
+      case "layer.copy":
+        this.copyLayerFrame();
+        break;
+      case "layer.paste":
+        this.pasteLayerFrame();
+        break;
+      case "layer.pasteNew":
+        this.pasteLayerToNew();
+        break;
+      case "layer.pasteAll":
+        void this.pasteLayerAllFrames();
+        break;
       // ファイル
       case "file.save":
         void this.save();
@@ -7715,6 +9323,14 @@ export class Editor {
       case "xform.peek":
         // 押している間だけ透かす。戻すのは keyup（peekCode が一致したとき）
         if (this.xformActive) this.setXformPeek(true, this.peekPendingCode);
+        break;
+      case "view.miniToggle":
+        // M11-16: id は据え置き（旧プリセットに保存された割り当てがそのまま新トグルを動かす）。
+        // 中身は「HUD をまとめて隠す/出す」に置き換わった
+        this.toggleHudHidden();
+        break;
+      case "view.focusToggle":
+        this.toggleFocus(); // M11-18: キャンバス集中（ボタンと同じ入口）
         break;
     }
   }
@@ -7891,6 +9507,10 @@ export class Editor {
         this.cancelFrameDrag(); // M11-7: コマの並べ替え中も同じ（並びは動かさない）
         return;
       }
+      if (this.splitDrag) {
+        this.cancelSplitDrag(); // M11-17: スプリッター中の Esc は掴む前の寸法へ戻して終わる
+        return;
+      }
       // M11-12: 浮動テキストは取り消して終わり（何も焼かない）。選択解除まで走らせない
       //（入力欄にフォーカスがあるときは、そちらの keydown が同じことをする）
       if (this.textDraft) {
@@ -7926,7 +9546,10 @@ export class Editor {
       return;
     }
     if (e.code === "Backspace") {
-      // 従来から Delete と2つある（Delete 側は割り当て可能・こちらは固定）
+      // 従来から Delete と2つある（Delete 側は割り当て可能・こちらは固定）。
+      // M11-15: 選択範囲があるときの選択消去は**固定の最優先**のまま。選択が無いときだけ
+      // 下の割り当て（キー → コマンド）へ流す＝Backspace に「このコマを消す」等を当てられる。
+      // 未割り当てなら keyLookup に無いので何も起きない（従来と同じ）
       if (this.selMask) {
         e.preventDefault();
         // M11-9: 押しっぱなしのキーリピートで履歴を空エントリで埋めない
@@ -7934,8 +9557,9 @@ export class Editor {
           this.endArrowSession(); // M11-10: 消す前に移動を確定（別の操作）
           this.deleteSelection();
         }
+        return;
       }
-      return;
+      // 選択が無い → 割り当てへフォールスルー
     }
     if (e.code === "Enter" || e.code === "NumpadEnter") {
       // M11-12: Ctrl+Enter=浮動テキストの確定（入力欄の外にフォーカスがある場合。
@@ -7969,8 +9593,17 @@ export class Editor {
     }
 
     // ---- 割り当て（キー → コマンドID → 実行） ----
-    const id = this.keyLookup.get(eventKey(e));
-    if (!id) return;
+    const ids = this.keyLookup.get(eventKey(e));
+    if (!ids || ids.length === 0) return;
+    // M11-15: 道具の同キー巡回。今のツールがそのキーの巡回グループに含まれていれば次へ
+    //（末尾→先頭へ循環）、含まれていなければ定義順の先頭へ。**キーリピートでは巡回しない**
+    let id: CommandId = ids[0];
+    if (ids.length > 1) {
+      if (e.repeat) return;
+      const curId = `tool.${this.tool}`;
+      const at = ids.indexOf(curId as CommandId);
+      id = at >= 0 ? ids[(at + 1) % ids.length] : ids[0];
+    }
     // ツール切替などはキーリピートで連続実行しない（Undo/Redo・コマ移動・ズームは従来どおり連続）
     if (e.repeat && !Editor.REPEATABLE.has(id)) return;
     e.preventDefault();
@@ -7981,3 +9614,6 @@ export class Editor {
     this.runCommand(id);
   }
 }
+
+
+

@@ -19,6 +19,7 @@ import {
   FPS_TABLE,
 } from "./model";
 import { pcmS16ToWav } from "./audio";
+import { layerBaseName } from "../i18n/defaults";
 
 function rgbToHex(c: [number, number, number, number]): string {
   const h = (n: number) => n.toString(16).padStart(2, "0");
@@ -71,7 +72,7 @@ export async function importFlipnote(
     width: W,
     height: H,
     colorTable: [""],
-    // インポートは うごメモ6色＋紙色のみ（既定パレット14色込みでも256未満）→ 必ず 8bit
+    // インポートは うごメモ6色＋紙色のみ（既定パレット込みでも256未満）→ 必ず 8bit
     indexBits: 8,
     layerDefs: [],
     frames: [],
@@ -99,7 +100,7 @@ export async function importFlipnote(
     layerIdByOriginal[orig] = id;
     p.layerDefs.push({
       id,
-      name: `レイヤー${names[orig] ?? orig + 1}`,
+      name: `${layerBaseName()}${names[orig] ?? orig + 1}`,
       visible: layerVisibility[orig + 1] !== false,
       opacity: 1,
     });

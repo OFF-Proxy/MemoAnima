@@ -7,9 +7,13 @@ import {
   PIXELS,
   newLayerId,
   makeEmptyFrame,
+  DEFAULT_PALETTE,
 } from "../src/editor/model";
 import { compositeFrame } from "../src/editor/render";
 import { makeClip, buildFramesFromClip } from "../src/editor/frameClip";
+// M12-1c-2: 文言の pin が言語に左右されないよう ja に固定する（pin の文字列は変えていない）
+import { setLang } from "../src/i18n";
+setLang("ja");
 
 let pass = 0;
 let fail = 0;
@@ -61,7 +65,7 @@ function check(name: string, ok: boolean, detail = "") {
   for (let i = 0; i < 200; i++) f.layers[lid][i] = hi;
   const srcPix = compositeFrame(src, 0).slice();
 
-  const dst = newProject("clip-16-dst"); // 8bit・14色
+  const dst = newProject("clip-16-dst"); // 8bit・既定パレット（M11-14b で6色）
   const clip = makeClip(src, [0]);
   const [built] = buildFramesFromClip(dst, clip);
   dst.frames[0] = built;
@@ -73,11 +77,13 @@ function check(name: string, ok: boolean, detail = "") {
       break;
     }
   check("B-6 高索引の色再マップ一致（truncateなし）", same);
-  // 使用色は1色だけ → 15色なので昇格しない（未使用色でパレットを汚さない）
+  // 使用色は1色だけ → 既定パレット＋透明＋1色 なので昇格しない（未使用色でパレットを汚さない）。
+  // M11-14 で決め打ちの 16 をやめて相対で数える形にした（M11-14b で既定6色→期待値 8）
+  const expectColors = DEFAULT_PALETTE.length + 2; // +透明 +貼り付けた1色
   check(
     "B-6 未使用色を持ち込まない",
-    dst.indexBits === 8 && dst.colorTable.length === 16,
-    `bits=${dst.indexBits} colors=${dst.colorTable.length}`
+    dst.indexBits === 8 && dst.colorTable.length === expectColors,
+    `bits=${dst.indexBits} colors=${dst.colorTable.length}（期待 ${expectColors}）`
   );
 }
 
@@ -167,6 +173,36 @@ function check(name: string, ok: boolean, detail = "") {
   const clip = makeClip(src, [0]);
   src.frames[0].layers[lid][0] = 0; // 元を消す
   check("独立性: クリップは元編集の影響を受けない", clip.frames[0].layers[0][0] !== 0);
+}
+
+// ---- M11-16: 透明の紙（paper=0）はページ・クリップを通っても透明のまま（白に化けない・色を登録しない） ----
+{
+  const src = newProject("clip-tp");
+  const lid = src.layerDefs[0].id;
+  const black = ensureColor(src, "#141414");
+  for (let i = 0; i < 100; i++) src.frames[0].layers[lid][i] = black;
+  src.frames[0].paper = 0;
+  const clip = makeClip(src, [0]);
+  check("M11-16 クリップは透明の紙を \"\" で持つ", clip.frames[0].paperHex === "");
+  const dst = newProject("clip-tp-dst");
+  const colorsBefore = dst.colorTable.length;
+  const [built] = buildFramesFromClip(dst, clip);
+  check("M11-16 貼り付け先でも paper=0（白に化けない）", built.paper === 0, `paper=${built.paper}`);
+  check(
+    "M11-16 透明の紙は色を登録しない（黒だけ増える or 既存）",
+    dst.colorTable.length <= colorsBefore + 1,
+    `${colorsBefore} → ${dst.colorTable.length}`
+  );
+  dst.frames[0] = built;
+  const pix = compositeFrame(dst, 0);
+  let alpha0 = 0;
+  for (let i = 0; i < PIXELS; i++) if ((pix[i] >>> 24) === 0) alpha0++;
+  check("M11-16 合成の紙部分は alpha=0", alpha0 === PIXELS - 100, `alpha0=${alpha0}`);
+  // 実色の紙は従来どおり再マップされる
+  src.frames[0].paper = ensureColor(src, "#ffe600");
+  const clip2 = makeClip(src, [0]);
+  const [built2] = buildFramesFromClip(dst, clip2);
+  check("M11-16 実色の紙は従来どおり", dst.colorTable[built2.paper] === "#ffe600");
 }
 console.log(`m33 smoke: pass=${pass} fail=${fail}`);
 process.exit(fail === 0 ? 0 : 1);

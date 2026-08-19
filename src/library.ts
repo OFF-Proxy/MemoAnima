@@ -12,6 +12,8 @@ import { projectFromBytes } from "./editor/serialize";
 import { FrameSource, ExportAudioSource, noteSource, projectSource } from "./editor/exporter";
 import { AudioPreview, pcmS16ToWav, bgmPlaybackRate, renderExportMix } from "./editor/audio";
 import type { BgmTrack } from "./editor/model";
+import { t, getLang } from "./i18n";
+import { collabAlbumName, defaultAlbumName, newAlbumName } from "./i18n/defaults";
 
 export type LibraryView = {
   kind: "note" | "project";
@@ -118,6 +120,19 @@ export class LibraryScreen {
           e.preventDefault();
           if (!e.repeat) this.togglePreviewPlayback();
         }
+        // M11-17: ←/→ でコマ送り（押しっぱなしの repeat も通す＝連続送り）。上の門番（画面表示中・
+        // モーダル無し・入力欄でない）を通ったあとだけ。修飾キー付き（Alt+← は WebView の「戻る」等）と
+        // カードのドラッグ中は触らない。作品未選択なら何も起きない（stepPreviewFrame 側で判定）
+        if (
+          (e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+          !e.altKey &&
+          !e.ctrlKey &&
+          !e.metaKey &&
+          !this.cardDrag
+        ) {
+          e.preventDefault();
+          this.stepPreviewFrame(e.key === "ArrowRight" ? 1 : -1);
+        }
       });
     }
     // M11-4: 外部（エクスプローラー等）での変更に追随する。ウィンドウへ戻ってきたら
@@ -169,7 +184,7 @@ export class LibraryScreen {
       );
       return true;
     } catch (e) {
-      this.cb.toast(`ライブラリ読み込みエラー: ${e}`);
+      this.cb.toast(t("lib.loadError.toast", { err: String(e) }));
       return false;
     }
   }
@@ -258,11 +273,7 @@ export class LibraryScreen {
   /** M11-4: 「移動または削除された」旨の案内（内部パスは出さない。詳細はログへ） */
   private notifyGone(refreshed: boolean, e?: unknown) {
     if (e !== undefined) console.error("[M11-4] 作品が見つかりません:", e);
-    this.cb.toast(
-      refreshed
-        ? "この作品は移動または削除されたようです。一覧を更新しました"
-        : "この作品は見つかりませんでした"
-    );
+    this.cb.toast(refreshed ? t("lib.gone.refreshed.toast") : t("lib.gone.notFound.toast"));
   }
 
   // ---------------- ヘッダー ----------------
@@ -271,7 +282,7 @@ export class LibraryScreen {
     $("#lib-import").onclick = () => this.importFolder();
     $("#lib-open-file").onclick = () => this.openSingleFile();
     $("#lib-new-note").onclick = () =>
-      this.cb.newNote(this.currentAlbum || "未分類");
+      this.cb.newNote(this.currentAlbum || defaultAlbumName());
     ($("#lib-search") as HTMLInputElement).oninput = (e) => {
       this.search = (e.target as HTMLInputElement).value.trim().toLowerCase();
       this.renderShelf();
@@ -293,12 +304,12 @@ export class LibraryScreen {
       btn.id = "lib-reload";
       btn.type = "button";
       btn.textContent = "🔄";
-      btn.title = "一覧を更新（外部でファイルを動かしたとき）";
+      btn.title = t("lib.reload.title");
       btn.onclick = async () => {
         btn.disabled = true;
         try {
           // 失敗時は refresh 自身がエラーを出すので、成功したときだけ知らせる
-          if (await this.refresh()) this.cb.toast("一覧を更新しました");
+          if (await this.refresh()) this.cb.toast(t("lib.reload.done.toast"));
         } finally {
           btn.disabled = false;
         }
@@ -309,7 +320,8 @@ export class LibraryScreen {
 
   private bindAlbumOps() {
     $("#album-add").onclick = async () => {
-      const name = await this.cb.prompt("新しいアルバム名", "新しいアルバム");
+      // 第2引数（既定名）は**アルバム名になるユーザーのデータ**なので訳さない（master §5）
+      const name = await this.cb.prompt(t("lib.album.add.msg"), newAlbumName());
       if (!name) return;
       try {
         await invoke("create_album", { libRoot: this.libRoot, name });
@@ -320,7 +332,7 @@ export class LibraryScreen {
     };
     $("#album-rename").onclick = async () => {
       if (!this.currentAlbum) return;
-      const name = await this.cb.prompt("アルバム名を変更", this.currentAlbum);
+      const name = await this.cb.prompt(t("lib.album.rename.msg"), this.currentAlbum);
       if (!name || name === this.currentAlbum) return;
       try {
         await invoke("rename_album", {
@@ -340,7 +352,7 @@ export class LibraryScreen {
       // アプリが作ったサムネ（.memoanima.png 等）は一緒に消える。同意を取る文言が
       // 実際の挙動と食い違わないようにする
       const ok = await this.cb.confirm(
-        `アルバム「${this.currentAlbum}」を削除しますか？（作品が入っていないアルバムのみ削除できます。サムネなどアプリが作ったファイルは一緒に削除されます）`
+        t("lib.album.delete.msg", { album: this.currentAlbum })
       );
       if (!ok) return;
       try {
@@ -359,23 +371,30 @@ export class LibraryScreen {
     const src = await open({
       directory: true,
       multiple: false,
-      title: "取り込み元フォルダを選択（SDカード内の private → …3DS → app → JKZJ）",
+      title: t("lib.import.pick.title"),
     });
     if (!src || typeof src !== "string") return;
     const footer = $("#import-footer");
     footer.hidden = false;
-    $("#import-label").textContent = "📥 取り込み中…";
+    $("#import-label").textContent = t("imp.progress.label");
     try {
       const res = await invoke<any>("import_flipnotes", {
         srcRoot: src,
         libRoot: this.libRoot,
       });
+      // M12-1c-1: 「完了: …」＋「/ 失敗 …件」の連結をやめ、状態ごとの完全文にした
       const msg = res.cancelled
-        ? `中断しました（新規 ${res.imported}件まで取り込み済み）`
-        : `完了: 新規 ${res.imported}件 / スキップ ${res.skipped}件${res.failed ? ` / 失敗 ${res.failed}件` : ""}`;
+        ? t("lib.import.cancelled.toast", { imported: res.imported })
+        : res.failed
+          ? t("lib.import.doneWithFailed.toast", {
+              imported: res.imported,
+              skipped: res.skipped,
+              failed: res.failed,
+            })
+          : t("lib.import.done.toast", { imported: res.imported, skipped: res.skipped });
       this.cb.toast(msg);
     } catch (e) {
-      this.cb.toast(`取り込みエラー: ${e}`);
+      this.cb.toast(t("lib.import.error.toast", { err: String(e) }));
     } finally {
       footer.hidden = true;
       await this.refresh();
@@ -385,7 +404,10 @@ export class LibraryScreen {
   private updateProgress(p: ImportProgress) {
     const footer = $("#import-footer");
     footer.hidden = false;
-    $("#import-label").textContent = `📥 取り込み中… ${p.album}（スキップ ${p.skipped}）`;
+    $("#import-label").textContent = t("lib.import.progress.label", {
+      album: p.album,
+      skipped: p.skipped,
+    });
     $("#import-count").textContent = `${p.done} / ${p.total}`;
     ($("#import-bar-fill") as HTMLElement).style.width = `${Math.round(
       (p.done / Math.max(1, p.total)) * 100
@@ -397,13 +419,14 @@ export class LibraryScreen {
     if (!path) {
       const sel = await open({
         multiple: false,
-        title: "3DS作品を開く（.kwz / .ppm）",
-        filters: [{ name: "3DS作品 (.kwz/.ppm)", extensions: ["kwz", "ppm"] }],
+        title: t("lib.openFile.pick.title"),
+        filters: [{ name: t("lib.openFile.filter.label"), extensions: ["kwz", "ppm"] }],
       });
       if (!sel || typeof sel !== "string") return;
       path = sel;
     }
-    const album = await this.cb.prompt("取り込み先アルバム", "合作");
+    // 第2引数（既定名）は**アルバム名になるユーザーのデータ**なので訳さない（master §5）
+    const album = await this.cb.prompt(t("lib.openFile.album.msg"), collabAlbumName());
     if (album == null) return;
     try {
       const [destPath, hash] = await invoke<[string, string]>("import_single_file", {
@@ -417,9 +440,9 @@ export class LibraryScreen {
       this.renderShelf();
       const item = this.items.find((i) => i.hash === hash);
       if (item) await this.select(item);
-      else this.cb.toast(`取り込みました: ${destPath}`);
+      else this.cb.toast(t("lib.openFile.imported.toast", { path: destPath }));
     } catch (e) {
-      this.cb.toast(`取り込みエラー: ${e}`);
+      this.cb.toast(t("lib.import.error.toast", { err: String(e) }));
     }
   }
 
@@ -462,11 +485,15 @@ export class LibraryScreen {
     }
     // M10-20: 並び順の適用。manual は従来どおり Rust の既定ソート（album→order→name）のまま
     // 1件も並びを変えない。name/date は写しをソート（this.items 自体は並べ替えない）
+    // M12-3: 照合規則は**いまの表示言語**に合わせる。"ja" 固定だと ñ / ç / ã の入る
+    // es / pt-BR で並びが直感と食い違う（ñ が n の後ろに来ない等）。
+    // ja のときは getLang() が "ja" を返すので、日本語の並びは1件も変わらない
+    const collate = getLang();
     if (this.shelfSort === "name") {
-      list = [...list].sort((a, b) => a.name.localeCompare(b.name, "ja"));
+      list = [...list].sort((a, b) => a.name.localeCompare(b.name, collate));
     } else if (this.shelfSort === "date") {
       list = [...list].sort(
-        (a, b) => b.sorted_at - a.sorted_at || a.name.localeCompare(b.name, "ja")
+        (a, b) => b.sorted_at - a.sorted_at || a.name.localeCompare(b.name, collate)
       );
     }
     return list;
@@ -477,9 +504,9 @@ export class LibraryScreen {
     grid.innerHTML = "";
     const list = this.shelfItems();
     $("#shelf-title").textContent = this.search
-      ? `検索: ${this.search}`
-      : this.currentAlbum || "（アルバムなし）";
-    $("#shelf-count").textContent = `${list.length}作品`;
+      ? t("lib.shelf.searching.label", { query: this.search })
+      : this.currentAlbum || t("lib.shelf.noAlbum.label");
+    $("#shelf-count").textContent = t("lib.shelf.count.label", { count: list.length });
     for (const it of list) {
       const card = document.createElement("div");
       card.className =
@@ -738,12 +765,12 @@ export class LibraryScreen {
           ? this.items.find((i) => i.hash === it.hash && i.album === album)
           : this.items.find((i) => i.path === newPath);
       if (moved) await this.select(moved);
-      this.cb.toast(`「${album}」へ移動しました`);
+      this.cb.toast(t("lib.move.done.toast", { album }));
     } catch (e) {
       // M11-4: 外部で移動された等でパスが古いときは、一覧を更新して1回だけやり直す
       if (retried) {
         console.error("[M11-4] 移動に失敗:", e);
-        this.cb.toast("移動できませんでした。もう一度お試しください");
+        this.cb.toast(t("lib.move.failed.toast"));
         return;
       }
       const { item: fresh, refreshed } = await this.ensureFresh(it);
@@ -757,7 +784,7 @@ export class LibraryScreen {
         this.renderAlbums();
         this.renderShelf();
         await this.select(fresh);
-        this.cb.toast(`すでに「${album}」にありました`);
+        this.cb.toast(t("lib.move.already.toast", { album }));
         return;
       }
       await this.moveItemTo(fresh, album, true);
@@ -769,10 +796,10 @@ export class LibraryScreen {
     const it = this.selected;
     if (!it) return;
     if (!this.cb.pickAlbum) {
-      this.cb.toast("移動先を選ぶダイアログが使えません");
+      this.cb.toast(t("lib.move.noPicker.toast"));
       return;
     }
-    const album = await this.cb.pickAlbum(this.albums, it.album, `「${it.name}」の移動先`);
+    const album = await this.cb.pickAlbum(this.albums, it.album, t("lib.move.pick.title", { name: it.name }));
     if (!album) return;
     await this.moveItemTo(it, album);
   }
@@ -952,11 +979,12 @@ export class LibraryScreen {
         this.renderMeta([
           `${(note?.format ?? it.ext).toString().toUpperCase()}`,
           `${note?.imageWidth ?? "?"} × ${note?.imageHeight ?? "?"}`,
-          `${note?.frameCount ?? "?"} コマ`,
+          t("lib.meta.frames.label", { count: note?.frameCount ?? "?" }),
           `${note?.framerate ?? "?"} fps`,
         ]);
         this.drawNoteFrame();
         p.play();
+        this.updatePlayButton(); // M11-18: 再生中なのに ▶ のままだった（M11-17 取りこぼし#1）
       } else {
         this.stageMode = "project";
         previewHost.hidden = false;
@@ -969,16 +997,16 @@ export class LibraryScreen {
         this.previewProject = await projectFromBytes(new Uint8Array(bytes));
         this.previewFrame = 0;
         this.renderMeta([
-          "メモアニマ",
+          t("app.name.label"),
           "320 × 240",
-          `${this.previewProject.frames.length} コマ`,
+          t("lib.meta.frames.label", { count: this.previewProject.frames.length }),
           `${FPS_TABLE[this.previewProject.speedIndex]} fps`,
         ]);
         this.drawPreview();
         this.startPreview();
       }
     } catch (e) {
-      this.renderMeta([`読み込みエラー: ${e}`]);
+      this.renderMeta([t("lib.meta.loadError.label", { err: String(e) })]);
     }
   }
 
@@ -993,24 +1021,24 @@ export class LibraryScreen {
     });
     const edit = document.createElement("button");
     edit.className = "chip edit";
-    edit.textContent = "✏ 編集";
+    edit.textContent = t("lib.chip.edit.btn");
     edit.onclick = () => this.selected && this.edit(this.selected);
     host.appendChild(edit);
     const exp = document.createElement("button");
     exp.className = "chip export";
-    exp.textContent = "⬇ 書き出し";
+    exp.textContent = t("lib.chip.export.btn");
     exp.onclick = () => this.exportSelected();
     host.appendChild(exp);
     // M11-3: ドラッグ以外の移動導線（アルバムが多いとスクロールしながらのドラッグは厳しい）
     const mv = document.createElement("button");
     mv.className = "chip";
-    mv.textContent = "📁 移動";
-    mv.title = "別のアルバムへ移動";
+    mv.textContent = t("lib.chip.move.btn");
+    mv.title = t("lib.chip.move.title");
     mv.onclick = () => void this.moveSelectedWithPicker();
     host.appendChild(mv);
     const del = document.createElement("button");
     del.className = "chip danger";
-    del.textContent = "🗑 削除";
+    del.textContent = t("lib.chip.delete.btn");
     del.onclick = () => this.selected && this.deleteSelected();
     host.appendChild(del);
   }
@@ -1023,7 +1051,7 @@ export class LibraryScreen {
     if (it.kind === "note") {
       const note: any = (this.player as any)?.note;
       if (!note) {
-        this.cb.toast("作品の読み込みが終わってから書き出してください");
+        this.cb.toast(t("lib.export.notReady.toast"));
         return;
       }
       try {
@@ -1063,7 +1091,7 @@ export class LibraryScreen {
       this.cb.openExport(noteSource(note), baseName, this.audioSourceFor(bgm, null, note.frameCount, note.framerate));
     } else {
       if (!this.previewProject) {
-        this.cb.toast("作品の読み込みが終わってから書き出してください");
+        this.cb.toast(t("lib.export.notReady.toast"));
         return;
       }
       this.stopPreview();
@@ -1131,9 +1159,7 @@ export class LibraryScreen {
   async deleteSelected() {
     const it = this.selected;
     if (!it) return;
-    const ok = await this.cb.confirm(
-      `「${it.name}」を削除しますか？\nライブラリから消えます（元のSDデータには影響しません・再取り込み可能）`
-    );
+    const ok = await this.cb.confirm(t("lib.delete.confirm.msg", { name: it.name }));
     if (!ok) return;
     try {
       await invoke("delete_note", {
@@ -1161,9 +1187,7 @@ export class LibraryScreen {
       } catch (e2) {
         console.error("[M11-4] 削除に失敗（1回目）:", e, "（再試行）:", e2);
         this.cb.toast(
-          refreshed
-            ? "削除できませんでした。一覧を更新したのでもう一度お試しください"
-            : "削除できませんでした。もう一度お試しください"
+          refreshed ? t("lib.delete.failedRefreshed.toast") : t("lib.delete.failed.toast")
         );
       }
     }
@@ -1179,13 +1203,13 @@ export class LibraryScreen {
     // ステージ表示を停止・クリア
     this.suspend();
     this.previewProject = null;
-    $("#stage-title").textContent = "作品を選んでください";
+    $("#stage-title").textContent = t("lib.stage.empty.label");
     $("#stage-author").textContent = "";
     $("#stage-meta").innerHTML = "";
     ($("#preview-host") as unknown as HTMLCanvasElement).hidden = true;
     $("#player-host").hidden = true;
     await this.refresh();
-    this.cb.toast("削除しました");
+    this.cb.toast(t("lib.delete.done.toast"));
   }
 
   private edit(it: LibraryView) {
@@ -1206,19 +1230,11 @@ export class LibraryScreen {
 
   // 再生コントロール（ビューア）
   bindTransport() {
-    $("#tp-restart").onclick = () => {
-      if (this.selected?.kind === "project") {
-        this.previewFrame = 0;
-        this.drawPreview();
-      } else {
-        try {
-          (this.player as any).currentFrame = 0;
-        } catch {
-          /* noop */
-        }
-      }
-    };
+    $("#tp-restart").onclick = () => this.restartPreview();
     $("#tp-play").onclick = () => this.togglePreviewPlayback();
+    // M11-17: ◀▶ コマ送り（←/→ キーと同じ入口）
+    $("#tp-prev").onclick = () => this.stepPreviewFrame(-1);
+    $("#tp-next").onclick = () => this.stepPreviewFrame(1);
     $("#tp-loop").onclick = () => {
       const btn = $("#tp-loop");
       if (this.selected?.kind === "project" && this.previewProject) {
@@ -1247,6 +1263,65 @@ export class LibraryScreen {
     this.updatePlayButton();
   }
 
+  /** M11-19: ⏮ 先頭へ。**再生中なら先に一時停止**してから先頭へ（◀▶ のコマ送りと同じ規則・M11-17 取りこぼし#4）。
+   *  停止中は従来どおり先頭へ移動するだけ。.memoanima / .kwz の両方 */
+  restartPreview() {
+    if (!this.selected) return;
+    if (this.selected.kind === "project") {
+      if (!this.previewProject) return;
+      if (this.previewPlaying) this.stopPreview();
+      this.previewFrame = 0;
+      this.drawPreview();
+    } else if (this.player) {
+      const p = this.player as any;
+      try {
+        if (!p.note) return;
+        if (!p.paused) p.pause();
+        p.setCurrentFrame(0);
+        if (p._hasEnded) p._hasEnded = false; // stepPreviewFrame と同じ（先頭から再生を再開できるように）
+      } catch {
+        /* ノート未ロード等 */
+      }
+    }
+    this.updatePlayButton();
+  }
+
+  /** M11-17: コマ送り（←/→ キーと ◀▶ ボタンの共通の入口）。
+   *  - 再生中なら**先に一時停止**してから 1コマ動く（停止中はそのまま動く）
+   *  - 端はループ（最後→先頭・先頭→最後）
+   *  - .memoanima: previewFrame＋drawPreview だけ（firePreviewSe は呼ばない＝SE 無音。BGM は stopPreview で止まる）
+   *  - .kwz/.ppm: flipnote.js Player の pause()＋setCurrentFrame()（clamp 式なので巻き戻しは自前で計算。
+   *    描画は既存の "frameupdate" 購読 → drawNoteFrame。setCurrentFrame は音に触れない）
+   *  作品を選んでいないときは何も起きない */
+  stepPreviewFrame(dir: 1 | -1) {
+    if (!this.selected) return;
+    if (this.selected.kind === "project") {
+      const pp = this.previewProject;
+      if (!pp || pp.frames.length === 0) return;
+      if (this.previewPlaying) this.stopPreview();
+      const n = pp.frames.length;
+      this.previewFrame = (((this.previewFrame + dir) % n) + n) % n;
+      this.drawPreview();
+    } else if (this.player) {
+      const p = this.player as any;
+      try {
+        if (!p.note) return;
+        if (!p.paused) p.pause();
+        const n: number = p.frameCount ?? 0;
+        if (!(n > 0)) return;
+        const cur = Math.max(0, Math.min(n - 1, Number(p.currentFrame ?? 0) || 0));
+        p.setCurrentFrame((((cur + dir) % n) + n) % n);
+        // ループ無しの作品が最後まで再生されて止まっていると Player は _hasEnded=true を持ち、
+        // 次の play() で先頭（0秒）へ巻き戻す（Player.mjs play()）。送った位置から再生を再開できるよう
+        // に、シークが通ったらこのフラグを下ろす（.memoanima 側の startPreview と同じ挙動に揃える）
+        if (p._hasEnded) p._hasEnded = false;
+      } catch {
+        /* ノート未ロード等。何も起きないだけでよい */
+      }
+    }
+    this.updatePlayButton();
+  }
+
   private updatePlayButton() {
     const playing =
       this.selected?.kind === "project"
@@ -1266,6 +1341,8 @@ export class LibraryScreen {
       cv.height = 240;
     }
     presentToCanvas(compositeFrame(this.previewProject, this.previewFrame), cv);
+    // M11-16: 透明の紙は canvas の背景で薄い市松にする（データには触れない・実色の紙と見分けるため）
+    cv.classList.toggle("paper-clear", this.previewProject.frames[this.previewFrame]?.paper === 0);
   }
 
   /** M5-1: 指定コマの配置SEを発火 */

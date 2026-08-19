@@ -7,6 +7,10 @@ import { newProject, PIXELS } from "../src/editor/model";
 import { projectToBytes, projectFromBytes } from "../src/editor/serialize";
 import { importFlipnote } from "../src/editor/kwzImport";
 import { pcmS16ToWav } from "../src/editor/audio";
+import { setLang } from "../src/i18n";
+
+// M12-1a: 文言を pin しているので表示言語を ja に固定する（既定は環境依存の detectLang）
+setLang("ja");
 
 let pass = 0;
 let fail = 0;

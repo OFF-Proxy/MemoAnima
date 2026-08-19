@@ -1,4 +1,4 @@
-/* アニメモ (AniMemo) — M3 UIシェル（モック animemo_ui_mockup.html / animemo_editor_v2.html 準拠）
+/* メモアニマ (MemoAnima) — M3 UIシェル（モック animemo_ui_mockup.html / animemo_editor_v2.html 準拠）
    レトロ・ビビッド: 赤×青＋クリーム地＋ドット、太い輪郭＋押せる3Dボタン、丸ゴシック */
 
 /* M10-1c: 文字ツール用の同梱フォント（assets/fonts/ のサブセット版）。
@@ -692,15 +692,200 @@ button:disabled {
   flex: 1;
 }
 
+/* M11-17: 3つの寸法は CSS 変数（既定 88 / 268 / 148 = 従来の固定値）。エディタ側が
+   スプリッターのドラッグで書き換え、settings.json に保存する。**カード間の 10px は gap ではなく
+   スプリッター用の明示トラック**（列2・列4・行2）にした＝見た目の間隔は従来と同じ 10px のまま、
+   その隙間そのものが「掴めるバー」になる */
 .ed-main {
+  --ed-tools-w: 88px;
+  --ed-side-w: 268px;
+  --ed-tl-h: 148px;
+  --ed-split: 10px;
   flex: 1;
   display: grid;
-  grid-template-columns: 88px 1fr 268px;
-  grid-template-rows: 1fr 148px;
-  gap: 10px;
+  grid-template-columns: var(--ed-tools-w) var(--ed-split) 1fr var(--ed-split) var(--ed-side-w);
+  grid-template-rows: 1fr var(--ed-split) var(--ed-tl-h);
+  gap: 0;
   padding: 10px;
   min-height: 0;
 }
+
+/* M11-17: スプリッター（境界バー）。**ペンで掴む UI なので touch-action: none**（M11-4/7/8 の鉄則）。
+   本体は 10px の隙間トラックそのもの・見た目は中央の小さなつまみだけ。::after で当たり判定を
+   両隣へ 4px ずつ広げる（カードの枠線の上＝中身は隠さない）。ダブルクリックで既定値へ戻る */
+.ed-split {
+  position: relative;
+  z-index: 12;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ed-split.v {
+  grid-row: 1 / span 3;
+  cursor: col-resize;
+}
+
+.ed-split.h {
+  grid-column: 3;
+  grid-row: 2;
+  cursor: row-resize;
+}
+
+#ed-split-tools {
+  grid-column: 2;
+}
+
+#ed-split-side {
+  grid-column: 4;
+}
+
+.ed-split::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--ink-soft);
+  border-radius: 999px;
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.ed-split.v::before {
+  width: 4px;
+  height: 36px;
+}
+
+.ed-split.h::before {
+  width: 36px;
+  height: 4px;
+}
+
+.ed-split::after {
+  content: "";
+  position: absolute;
+  inset: 0 -4px;
+}
+
+.ed-split.h::after {
+  inset: -4px 0;
+}
+
+.ed-split:hover::before,
+.ed-split.on::before {
+  background: var(--tangerine);
+  opacity: 1;
+}
+
+.ed-split.on::before {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.8);
+}
+
+/* M11-18: 畳んでいるパネルのスプリッターは掴めない（つまみは見えているが境界は動かせない） */
+.ed-split.disabled {
+  pointer-events: none;
+  cursor: default;
+}
+
+.ed-split.disabled::before {
+  display: none;
+}
+
+/* ============ M11-18: 畳む（3パネル） ============
+   畳んだパネルはカードごと 22px の「つまみ」になる（.ed-main に c-tools / c-side / c-tl が付き、
+   applyLayout が幅/高さの CSS 変数を 22px にする。M11-17 の layout 値は触らないので復帰で元に戻る）。
+   つまみ（.ed-tab）は畳んだときだけ表示・カード全面がボタン。畳むボタン（.ed-fold）は各パネルの
+   キャンバス側の縁に置く（隠したものと同じ場所に戻す手段を置かない＝戻すのはつまみ） */
+.ed-fold {
+  font: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 0;
+  padding: 0 4px;
+  cursor: pointer;
+  border-radius: 6px;
+  line-height: 14px;
+  height: 14px;
+}
+
+.ed-fold:hover {
+  background: var(--orange-l);
+  color: var(--ink);
+}
+
+/* 道具列: 先頭に1行ぶん（2列組でも1行を占める） */
+.tools .ed-fold {
+  flex: 0 0 100%;
+  height: 12px;
+  line-height: 12px;
+  margin: -6px 0 -3px;
+}
+
+/* 右パネル: 先頭に右寄せの1行 */
+.side .ed-fold-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: -6px 0 -6px;
+}
+
+.ed-tab {
+  display: none;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: var(--ink);
+  background: var(--yellow);
+  border: 0;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.ed-tab:hover {
+  background: var(--orange-l);
+}
+
+/* 畳んだ状態: そのカードは中身を全部消してつまみだけ（overflow hidden で 22px に収める） */
+.ed-main.c-tools .tools,
+.ed-main.c-side .side,
+.ed-main.c-tl .timeline {
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  scrollbar-gutter: auto; /* .tools の stable ガター（8px）を畳み中は確保しない（つまみが 8px に潰れる） */
+}
+
+.ed-main.c-tools .tools > :not(.ed-tab),
+.ed-main.c-side .side > :not(.ed-tab),
+.ed-main.c-tl .timeline > :not(.ed-tab) {
+  display: none;
+}
+
+.ed-main.c-tools .tools > .ed-tab,
+.ed-main.c-side .side > .ed-tab,
+.ed-main.c-tl .timeline > .ed-tab {
+  display: flex;
+  width: 100%;
+  height: 100%;
+}
+
+/* 縦のつまみ（道具列・右パネル）は縦書き */
+.ed-tab.v {
+  writing-mode: vertical-rl;
+  padding: 10px 0;
+}
+
+.ed-tab.h {
+  padding: 0 10px;
+}
+
+/* 集中トグルの点灯は既存の .ic.onb（黄） */
 
 /* F-0対策: gridアイテムの min-width/height 既定値（auto）だと、フィルムストリップ等の
    非折返しコンテンツ（数百コマ×80px）が 1fr 列を数万pxまで押し広げ、キャンバスが
@@ -711,16 +896,45 @@ button:disabled {
   min-height: 0;
 }
 
-/* 左: ツール */
+/* 左: ツール
+   M11-17: 縦一列（column）から**横並び折返し（row wrap）**へ。88px では1行に1個しか入らないので
+   見た目は従来の縦一列と完全に同じ。スプリッターで列を広げて 2個ぶん（66×2+7=139px 以上）の
+   内容幅が取れると自動で **2列組** になり、縦スクロールが減る（読み順は左→右・上→下）。
+   区切りラベル（.tlabel）は常に1行を占める */
 .tools {
   grid-column: 1;
-  grid-row: 1 / span 2;
+  grid-row: 1 / span 3;
   display: flex;
-  flex-direction: column;
-  align-items: center;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-content: flex-start;
+  align-items: flex-start;
   gap: 7px;
-  padding: 10px 6px;
+  /* M11-14: 縦スクロールバーが出ると内容幅が奪われ（overflow-y だけの指定では
+     overflow-x が auto に落ちるため）横バーが出ていた。横は明示的に殺し、
+     左右 padding を 2px へ詰めてボタン(66px)が 88px − バー幅 に収まるようにする。
+     scrollbar-gutter でバーの有無によるボタンの横ズレも防ぐ */
+  padding: 10px 2px;
   overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+
+/* M11-14: 標準のバー（約17px）では 88px 列にボタン(66px)＋枠(6px)が収まらないので
+   細いバーにする（.ap-scroll の横バーと同じ流儀の自前スタイル）。
+   88 − 枠6 − padding4 − バー8 = 70px ≥ 66px でボタンは欠けない */
+.tools::-webkit-scrollbar {
+  width: 8px;
+}
+
+.tools::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tools::-webkit-scrollbar-thumb {
+  background: var(--ink-soft);
+  border-radius: 999px;
 }
 
 .tlabel {
@@ -728,6 +942,8 @@ button:disabled {
   color: var(--ink-soft);
   font-weight: 800;
   margin: 2px 0 0;
+  flex: 0 0 100%; /* M11-17: 2列組でも区切りは1行を占める */
+  text-align: center;
 }
 
 .tool {
@@ -771,7 +987,7 @@ button:disabled {
    M3.9 H-1: スクロールは内側の .stage-scroll に限定。HUD（バッジ/ボタン/ミニプレビュー等の
    浮遊UI）は stage 直下の absolute のままなので、パンしても定位置に固定される */
 .ed-main .stage {
-  grid-column: 2;
+  grid-column: 3; /* M11-17: 列2はスプリッター */
   grid-row: 1;
   position: relative;
   display: flex;
@@ -814,6 +1030,13 @@ button:disabled {
   cursor: crosshair;
 }
 
+/* M11-16: 透明の紙（paper=0）。合成バッファは alpha=0 のままで、市松は**この背景**で見せる
+   （データには焼かない）。ピッチはズームに依らない画面ピクセル固定で、パレットの透明スウォッチ
+   （.sw.tp）と同じ conic-gradient の流儀 */
+#ed-canvas.paper-clear {
+  background: repeating-conic-gradient(#d4d4d4 0 25%, #f4f4f4 0 50%) 0/16px 16px;
+}
+
 #ed-overlay {
   pointer-events: none;
 }
@@ -837,6 +1060,19 @@ button:disabled {
 }
 
 .pxgrid[hidden] {
+  display: none;
+}
+
+/* M12-C: カーソル層（ペン先の輪・乗っているドットの枠）。位置とサイズは .cvwrap canvas に任せ、
+   ここでは重なり順と当たり判定だけを決める（#ed-overlay と同じ最小の書き方）。
+   格子(.pxgrid, z-index:3)の上・ポインタは拾わない。バッキングは cssSize×devicePixelRatio で
+   確保して物理pxに描く（editor.ts paintCursorLayer）。絵には焼かない */
+#ed-cursor {
+  pointer-events: none;
+  z-index: 4;
+}
+
+#ed-cursor[hidden] {
   display: none;
 }
 
@@ -928,6 +1164,38 @@ button:disabled {
   cursor: pointer;
 }
 
+/* M11-13: 隠す（.mini は display を持たないので UA の [hidden] でも消えるが、
+   将来 display を足したときに黙って壊れないよう明示しておく） */
+.mini[hidden] {
+  display: none;
+}
+
+/* M11-16: まとめて隠す（トグル）。バッジ・倍率も display を持たないが同じ理由で明示 */
+.cvbadge[hidden],
+.zoominfo[hidden] {
+  display: none;
+}
+
+/* M11-16: 描いている間の自動非表示。**見た目だけ**（pointer-events は触らない＝当たり判定を奪わない。
+   それは四隅変形 muteFloatingOverlays の役目）。消えるのは即時・戻りは JS 側の遅延＋この短い
+   トランジションで、連続ストロークでちらつかない */
+.cvright.hud-stroke,
+.cvbadge.hud-stroke,
+.zoominfo.hud-stroke,
+.mini.hud-stroke {
+  opacity: 0.12;
+  transition: opacity 0.12s ease-out;
+}
+
+/* M11-16: 透明の紙をサムネ類（ミニ・フィルム・ライブラリの再生ビュー）で薄い市松に。
+   canvas の背景＝データには触れない */
+#ed-mini-canvas.paper-clear,
+.fr canvas.paper-clear,
+#preview-host.paper-clear,
+#ap-mini.paper-clear {
+  background: repeating-conic-gradient(#e2e2e2 0 25%, #fafafa 0 50%) 0/8px 8px;
+}
+
 .mini .tg {
   position: absolute;
   top: 3px;
@@ -973,8 +1241,8 @@ button:disabled {
 
 /* 右: サイドパネル */
 .side {
-  grid-column: 3;
-  grid-row: 1 / span 2;
+  grid-column: 5; /* M11-17: 列4はスプリッター */
+  grid-row: 1 / span 3;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1082,6 +1350,29 @@ button:disabled {
   outline-offset: -1px;
 }
 
+/* M11-14b: ペアを持たない柄（ベタ・斜め格子）は2列ぶちぬきにして、
+   大/小のペアが同じ行に揃うようにする（REQ §9 の並びをそのまま2列に流すと
+   奇数の単品で以降のペアが全部行をまたぐ）。スウォッチは横長で柄が見える高さに */
+.tone-btn.tone-wide {
+  grid-column: 1 / -1;
+}
+
+/* M11-19→M11-24: トーンピッカーのグループ区切り。**文字は出さない**（「ざこメモの柄／メモアニマの柄」は
+   見れば分かるので削除・作者指摘）。2列グリッドを1行ぶち抜きにして後続のペアが行をまたがないのは
+   tone-wide と同じ理由。中身が空でも高さを持つよう height を指定する */
+.tone-sep {
+  grid-column: 1 / -1;
+  height: 1px;
+  background: var(--ink-soft);
+  margin: 4px 0 2px;
+  opacity: 0.25;
+}
+
+.tone-btn.tone-wide canvas {
+  width: 144px; /* 72×16 バッキング → ×2 整数拡大（通常の 32×32→64 と同じ倍率） */
+  height: 32px;
+}
+
 .pal {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
@@ -1145,6 +1436,24 @@ button:disabled {
   font-size: 13px;
   cursor: pointer;
   flex: 0 0 auto; /* M6-6 R-1: 縮まない要素（縮むのは名前とスライダーだけ） */
+}
+
+/* M11-20: クリッピング（クリスタ準拠）。トグルは 👁 の右隣「⤵」。off は薄く・on は赤。
+   on の行は左の縁を赤い帯にして 12px 引っ込める（土台にぶら下がって見える）。
+   土台なし／土台非表示で「いまは表示されない」ときは on のまま少し薄く（title に理由） */
+.lay .lay-clipmask {
+  opacity: 0.35;
+  font-weight: 800;
+}
+.lay .lay-clipmask.on {
+  opacity: 1;
+  color: var(--red);
+}
+.lay .lay-clipmask.on.nobase {
+  opacity: 0.55;
+}
+.lay.clipped {
+  border-left: 8px solid var(--red);
 }
 
 /* M6-6 R-1: 行内ボタン（フォルダ🗑等）も縮めない */
@@ -1355,6 +1664,24 @@ button:disabled {
   background: var(--yellow);
 }
 
+/* M11-22: 倍率ボタンの「おすすめ」バッジ（書き出し・画像で保存の ×4）。ボタン内にインラインで並ぶだけ
+   （position 不要・折返しなし）。注意文（GIF ×8 の容量）は .modal-path.warn で赤字 */
+.oni .lv .rec {
+  margin-left: 5px;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--orange);
+  color: #fff;
+}
+/* 注意だけを赤くする（本文は通常色のまま）。M11-22 は注記行の中に <span class="warn"> を足す */
+.modal-path .warn {
+  color: var(--red);
+  font-weight: 700;
+}
+
 .selacts {
   display: flex;
   gap: 5px;
@@ -1409,24 +1736,115 @@ input[type="text"] {
 
 /* 下: タイムライン */
 .timeline {
-  grid-column: 2;
-  grid-row: 2;
+  grid-column: 3; /* M11-17: 行2はスプリッター */
+  grid-row: 3;
   display: flex;
   flex-direction: column;
   padding: 7px 10px;
   min-height: 0;
 }
 
+/* M11-18: 見出しは**常に1行**。折り返さず、入りきらないボタンは JS（reflowTlHead）が後ろから
+   「…」メニュー（#ed-tlmore-pop）へ送る。測定のため各要素は縮めない（flex-shrink:0）・
+   余白 .sp だけが縮む。overflow は visible のまま（scrollWidth で「はみ出し」を検知する） */
 .tl-head {
   display: flex;
   align-items: center;
   gap: 7px;
   margin-bottom: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.tl-head > * {
+  flex-shrink: 0;
 }
 
 .tl-head .sp {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* 「…」と畳むボタンは幅を詰めた .ic（見出しの右端に常駐・あふれ対象外） */
+.tl-head .tl-ic {
+  width: 30px;
+}
+
+/* .ic は display:flex を持つので UA の [hidden] では消えない（.mini[hidden] と同じ理由・レビュー指摘）。
+   あふれが無いときの「…」は本当に消す（幅の測定にも入れない） */
+.tl-head .tl-ic[hidden] {
+  display: none;
+}
+
+/* 「…」メニュー: 見出しの右端ボタンの上へ開く（position:fixed・JS が位置決め）。中身は見出しから
+   移した**同じボタン要素**（listener・disabled はそのまま） */
+.tl-more-pop {
+  position: fixed;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px;
+  background: var(--panel);
+  border: 3px solid var(--ink);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  min-width: 150px;
+}
+
+.tl-more-pop[hidden] {
+  display: none;
+}
+
+.tl-more-pop > .hb {
+  text-align: left;
+}
+
+.tl-more-pop > .ic {
+  width: 100%;
+}
+
+.tl-more-pop > .speed {
+  justify-content: space-between;
+}
+
+/* M11-18: 本体＝収納ミニ＋フィルム帯の横並び。F-0: 帯（数百コマの非折返し）が幅を押し広げないよう
+   min-width:0 を両方に */
+.tl-body {
   flex: 1;
+  display: flex;
+  gap: 8px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.tl-mini-slot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center; /* 上限（等倍 240）で止まったときは帯の中で上下中央 */
+  min-height: 0;
+}
+
+.tl-mini-slot:empty {
+  display: none;
+}
+
+/* 収納ミニ: フィルム帯と同じ濃い枠・同じ角丸で「タイムラインの一部」に見せる。高さは帯と同じ
+   （tl-body の高さ＝タイムライン高に追従）・幅は 4:3 から。上限は等倍（320×240）＝ドット等倍で
+   それ以上は粗くなるだけ */
+.tl-mini-slot .mini {
+  position: relative; /* static だと中の「▶ プレビュー」ラベル（absolute）の基準が画面になってしまう */
+  right: auto;
+  bottom: auto;
+  width: auto;
+  height: 100%;
+  max-height: 240px;
+  aspect-ratio: 320/240;
+  border: 3px solid var(--ink);
+  border-radius: 10px;
+  box-shadow: none;
+  z-index: auto;
 }
 
 .tl-head .t {
@@ -1457,11 +1875,30 @@ input[type="text"] {
   background: var(--ink);
   border-radius: 10px;
   min-height: 0;
+  min-width: 0; /* M11-18: 横並び（tl-body）の中でも F-0（帯が親を押し広げない） */
 }
 
 .fr {
   flex: 0 0 auto;
-  width: 78px;
+  /* M11-17: タイムラインを高くしたぶんだけサムネも大きくなる（既定 148px では**どの画面幅でも**
+     従来どおり 78×58.5）。伸びは (a) 148 からの増分 と (b) 帯に入る高さ の小さい方まで。
+     (b) は **帯の実高（100%）ではなく**、タイムライン高 − 見出しの実高（--ed-tlhead-h・JS が実測して
+     公開）− 固定分（カード padding 14＋見出し余白 6＋枠 6＋帯 padding 8＋横スクロールバー 17）で
+     計算する。100% にすると帯自身の横スクロールバーの有無で高さが変わり、サムネ幅→バーの有無→
+     高さ…の往復で「動かない横バー」が残る（レビュー指摘）。見出し高はステージ幅で決まりサムネの
+     大きさに依存しないので、この計算はループしない。横バーぶんは常に確保（保守的）。
+     上限は**2倍（117px 高）**＝バッキングは 80×60 のまま（F-0 のメモリ制約）なのでそれ以上は
+     粗くなるだけ。下限 58.5 は「帯がそれより低くても縮めない」（=既定の見た目を変えない。
+     1280×800 の既定では見出し2行で帯 42px なので従来どおり少しはみ出す）。幅は aspect-ratio から */
+  width: auto;
+  height: clamp(
+    58.5px,
+    min(
+      calc(var(--ed-tl-h, 148px) - var(--ed-tlhead-h, 38px) - 51px),
+      calc(58.5px + (var(--ed-tl-h, 148px) - 148px))
+    ),
+    117px
+  );
   aspect-ratio: 320/240;
   border: 3px solid #fff;
   border-radius: 6px;
@@ -1508,7 +1945,16 @@ input[type="text"] {
 
 .fradd {
   flex: 0 0 auto;
-  width: 52px;
+  /* M11-17: ＋ボタンもサムネと同じ比率で伸びる（52×39 → 最大 104×78） */
+  width: auto;
+  height: clamp(
+    39px,
+    min(
+      calc((var(--ed-tl-h, 148px) - var(--ed-tlhead-h, 38px) - 51px) * 0.667),
+      calc(39px + (var(--ed-tl-h, 148px) - 148px) * 0.667)
+    ),
+    78px
+  );
   aspect-ratio: 320/240;
   border: 3px dashed #fff;
   border-radius: 6px;
@@ -1720,6 +2166,22 @@ input[type="text"] {
 .keymap-menu .km-key.waiting {
   border-color: var(--orange);
   color: var(--orange);
+}
+
+/* M11-15: 同じキーを共有している道具の行（巡回グループ）。左に帯を出して見分ける */
+.keymap-menu .km-row.km-shared {
+  background: color-mix(in srgb, var(--yellow) 22%, transparent);
+  border-left: 3px solid var(--orange);
+  padding-left: 5px;
+  border-radius: 6px;
+}
+
+.keymap-menu .km-shared-note {
+  color: var(--orange) !important;
+}
+
+.keymap-menu .km-cycle-note {
+  margin: 2px 0 6px;
 }
 
 /* M11-9 P-5: 「範囲をいじる」と「絵をどうにかする」の間の細い区切り */

@@ -13,6 +13,9 @@ import {
 import { compositeFrame } from "../src/editor/render";
 import { projectToBytes, projectFromBytes } from "../src/editor/serialize";
 import { importFlipnote } from "../src/editor/kwzImport";
+// M12-1c-2: 文言の pin が言語に左右されないよう ja に固定する（pin の文字列は変えていない）
+import { setLang } from "../src/i18n";
+setLang("ja");
 
 let pass = 0;
 let fail = 0;
@@ -64,7 +67,7 @@ function b64(bytes: Uint8Array): string {
 {
   const p = newProject("n2-promote");
   const lay = Object.keys(p.frames[0].layers)[0];
-  // 既定14色のうち黒(idx1)で数ドット描いておく
+  // 既定パレットのうち黒(idx1)と白(idx2)で数ドット描いておく（色数には依存しない）
   p.frames[0].layers[lay][0] = 1;
   p.frames[0].layers[lay][100] = 2;
   const before = compositeFrame(p, 0).slice();

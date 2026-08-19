@@ -21,6 +21,10 @@ import {
 import { projectToBytes, projectFromBytes, PROJECT_VERSION } from "../src/editor/serialize";
 import { computeMixPlan, ExportMixSpec, pcmS16ToWav } from "../src/editor/audio";
 import { makeClip, buildFramesFromClip } from "../src/editor/frameClip";
+import { setLang } from "../src/i18n";
+
+// M12-1a: 文言を pin しているので表示言語を ja に固定する（既定は環境依存の detectLang）
+setLang("ja");
 
 let pass = 0;
 let fail = 0;

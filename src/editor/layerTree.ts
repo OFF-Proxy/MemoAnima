@@ -6,6 +6,7 @@
 //   3. 循環（フォルダを自分/子孫へ）を禁止。
 
 import { Project, LayerFolder } from "./model";
+import { t } from "../i18n";
 
 /** 挿入先。gap=行間（parent の子として物理 phys 位置へ挿入）/ into=フォルダの末尾の子 */
 export type DropTarget =
@@ -84,13 +85,13 @@ export function checkContiguity(p: Project): boolean {
  */
 export function moveNodes(p: Project, ids: string[], target: DropTarget): MoveResult {
   const tops = topNodesOf(p, ids);
-  if (tops.length === 0) return { ok: false, changedPhys: false, error: "対象がありません" };
+  if (tops.length === 0) return { ok: false, changedPhys: false, error: t("ed.layer.move.noTarget.msg") };
 
   const targetParent = target.type === "into" ? target.folder : target.parent;
   if (targetParent && !folderById(p, targetParent))
-    return { ok: false, changedPhys: false, error: "フォルダが見つかりません" };
+    return { ok: false, changedPhys: false, error: t("ed.layer.move.folderMissing.msg") };
   if (wouldCycle(p, tops, targetParent))
-    return { ok: false, changedPhys: false, error: "フォルダを自分の中に入れることはできません" };
+    return { ok: false, changedPhys: false, error: t("ed.layer.move.cycle.msg") };
 
   // 移動レイヤー集合（トップがフォルダなら子孫レイヤーも全部）
   const movedLayerIds = new Set<string>();

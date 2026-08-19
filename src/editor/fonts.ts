@@ -12,7 +12,8 @@ export type FontKey = "misaki" | "pixel12" | "maru" | "pop" | "mincho";
 export interface FontDef {
   key: FontKey;
   /** ツールオプションに出す表示名 */
-  label: string;
+  /** M12-1c-2: 表示名の辞書キー（旧 label）。書体名は画面の選択肢に出る */
+  labelKey: string;
   /** styles.css の @font-face と一致させること */
   cssFamily: string;
   /** dot=設計グリッドを持つ（等倍レンダ＋閾値2値化） / outline=3倍レンダ＋3×3平均 */
@@ -25,13 +26,13 @@ export interface FontDef {
 }
 
 export const FONTS: FontDef[] = [
-  { key: "misaki", label: "極小ドット（美咲）", cssFamily: "MA Misaki", kind: "dot", sizes: [8, 16, 24, 32, 40, 48], hasBold: false },
-  { key: "pixel12", label: "ドット（標準）", cssFamily: "MA Pixel12", kind: "dot", sizes: [12, 24, 36, 48], hasBold: true },
-  { key: "maru", label: "丸文字", cssFamily: "MA Maru", kind: "outline", sizes: [8, 10, 12, 16, 20, 24, 32, 48], hasBold: true },
+  { key: "misaki", labelKey: "ed.text.font.misaki.label", cssFamily: "MA Misaki", kind: "dot", sizes: [8, 16, 24, 32, 40, 48], hasBold: false },
+  { key: "pixel12", labelKey: "ed.text.font.pixel12.label", cssFamily: "MA Pixel12", kind: "dot", sizes: [12, 24, 36, 48], hasBold: true },
+  { key: "maru", labelKey: "ed.text.font.maru.label", cssFamily: "MA Maru", kind: "outline", sizes: [8, 10, 12, 16, 20, 24, 32, 48], hasBold: true },
   // pop / mincho から 8px・10px を落としているのは、2値化後に潰れて判読できないため
   // （要件定義書 §2.4 の推奨 12〜48px に合わせる）
-  { key: "pop", label: "ポップ（太字）", cssFamily: "MA Pop", kind: "outline", sizes: [12, 16, 20, 24, 32, 48], hasBold: false },
-  { key: "mincho", label: "明朝（レトロ）", cssFamily: "MA Mincho", kind: "outline", sizes: [12, 16, 20, 24, 32, 48], hasBold: false },
+  { key: "pop", labelKey: "ed.text.font.pop.label", cssFamily: "MA Pop", kind: "outline", sizes: [12, 16, 20, 24, 32, 48], hasBold: false },
+  { key: "mincho", labelKey: "ed.text.font.mincho.label", cssFamily: "MA Mincho", kind: "outline", sizes: [12, 16, 20, 24, 32, 48], hasBold: false },
 ];
 
 export const DEFAULT_TEXT = { family: "maru" as FontKey, size: 16, bold: true };

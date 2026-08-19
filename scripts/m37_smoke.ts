@@ -17,6 +17,10 @@ import {
 } from "../src/editor/layerTree";
 import { compositeFrame } from "../src/editor/render";
 import { projectToBytes, projectFromBytes } from "../src/editor/serialize";
+import { setLang } from "../src/i18n";
+
+// M12-1a: 文言を pin しているので表示言語を ja に固定する（既定は環境依存の detectLang）
+setLang("ja");
 
 let pass = 0;
 let fail = 0;

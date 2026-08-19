@@ -15,6 +15,9 @@ import { W, H, PIXELS, newProject, allocIndexBuf, copyIndexBuf, ensureColor } fr
 import type { IndexBuf, Project } from "../src/editor/model";
 import { floodFill, autoSelectMask, toneAt, TONE_TILES } from "../src/editor/raster";
 import { flattenIndexFrame } from "../src/editor/render";
+// M12-1c-2: 文言の pin が言語に左右されないよう ja に固定する（pin の文字列は変えていない）
+import { setLang } from "../src/i18n";
+setLang("ja");
 
 let pass = 0;
 let fail = 0;

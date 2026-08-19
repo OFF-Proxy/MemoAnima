@@ -4,7 +4,9 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>メモアニマ (MemoAnima)</title>
+    <!-- M12-1a: 起動時に applyI18n が document.title = t("app.title") を入れる。
+         ウィンドウのタイトルバーは src-tauri/tauri.conf.json 側の値なのでここでは変わらない -->
+    <title>MemoAnima</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
@@ -13,35 +15,37 @@
     <div id="screen-library" class="screen">
       <header class="topbar">
         <div class="logo">
-          <span class="mark"></span>メモアニマ <small>MemoAnima</small>
+          <!-- M12-1a: この要素は子（.mark / small / .ver）を持つので、テキストだけを span に切り出して data-i18n を振る -->
+          <span class="mark"></span><span data-i18n="app.name.label"></span> <small>MemoAnima</small>
           <span id="app-meta" class="ver"></span>
         </div>
         <div class="spacer"></div>
-        <div class="search">🔍<input id="lib-search" placeholder="作品を検索…" /></div>
-        <button class="btn blue" id="lib-import" type="button">＋ 3DS作品を取り込む (.kwz)</button>
-        <button class="btn" id="lib-open-file" type="button" title="単発の .kwz / .ppm を開く（合作の受け取り）">📂 ファイルを開く</button>
-        <button class="btn primary" id="lib-new-note" type="button">✏ 新規メモ</button>
-        <button class="btn" id="lib-change-dir" type="button" title="設定">⚙</button>
+        <div class="search">🔍<input id="lib-search" data-i18n-placeholder="lib.search.placeholder" /></div>
+        <button class="btn blue" id="lib-import" type="button" data-i18n="lib.import.btn"></button>
+        <button class="btn" id="lib-open-file" type="button" data-i18n="lib.openFile.btn" data-i18n-title="lib.openFile.title"></button>
+        <button class="btn primary" id="lib-new-note" type="button" data-i18n="lib.newNote.btn"></button>
+        <button class="btn" id="lib-change-dir" type="button" data-i18n-title="lib.settings.title">⚙</button>
       </header>
 
       <main class="lib-main">
         <!-- 左: アルバム（＝実フォルダ・ファイル管理） -->
         <nav class="card albums">
-          <h2>アルバム
+          <!-- M12-1a: h2 は子（.albbtns）を持つので、見出しの文字だけ span に切り出す -->
+          <h2><span data-i18n="lib.albums.label"></span>
             <span class="albbtns">
-              <button class="minibtn" id="album-add" type="button" title="アルバムを作成">＋</button>
-              <button class="minibtn" id="album-rename" type="button" title="アルバム名を変更">✎</button>
-              <button class="minibtn" id="album-delete" type="button" title="アルバムを削除（空のみ）">🗑</button>
+              <button class="minibtn" id="album-add" type="button" data-i18n-title="lib.album.add.title">＋</button>
+              <button class="minibtn" id="album-rename" type="button" data-i18n-title="lib.album.rename.title">✎</button>
+              <button class="minibtn" id="album-delete" type="button" data-i18n-title="lib.album.delete.title">🗑</button>
             </span>
           </h2>
           <div id="albums-list"></div>
-          <p class="dnd-hint">サムネをアルバムへドラッグで移動</p>
+          <p class="dnd-hint" data-i18n="lib.dndHint.hint"></p>
         </nav>
 
         <!-- 中央: ビューア -->
         <section class="card stage">
           <div class="stage-top">
-            <span class="title" id="stage-title">作品を選んでください</span>
+            <span class="title" id="stage-title" data-i18n="lib.stage.empty.label"></span>
             <span class="author" id="stage-author"></span>
           </div>
           <div class="screen-view">
@@ -50,9 +54,12 @@
           </div>
           <div class="controls">
             <div class="transport">
-              <button class="rbtn" id="tp-restart" type="button" title="先頭へ">⏮</button>
-              <button class="rbtn play" id="tp-play" type="button" title="再生 / 一時停止">▶</button>
-              <button class="rbtn" id="tp-loop" type="button" title="ループ">🔁</button>
+              <button class="rbtn" id="tp-restart" type="button" data-i18n-title="lib.tp.restart.title">⏮</button>
+              <!-- M11-17: コマ送り（←/→ キーと同じ。再生中は一時停止してから1コマ・端はループ） -->
+              <button class="rbtn" id="tp-prev" type="button" data-i18n-title="lib.tp.prev.title">◀</button>
+              <button class="rbtn play" id="tp-play" type="button" data-i18n-title="lib.tp.play.title">▶</button>
+              <button class="rbtn" id="tp-next" type="button" data-i18n-title="lib.tp.next.title">▶</button>
+              <button class="rbtn" id="tp-loop" type="button" data-i18n-title="lib.tp.loop.title">🔁</button>
             </div>
             <div class="meta-row" id="stage-meta"></div>
           </div>
@@ -63,10 +70,10 @@
           <div class="shelf-head">
             <span class="t" id="shelf-title"></span>
             <!-- M10-20: 並び順（手動=従来／名前順／日付順。選択はアプリ設定に保存） -->
-            <select id="shelf-sort" title="並び順">
-              <option value="manual">-並び替え-</option>
-              <option value="name">名前順</option>
-              <option value="date">日付順</option>
+            <select id="shelf-sort" data-i18n-title="lib.sort.title">
+              <option value="manual" data-i18n="lib.sort.manual.label"></option>
+              <option value="name" data-i18n="lib.sort.name.label"></option>
+              <option value="date" data-i18n="lib.sort.date.label"></option>
             </select>
             <span class="c" id="shelf-count"></span>
           </div>
@@ -76,32 +83,41 @@
 
       <!-- 下: 取り込み進捗バー -->
       <footer id="import-footer" hidden>
-        <span class="label" id="import-label">📥 取り込み中…</span>
+        <!-- M12-1a: #import-label は取り込み中に library.ts が書き換える**動的なノード**なので
+             data-i18n を振らない（言語切替の applyI18n が進捗表示を初期値へ戻してしまうため）。
+             初期値は起動時に main.ts が t() で入れる。footer は hidden なので空でも見た目は変わらない -->
+        <span class="label" id="import-label"></span>
         <div class="bar"><i id="import-bar-fill"></i></div>
         <span class="pct" id="import-count"></span>
-        <button class="btn" id="lib-cancel-import" type="button">中断</button>
+        <button class="btn" id="lib-cancel-import" type="button" data-i18n="imp.cancel.btn"></button>
       </footer>
     </div>
 
     <!-- ============ エディタ画面 ============ -->
     <div id="screen-editor" class="screen" hidden>
       <header class="edbar">
-        <button class="ic" id="ed-back" type="button" title="ライブラリへ戻る">←</button>
-        <div class="h-title" id="ed-title">✏ 新規メモ</div>
-        <button class="ic" id="ed-undo" type="button" title="元に戻す (Ctrl+Z)">↶</button>
-        <button class="ic" id="ed-redo" type="button" title="やり直し (Ctrl+Y)">↷</button>
+        <button class="ic" id="ed-back" type="button" data-i18n-title="ed.back.title">←</button>
+        <!-- M12-1a: #ed-title は作品を開くと editor.ts が書き換える**動的なノード**なので data-i18n を振らない。
+             初期値は起動時に main.ts が t() で入れる（エディタ画面は hidden で開くので空でも見た目は変わらない） -->
+        <div class="h-title" id="ed-title"></div>
+        <button class="ic" id="ed-undo" type="button" data-i18n-title="ed.undo.title">↶</button>
+        <button class="ic" id="ed-redo" type="button" data-i18n-title="ed.redo.title">↷</button>
         <div class="sp"></div>
-        <div class="h-spec">320×240 ドット等倍（描画310×230）/ レイヤー無制限 / パレット＋フルカラー</div>
+        <div class="h-spec" data-i18n="ed.spec.label"></div>
         <div class="sp"></div>
-        <button class="hb green" id="ed-save" type="button">💾 保存 (Ctrl+S)</button>
-        <button class="hb" id="ed-saveas" type="button" title="別のファイル名/アルバムに保存 (Ctrl+Shift+S)">💾 別名で保存</button>
-        <button class="hb" id="ed-export" type="button" title="MP4 / GIF / APNG / PNG連番へ書き出し">⬇ 書き出し</button>
-        <button class="hb" id="ed-imgexport" type="button" title="いま見ているコマ1枚を画像で保存（PNG / JPEG・1〜8倍）">🖼 画像で保存</button>
+        <button class="hb green" id="ed-save" type="button" data-i18n="ed.save.btn"></button>
+        <button class="hb" id="ed-saveas" type="button" data-i18n="ed.saveAs.btn" data-i18n-title="ed.saveAs.title"></button>
+        <button class="hb" id="ed-export" type="button" data-i18n="ed.export.btn" data-i18n-title="ed.export.title"></button>
+        <button class="hb" id="ed-imgexport" type="button" data-i18n="ed.imgExport.btn" data-i18n-title="ed.imgExport.title"></button>
       </header>
 
       <main class="ed-main">
-        <!-- 左: 道具 -->
+        <!-- 左: 道具（M11-18: 畳むと .ed-tab（つまみ）だけが残る。つまみは buildToolsPanel が消さない位置＝カード直下の最後） -->
         <div class="card tools" id="ed-tools"></div>
+        <!-- M11-17: スプリッター3本（列2・列4・行2 の隙間トラック）。ドラッグで幅/高さ・ダブルクリックで既定 -->
+        <div class="ed-split v" id="ed-split-tools" data-i18n-title="ed.split.tools.title"></div>
+        <div class="ed-split v" id="ed-split-side" data-i18n-title="ed.split.side.title"></div>
+        <div class="ed-split h" id="ed-split-tl" data-i18n-title="ed.split.tl.title"></div>
 
         <!-- 中央: キャンバス（M3.9 H-1: スクロールは #ed-scroll に限定し、HUDは stage 直下で固定） -->
         <div class="card stage" id="ed-stage">
@@ -111,20 +127,28 @@
               <canvas id="ed-overlay" width="320" height="240"></canvas>
               <!-- M3.10 G-1: 格子は canvas 化（実測ピッチ×devicePixelRatio の物理pxに線を引く） -->
               <canvas class="pxgrid" id="ed-grid" hidden></canvas>
+              <!-- M12-C: カーソル層（ペン先の輪・ドット枠）。格子と同じく画面解像度で描く。
+                   #ed-overlay は 320×240 のドット解像度なので 1ドット未満の細い線が出せない -->
+              <canvas id="ed-cursor" hidden></canvas>
               <div class="drawguide"></div>
             </div>
           </div>
           <div class="cvbadge" id="ed-badge"></div>
-          <div class="xform-badge" id="ed-xform-badge" hidden>🔀 変形中（Enter=確定 / Esc=キャンセル）</div>
+          <div class="xform-badge" id="ed-xform-badge" data-i18n="ed.xform.badge.label" hidden></div>
           <div class="cvright">
-            <button class="ic" id="ed-view-rot" type="button" title="表示を回転（データは不変）">🔄</button>
-            <button class="ic" id="ed-view-flip" type="button" title="表示を左右反転（データは不変）">↔</button>
-            <button class="ic" id="ed-zoom-in" type="button" title="ズーム＋">＋</button>
-            <button class="ic" id="ed-zoom-out" type="button" title="ズーム−">−</button>
+            <button class="ic" id="ed-view-rot" type="button" data-i18n-title="ed.view.rotate.title">🔄</button>
+            <button class="ic" id="ed-view-flip" type="button" data-i18n-title="ed.view.flip.title">↔</button>
+            <button class="ic" id="ed-zoom-in" type="button" data-i18n-title="ed.zoom.in.title">＋</button>
+            <button class="ic" id="ed-zoom-out" type="button" data-i18n-title="ed.zoom.out.title">−</button>
+            <!-- M11-13→M11-16: プレビュー・コマ番号・倍率をまとめて隠す/出す（統合トグル）。
+                 **隠す対象の外＝この列**に置く（隠したあとに戻す手段が消えないように） -->
+            <button class="ic" id="ed-mini-toggle" type="button" data-i18n-title="ed.mini.toggle.title">🖼</button>
+            <!-- M11-18: キャンバス集中（3パネルを一括で畳む/戻す）。つまみは畳んでも見えるので戻す手段は消えない -->
+            <button class="ic" id="ed-focus-toggle" type="button" data-i18n-title="ed.focus.toggle.title">⛶</button>
           </div>
           <div class="zoominfo" id="ed-zoominfo"></div>
-          <div class="mini" id="ed-mini" title="クリックでプレビューを大画面に（もう一度で戻る）">
-            <span class="tg">▶ プレビュー</span>
+          <div class="mini" id="ed-mini" data-i18n-title="ed.mini.title">
+            <span class="tg" data-i18n="ed.mini.label"></span>
             <canvas id="ed-mini-canvas" width="320" height="240"></canvas>
           </div>
         </div>
@@ -132,10 +156,14 @@
         <!-- 右: ペン設定・色・レイヤー・描き味 -->
         <div class="card side" id="ed-side"></div>
 
-        <!-- 下: タイムライン -->
-        <div class="card timeline">
+        <!-- 下: タイムライン（M11-18: 見出しは常に1行・あふれは「…」へ。本体は「収納ミニ＋フィルム帯」の横並び） -->
+        <div class="card timeline" id="ed-timeline">
           <div class="tl-head" id="ed-tlhead"></div>
-          <div class="film" id="ed-film"></div>
+          <div class="tl-body" id="ed-tlbody">
+            <!-- 収納ミニの置き場（miniDock=timeline のとき #ed-mini がここへ移る。空なら幅0） -->
+            <div class="tl-mini-slot" id="ed-mini-slot"></div>
+            <div class="film" id="ed-film"></div>
+          </div>
         </div>
       </main>
     </div>

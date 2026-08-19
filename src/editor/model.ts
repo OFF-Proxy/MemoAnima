@@ -1,8 +1,9 @@
-// アニメモ エディタ データモデル（M3）
+// メモアニマ (MemoAnima) エディタ データモデル（M3）
 // 絶対不変: 320×240 ドットバッファ / nearest-neighbor 整数倍表示 / パラパラの作法。
 // 拡張可: レイヤー数（実質無制限）・色（既定パレット＋任意フルカラー、colorTable 最大256色）。
 // インポートした .kwz は3層・各層2色・紙色の構造を色indexレベルで忠実に保持する。
 
+import { layerBaseName } from "../i18n/defaults";
 export const W = 320;
 export const H = 240;
 export const PIXELS = W * H;
@@ -20,15 +21,34 @@ export const UGO_COLORS = {
   blue: "#06aeff",
 } as const;
 
-/** 既定パレット: うごメモ6色 ＋ レトロ寄り拡張色 */
+/** うごメモ3D／.kwz の青（flipnote.js の KWZ globalPalette[5] と同一値 [0,56,206]）。
+ *  インポートした青作品の色と一致する。UGO_COLORS の水色 #06aeff とは別の値（M11-14） */
+export const UGO3D_BLUE = "#0038ce";
+
+/** 既定パレット（新規作品・.kwz インポートの種）。
+ *  M11-14b: **うごメモ3Dの6色のみ**（作者判断「既定から色が多くごちゃごちゃしている」）。
+ *  以前の「レトロ寄り拡張色」は既定から外した（画像取り込みの「レトロ14色」は
+ *  RETRO_PALETTE として独立に残す＝あちらの意味を変えないため）。
+ *  並びは 黒・白・赤・青・黄・緑（REQ_M11_14_batch.md §8） */
 export const DEFAULT_PALETTE: string[] = [
+  UGO_COLORS.black,
+  UGO_COLORS.white,
+  UGO_COLORS.red,
+  UGO3D_BLUE,
+  UGO_COLORS.yellow,
+  UGO_COLORS.green,
+];
+
+/** 画像取り込み（M8）の「レトロ14色」モード用。M11-14b で既定パレットから分離したが、
+ *  **中身は M11-14 以前の DEFAULT_PALETTE と同一**（うごメモ6色＋レトロ拡張8色）。
+ *  ここを変えると写真のドット化結果が変わるので、既定パレットとは独立に据え置く */
+export const RETRO_PALETTE: string[] = [
   UGO_COLORS.black,
   UGO_COLORS.white,
   UGO_COLORS.red,
   UGO_COLORS.yellow,
   UGO_COLORS.green,
   UGO_COLORS.blue,
-  // レトロ拡張
   "#ff7f27", // オレンジ
   "#ff9ec8", // ピンク
   "#8b5cf6", // むらさき
@@ -90,6 +110,11 @@ export interface LayerDef {
   opacity: number;
   /** M3.7: 所属フォルダ id（未指定=ルート） */
   parent?: string;
+  /** M11-20: 下のレイヤーでクリッピング（クリスタ準拠・省略=false）。
+   *  true のレイヤーの画素は「土台」（clipBaseMap で解決）の同じ画素が非0のときだけ表示される。
+   *  **表示時のマスクだけ**でバッファは全画素そのまま。保存形式は PROJECT_VERSION=5 のまま
+   *  任意キーとして書く（M10-14 thumbFrame の前例。旧ビルドは未知キーとして素通し） */
+  clip?: boolean;
 }
 
 /** M3.7: レイヤーフォルダ（組織化レイヤー・ネスト対応）。
@@ -320,6 +345,38 @@ export function effectiveLayerStates(
   return out;
 }
 
+/** M11-20: クリッピングのあるレイヤーが 1 枚でもあるか（無ければ合成側は clip の処理を丸ごと飛ばす＝
+ *  clip なし作品のホットパスを 1 命令も変えないための門番） */
+export function hasClipLayers(p: Project): boolean {
+  for (const ld of p.layerDefs) if (ld.clip === true) return true;
+  return false;
+}
+
+/**
+ * M11-20: クリッピングの「土台」を解決する（クリスタ準拠・REQ_M11_20 §1）。
+ * 戻り値は **clip=true のレイヤーだけ**を鍵にした Map（値 = 土台レイヤー id・土台なしは null）。
+ * - 土台 = そのレイヤーから**下方向**に連続する clip レイヤー群を飛ばした、最初の非 clip レイヤー
+ *   （連続する clip 群は同じ土台を共有）
+ * - 判定は **layerDefs の構造順（配列は下→上）**。コマ固有の描画順（frames[].order）は見ない
+ * - **同じ親（同じフォルダ）内のレイヤーだけ**を候補にする（フォルダ境界を跨がない）。
+ *   親の異なるレイヤー（子フォルダのブロック等）が間に挟まっていても、それは飛ばして
+ *   同じ親の直下の非 clip レイヤーを土台にする（フォルダ自体を土台にする機能は今回なし）
+ * - 存在しないフォルダを親に持つレイヤーはルート扱い（effectiveLayerStates と同じ健全化）
+ * - 「土台が非表示なら clip 群も非表示」の判定は呼び出し側（effectiveLayerStates の実効可視で見る）
+ * 走査は 1 パス O(レイヤー数)。順序が非連続な壊れたファイルでも落ちない。
+ */
+export function clipBaseMap(p: Project): Map<string, string | null> {
+  const folderIds = new Set((p.folders ?? []).map((f) => f.id));
+  const lastNonClip = new Map<string, string>(); // 親キー → その親で最後に見た非 clip レイヤー id
+  const out = new Map<string, string | null>();
+  for (const ld of p.layerDefs) {
+    const key = ld.parent && folderIds.has(ld.parent) ? ld.parent : "";
+    if (ld.clip === true) out.set(ld.id, lastNonClip.get(key) ?? null);
+    else lastNonClip.set(key, ld.id);
+  }
+  return out;
+}
+
 /**
  * M3.7: フォルダ構造の健全化（読み込み時・設定時）。
  * 存在しない親・循環参照は parent を外してルートへ隔離（絵は必ず開ける）。
@@ -440,7 +497,7 @@ export function newProject(title: string): Project {
   };
   // うごメモ準拠: C(下) / B / A(上)
   for (const name of ["C", "B", "A"]) {
-    p.layerDefs.push({ id: newLayerId(p), name: `レイヤー${name}`, visible: true, opacity: 1 });
+    p.layerDefs.push({ id: newLayerId(p), name: `${layerBaseName()}${name}`, visible: true, opacity: 1 });
   }
   const paper = ensureColor(p, UGO_COLORS.white);
   p.frames.push(makeEmptyFrame(p, paper));
