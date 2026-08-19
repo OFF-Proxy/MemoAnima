@@ -129,7 +129,11 @@ const LIMIT: Record<string, number> = { btn: 12, label: 16, hint: 30, title: 60,
 
 /** 個別の上限（短くできない性質のもの）。ベースラインと違い「この長さは妥当」という意味 */
 const LIMIT_OVERRIDE: Record<string, number> = {
-  "ed.spec.label": 46, // エディタ上部の仕様1行（320×240 …）。仕様なので削れない
+  // M12-R2: 46 → 36 へ**締めた**。旧値は誤記「（描画310×230）」を含んだ長さだった。
+  // メモアニマは 320×240 の全ドットに描ける（`model.ts` W=320/H=240・`raster.ts` の境界は
+  // すべて 0≤x<W / 0≤y<H で、内側に寄せる処理は無い）。310×230 は 3DS 実機の再生事情の
+  // 調査メモ（`docs/ugomemo3d_research.md:12`）が要件書経由で紛れ込んだもの
+  "ed.spec.label": 36, // エディタ上部の仕様1行（320×240 …）。ja の実測ちょうど＝これ以上は増やさない
   "set.legal.scope.msg": 163, // 法務文（非営利・非公式の説明）
   "set.legal.license.msg": 135, // 法務文（GPL の入手先）
 };
@@ -262,7 +266,6 @@ const OVER_BASELINE_KO = new Set<string>([
   "ed.audio.status.replaced.label", // 21字 / 上限 17
   "ed.audio.status.replacedName.label", // 29字 / 上限 17
   "ed.audio.wave.info.label", // 50字 / 上限 17
-  "ed.spec.label", // 51字 / 上限 50
   "ed.view.badge.label", // 21字 / 上限 17
   "ed.view.zoominfo.label", // 27字 / 上限 17
   "ed.xform.badge.label", // 25字 / 上限 17
@@ -315,7 +318,6 @@ const OVER_BASELINE_EN = new Set<string>([
   "ed.audio.status.replacedName.label", // 44字 / 上限 28
   "ed.audio.wave.info.label", // 62字 / 上限 28
   // --- エディタ（3 件） ---
-  "ed.spec.label", // 87字 / 上限 82
   "ed.view.zoominfo.label", // 33字 / 上限 28
   "ed.layerclip.pasteTo.btn", // 22字 / 上限 21
   // --- 変形（2 件） ---

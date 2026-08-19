@@ -561,7 +561,7 @@ const en: Record<keyof typeof ja, string> = {
   "ed.save.internalOrder.msg": "Internal error: the document was serialised in an unexpected order",
   "ed.saveAs.btn": "💾 Save as",
   "ed.saveAs.title": "Save under a different name or album (Ctrl+Shift+S)",
-  "ed.spec.label": "320×240 at 1:1 pixels (drawing area 310×230) / unlimited layers / palette + full colour",
+  "ed.spec.label": "320×240 at 1:1 pixels / unlimited layers / palette + full colour",
   "ed.split.side.title": "Drag to resize the right panel (double-click to reset)",
   "ed.split.tl.title": "Drag to resize the timeline (double-click to reset)",
   "ed.split.tools.title": "Drag to resize the tool column (double-click to reset)",

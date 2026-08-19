@@ -561,7 +561,7 @@ const ptBR: Record<keyof typeof ja, string> = {
   "ed.save.internalOrder.msg": "Erro interno: o documento foi serializado em uma ordem inesperada",
   "ed.saveAs.btn": "💾 Salvar como",
   "ed.saveAs.title": "Salvar com outro nome ou em outro álbum (Ctrl+Shift+S)",
-  "ed.spec.label": "320×240 em pixels 1:1 (área de desenho 310×230) / camadas ilimitadas / paleta + cor total",
+  "ed.spec.label": "320×240 em pixels 1:1 / camadas ilimitadas / paleta + cor total",
   "ed.split.side.title": "Arraste para redimensionar o painel direito (duplo clique para redefinir)",
   "ed.split.tl.title": "Arraste para redimensionar a linha do tempo (duplo clique para redefinir)",
   "ed.split.tools.title": "Arraste para redimensionar a coluna de ferramentas (duplo clique para redefinir)",

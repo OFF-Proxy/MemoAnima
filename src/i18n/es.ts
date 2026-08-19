@@ -561,7 +561,7 @@ const es: Record<keyof typeof ja, string> = {
   "ed.save.internalOrder.msg": "Error interno: el documento se serializó en un orden inesperado",
   "ed.saveAs.btn": "💾 Guardar como",
   "ed.saveAs.title": "Guardar con otro nombre o en otro álbum (Ctrl+Shift+S)",
-  "ed.spec.label": "320×240 en píxeles 1:1 (área de dibujo 310×230) / capas ilimitadas / paleta + color completo",
+  "ed.spec.label": "320×240 en píxeles 1:1 / capas ilimitadas / paleta + color completo",
   "ed.split.side.title": "Arrastre para redimensionar el panel derecho (doble clic para restablecer)",
   "ed.split.tl.title": "Arrastre para redimensionar la línea de tiempo (doble clic para restablecer)",
   "ed.split.tools.title": "Arrastre para redimensionar la columna de herramientas (doble clic para restablecer)",

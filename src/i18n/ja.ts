@@ -125,7 +125,7 @@ const ja = {
   "ed.save.btn": "💾 保存 (Ctrl+S)",
   "ed.saveAs.btn": "💾 別名で保存",
   "ed.saveAs.title": "別のファイル名/アルバムに保存 (Ctrl+Shift+S)",
-  "ed.spec.label": "320×240 ドット等倍（描画310×230）/ レイヤー無制限 / パレット＋フルカラー",
+  "ed.spec.label": "320×240 ドット等倍 / レイヤー無制限 / パレット＋フルカラー",
   "ed.split.side.title": "ドラッグで右パネルの幅を変える（ダブルクリックで既定に戻す）",
   "ed.split.tl.title": "ドラッグでタイムラインの高さを変える（ダブルクリックで既定に戻す）",
   "ed.split.tools.title": "ドラッグで道具列の幅を変える（ダブルクリックで既定に戻す）",

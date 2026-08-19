@@ -563,7 +563,7 @@ const ko: Record<keyof typeof ja, string> = {
   "ed.save.internalOrder.msg": "내부 오류: 문서가 예상과 다른 순서로 직렬화됐어요",
   "ed.saveAs.btn": "💾 다른 이름으로",
   "ed.saveAs.title": "다른 이름이나 다른 앨범으로 저장 (Ctrl+Shift+S)",
-  "ed.spec.label": "320×240 1:1 픽셀(그리는 영역 310×230) / 레이어 무제한 / 팔레트＋풀 컬러",
+  "ed.spec.label": "320×240 1:1 픽셀 / 레이어 무제한 / 팔레트＋풀 컬러",
   "ed.split.side.title": "끌어서 오른쪽 패널 크기 조절(두 번 클릭하면 초기화)",
   "ed.split.tl.title": "끌어서 타임라인 크기 조절(두 번 클릭하면 초기화)",
   "ed.split.tools.title": "끌어서 도구 열 크기 조절(두 번 클릭하면 초기화)",
