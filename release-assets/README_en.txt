@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.4.0
+ MemoAnima v1.4.1
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -15,6 +15,10 @@ Windows only.
 - Your source data (the SD card and so on) is only ever READ. Nothing is
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
+
+== NEW IN v1.4.1 ==
+This is the public release, made after verifying the in-app update path with
+the real distribution files. Features are the same as v1.4.0 below.
 
 == NEW IN v1.4.0 ==
 - There is now an installer. It does not need administrator rights (it installs
@@ -121,7 +125,7 @@ opens as it is, and your settings and shortcuts carry over.
 3. Follow the first-run guide: choose a library folder -> import -> edit -> export
 Note: layers are shared across every frame (the standard way animation tools
 work). Adding a frame gives you a blank frame with the same layer structure.
-Note: there is also an installer (MemoAnima_1.4.0_x64-setup.exe). Just
+Note: there is also an installer (MemoAnima_1.4.1_x64-setup.exe). Just
 double-click it; no administrator rights are needed. IMPORTANT: this portable
 (zip) version cannot update in place - accepting an update installs the
 installer version instead (see ABOUT NETWORK ACCESS below). Moving from the
