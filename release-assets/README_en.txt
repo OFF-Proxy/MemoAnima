@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.4.1
+ MemoAnima v1.4.2
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -15,6 +15,16 @@ Windows only.
 - Your source data (the SD card and so on) is only ever READ. Nothing is
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
+
+== NEW IN v1.4.2 ==
+- Selections can now add (Shift) and subtract (Alt). Works with rectangle,
+  lasso and auto-select; hold the key as you start the drag.
+- The selected area is tinted so it is easier to see (turn it off with "Tint"
+  in the selection tool's options).
+- New "Fill with color": fills the selection with the current color. Combined
+  with auto-select set to "whole layer", you can recolor all lines at once.
+- New setting to skip the "delete these frames" confirmation (gear menu).
+  Ctrl+Z still brings deleted frames back.
 
 == NEW IN v1.4.1 ==
 This is the public release, made after verifying the in-app update path with
@@ -125,7 +135,7 @@ opens as it is, and your settings and shortcuts carry over.
 3. Follow the first-run guide: choose a library folder -> import -> edit -> export
 Note: layers are shared across every frame (the standard way animation tools
 work). Adding a frame gives you a blank frame with the same layer structure.
-Note: there is also an installer (MemoAnima_1.4.1_x64-setup.exe). Just
+Note: there is also an installer (MemoAnima_1.4.2_x64-setup.exe). Just
 double-click it; no administrator rights are needed. IMPORTANT: this portable
 (zip) version cannot update in place - accepting an update installs the
 installer version instead (see ABOUT NETWORK ACCESS below). Moving from the

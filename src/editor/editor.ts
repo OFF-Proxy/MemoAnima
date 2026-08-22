@@ -253,6 +253,8 @@ export interface EditorCallbacks {
   /** M11-18: 個別の畳み状態が変わったら settings.json へ保存する（つまみ・畳むボタンの瞬間だけ。
    *  集中トグルは一時的な見方なので呼ばない） */
   onCollapsedChange?: (collapsed: CollapsedState) => void;
+  /** M13-2a (A-2): 選択範囲の色付け表示のトグルが変わったら settings.json へ保存する（同じ流儀） */
+  onSelMaskShowChange?: (show: boolean) => void;
   /** ライブラリ保存（Rust呼び出し）を委譲 */
   saveProject: (
     ctx: EditorSaveContext,
@@ -310,6 +312,12 @@ function yieldToInput(): Promise<void> {
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) =>
   document.querySelector(sel) as T;
 
+/** M13-2a (A-2): 選択範囲の内側に塗る色（オーバーレイ専用・索引バッファには一切触れない）。
+ *  **1箇所の定数**（REQ §6-2）。青にしているのは 3DS の作法に倣ったもので、
+ *  既定パレットの青 `[0,56,206]` とは**わざと違う色**（描いた青と見分けがつかなくなるため）。
+ *  REQ §8-1: 値は仮。実機で紙色・6色と見分けがつくかを見て決める */
+const SEL_MASK_RGBA: readonly [number, number, number, number] = [64, 140, 255, 102]; // rgba(64,140,255,.40)
+
 /** M6-6 R-2: 回転ゾーンのカーソルは標準 grab に変更。
  *  SVGカスタムカーソルは実機（WebView2＋ペンタブ）で表示されない/判別できないため撤去し、
  *  カーソル非依存の視覚補助（モードラベル .xmode-label）を併設する。 */
@@ -331,8 +339,19 @@ export class Editor {
   private inputLog = false;
   private inputLogBuf: string[] = [];
   private inputLogTimer: number | null = null;
-  /** M10-19: 自動選択（✨）の参照（false=このレイヤー / true=全レイヤー）。セッションのみ */
+  /** M10-19: 自動選択（✨）の参照（false=選択中のレイヤー / true=全レイヤー）。セッションのみ。
+   *  M13-2a: false 側の意味を「このレイヤー1枚」から「**選択中のレイヤーの合成**」へ広げた
+   *  （解決規則は M13-1 の `moveTargetLayerIds()` と同じ＝1枚だけ選んでいれば従来と同じ結果）。
+   *  boolean はそのまま＝設定の移行なし */
   selectRefAll = false;
+  /** M13-2a (A-1): 範囲選択の合成方法。**ドラッグ開始時の修飾キーで決めて**、離すまで変えない
+   *  （Shift=足す／Alt=引く／無し=置き換え） */
+  private selMod: "replace" | "add" | "sub" = "replace";
+  /** M13-2a (A-2): 選択範囲の内側に色を付けて見せるか（既定オン・settings.json へ永続化） */
+  selMaskShow = true;
+  /** M13-2a (A-4): コマを消すときに確認を出すか（既定オン＝従来どおり・settings.json へ永続化）。
+   *  効くのは**コマの削除の確認だけ**。レイヤー・フォルダの削除の確認には触れない */
+  frameDeleteConfirm = true;
   /** M10-19: 自動選択の範囲（false=つながり=4方向連結 / true=画面全体の同添字） */
   selectAutoGlobal = false;
   /** M10-19: バケツ塗りの参照（false=このレイヤー（既定・従来） / true=全レイヤー）。セッションのみ */
@@ -3721,7 +3740,7 @@ export class Editor {
       ${
         this.selectKind === "auto"
           ? `<div class="row"><span class="tog">${t("ed.sel.ref.label")}</span><div class="oni" style="flex:1" id="ed-selref">
-          <button class="lv${this.selectRefAll ? "" : " on"}" data-v="self">${t("ed.sel.refSelf.btn")}</button>
+          <button class="lv${this.selectRefAll ? "" : " on"}" data-v="self">${t("ed.sel.refSel.btn")}</button>
           <button class="lv${this.selectRefAll ? " on" : ""}" data-v="all">${t("ed.sel.refAll.btn")}</button>
         </div></div>
         <div class="row"><span class="tog">${t("ed.sel.scope.label")}</span><div class="oni" style="flex:1" id="ed-selscope">
@@ -3730,6 +3749,7 @@ export class Editor {
         </div></div>`
           : ""
       }
+      <div class="row"><div class="sw2${this.selMaskShow ? " on" : ""}" id="ed-sel-mask"></div><span class="tog">${t("ed.sel.maskShow.label")}</span></div>
       <div class="selacts">
         <button class="minibtn" id="ed-sel-copy">${t("ed.sel.copy.btn")}</button>
         <button class="minibtn" id="ed-sel-cut">${t("ed.sel.cut.btn")}</button>
@@ -3737,11 +3757,23 @@ export class Editor {
         <button class="minibtn" id="ed-sel-del">${t("ed.sel.delete.btn")}</button>
         <button class="minibtn" id="ed-sel-none">${t("ed.sel.deselect.btn")}</button>
       </div>
+      <div class="selacts">
+        <button class="minibtn" id="ed-sel-fill">${t("ed.sel.fillColor.btn")}</button>
+      </div>
       <p class="hintline">${
         this.selectKind === "auto"
           ? t("ed.sel.auto.hint")
           : t("ed.sel.drag.hint")
       }</p>`;
+      // M13-2a: 訳文は属性へ埋めず、組んだあとにプロパティで入れる（検査6・R-2 案1）
+      $("#ed-sel-fill").title = t("ed.sel.fillColor.title");
+      $("#ed-sel-fill").addEventListener("click", () => this.fillSelectionWithColor());
+      $("#ed-sel-mask").addEventListener("click", () => {
+        this.selMaskShow = !this.selMaskShow;
+        $("#ed-sel-mask").classList.toggle("on", this.selMaskShow);
+        this.cb.onSelMaskShowChange?.(this.selMaskShow); // 変えた瞬間に settings.json へ
+        this.redrawOverlay();
+      });
       // M10-19: 種別切替は data-k のボタンだけに束ねる（参照/範囲の .lv と混線させない）
       host.querySelectorAll("[data-k]").forEach((b) =>
         b.addEventListener("click", () => {
@@ -4810,6 +4842,18 @@ export class Editor {
     this.collapsed = sanitizeCollapsed(v);
   }
 
+  /** M13-2a (A-2): settings.json の `selMask` から復元。**`false` 以外はすべてオン**（既定オン・追加のみ） */
+  restoreSelMaskShow(v: unknown) {
+    this.selMaskShow = v !== false;
+    if (this.mounted) this.redrawOverlay();
+  }
+
+  /** M13-2a (A-4): settings.json の `frameDeleteConfirm` から復元。**`false` 以外はすべてオン**
+   *  （既定オン＝従来どおり確認が出る・追加のみ）。⚙ はライブラリ画面からしか開けないので mount 前の復元で足りる */
+  restoreFrameDeleteConfirm(v: unknown) {
+    this.frameDeleteConfirm = v !== false;
+  }
+
   /** いま実際に畳まれているか（個別状態 or 集中） */
   private isCollapsed(key: CollapseKey): boolean {
     return this.focusActive || this.collapsed[key];
@@ -5666,6 +5710,10 @@ export class Editor {
     // 選択のマーチングアンツ（ドット風）
     if (this.selMask && !this.xformActive) {
       const img = ctx.createImageData(W, H);
+      // M13-2a (A-2): 内側の色付け。**同じ1回の走査**で、輪郭でない画素にだけ半透明の単色を置く
+      //（輪郭＝破線は従来どおり残す）。オーバーレイの ImageData に書くだけで索引には触れない
+      const [mr, mg, mb, ma] = SEL_MASK_RGBA;
+      const tint = this.selMaskShow;
       for (let y = 0; y < H; y++)
         for (let x = 0; x < W; x++) {
           const i = y * W + x;
@@ -5687,6 +5735,11 @@ export class Editor {
             img.data[i * 4 + 1] = white ? 255 : 38;
             img.data[i * 4 + 2] = white ? 255 : 33;
             img.data[i * 4 + 3] = 255;
+          } else if (tint) {
+            img.data[i * 4] = mr;
+            img.data[i * 4 + 1] = mg;
+            img.data[i * 4 + 2] = mb;
+            img.data[i * 4 + 3] = ma;
           }
         }
       ctx.putImageData(img, 0, 0);
@@ -6165,22 +6218,24 @@ export class Editor {
         break;
       }
       case "select": {
-        if (this.selMask && this.selMask[pt.y * W + pt.x]) {
+        // M13-2a (A-1): 合成方法は**押した瞬間の修飾キー**で決める（途中で押し変えても変わらない）。
+        // Shift は図形ツールの拘束（`tool === "shape"` の分岐）とは別の経路＝衝突しない
+        this.selMod = e.shiftKey ? "add" : e.altKey ? "sub" : "replace";
+        if (this.selMod === "replace" && this.selMask && this.selMask[pt.y * W + pt.x]) {
           // M11-8 P-1: 範囲内のドラッグは**枠だけ**が動く（絵は動かない）。
-          // 絵を動かすのは移動ツール（上の case "move"）
+          // 絵を動かすのは移動ツール（上の case "move"）。
+          // M13-2a: 足す／引くのときは枠を動かさず、新しい範囲を描き始める
           this.beginSelMaskMove(pt);
         } else if (this.selectKind === "auto") {
-          // M10-19: ✨自動 — クリックで即マスク生成（既存選択は置き換え）。
+          // M10-19: ✨自動 — クリックで即マスク生成。
           // 生成した selMask の下流（点線・移動・コピー・削除・変形）は既存のまま
+          // M13-2a: 参照の「選択中」は、選択中のレイヤー（フォルダは展開・非表示は除外）の合成。
+          // 1枚だけ選んでいれば従来の `activeBuffer()` と同じ結果になる
           const ref = this.selectRefAll
             ? flattenIndexFrame(this.project, this.frameIndex)
-            : this.activeBuffer();
+            : this.flattenSelectedLayers();
           if (!ref) return;
-          // M10-22: 自動選択も履歴へ（作成・置換）
-          const selBefore = this.selMask ? this.selMask.slice() : null;
-          this.selMask = R.autoSelectMask(ref, pt.x, pt.y, this.selectAutoGlobal);
-          this.pushSelectionHistory("自動選択", selBefore, this.selMask.slice());
-          this.redrawOverlay();
+          this.applySelectionResult("auto", R.autoSelectMask(ref, pt.x, pt.y, this.selectAutoGlobal));
         } else if (this.selectKind === "rect") {
           this.shapeStart = pt;
         } else {
@@ -6821,28 +6876,29 @@ export class Editor {
         if (this.dragMode === "selmask") {
           this.commitSelMaskMove(); // M11-8 P-1
         } else if (this.selectKind === "rect" && this.shapeStart) {
-          // M10-22: 選択の作成・置換を履歴へ（before=直前のマスク・null許容）
-          const selBefore = this.selMask ? this.selMask.slice() : null;
           if (this.shapeStart.x === pt.x && this.shapeStart.y === pt.y) {
             // ドラッグなしの素クリック＝選択解除（1pxの見えない選択が clip で
-            // 全描画を無音で封じる事故の防止。マーキー系ツールの標準挙動でもある）
-            if (selBefore) this.pushSelectionHistory("選択解除", selBefore, null);
-            this.selMask = null;
+            // 全描画を無音で封じる事故の防止。マーキー系ツールの標準挙動でもある）。
+            // M13-2a: 足す／引くの素クリックは「何も足さない／引かない」＝何もしない
+            if (this.selMod === "replace") {
+              const selBefore = this.selMask ? this.selMask.slice() : null;
+              if (selBefore) this.pushSelectionHistory("選択解除", selBefore, null);
+              this.selMask = null;
+            }
           } else {
-            this.selMask = R.rectMask(this.shapeStart.x, this.shapeStart.y, pt.x, pt.y);
-            this.pushSelectionHistory("範囲選択", selBefore, this.selMask.slice());
+            // M10-22: 選択の作成・置換を履歴へ（applySelectionResult の中で before=直前のマスク）
+            this.applySelectionResult("drag", R.rectMask(this.shapeStart.x, this.shapeStart.y, pt.x, pt.y));
           }
           this.shapeStart = null;
           this.redrawOverlay();
         } else if (this.selectKind === "lasso" && this.lassoPts.length > 2) {
-          const selBefore = this.selMask ? this.selMask.slice() : null;
           const lm = R.lassoMask(this.lassoPts);
           if (lm.some((v) => v !== 0)) {
-            this.selMask = lm;
-            this.pushSelectionHistory("範囲選択", selBefore, this.selMask.slice());
-          } else {
+            this.applySelectionResult("drag", lm);
+          } else if (this.selMod === "replace") {
             // 囲めていない軌跡（面積ゼロ）＝選択解除（全0マスクはアンツが1画素も
             // 出ず、clip で描けない原因が見えなくなるため選択として扱わない）
+            const selBefore = this.selMask ? this.selMask.slice() : null;
             if (selBefore) this.pushSelectionHistory("選択解除", selBefore, null);
             this.selMask = null;
           }
@@ -7345,6 +7401,101 @@ export class Editor {
    *  同じ結果になるよう、実体はこの1つだけにしてある。
    *  M10-22 では「画素の削除とマスク解除を1エントリに束ねる」形だったが、
    *  解除しなくなったので履歴には**画素の変化だけ**を積む */
+  /**
+   * M13-2a (A-1): 新しく作った範囲 `next` を、ドラッグ開始時の修飾キー（`selMod`）に従って
+   * いまの選択へ合成する。矩形・自由・自動の**3つがすべてここを通る**。
+   *   replace … 置き換え（従来どおり）
+   *   add     … 和（`|`）
+   *   sub     … 差（`& ~`）
+   * 結果が全0なら**選択解除として扱う**（既存の流儀。1px の見えない選択で clip が全描画を封じる事故の防止）。
+   * 履歴は従来どおり `pushSelectionHistory(before, after)` の1エントリ＝Undo 1回で前の範囲へ戻る。
+   * `Uint8Array` の 0/1 を触るだけで索引バッファには一切触れない。
+   */
+  private applySelectionResult(kind: "auto" | "drag", next: Uint8Array) {
+    const before = this.selMask ? this.selMask.slice() : null;
+    let out = next;
+    if (this.selMod !== "replace" && this.selMask) {
+      out = new Uint8Array(PIXELS);
+      const cur = this.selMask;
+      if (this.selMod === "add") {
+        for (let i = 0; i < PIXELS; i++) out[i] = cur[i] | next[i];
+      } else {
+        for (let i = 0; i < PIXELS; i++) out[i] = cur[i] & (next[i] ^ 1);
+      }
+    } else if (this.selMod === "sub") {
+      // 何も選んでいない所から引く＝引く相手が無い。選択は無いまま（履歴にも積まない）
+      return;
+    }
+    const empty = !out.some((v) => v !== 0);
+    this.selMask = empty ? null : out;
+    // 変化が無いなら履歴に積まない（同じ範囲を足し直した等）
+    if (before && !empty && before.length === out.length && before.every((v, i) => v === out[i])) return;
+    if (!before && empty) return;
+    // 履歴ラベルは画面に出ない内部識別子（検査5 が `pushSelectionHistory` の第1引数として見逃す形に置く）
+    this.pushSelectionHistory(kind === "auto" ? "自動選択" : "範囲選択", before, empty ? null : out.slice());
+    if (empty && before) this.cb.toast(t("ed.sel.becameEmpty.toast"));
+  }
+
+  /**
+   * M13-2a (A-1): 自動選択の参照「選択中」＝選択中のレイヤーを合成した索引バッファ。
+   * 対象の解決は M13-1 の純関数（`moveTargetLayerIds`）と同じ規則＝フォルダは展開・重複は除去・
+   * 実効可視が false は除外・何も選んでいなければ `activeLayerId`。**必ず1枚以上**に解決される。
+   * 合成は「レイヤー順（下→上）で非0が勝つ」だけ。クリッピングは見ない＝**1枚だけなら
+   * 従来の `activeBuffer()` とビット単位で同じ**（既存の流儀を変えない）。
+   * 値は索引のコピーだけ。色計算・補間・平均・ブレンドはしない（IndexBuf の掟）。
+   */
+  private flattenSelectedLayers(): IndexBuf | null {
+    const ids = this.moveTargetLayerIds();
+    const frame = this.project.frames[this.frameIndex];
+    if (!frame) return null;
+    if (ids.length === 1) return frame.layers[ids[0]] ?? null;
+    if (ids.length === 0) return this.activeBuffer();
+    const want = new Set(ids);
+    const out = allocIndexBuf(this.project);
+    for (const ld of this.project.layerDefs) {
+      if (!want.has(ld.id)) continue;
+      const lb = frame.layers[ld.id];
+      if (!lb) continue;
+      for (let i = 0; i < PIXELS; i++) if (lb[i] !== 0) out[i] = lb[i];
+    }
+    return out;
+  }
+
+  /**
+   * M13-2a (A-3): 選択範囲を**いまの色**で塗る。この回の目玉。
+   *  - 対象は**アクティブレイヤー1枚**（既存の塗りツールと同じ流儀。複数レイヤーには塗らない）
+   *  - 選択マスクの立っている位置へ**現在の色の索引を書き込むだけ**（補間・平均・ブレンドはしない）
+   *  - 現在の色が「透明」（`colorHex === ""` → 索引0）なら、範囲が消える（`ed.sel.erase` と同じ結果でよい）
+   *  - ⚠ **色の解決を先に、バッファの取得を後に**（257色目で16bitへ昇格すると全バッファが差し替わる）
+   *  - 履歴1エントリ。変化ゼロなら積まない（`deleteSelection` と同じ作法）
+   */
+  private fillSelectionWithColor() {
+    if (this.xformGuard()) return;
+    if (!this.selMask) {
+      this.cb.toast(t("ed.sel.needSelection.toast"));
+      return;
+    }
+    if (this.playing) this.stopPlayback();
+    const color = this.currentColorIndex(); // 昇格し得るので先に解決
+    const buf = this.activeBuffer();
+    if (!buf) return;
+    const mask = this.selMask;
+    let changed = false;
+    for (let i = 0; i < PIXELS; i++) {
+      if (mask[i] && buf[i] !== color) {
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) return;
+    const before = copyIndexBuf(buf);
+    for (let i = 0; i < PIXELS; i++) if (mask[i]) buf[i] = color;
+    this.pushBufferHistory("選択範囲を塗る", buf, before);
+    this.renderCanvas();
+    this.redrawOverlay();
+    this.paintFilmThumb(this.frameIndex);
+  }
+
   private deleteSelection() {
     const buf = this.activeBuffer();
     if (!buf || !this.selMask) return;
@@ -8882,7 +9033,10 @@ export class Editor {
       this.cb.toast(t("ed.tl.deleteFrame.allBlocked.toast"));
       return;
     }
-    if (count > 1) {
+    // M13-2a (A-4): ⚙「コマを消すときに確認する」がオフなら確認を省く。**ダイアログを呼ぶ側は消さない**
+    //（オン＝従来どおり）。上の「最後の1枚」「全部」の制止は設定に関係なく生きる。
+    // 1枚の削除には元から確認が無い（Undo で戻せるため）ので、この設定が効くのは範囲削除だけ
+    if (count > 1 && this.frameDeleteConfirm) {
       const ok = await this.cb.confirm(
         t("ed.tl.deleteFrame.range.msg", { count, from: at + 1, to: end + 1 })
       );

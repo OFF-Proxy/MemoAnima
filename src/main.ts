@@ -129,6 +129,11 @@ type Settings = {
    *  v1.3.0 から上がってきた人も既定オン。**オフでも他の機能は一切制限しない**
    *  （`COLLAB_PROTOCOL` §1-b 条件1 の義務）。追加のみ・`PROJECT_VERSION` には無関係 */
   updateCheck?: boolean;
+  /** M13-2a (A-2): 範囲選択の色付け表示。**未設定＝オン**（`!== false` で見る）。追加のみ */
+  selMask?: boolean;
+  /** M13-2a (A-4): コマを消すときに確認を出すか。**未設定＝オン**（＝従来どおり）。追加のみ。
+   *  効くのはコマの削除だけ（レイヤー・フォルダ・ライブラリの削除の確認には無関係） */
+  frameDeleteConfirm?: boolean;
   /** U-1: 「起動時に更新を確認します（⚙ でオフにできます）」の初回案内を出したか。
    *  `guideDone` とは別にしている——既存利用者は `guideDone: true` を持っているので、
    *  それを流用すると**更新確認のことを一度も知らされないまま**になる */
@@ -1607,6 +1612,9 @@ function showEditor(
   editor.restoreCollapsed(settings.collapsed);
   // M12-C: カーソル（点/十字/矢印・輪・ドット枠）。無い・不正値は既定（点＋輪 ON・枠 OFF）
   editor.restoreCursor(settings.cursor);
+  // M13-2a: 選択範囲の色付け（false 以外はオン）／コマ削除の確認（false 以外はオン＝従来どおり）
+  editor.restoreSelMaskShow(settings.selMask);
+  editor.restoreFrameDeleteConfirm(settings.frameDeleteConfirm);
   editor.mount(
     project,
     ctx,
@@ -1635,6 +1643,11 @@ function showEditor(
       // M11-18: 個別の畳み状態も同じ流儀（つまみ・畳むボタンの瞬間だけ。集中トグルは保存しない）
       onCollapsedChange: (collapsed) => {
         settings.collapsed = collapsed;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      // M13-2a: 選択範囲の色付け表示も同じ流儀（トグルを押した瞬間に保存）
+      onSelMaskShowChange: (show) => {
+        settings.selMask = show;
         invoke("save_settings", { settings }).catch(() => {});
       },
       saveProject: async (c, data, thumb) => {
@@ -2137,6 +2150,12 @@ async function openSettingsMenu() {
         </div>
         <p class="hintline">${t("set.cursor.hint")}</p>
       </div>
+      <!-- M13-2a (A-4): コマ削除の確認。効くのはコマの削除だけ（レイヤー・フォルダの削除は従来どおり確認する） -->
+      <div class="set-sec">
+        <b>${t("set.frameDeleteConfirm.label")}</b>
+        <div class="modal-field"><div class="sw2" id="set-framedel-sw"></div></div>
+        <p class="hintline">${t("set.frameDeleteConfirm.hint")}</p>
+      </div>
       <div class="set-sec">
         <b>${t("set.keys.label")}</b>
         <p class="modal-path" id="set-keys-cur"></p>
@@ -2352,6 +2371,18 @@ async function openSettingsMenu() {
         } finally {
           nowBtn.disabled = false;
         }
+      });
+    }
+    // M13-2a (A-4): コマ削除の確認トグル（`#set-update-sw` と同じ `.sw2` の作法・既定オン）。
+    // エディタはライブラリ画面からしか開けないので、ここで settings に覚えるだけで次の mount から効く
+    {
+      const sw = box.querySelector("#set-framedel-sw") as HTMLElement;
+      const on = () => settings.frameDeleteConfirm !== false;
+      sw.classList.toggle("on", on());
+      sw.addEventListener("click", () => {
+        settings.frameDeleteConfirm = !on();
+        sw.classList.toggle("on", on());
+        invoke("save_settings", { settings }).catch(() => {});
       });
     }
     (box.querySelector("#set-keys-cur") as HTMLElement).textContent =
