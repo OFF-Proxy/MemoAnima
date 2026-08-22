@@ -11,6 +11,9 @@
 //   5. ハードコード残りの検出           … **有効**（対象は index.html と src/main.ts のみ）
 import { readFileSync } from "node:fs";
 import ts from "typescript";
+// L-2: 言語コードは `LANGS` が正。**型だけ**取る（値を import すると辞書を読み込むので、
+// esbuild が消せる `import type` にしてある）。綴りを間違えた言語はここで気づける
+import type { Lang } from "../src/i18n";
 
 const REPO = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const read = (p: string) => readFileSync(`${REPO}/${p}`, "utf8");
@@ -82,12 +85,28 @@ check("ja.ts が読める（1行1エントリ）", ja.size > 100, `${ja.size} �
 
 // M12-3: 5言語ぶん読む。検査1・2（キー集合／プレースホルダ）と検査3（言語別の字数）で使う。
 // ブロックの外に出しておく（下の検査3 から見えるように）
-const TRANSLATIONS: readonly (readonly [string, string])[] = [
+// L-2: `zh-Hans` を6言語目として足した。**足すのはこの1行だけ**で、検査2・3・9 の対象になる
+const TRANSLATIONS: readonly (readonly [Lang, string])[] = [
   ["en", "src/i18n/en.ts"],
   ["es", "src/i18n/es.ts"],
   ["pt-BR", "src/i18n/pt-BR.ts"],
   ["ko", "src/i18n/ko.ts"],
+  ["zh-Hans", "src/i18n/zh-Hans.ts"],
 ];
+
+/**
+ * L-2: **移行中の言語**（訳が届いている途中）。
+ *
+ * 部分辞書は `src/i18n/index.ts` の設計どおり（未訳キーは en → ja へ落ちる）なので、
+ * **検査1（キー集合の一致）だけを「未訳の件数を警告に出す」へ替える**。
+ * ほかは緩めない:
+ *   - **検査2（差し込み語）・検査3（字数）・検査9（禁止語）は移行中でも通常どおり**。
+ *     訳された行は、訳された時点で正しくあるべき
+ *   - **ja に無い余分なキーは移行中でも fail**（それは事故＝対照表のキー列が書き換わっている）
+ *
+ * 訳が全部埋まったらここから外す。**外し忘れを防ぐため、未訳0件になったら警告を出す**。
+ */
+const IN_PROGRESS: ReadonlySet<Lang> = new Set<Lang>(["zh-Hans"]);
 const DICTS_BY_LANG = new Map<string, Map<string, string>>(
   TRANSLATIONS.map(([lang, path]) => [lang, parseDict(read(path))])
 );
@@ -100,18 +119,28 @@ const en = DICTS_BY_LANG.get("en")!;
   const badPh: string[] = [];
   for (const [lang] of TRANSLATIONS) {
     const d = DICTS_BY_LANG.get(lang)!;
-    if (d.size === 0) {
+    const inProgress = IN_PROGRESS.has(lang);
+    // 移行中の言語は**空でも skip しない**（未訳の件数を出すのがこの回の目的）
+    if (d.size === 0 && !inProgress) {
       console.log(`… 検査1・2 は ${lang}.ts が空のため skip`);
       continue;
     }
     const missing = [...ja.keys()].filter((k) => !d.has(k) && !k.endsWith("_one"));
     const extra = [...d.keys()].filter((k) => !ja.has(k));
-    if (missing.length || extra.length) missingLangs.push(`${lang}(不足${missing.length}/余分${extra.length})`);
+    if (inProgress) {
+      warnings.push(`検査1: ${lang} は移行中 — 未訳 ${missing.length} 件 / 訳済み ${d.size} / 全 ${ja.size} キー`);
+      // 外し忘れ防止。**余分なキーは移行中でも下の fail に載せる**（それは事故）
+      if (missing.length === 0)
+        warnings.push(`検査1: ${lang} は全キー埋まっています。IN_PROGRESS から外してください`);
+      if (extra.length) missingLangs.push(`${lang}(余分${extra.length})`);
+    } else if (missing.length || extra.length) {
+      missingLangs.push(`${lang}(不足${missing.length}/余分${extra.length})`);
+    }
     const bad = [...d.entries()].filter(([k, v]) => ja.has(k) && ph(v) !== ph(ja.get(k)!));
     if (bad.length) badPh.push(`${lang}: ${bad.map(([k]) => k).join(" ")}`);
   }
   check(
-    `検査1: 全言語のキー集合が ja と一致（${TRANSLATIONS.map(([l]) => l).join(" / ")}）`,
+    `検査1: 全言語のキー集合が ja と一致（${TRANSLATIONS.map(([l]) => (IN_PROGRESS.has(l) ? `${l}=移行中` : l)).join(" / ")}）`,
     missingLangs.length === 0,
     missingLangs.join(" ")
   );
@@ -134,7 +163,10 @@ const LIMIT_OVERRIDE: Record<string, number> = {
   // すべて 0≤x<W / 0≤y<H で、内側に寄せる処理は無い）。310×230 は 3DS 実機の再生事情の
   // 調査メモ（`docs/ugomemo3d_research.md:12`）が要件書経由で紛れ込んだもの
   "ed.spec.label": 36, // エディタ上部の仕様1行（320×240 …）。ja の実測ちょうど＝これ以上は増やさない
-  "set.legal.scope.msg": 163, // 法務文（非営利・非公式の説明）
+  // v1.3.1-L: 163 → 176。「第三者の作品」を「3DS の作品ファイル（.kwz / .ppm）」へ限定し、
+  // 「お手元の PC にあるファイルだけ」を畳み込んだ結果。**ja の実測ちょうど＝これ以上増やさない**
+  //（`ed.spec.label` と同じ流儀。増やしたくなった回に、増やす理由とセットで上限を動かす）
+  "set.legal.scope.msg": 176, // 法務文（非営利・非公式の説明）
   "set.legal.license.msg": 135, // 法務文（GPL の入手先）
 };
 
@@ -182,7 +214,7 @@ const OVER_BASELINE_ES = new Set<string>([
   "export.whiteBg.hint", // 71字 / 上限 63
   "export.phase.encoderInit.label", // 46字 / 上限 33
   // --- 設定・法的表記（1 件） ---
-  "set.legal.scope.msg", // 396字 / 上限 342
+  "set.legal.scope.msg", // 408字 / 上限 369
   // --- エディタ（12 件） ---
   "ed.audio.load.btn", // 29字 / 上限 25
   "ed.audio.se.add.btn", // 29字 / 上限 25
@@ -219,7 +251,7 @@ const OVER_BASELINE_PT = new Set<string>([
   "export.whiteBg.hint", // 87字 / 上限 60
   "export.phase.encoderInit.label", // 42字 / 上限 32
   // --- 設定・法的表記（1 件） ---
-  "set.legal.scope.msg", // 384字 / 上限 326
+  "set.legal.scope.msg", // 398字 / 上限 352
   // --- エディタ（9 件） ---
   "ed.audio.status.kwz.label", // 35字 / 上限 32
   "ed.audio.status.replacedName.label", // 37字 / 上限 32
@@ -258,8 +290,8 @@ const OVER_BASELINE_KO = new Set<string>([
   // --- 画像取り込み（1 件） ---
   "img.dialog.target.hint", // 34字 / 上限 33
   // --- 設定・法的表記（2 件） ---
-  "set.legal.license.msg", // 157字 / 上限 148
-  "set.legal.scope.msg", // 200字 / 上限 179
+  "set.legal.license.msg", // 160字 / 上限 148
+  "set.legal.scope.msg", // 213字 / 上限 193
   // --- エディタ（14 件） ---
   "ed.audio.se.add.btn", // 17字 / 上限 13
   "ed.audio.status.kwz.label", // 28字 / 上限 17
@@ -309,7 +341,7 @@ const OVER_BASELINE_EN = new Set<string>([
   // --- 設定（3 件） ---
   "set.keys.btn", // 24字 / 上限 21
   "set.legal.license.msg", // 257字 / 上限 243
-  "set.legal.scope.msg", // 356字 / 上限 293
+  "set.legal.scope.msg", // 357字 / 上限 316
   // --- 音声パネル（6 件） ---
   "ed.audio.load.btn", // 26字 / 上限 21
   "ed.audio.se.add.btn", // 26字 / 上限 21
@@ -332,6 +364,15 @@ const OVER_BASELINE_EN = new Set<string>([
   "ed.warp.pinchHint.hint", // 61字 / 上限 54
   "ed.warp.pushHint.hint", // 78字 / 上限 54
 ]);
+
+/**
+ * L-2: `zh-Hans` の既知超過。**まだ1件も無い**（訳が1文字も届いていないため）。
+ *
+ * ほかの言語と同じ順番を踏むこと: **実画面を先に見る → 収まらないものは訳を短くする →
+ * それでも残ったものだけをここへ載せる**。先にここへ入れると「入っているから良し」になり、
+ * はみ出したまま通ってしまう（M12-2 の反省）。
+ */
+const OVER_BASELINE_ZH = new Set<string>([]);
 
 const OVER_BASELINE = new Set<string>([
   // --- M12-1a（index.html / main.ts）17 件 ---
@@ -423,16 +464,21 @@ const OVER_BASELINE = new Set<string>([
   // M12-3: 係数は **852キーの ja 比を実測して改訂**した（GLOSSARY 決まり6）。
   // 旧値（es / pt-BR ×1.7）は勘の数字で、実測は es 2.09 / pt-BR 2.00 だった。
   // en 1.82 と ko 1.00 は元の 1.8 / 1.1 とほぼ一致したので据え置き。
-  const LANG_FACTOR: Record<string, number> = { en: 1.8, es: 2.1, "pt-BR": 2.0, ko: 1.1 };
+  // L-2: `zh-Hans` は **暫定 1.0**（＝ ja と同じ上限）。中国語は日本語より短くなることが多いので
+  // 締める側に倒してある。**訳が揃った時点で 853キーの ja 比を実測して確定する**（決まり6 と同じ手順）
+  const LANG_FACTOR: Record<string, number> = { en: 1.8, es: 2.1, "pt-BR": 2.0, ko: 1.1, "zh-Hans": 1.0 };
   const BASELINES: Record<string, Set<string>> = {
     en: OVER_BASELINE_EN,
     es: OVER_BASELINE_ES,
     "pt-BR": OVER_BASELINE_PT,
     ko: OVER_BASELINE_KO,
+    "zh-Hans": OVER_BASELINE_ZH,
   };
   for (const [lang] of TRANSLATIONS) {
     const d = DICTS_BY_LANG.get(lang)!;
-    if (d.size === 0) continue;
+    // 移行中の言語は空でも回す（0キーなら素通りするが、**検査そのものは最初から効かせておく**。
+    // 訳が1行届いた瞬間から字数を見るため）
+    if (d.size === 0 && !IN_PROGRESS.has(lang)) continue;
     const factor = LANG_FACTOR[lang];
     const baseline = BASELINES[lang];
     const over: { key: string; len: number; lim: number }[] = [];
@@ -604,9 +650,29 @@ function exemptLines(src: string): Set<number> {
   return out;
 }
 
-function jaLiterals(file: string, src: string): { line: number; text: string; internal: boolean }[] {
+/** 文字列リテラルを AST で拾う。**コメントは対象外**（`ts` の走査はコメントをノードにしない）。
+ *  v1.3.1-L: 検査9 から再利用できるよう、当てる正規表現を引数にした（既定は日本語＝検査5 の従来動作）。
+ *  `internal`（`console.*` や履歴ラベル）は**呼び出し側が使うかどうかを決める**。
+ *  検査9 では使わない——`console.log("うごメモ…")` も直すべきなので。 */
+function jaLiterals(
+  file: string,
+  src: string,
+  re: RegExp = JP
+): { line: number; text: string; internal: boolean }[] {
   const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const out: { line: number; text: string; internal: boolean }[] = [];
+  /**
+   * A-12: **`g` 付きの正規表現を `test()` に渡してはいけない。**
+   * `test()` は `lastIndex` を持ち越すので、マッチした**次の文字列で false を返す**
+   * （＝1件おきに取りこぼす）。検査9 が渡す `BANNED` が `/gi` なので実際に踏んだ。
+   *
+   *   BANNED.test("Flipnote Studio") → true  （lastIndex = 8）
+   *   BANNED.test("Flipnote")        → false ★ index 8 から探すため。長さ8で見つからない
+   *
+   * 呼び出し側の書き方に依存しないよう、**ここで `g` を落とした複製に差し替える**
+   * （`re` そのものを書き換えると呼び出し側の状態を壊すので、複製を作る）。
+   */
+  const probe = re.global ? new RegExp(re.source, re.flags.replace("g", "")) : re;
   /** 画面に出ない「内部識別子」か（履歴ラベル＝History.label は描画されない） */
   const INTERNAL_FIRST_ARG = new Set([
     "pushStructure",
@@ -654,7 +720,7 @@ function jaLiterals(file: string, src: string): { line: number; text: string; in
     ) {
       // テンプレート内の HTML コメントは画面に出ない
       const text = node.text.replace(/<!--[\s\S]*?-->/g, "");
-      if (JP.test(text)) {
+      if (probe.test(text)) {
         out.push({
           line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
           text: node.text.trim(),
@@ -877,6 +943,109 @@ function jaLiterals(file: string, src: string): { line: number; text: string; in
   });
   warnings.push(...bad.map((k) => `用途語が無いキー: ${k}`));
   check("キーが「画面.部品.用途」の形（用途語で終わる）", bad.length === 0, bad.slice(0, 8).join(" "));
+}
+
+// ---------------- 9: 禁止ブランド語（v1.3.1-L / BACKLOG A-9） ----------------
+// 「うごメモ / Flipnote を日本語でも英語でも全言語で使わない」は絶対規則なのに、
+// **機械の検査が1つも無かった**（852キー × 5言語を人手のレビューだけで守っていた）。
+//
+// 対象は「製品に乗るもの＋配布物」。`docs/**` は走査しない（作者決定・REQ §3）。
+// **`3DS` / `Nintendo 3DS` は禁止語ではない**（GLOSSARY 決まり1 で許容された用法）。入れないこと。
+{
+  /** 大文字小文字を区別しない。`Flipnote Studio` は `Flipnote` で拾える */
+  const BANNED = /うごメモ|うごくメモ帳|Flipnote|フリップノート/gi;
+  /**
+   * 禁止語を字面に含むが、**任天堂の製品名ではない**識別子。当てる前に取り除く。
+   *
+   * v1.3.1-L で検査を作ったとき、この4つが実際にヒットした。**どれも消してはいけない**:
+   *  - `flipnote.js` … 第三者の npm パッケージ名（`import { parse } from "flipnote.js"`）。
+   *    OSS クレジットにも載る。消すとビルドが壊れ、ライセンス表示の義務も果たせなくなる
+   *  - `import_flipnotes` / `scan_flipnote_folder` … Tauri コマンド名（Rust と共有する識別子）。
+   *    変えるとアプリの挙動が変わる
+   *  - `FlipnoteAudioTrack` … flipnote.js が公開している型名
+   *
+   * 「製品名として書いてしまった」ものだけを捕まえたいので、識別子は先に落とす。
+   * **画面に出る文言でこれらを使うことは無い**（使うとしたら OSS クレジットで、そこは正当）。
+   */
+  const SAFE_TOKENS = /flipnote\.js|import_flipnotes|scan_flipnote_folder|FlipnoteAudioTrack/gi;
+  const hit = (s: string): string[] => [...new Set((s.replace(SAFE_TOKENS, "").match(BANNED) ?? []).map((x) => x))];
+  const bad: string[] = [];
+  const cut = (s: string) => (s.length > 70 ? s.slice(0, 68) + "…" : s);
+
+  // 9-a: 全言語の辞書の値。**ディレクトリにある辞書を全部**見る（DICTS_BY_LANG は
+  //      TRANSLATIONS ＋ ja から作られるので、6言語目を足せば自動で対象になる）
+  //      例外は**キー名の完全一致で1キーだけ**。訳文の中身は言語ごとに違うので、
+  //      行スコープの `// i18n-exempt:` 方式は使えない
+  const DICT_EXEMPT_KEYS = new Set(["set.legal.trademark.msg"]);
+  for (const [lang, dict] of [["ja", ja] as const, ...DICTS_BY_LANG.entries()]) {
+    for (const [key, value] of dict) {
+      if (DICT_EXEMPT_KEYS.has(key)) continue;
+      const w = hit(value);
+      if (w.length) bad.push(`  src/i18n/${lang}.ts  ${key}  [${w.join(" ")}]  ${cut(value)}`);
+    }
+  }
+
+  // 9-b: ソース一式の**文字列リテラル**（AST）。コメントは対象外＝
+  //      `src/editor/model.ts` 等の「うごメモ準拠」「うごメモ6色」は仕様の記録なので残す。
+  //      `internal` の除外はしない（`console.*` に入っていても直すべき）
+  for (const [name, src] of SCANNED) {
+    for (const h of jaLiterals(name, src, BANNED)) {
+      const w = hit(h.text);
+      if (w.length) bad.push(`  ${name}:${h.line}  [${w.join(" ")}]  ${cut(h.text)}`);
+    }
+  }
+
+  // 9-c: index.html。コメントを除いたうえで、テキストと属性値をまとめて見る
+  {
+    const noComment = htmlSrc.replace(/<!--[\s\S]*?-->/g, "");
+    noComment.split("\n").forEach((line, i) => {
+      const w = hit(line);
+      if (w.length) bad.push(`  index.html:${i + 1}  [${w.join(" ")}]  ${cut(line.trim())}`);
+    });
+  }
+
+  // 9-d: 配布物。行単位の素直な一致でよい。
+  //      例外は**商標帰属表示の行だけ**。行番号ではなく**許可正規表現＋想定件数**で持つ
+  //      （行番号だと README を1行足すたびにずれる）
+  // 許可パターンは「**禁止語が載っている行そのもの**」に当たる必要がある。
+  // README*.txt の帰属表示は3行に折り返されていて、「商標または登録商標です」は
+  // **次の行**にある（禁止語が載るのは名称を並べた1行目）。ここを取り違えると
+  // 帰属表示を違反として弾いてしまうので、名称を並べた行の特徴で許可する。
+  const DIST: readonly (readonly [string, RegExp, number])[] = [
+    // 「「ニンテンドー3DS」「うごくメモ帳」「Flipnote Studio」その他の名称は、」
+    ["release-assets/README.txt", /その他の名称は|商標または登録商標/, 1],
+    // `"Nintendo 3DS", "Flipnote Studio" and other such names are trademarks or`
+    ["release-assets/README_en.txt", /other such names are trademarks|trademarks or registered trademarks/, 1],
+    // README.md は英語ブロックと日本語ブロックで各1行（どちらも1行に収まっている）
+    ["README.md", /trademarks or registered trademarks|商標または登録商標/, 2],
+  ];
+  for (const [file, allow, expect] of DIST) {
+    let allowed = 0;
+    read(file)
+      .split("\n")
+      .forEach((line, i) => {
+        const w = hit(line);
+        if (!w.length) return;
+        if (allow.test(line)) {
+          allowed++;
+          return;
+        }
+        bad.push(`  ${file}:${i + 1}  [${w.join(" ")}]  ${cut(line.trim())}`);
+      });
+    // 帰属表示は**消してはいけない**。許可パターンが消えたら気づけるようにする
+    if (allowed === 0) {
+      warnings.push(`検査9: ${file} の商標帰属表示が見つからない（消していないか確認）`);
+    } else if (allowed !== expect) {
+      warnings.push(`検査9: ${file} の商標帰属表示が ${allowed} 行（想定 ${expect} 行）`);
+    }
+  }
+
+  for (const b of bad) console.log(`  禁止ブランド語 ${b.trim()}`);
+  check(
+    "検査9: 禁止ブランド語（うごメモ / Flipnote 系）が製品と配布物に無い（商標帰属表示を除く）",
+    bad.length === 0,
+    `${bad.length} 件`
+  );
 }
 
 console.log(`\n--- 警告 ${warnings.length} 件（この回では直さない・報告書に載せる）---`);

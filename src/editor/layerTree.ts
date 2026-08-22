@@ -5,7 +5,7 @@
 //   2. 物理順（id列）が実際に変わったときだけ frames[].order を標準化（呼び出し側へ changed で通知）。
 //   3. 循環（フォルダを自分/子孫へ）を禁止。
 
-import { Project, LayerFolder } from "./model";
+import { Project, LayerFolder, effectiveLayerStates } from "./model";
 import { t } from "../i18n";
 
 /** 挿入先。gap=行間（parent の子として物理 phys 位置へ挿入）/ into=フォルダの末尾の子 */
@@ -57,6 +57,61 @@ export function topNodesOf(p: Project, ids: string[]): string[] {
       : folderById(p, id)?.parent;
     return !ancestorChain(p, parent).some((a) => set.has(a));
   });
+}
+
+/**
+ * M13-1: 移動ツール（**選択範囲が無いとき**）で動かすレイヤーを決める。
+ *
+ * `selectedNodeIds`（M3.8 の複数選択）が起点。以前は `selectedFolderId` → `activeLayerId` しか
+ * 見ておらず、**複数選択を一度も見ていなかった**（レイヤーを3枚選んでも1枚しか動かない症状の原因）。
+ *
+ * REQ_M13_1_move §6-1 の7段:
+ *   1. `selectedNodeIds` を集める（レイヤー / フォルダが混在しうる）
+ *   2. 空なら `activeLayerId` 1件（＝従来の挙動を残す）
+ *   3. フォルダはネスト込みで中のレイヤーへ展開
+ *   4. 重複を除く（混在選択で同じレイヤーが2回入ると移動量が2倍になる）
+ *   5. **実効可視が false のものを除く**
+ *   6. 掴んだコマにバッファが無いものを除く
+ *   7. 残り0件なら呼び出し側が `ed.layer.move.noTarget.toast` を出す
+ *
+ * ★可視の判定は必ず `effectiveLayerStates()` を使う（`ld.visible` を自分で見ない）。
+ *   フォルダの非表示が中身へ効かず、**UI と合成（render.ts）が食い違う**ため。
+ *
+ * UI 状態を引数で受け取る純関数にしてある（`m37_smoke` から展開・重複除去・非表示除外を検証するため）。
+ */
+export function moveTargetLayerIds(
+  p: Project,
+  selectedNodeIds: Iterable<string>,
+  activeLayerId: string | null | undefined,
+  frameIndex: number
+): string[] {
+  const seeds = [...selectedNodeIds];
+  // 2: 何も選んでいないときだけ activeLayerId へフォールバック
+  const roots = seeds.length > 0 ? seeds : activeLayerId ? [activeLayerId] : [];
+
+  // 3・4: フォルダを展開しつつ、挿入順を保ったまま重複を除く
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (id: string) => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push(id);
+  };
+  for (const id of roots) {
+    if (folderById(p, id)) {
+      for (const i of folderLayerIndices(p, id)) {
+        const ld = p.layerDefs[i];
+        if (ld) push(ld.id);
+      }
+    } else if (p.layerDefs.some((l) => l.id === id)) {
+      push(id);
+    }
+  }
+
+  // 5・6
+  const eff = effectiveLayerStates(p);
+  const frame = p.frames[frameIndex];
+  return out.filter((id) => eff.get(id)?.visible === true && !!frame?.layers[id]);
 }
 
 /** ドロップ先 parent（gap の親 or intoフォルダ）に対する循環チェック。true=循環で不可 */

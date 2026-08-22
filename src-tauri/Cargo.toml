@@ -1,6 +1,6 @@
 [package]
 name = "animemo"
-version = "1.3.0"
+version = "1.4.0"
 description = "メモアニマ (MemoAnima) — 3DSのお絵かきアニメ作品をPCで編集・書き出しできる非公式・非営利のファンツール"
 authors = ["arcana"]
 edition = "2021"
@@ -27,3 +27,9 @@ serde_json = "1"
 # ライブラリ取り込み時の内容ハッシュ（SHA-256）で重複を判定するのに使う
 sha2 = "0.10"
 hex = "0.4"
+
+# U-1: アプリ内アップデート。**デスクトップだけ**に入れる（モバイルはストアが更新を配るので
+# プラグイン自体が要らない・G-1 でモバイルを足すときにここを直さずに済む形にしておく）。
+# 署名（minisign）は無効化できない仕様。公開鍵は tauri.conf.json、秘密鍵はビルド環境の環境変数。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"

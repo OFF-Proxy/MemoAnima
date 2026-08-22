@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.3.0
+ MemoAnima v1.4.0
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -16,25 +16,94 @@ Windows only.
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
 
+== NEW IN v1.4.0 ==
+- There is now an installer. It does not need administrator rights (it installs
+  only inside your own user account).
+- The app can check whether a newer version is available and tell you about it.
+  It never downloads anything on its own - it asks first.
+  - It checks once, at startup. You can turn it off any time from the gear icon.
+  - Turning it off does not limit any other feature.
+  - Even with it off, "Check now" in the gear menu lets you check when you want.
+- IMPORTANT: this portable (zip) version cannot update in place. If you press
+  "Update now", the installer version is installed as a new copy. Use the
+  installer version from then on (your library, settings and autosave carry
+  over unchanged).
+
 == NEW IN v1.3.0 ==
-<Added>
+This release has two halves: the app now speaks 5 languages, and it carries
+twelve milestones of features and fixes built after v1.2.0.
+
+<Languages>
 - The app is now available in 5 languages: Japanese, English, Spanish,
   Portuguese (Brazil) and Korean. It follows your Windows display language on
   first launch, and you can change it any time from the gear icon. The change
   takes effect right away - no restart.
+- New album and layer names are created in the language you are using at the
+  time. Names that already exist are never rewritten.
+
+<Drawing>
+- Clipping: show a layer only where the layer directly below it has something
+  drawn. Toggle it with the arrow on the layer row.
+- Thicken / thin lines by one pixel. Works inside a selection only, if there
+  is one.
+- Copy and paste a layer. You can also paste the same artwork into that layer
+  on every frame - handy for logos and signatures.
+- Paper colour can now be transparent. APNG and PNG sequences keep the
+  transparency.
+- The default palette is now 6 colours (black, white, red, blue, yellow,
+  green). The old 14-colour set is still there as "Retro 14 colours".
+- Added a pattern eraser and 5 more tone patterns.
 - You can choose the drawing cursor (dot / cross / arrow), with an optional
   ring showing the area your nib would paint and an optional box around the
-  single pixel under the cursor. Choose "Cross" to get the old look back.
-- Pressing F5 or Ctrl+R while editing now asks for confirmation instead of
-  reloading straight away (only when you have unsaved changes).
+  single pixel under the cursor. Choose "Cross" to get exactly the old look
+  back.
+
+<Layout>
+- Drag the dividers between the tool column, the right panel and the timeline
+  to resize them. Double-click resets. Your layout is remembered.
+- Fold each panel away on its own, or press the focus button to fold all three
+  and leave just the canvas.
+- The preview window can be docked in the timeline so it never covers the
+  canvas (this is the new default). You can also float it or hide it.
+- While you are drawing, the surrounding overlays fade out. They come back
+  when you stop.
+- On the home screen, the arrow keys step through frames.
+
+<Exporting>
+- Scale is now x1 / x2 / x4 / x8, and the default is x4. We heard from a lot
+  of people whose animations looked mangled after posting - social sites
+  upscale x1 (320x240) themselves and it falls apart. The dimensions and a
+  note on what each scale suits are shown at all times.
+- Fixed exported colours coming out duller than they should
+  (MP4 now declares BT.709; PNG and APNG carry sRGB information). No pixel
+  values were changed.
+- Fixed GIF colour shifts and flicker. Animations with 256 colours or fewer
+  now export with the colours exactly as drawn.
+- Before a large export, MemoAnima now shows the estimated memory, the
+  estimated time and how the next scale down would look, and asks you to
+  confirm. It never refuses. While exporting, a rough time remaining is shown.
 
 <Fixed>
+- Rotation during a transform reached inside the frame, so on a small
+  selection you could not move it at all - grabbing the middle rotated it.
+  Rotation is now only within 12 pixels outside the frame.
 - The hand and transform cursors never actually appeared over the canvas.
   They do now (this had been broken for a long time).
+- Pressing F5 or Ctrl+R while editing now asks for confirmation instead of
+  reloading straight away (only when you have unsaved changes).
 - "Save as" used to preselect the album you last saved into. It now
   preselects the album the animation itself lives in.
+- The selection was cleared after erasing its contents. It stays now.
+- The timeline heading wrapped to two lines and ate vertical space.
 - The image-import palette named after another product has been renamed
   "Classic 6 colours".
+
+<Worth knowing>
+- If you open an animation that uses clipping in an older version (v1.2.0 or
+  earlier), the clipped parts will spill over. Nothing is damaged, and it
+  looks right again in v1.3.0.
+- x4 is the scale we recommend. GIF at x8 runs to tens of megabytes, so for
+  social media use x4 or MP4.
 
 Your animation files have not changed format. Everything you made before
 opens as it is, and your settings and shortcuts carry over.
@@ -52,6 +121,12 @@ opens as it is, and your settings and shortcuts carry over.
 3. Follow the first-run guide: choose a library folder -> import -> edit -> export
 Note: layers are shared across every frame (the standard way animation tools
 work). Adding a frame gives you a blank frame with the same layer structure.
+Note: there is also an installer (MemoAnima_1.4.0_x64-setup.exe). Just
+double-click it; no administrator rights are needed. IMPORTANT: this portable
+(zip) version cannot update in place - accepting an update installs the
+installer version instead (see ABOUT NETWORK ACCESS below). Moving from the
+portable version to the installer keeps your library, settings and autosave
+(they live in the same place either way).
 
 == IF WINDOWS SMARTSCREEN WARNS YOU ==
 This is an unsigned app distributed by an individual, so the first launch may
@@ -60,15 +135,43 @@ detection - it means "the publisher is not verified". To run it:
   click "More info" -> click "Run anyway"
 (If you would rather be careful, scan the file with your antivirus first.)
 
+Note: this warning can appear again each time you update. Unsigned software is
+treated as "a file Windows has not seen before" every time the file changes.
+The steps are always the same ("More info" -> "Run anyway").
+
 == ABOUT NETWORK ACCESS ==
-This application never communicates over the internet. There is no update
-check and nothing is sent anywhere. The video encoder (ffmpeg.wasm) is bundled,
-so everything works offline.
+Drawing, editing and exporting are done entirely on your own device. Every
+feature works with no internet connection. The video encoder (ffmpeg.wasm) is
+bundled, so everything works offline.
+
+In this version there is exactly one thing the app does on its own: it checks
+whether a newer version has been released.
+- It checks once, at startup. It only reads a small file at a fixed address that
+  says which version is current; it sends nothing about you. The comparison
+  happens inside the app on your machine.
+- You can turn it off any time from the gear icon. Turning it off does not
+  limit any other feature.
+- Even when an update is found, nothing is downloaded until you say so.
+- If it cannot reach the network, nothing is shown and everything keeps working.
+- IMPORTANT: this portable (zip) version cannot update in place. If you press
+  "Update now", the installer version is installed as a new copy and this zip
+  stays at the old version. Use the installer version from then on (your
+  library, settings and autosave carry over; you can delete the zip folder
+  afterwards).
+
+Apart from animations you choose to publish, your animation data is never sent
+anywhere, and the author never collects a record of which features you use.
+This will not change in any future version, on any platform.
 
 == WHERE YOUR DATA LIVES ==
 - Your animation library: the folder you chose in the first-run guide
 - Settings and autosave: %APPDATA%\com.arcana.memoanima
-To uninstall, delete the folder you unzipped and the folder above.
+- Installer version, program files: %LOCALAPPDATA%\MemoAnima
+
+Uninstalling never deletes your animations, your library or your settings.
+- Portable version: delete the folder you unzipped.
+- Installer version: remove it from "Apps & features" in Windows.
+Either way, if you want everything gone, delete the folders above yourself.
 
 == DISCLAIMER ==
 You use this software at your own risk. Your animations matter - please keep
@@ -101,10 +204,10 @@ holder, and it is not licensed, sponsored, endorsed or otherwise approved by
 them.
 
 This software is a tool for working with animation data that you created
-yourself. It cannot run game software. It does not break any encryption. It has
-no feature for obtaining or distributing other people's work over the internet
-or anywhere else. It only reads files that are already on your PC - the
-animation data the console saves as ordinary files, read as they are.
+yourself. It cannot run game software. It does not break any encryption. 3DS
+animation files (.kwz / .ppm) are only read from your own device - there is no
+feature for obtaining or distributing them over the internet. It reads the
+animation data the console saves as ordinary files, as they are.
 
 This software contains no programs, images, sounds, fonts, data or encryption
 keys owned by Nintendo Co., Ltd.

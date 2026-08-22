@@ -543,6 +543,12 @@ pub fn run() {
             if let Ok(dir) = app.path().app_config_dir() {
                 migrate_old_config_dir(&dir);
             }
+            // U-1: アプリ内アップデート（デスクトップのみ）。**確認そのものはフロント側が
+            // 明示的に呼んだときだけ走る**（ここで登録するのはコマンドの口だけで、通信は起きない）。
+            // ⚙ の「起動時に更新を確認する」がオフなら、フロントは check() を呼ばない＝通信ゼロ。
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -60,7 +60,15 @@ import { createSlider, SliderHandle } from "../ui/slider";
 import { t } from "../i18n";
 // M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
 import { folderBaseName, layerBaseName, untitledTitle } from "../i18n/defaults";
-import { moveNodes, wouldCycle, topNodesOf, DropTarget } from "./layerTree";
+import {
+  moveNodes,
+  wouldCycle,
+  topNodesOf,
+  ancestorChain,
+  // M13-1: 同名のメソッドがあるので別名で入れる（`this.` の有無で意味が変わると読み違える）
+  moveTargetLayerIds as computeMoveTargetLayerIds,
+  DropTarget,
+} from "./layerTree";
 // M11-10: ショートカット（キー → コマンドID → 実行）。定義とプリセットは src/keymap.ts に集約
 import {
   COMMANDS,
@@ -2774,7 +2782,7 @@ export class Editor {
       return;
     }
     d.ghost?.classList.remove("invalid");
-    this.showRowIndicator(hit.rowIdx, hit.zone);
+    this.showRowIndicator(hit.rowIdx, hit.zone, hit.t); // M13-1: 入る先のインデントで線を引く
     // 折りたたみフォルダに1秒ホバーで自動展開（into ゾーンのみ）
     const hoverId =
       hit.zone === "into" && this.folderById(hit.t.type === "into" ? hit.t.folder : undefined)?.collapsed
@@ -2837,19 +2845,28 @@ export class Editor {
     const t: DropTarget =
       zone === "into"
         ? { type: "into", folder: this.displayRows[rowIdx].id }
-        : this.gapTargetAt(zone === "above" ? rowIdx : rowIdx + 1);
+        : this.gapTargetAt(zone === "above" ? rowIdx : rowIdx + 1, x); // M13-1: X で内／外を出し分ける
     const parent = t.type === "into" ? t.folder : t.parent;
     if (wouldCycle(this.project, ids, parent)) return null; // 循環禁止
     return { t, zone, rowIdx };
   }
 
-  private showRowIndicator(rowIdx: number, zone: "above" | "below" | "into") {
+  private showRowIndicator(
+    rowIdx: number,
+    zone: "above" | "below" | "into",
+    target?: DropTarget // M13-1: 入る先が分かると挿入線をそのインデントで描ける
+  ) {
     this.clearDndUi();
     if (!this.insLineEl) return;
     if (zone === "into") {
       this.displayRows[rowIdx]?.el.classList.add("droptarget");
       return;
     }
+    // M13-1: 挿入線を**入る先のインデント**で描く。
+    // 同じ隙間でも X しだいで「フォルダの中」と「外」に分かれるので、
+    // これが無いとどちらに入るのか利用者には分からない（受け入れ基準）。
+    const insParent = target && target.type === "gap" ? target.parent : undefined;
+    this.insLineEl.style.marginLeft = `${ancestorChain(this.project, insParent).length * 14}px`;
     // 挿入線: gap の位置（末尾は最後の行の下）
     const gi = zone === "above" ? rowIdx : rowIdx + 1;
     let top: number;
@@ -3119,13 +3136,52 @@ export class Editor {
     this.rebuildLayers();
   }
 
-  /** 表示リストの隙間 gi（rows[gi] の上）を DropTarget(gap) に解決する */
-  private gapTargetAt(gi: number): DropTarget {
+  /**
+   * M13-1: 隙間を「フォルダの内側」と見なす X のしきい値（画面座標）。
+   *
+   *   しきい値 = レイヤーパネルの左端 + (候補B の深さ + 1) * 14 - 7
+   *            （＝候補B の子が描かれるインデントの、半段ぶん手前）
+   *
+   * ★この数値は**仮**です（REQ_M13_1_move §8 未決1）。狭すぎると外に出せず、広すぎると中に入れない。
+   *   作者が実機（ペンタブ・液タブ）で触って調整するので、**式はこの1箇所にしか書いていません**。
+   *   調整するときはここだけを変えてください。
+   */
+  private gapInsideThresholdX(hostLeft: number, insideFolderId: string): number {
+    const INDENT_PX = 14; // 行の marginLeft と同じ単位
+    const BIAS_PX = 7; // インデントの半分ぶん手前で「内側」に倒す
+    // ancestorChain(id) は id 自身を含むので、その長さ ＝ その子が描かれる深さ ＝ (深さ + 1)
+    const childDepth = ancestorChain(this.project, insideFolderId).length;
+    return hostLeft + childDepth * INDENT_PX - BIAS_PX;
+  }
+
+  /**
+   * 表示リストの隙間 gi（rows[gi] の上）を DropTarget(gap) に解決する。
+   * M13-1: `x`（ドラッグ中の画面 X）を渡すと、**フォルダの内／外**を出し分ける。
+   * 省略すると従来どおり「下の行の親」になる。
+   */
+  private gapTargetAt(gi: number, x?: number): DropTarget {
     const rows = this.displayRows;
-    // parent = 隙間の直下にある行の親（隙間に挿すとその行と同じ階層になる）
+    // 候補A（外）= 隙間の直下にある行の親（隙間に挿すとその行と同じ階層になる）＝従来の挙動
     let parent: string | undefined = undefined;
     if (gi < rows.length) parent = rows[gi].parent;
+    // 候補B（内）= 隙間の直上の行が属するフォルダ。
+    // 上の行が**フォルダ行**（折りたたみ中・空を含む）なら、そのフォルダ自身。
+    // これが無いと「フォルダの最後の子の下の隙間」が必ず外になる（M13-1 の症状）。
+    const above = gi > 0 ? rows[gi - 1] : null;
+    const inside = above ? (above.kind === "folder" ? above.id : above.parent) : undefined;
+    // A と B が同じなら X を見ない（従来どおり）。違うときだけ X で選ぶ。
+    // depth の比較は保険: 表示順の都合で B が A より浅くなることは無いはずだが、
+    // もしそうなったときに内外が逆転しないようにする
+    if (x !== undefined && inside !== undefined && inside !== parent) {
+      const host = document.querySelector("#ed-layers") as HTMLElement | null;
+      const deeper =
+        ancestorChain(this.project, inside).length > ancestorChain(this.project, parent).length;
+      if (host && deeper && x >= this.gapInsideThresholdX(host.getBoundingClientRect().left, inside))
+        parent = inside;
+    }
     // 物理位置 = 隙間より下（表示）で最初に物理アンカーを持つ行の直上
+    // ★M13-1: ここは**触らない**（不変条件2「物理順が変わったときだけ order を標準化」に効く）。
+    //   候補B を選んだときも、隙間の下の行の直上＝そのフォルダの最下位の子の下、で正しい
     let phys = 0;
     for (let i = gi; i < rows.length; i++) {
       const r = rows[i];
@@ -6991,21 +7047,26 @@ export class Editor {
     dy: number;
   } | null = null;
 
-  /** いま動かす対象のレイヤー id（フォルダ選択中はフォルダ内の全レイヤー） */
+  /**
+   * M13-1: いま動かす対象のレイヤー id。
+   * 判定そのものは `layerTree.ts` の純関数（`m37_smoke` が展開・重複除去・非表示除外を検証する）。
+   * ここは UI 状態を渡すだけの薄い橋。**対象は掴んだ時点で確定**する
+   *（ドラッグ中に選択を変えても対象は変わらない＝表示コマを変えても掴んだコマだけ書き換える既存の流儀と揃える）。
+   */
   private moveTargetLayerIds(): string[] {
-    if (this.selectedFolderId) {
-      const ids = this.folderLayerIndices(this.selectedFolderId)
-        .map((i: number) => this.project.layerDefs[i]?.id)
-        .filter((v): v is string => !!v);
-      if (ids.length > 0) return ids;
-    }
-    return this.activeLayerId ? [this.activeLayerId] : [];
+    return computeMoveTargetLayerIds(
+      this.project,
+      this.selectedNodeIds,
+      this.activeLayerId,
+      this.frameIndex
+    );
   }
 
   private beginLayerMove(pt: { x: number; y: number }) {
     const f = this.project.frames[this.frameIndex];
     if (!f) return;
-    const ids = this.moveTargetLayerIds().filter((id) => !!f.layers[id]);
+    // 純関数側で「そのコマにバッファが無いもの」まで落としているので、ここでの再フィルタは不要
+    const ids = this.moveTargetLayerIds();
     if (ids.length === 0) {
       this.cb.toast(t("ed.layer.move.noTarget.toast"));
       return;

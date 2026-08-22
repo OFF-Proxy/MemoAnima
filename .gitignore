@@ -57,3 +57,8 @@ aes_keys*.txt
 # リポジトリ管理下の .gitignore に明示する。
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+
+# U-1: 更新の署名鍵（絶対にコミットしない）
+*.key
+*.key.pub
+.tauri/

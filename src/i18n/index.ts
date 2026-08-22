@@ -12,9 +12,11 @@ import en from "./en";
 import es from "./es";
 import ptBR from "./pt-BR";
 import ko from "./ko";
+import zhHans from "./zh-Hans";
 
-/** 対応言語（master §0。この5つで固定） */
-export const LANGS = ["ja", "en", "es", "pt-BR", "ko"] as const;
+/** 対応言語（master §0 の5言語 ＋ L-2 で `zh-Hans`）。
+ *  **言語を1つ足す作業は、ここと `DICTS` と `detectLang()` の3箇所**（`sanitizeLang` は `LANGS` を見る）。 */
+export const LANGS = ["ja", "en", "es", "pt-BR", "ko", "zh-Hans"] as const;
 export type Lang = (typeof LANGS)[number];
 
 /** 辞書の型。`ja` のキー集合が正 */
@@ -22,19 +24,24 @@ export type Dict = Record<keyof typeof ja, string>;
 export type DictKey = keyof Dict;
 
 /** M12-3: 5言語すべてが全キー埋まった（各 `Record<DictKey, string>`＝訳し漏れはコンパイルエラー）。
- *  `LANGS` / `detectLang()` / `sanitizeLang()` は最初から5言語なので、ここへ足すだけで届く。 */
-const DICTS: Partial<Record<Lang, Partial<Dict>>> = { ja, en, es, "pt-BR": ptBR, ko };
+ *  `LANGS` / `detectLang()` / `sanitizeLang()` は最初から5言語なので、ここへ足すだけで届く。
+ *
+ *  L-2: `zh-Hans` は**部分辞書**（`Partial<Dict>`）。翻訳が届いた行から順に載る。
+ *  未訳キーは `lookup()` が **en → ja** の順に落とすので、1キームも無くても画面は英語で成立する。
+ *  この型（`Partial<Record<Lang, Partial<Dict>>>`）は M12-1a から部分辞書を想定している＝**変えない**。 */
+const DICTS: Partial<Record<Lang, Partial<Dict>>> = { ja, en, es, "pt-BR": ptBR, ko, "zh-Hans": zhHans };
 
 let current: Lang = "ja";
 
-/** settings.lang の正規化（`sanitizeExportScale` 等と同じ流儀）。不正値・未知の値は undefined */
+/** settings.lang の正規化（`sanitizeExportScale` 等と同じ流儀）。不正値・`LANGS` に無い値は undefined。
+ *  ＝**設定は追加のみ**。既存の利用者の `settings.lang` は `LANGS` に載ったままなので影響を受けない */
 export function sanitizeLang(v: unknown): Lang | undefined {
   return (LANGS as readonly string[]).includes(v as string) ? (v as Lang) : undefined;
 }
 
 /**
  * M12-1a: 表示言語の判定（master §3-g）。
- *   settings.lang（正規化して5言語のいずれか） → navigator.language → **既定 en**
+ *   settings.lang（正規化して `LANGS` のいずれか） → navigator.language → **既定 en**
  * 追加の依存（tauri-plugin-os）は入れない。WebView2 の navigator.language は OS の表示言語を反映する。
  */
 export function detectLang(saved?: unknown): Lang {
@@ -45,6 +52,9 @@ export function detectLang(saved?: unknown): Lang {
   if (nav.startsWith("ko")) return "ko";
   if (nav.startsWith("es")) return "es";
   if (nav.startsWith("pt")) return "pt-BR"; // ポルトガル語はブラジル向けを正とする
+  // L-2: 中国語は**簡体字だけ**。繁体字圏（zh-Hant / zh-TW / zh-HK / zh-MO）は簡体字へ落とさず
+  // 英語のままにする（繁体字は別に足す予定。簡体字を当てるほうが読み手に不親切なため）
+  if (nav.startsWith("zh") && !/^zh-(hant|tw|hk|mo)/.test(nav)) return "zh-Hans";
   return "en"; // 判定できないユーザーの多数は海外側なので既定は英語
 }
 
@@ -92,7 +102,8 @@ export function t(key: string, vars?: Record<string, unknown>): string {
   // 複数形: { count } があり `キー_other` が在るときだけ解決する（master §3-d・乱用しない）
   if (vars && typeof vars.count === "number" && lookup(`${key}_other`) !== undefined) {
     // M12-1b: 以前は `current === "pt-BR" ? "pt-BR" : current` と書いていたが両辺とも同じ＝無意味だった。
-    // Lang の値（"ja" / "en" / "es" / "pt-BR" / "ko"）はそのまま BCP-47 として通る
+    // Lang の値（"ja" / "en" / "es" / "pt-BR" / "ko" / "zh-Hans"）はそのまま BCP-47 として通る
+    //（"zh-Hans" は言語＋文字体系の正しい形。地域の "zh-CN" ではない）
     const cat = new Intl.PluralRules(current).select(vars.count);
     const v = lookup(`${key}_${cat}`) ?? lookup(`${key}_other`);
     if (v !== undefined) return fill(v, vars);

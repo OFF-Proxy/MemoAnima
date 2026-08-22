@@ -4,10 +4,9 @@
 
 A Windows tool for importing the flipbook animations you made on a Nintendo 3DS (`.kwz` / `.ppm`), editing them with a pen tablet, and exporting to **MP4 / GIF / APNG / a PNG sequence**. Everything runs on your PC.
 
-> ⚠️ This is an unofficial, non-commercial fan tool made by one person. It has no connection to Nintendo Co., Ltd. or its affiliates, and is not licensed, sponsored or endorsed by them.
+> ⚠️ This is an unofficial, non-commercial fan tool made by one person. It has no connection to Nintendo Co., Ltd. or its affiliates, and is not licensed, sponsored, endorsed or otherwise approved by them.
 >
-> - It works with **animation data you created yourself**. **It cannot run game software, and it does not break any encryption.** It has no feature for obtaining or distributing other people's work over the internet or anywhere else.
-> - It only reads files that are already on your PC — the animation data the console saves as ordinary files, read as they are.
+> - It works with **animation data you created yourself**. **It cannot run game software, and it does not break any encryption.** 3DS animation files (`.kwz` / `.ppm`) are only read from your own device — there is no feature for obtaining or distributing them over the internet.
 > - It contains **no** programs, images, sounds, fonts, data or keys owned by Nintendo Co., Ltd.
 > - "Nintendo 3DS", "Flipnote Studio" and related names are trademarks or registered trademarks of Nintendo Co., Ltd. They are mentioned only to explain which file formats and environments are supported.
 
@@ -27,9 +26,10 @@ A Windows tool for importing the flipbook animations you made on a Nintendo 3DS 
 - **Wobble frames**: generate a few slightly shifted copies of one frame and insert them right after it (count, strength and type are selectable). The same input always gives the same result.
 - **Cursor**: choose dot, cross or arrow, with an optional ring showing the area your nib would paint and an optional box around the single pixel under the cursor.
 - **Export**: MP4 (with audio) / GIF / APNG / a zipped PNG sequence. Integer upscaling ×1 / 2 / 4 / 8 (nearest, default ×4). A single frame can be saved as PNG / JPEG (the same ×1 / 2 / 4 / 8; PNG can keep the background transparent).
-- **Fully offline**: zero network access at runtime (ffmpeg.wasm is bundled).
+- **Works offline**: drawing, editing and exporting need no network (ffmpeg.wasm is bundled). The one thing the app does on its own is check whether a newer version exists — once, at startup, by reading a small file at a fixed address; nothing about you is sent, and the comparison happens on your machine. You can turn that off in the gear menu, and turning it off limits nothing else. Nothing is ever downloaded until you say so, and if the network is unreachable the app stays silent and keeps working.
+- **In-app update**: when a newer version is found, the app offers to install it. Windows closes the app while the installer runs, so it asks first.
 
-Distribution is a portable zip for BOOTH (`MemoAnima.exe` + `README.txt` + `README_en.txt` + `LICENSES.txt`).
+Distribution is an NSIS installer (per-user, no administrator rights) plus a portable zip for BOOTH (`MemoAnima.exe` + `README.txt` + `README_en.txt` + `LICENSES.txt`). **The portable zip cannot update itself from inside the app** — settings, library and autosave live in `%APPDATA%\com.arcana.memoanima` either way, so moving from the zip to the installer keeps everything.
 
 ## Built with
 
@@ -89,10 +89,9 @@ npx tsx scripts/make_release.ts   # dist-release/MemoAnima_v<version>_win64.zip
 
 ニンテンドー3DSで作ったお絵かきアニメ作品（`.kwz` / `.ppm`）をPCに取り込み、ペンタブ・液タブで編集して **MP4 / GIF / APNG / PNG連番** に書き出せる Windows 向けツール（PC完結型）。
 
-> ⚠️ 本ソフトは個人制作の非公式・非営利ファンツールです。任天堂株式会社およびその関連会社とは一切関係がなく、許諾・後援・提携を受けたものではありません。
+> ⚠️ 本ソフトは個人制作の非公式・非営利ファンツールです。任天堂株式会社およびその関連会社とは一切関係がなく、許諾・後援・提携・推奨を受けたものではありません。
 >
-> - 扱うのは **利用者ご自身が作成した作品データ**です。**ゲームソフトを動作させる機能はありません。暗号の解除も行いません。** 第三者の作品をインターネット等から取得・配信する機能もありません。
-> - 読み込めるのは、お手元のPCにあるファイルだけです。本体が通常のファイルとして保存している作品データを、そのまま読み込みます。
+> - 扱うのは **利用者ご自身が作成した作品データ**です。**ゲームソフトを動作させる機能はありません。暗号の解除も行いません。** 3DS の作品ファイル（`.kwz` / `.ppm`）は、お手元の端末にあるものを読み込むだけで、インターネット経由で取得・配信する機能はありません。
 > - 任天堂株式会社が権利を有するプログラム・画像・音声・フォント・データ・鍵等は **一切同梱していません**。
 > - 「ニンテンドー3DS」「うごくメモ帳」「Flipnote Studio」は任天堂株式会社の商標または登録商標です。対応形式・動作環境の説明目的でのみ言及しています。
 
@@ -112,9 +111,10 @@ npx tsx scripts/make_release.ts   # dist-release/MemoAnima_v<version>_win64.zip
 - **歪み**: 液状化（押す）／魚眼（ふくらませ・へこませ）／四隅をつまんでの自由変形（射影変換）。範囲選択の中だけにも効く。
 - **ゆらゆら差分**: 1コマから少し揺れた差分を数枚生成して直後に挿入（枚数・強さ・種類を選択）。同じ入力なら同じ結果。
 - **書き出し**: MP4（音声付き）／GIF／APNG／PNG連番zip。整数倍アップスケール ×1／2／4／8（nearest・既定 ×4）。1コマだけを PNG / JPEG で保存（同じく ×1／2／4／8・PNG は背景の透過を選択可）。
-- **オフライン完結**: 実行時のネットワーク通信はゼロ（ffmpeg.wasm も同梱）。
+- **オフラインで動く**: 描画・編集・書き出しにネットワークは要りません（ffmpeg.wasm も同梱）。アプリが自分から通信するのは「新しい版が出ているかの確認」だけで、起動時に一度、決まったアドレスから「最新版はどれか」を書いた小さなファイルを読むだけです（あなたの情報は送りません。新旧の判断は手元で行います）。⚙ からいつでもオフにでき、オフにしても他の機能は一切制限されません。見つかっても押していただくまでダウンロードはせず、通信できないときは何も出さずにそのまま使えます。
+- **アプリ内アップデート**: 新しい版が見つかると、その場で更新できます。更新中は Windows がアプリを一度閉じるので、必ず先に確認します。
 
-配布形態は BOOTH 向けのポータブル zip（`MemoAnima.exe` ＋ `README.txt` ＋ `README_en.txt` ＋ `LICENSES.txt`）。
+配布形態は NSIS インストーラ（perUser・管理者権限なし）と、BOOTH 向けのポータブル zip（`MemoAnima.exe` ＋ `README.txt` ＋ `README_en.txt` ＋ `LICENSES.txt`）。**ポータブル zip はアプリからの更新ができません**。設定・ライブラリ・オートセーブはどちらも `%APPDATA%\com.arcana.memoanima` にあるので、zip からインストーラ版へ移ってもそのまま引き継がれます。
 
 ## 技術構成
 

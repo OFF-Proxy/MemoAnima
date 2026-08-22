@@ -6,6 +6,7 @@ import {
   ensureColor,
   effectiveLayerStates,
   sanitizeFolders,
+  allocIndexBuf,
   PIXELS,
 } from "../src/editor/model";
 import {
@@ -14,6 +15,7 @@ import {
   topNodesOf,
   checkContiguity,
   folderLayerIndices,
+  moveTargetLayerIds,
 } from "../src/editor/layerTree";
 import { compositeFrame } from "../src/editor/render";
 import { projectToBytes, projectFromBytes } from "../src/editor/serialize";
@@ -314,6 +316,142 @@ async function gzipJson(doc: unknown): Promise<Uint8Array> {
         p.layerDefs.find((l) => l.id === l1)!.parent === "FA" &&
         checkContiguity(p)
     );
+  }
+}
+
+// ---------------- M13-1: フォルダ末尾への差し込み（gap の parent が候補B のとき） ----------------
+// 同じ隙間でも、ドラッグ中の X で「フォルダの内／外」に分かれる。X の判定は UI 側（editor.ts）だが、
+// **解決後の DropTarget をデータ層が正しく処理できるか**（＝連続ブロックが崩れないか）をここで固定する。
+// phys は従来の計算のまま（不変条件2）。変わるのは parent だけ、という前提の検証でもある。
+{
+  // 物理配置（index 0 が表示上いちばん下）: [l1(ルート), l2(FA), l3(FA)]
+  const build = () => {
+    const p = newProject("m13tail");
+    const [l1, l2, l3] = p.layerDefs.map((l) => l.id);
+    p.folders = [{ id: "FA", name: "A", visible: true, opacity: 1, collapsed: false }];
+    p.layerDefs[1].parent = "FA";
+    p.layerDefs[2].parent = "FA";
+    return { p, l1, l2, l3 };
+  };
+  // 隙間は「FA の最下位の子（index 1）」と「l1（index 0）」の間 → phys = 0 + 1 = 1
+  const PHYS_AT_FA_TAIL = 1;
+
+  // (a) 候補B を選んだ場合＝フォルダの末尾の子として入る
+  {
+    const { p, l1 } = build();
+    const r = moveNodes(p, [l1], { type: "gap", parent: "FA", phys: PHYS_AT_FA_TAIL });
+    const inFA = folderLayerIndices(p, "FA");
+    check(
+      "M13-1 gap→フォルダ末尾: parent=FA・連続性",
+      r.ok && p.layerDefs.find((l) => l.id === l1)!.parent === "FA" && checkContiguity(p)
+    );
+    check("M13-1 gap→フォルダ末尾: FA の子が3枚", inFA.length === 3);
+    check(
+      "M13-1 gap→フォルダ末尾: 末尾の子＝物理最小（表示上いちばん下）",
+      p.layerDefs[inFA[0]].id === l1
+    );
+  }
+
+  // (b) 候補A を選んだ場合＝従来どおりフォルダの外（同じ phys でも parent だけが違う）
+  {
+    const { p, l1, l2 } = build();
+    const r = moveNodes(p, [l2], { type: "gap", parent: undefined, phys: PHYS_AT_FA_TAIL });
+    check(
+      "M13-1 gap→フォルダ外: parent=ルート・連続性",
+      r.ok && p.layerDefs.find((l) => l.id === l2)!.parent === undefined && checkContiguity(p)
+    );
+    check("M13-1 gap→フォルダ外: FA の子が1枚に減る", folderLayerIndices(p, "FA").length === 1);
+    void l1;
+  }
+
+  // (c) 折りたたみ中のフォルダでも同じ（collapsed はデータ層の移動に影響しない）
+  {
+    const { p, l1 } = build();
+    p.folders[0].collapsed = true;
+    const r = moveNodes(p, [l1], { type: "gap", parent: "FA", phys: PHYS_AT_FA_TAIL });
+    check(
+      "M13-1 折りたたみ中でも末尾差し込みが成立",
+      r.ok && p.layerDefs.find((l) => l.id === l1)!.parent === "FA" && checkContiguity(p)
+    );
+  }
+
+  // (d) 循環禁止は候補を確定させたあとも生きている
+  {
+    const { p } = build();
+    p.folders.push({ id: "FB", name: "B", visible: true, opacity: 1, collapsed: false });
+    p.folders[1].parent = "FA";
+    check("M13-1 循環禁止が生きている", wouldCycle(p, ["FA"], "FB"));
+  }
+}
+
+// ---------------- M13-1: 移動対象の決め方（純関数）----------------
+// 展開（ネスト込み）・重複除去・非表示除外の3点を機械で確かめる。
+// ここが UI 状態に触らない純関数になっているので、実機を起動せずに検証できる。
+{
+  //   ルート: l1
+  //   FA: l2, l3, FB
+  //     FB: l4
+  const build = () => {
+    const p = newProject("m13move");
+    const [l1, l2, l3] = p.layerDefs.map((l) => l.id);
+    p.folders = [
+      { id: "FA", name: "A", visible: true, opacity: 1, collapsed: false },
+      { id: "FB", name: "B", visible: true, opacity: 1, collapsed: false, parent: "FA" },
+    ];
+    p.layerDefs[1].parent = "FA";
+    p.layerDefs[2].parent = "FA";
+    // FB の中に1枚足す（ネストの展開を見るため）
+    const l4 = `L${p.nextLayerId++}`;
+    p.layerDefs.push({ id: l4, name: "D", visible: true, opacity: 1, parent: "FB" });
+    p.frames[0].layers[l4] = allocIndexBuf(p, PIXELS);
+    return { p, l1, l2, l3, l4 };
+  };
+
+  {
+    const { p, l1 } = build();
+    check("M13-1 対象: 未選択なら activeLayerId 1枚（従来の挙動）",
+      JSON.stringify(moveTargetLayerIds(p, [], l1, 0)) === JSON.stringify([l1]));
+  }
+  {
+    const { p, l2, l3, l4 } = build();
+    const got = moveTargetLayerIds(p, ["FA"], null, 0).sort();
+    check("M13-1 対象: フォルダはネスト込みで展開（孫まで）",
+      JSON.stringify(got) === JSON.stringify([l2, l3, l4].sort()));
+  }
+  {
+    const { p, l2, l3, l4 } = build();
+    // 混在選択: FA とその中の l2 を同時に選ぶ → l2 が2回入ってはいけない（移動量が2倍になる）
+    const got = moveTargetLayerIds(p, ["FA", l2], null, 0);
+    check("M13-1 対象: 混在選択でも重複しない",
+      got.length === new Set(got).size && got.length === 3 &&
+        JSON.stringify([...got].sort()) === JSON.stringify([l2, l3, l4].sort()));
+  }
+  {
+    const { p, l2, l3, l4 } = build();
+    p.layerDefs.find((l) => l.id === l3)!.visible = false;
+    const got = moveTargetLayerIds(p, ["FA"], null, 0).sort();
+    check("M13-1 対象: 非表示のレイヤーだけ除かれる",
+      JSON.stringify(got) === JSON.stringify([l2, l4].sort()));
+  }
+  {
+    const { p } = build();
+    p.folders[0].visible = false; // FA ごと非表示 → 中身は実効可視 false
+    check("M13-1 対象: フォルダごと非表示なら0件（呼び出し側がトースト）",
+      moveTargetLayerIds(p, ["FA"], null, 0).length === 0);
+  }
+  {
+    const { p, l2, l3, l4 } = build();
+    p.folders[1].visible = false; // FB だけ非表示 → 孫の l4 が落ちる
+    const got = moveTargetLayerIds(p, ["FA"], null, 0).sort();
+    check("M13-1 対象: ネストしたフォルダの非表示も効く（effectiveLayerStates 経由）",
+      JSON.stringify(got) === JSON.stringify([l2, l3].sort()) && !got.includes(l4));
+  }
+  {
+    const { p, l1, l2 } = build();
+    delete p.frames[0].layers[l2]; // そのコマにバッファが無い
+    const got = moveTargetLayerIds(p, [l1, l2], null, 0);
+    check("M13-1 対象: そのコマにバッファが無いものを除く",
+      JSON.stringify(got) === JSON.stringify([l1]));
   }
 }
 

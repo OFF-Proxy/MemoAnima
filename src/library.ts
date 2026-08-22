@@ -316,6 +316,11 @@ export class LibraryScreen {
       };
       sortSel.parentElement?.insertBefore(btn, sortSel);
     }
+    // A-14-1: ツールチップは**毎回入れ直す**。上のブロックは「1個だけ作る」ためのもので、
+    // 言語を切り替えたときは既にボタンがあるので中へ入らず、**title だけ古い言語のまま残っていた**
+    // （L-2 で6言語すべてで再現。ja 起動→zh で日本語のまま／zh 起動→ja で英語のまま）
+    const reloadBtn = document.querySelector("#lib-reload") as HTMLElement | null;
+    if (reloadBtn) reloadBtn.title = t("lib.reload.title");
   }
 
   private bindAlbumOps() {

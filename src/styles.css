@@ -1644,6 +1644,13 @@ button:disabled {
   gap: 5px;
 }
 
+/* L-2: 表示言語だけは横に並べきれない（6言語目で1行に入らない・BACKLOG §E「余り 28px」）。
+   `.oni .lv` の `flex: 1` は flex-basis 0 だが、flex 行の折り返しは
+   **min-width: auto（＝文字の min-content 幅）で決まる**ので、これだけで2行に折り返る。 */
+#set-lang {
+  flex-wrap: wrap;
+}
+
 .oni .lv {
   flex: 1;
   height: 30px;

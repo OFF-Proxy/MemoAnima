@@ -4,6 +4,10 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+// U-1: 更新履歴を既定ブラウザで開く（tauri-plugin-opener は M0 から導入済み・権限もある）
+import { openUrl } from "@tauri-apps/plugin-opener";
+// U-1: 型だけ。**実体は使うときに遅延 import する**（`runUpdateCheck`）
+import type { Update } from "@tauri-apps/plugin-updater";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { runGuide, GuideStep } from "./guide";
@@ -121,6 +125,14 @@ type Settings = {
   /** M12-C: 編集中のカーソル。**追加のみ**・不正値は既定へ（`sanitizeCursor`）。
    *  `style: "cross"` にすると v1.2.0 と見分けがつかない状態に戻せる（既存ユーザーの逃げ場） */
   cursor?: { style?: "dot" | "cross" | "arrow"; ring?: boolean; cell?: boolean };
+  /** U-1: 起動時に更新を確認するか。**未設定＝オン**（`!== false` で見る）＝
+   *  v1.3.0 から上がってきた人も既定オン。**オフでも他の機能は一切制限しない**
+   *  （`COLLAB_PROTOCOL` §1-b 条件1 の義務）。追加のみ・`PROJECT_VERSION` には無関係 */
+  updateCheck?: boolean;
+  /** U-1: 「起動時に更新を確認します（⚙ でオフにできます）」の初回案内を出したか。
+   *  `guideDone` とは別にしている——既存利用者は `guideDone: true` を持っているので、
+   *  それを流用すると**更新確認のことを一度も知らされないまま**になる */
+  updateNoticeShown?: boolean;
 };
 
 /** M7-2b: クレジット（後で差し替えやすいよう**この定数1箇所**に集約）。
@@ -1834,6 +1846,206 @@ async function applyDisplaySettings(d?: DisplaySettings, notify = false): Promis
   }
 }
 
+// ---------------- U-1: アプリ内アップデート ----------------
+//
+// `docs/COLLAB_PROTOCOL.md` §1-b（v2）は「通信は利用者が明示的に操作したときだけ」を不変条件にし、
+// **唯一の例外として「更新の有無の確認」だけ**を起動時の自動通信として認めている。
+// その代わりに義務が付いている: **⚙ でオフにでき、オフにしても他の機能を一切制限しない**こと。
+// ここの実装はその義務側を守るために、次を守っている。
+//
+//   - オフのときは `check()` を**一度も呼ばない**（＝通信そのものが起きない。握りつぶすのではない）
+//   - 見つからない / 通信できない → **何も出さない**（警告もトーストも出さない・静かに終わる）
+//   - **勝手にダウンロードしない**。聞いてから落とす
+//   - 「あとで」は**その起動では二度と聞かない**。記憶は**メモリだけ**（設定に持たせない＝次の起動では聞く）
+//   - 適用すると **Windows ではアプリが終了する**。事前に伝え、未保存があれば先に保存を促す
+//   - 配信元から来た文字列（変更点・版数）は **`textContent` でしか入れない**（`innerHTML` にしない）。
+//     ダウンロードした本体は minisign で検証されるが、**feed の JSON 自体は署名の対象外**なので、
+//     「表示に使う文字列は信用しない」を実装側で守る
+
+/** 更新履歴のページ（既定ブラウザで開く。アプリ内にページを作らない・REQ §6-1）。
+ *  GitHub の Releases にしているのは、**GPL の対応ソースと同じ場所**で、版とソースが1画面で辿れるため */
+const RELEASE_NOTES_URL = "https://github.com/OFF-Proxy/MemoAnima/releases";
+
+/** 「あとで」を押した＝**この起動では二度と聞かない**（REQ §6-1・記憶はメモリで十分） */
+let updateDeclinedThisRun = false;
+/** 起動時の自動確認と ⚙ の「いま確認する」が重ならないようにする（二重に通信しない） */
+let updateCheckRunning = false;
+/** 起動時の確認は**起動処理の早い段階で投げて**おき、結果は最後に受け取る。
+ *  こうしないと「起動処理の途中でモーダルを待っている間、確認が始まってすらいない」ことになる
+ *  （実測で判明: `checkAutosave()` は復元ダイアログの答えを待つので、そこで止まっていた）。 */
+let updateCheckPromise: Promise<Update | null> | null = null;
+/** 出せる状態になるまで待つ上限と間隔。起動直後は復元ダイアログ等が出ていることがあるので、
+ *  1回見て塞がっていたら諦める、では**ほぼ毎回出せなくなる**。逆に無限に待つと
+ *  「編集中は出さない（次の起動へ回す）」が守れないので、上限を置いて諦める */
+const UPDATE_QUIET_WAIT_MS = 60_000;
+const UPDATE_QUIET_POLL_MS = 2_000;
+
+/** 起動時に確認するか。**未設定＝オン**にしているので、v1.3.0 から上がってきた人も既定オン */
+function updateCheckEnabled(): boolean {
+  return settings.updateCheck !== false;
+}
+
+/**
+ * 自動の確認結果を「いま出してよいか」。
+ * REQ §6-1 は「**編集中・変形中・書き出し中は出さない**（次の起動へ回す）」。
+ *
+ * この回は **`src/editor/` を1行も触らない**ので、editor 側の private フラグ
+ * （`xformActive` / `cornerActive`）は見に行けない。代わりに
+ * 「**エディタが開いている / モーダルが1枚でも出ている**」で判定する＝**要件より厳しい側**に倒す:
+ *   - 変形中・四隅変形中は、必ずエディタが開いている
+ *   - 書き出し中は、必ず書き出しモーダルが出ている（`openExportDialog` は `modal()`）
+ *   - ついでにダイアログの重なりも防げる
+ *
+ * 結果として「**エディタを開いている間は更新を提案しない**」になる。
+ * ＝ 更新の適用（アプリが終了する）が**未保存の作品を巻き込む経路そのものが無い**。
+ */
+function updatePromptBlocked(): boolean {
+  if (editorOpen) return true;
+  const root = document.querySelector("#modal-root");
+  return !!root && root.childElementCount > 0;
+}
+
+/**
+ * 更新の有無を確認する。**投げない**——通信できない / feed が無い / 署名を検証できない、
+ * どれも「静かに終わる」（REQ §6-1）。戻り値は見つかった更新、または null（最新・確認できない）。
+ * `mode` が変えるのは**結果の出し方だけ**（"startup" は黙る・"manual" は必ず知らせる）。
+ */
+async function runUpdateCheck(mode: "startup" | "manual"): Promise<Update | null> {
+  try {
+    // 遅延 import。オフの人のバンドル評価にも乗せない＋プラグインが無い環境でも起動を壊さない
+    const { check } = await import("@tauri-apps/plugin-updater");
+    return await check();
+  } catch (e) {
+    // ログはローカルへ追記するだけ（送信機能は無い）。起動時は**画面に何も出さない**
+    logError("update", `check failed (${mode}): ${e}`);
+    if (mode === "manual") toast(t("set.update.failed.toast"));
+    return null;
+  }
+}
+
+/** 見つかった更新を提示して、同意されたら適用する（［今すぐ更新する］［あとで］［更新履歴を見る］） */
+async function presentUpdate(up: Update): Promise<void> {
+  await modal((close) => {
+    const box = document.createElement("div");
+    // 見出しは付けない（`projectDropDialog` と同じ形）。
+    // **訳文も配信元の文字列も属性へ埋めない**（検査6／信用しない文字列の扱い）
+    box.innerHTML = `
+      <p class="modal-msg" id="up-line1"></p>
+      <p class="hintline" id="up-line2"></p>
+      <p class="modal-path" id="up-notes"></p>
+      <div id="up-progress" hidden>
+        <div class="bar"><i id="up-bar" style="width:0%"></i></div>
+        <p class="modal-path" id="up-phase"></p>
+      </div>
+      <div class="modal-actions">
+        <button class="btn primary" id="up-now"></button>
+        <button class="btn" id="up-later"></button>
+        <button class="btn" id="up-notes-btn"></button>
+      </div>`;
+    // 版数は**配信元から来た文字列**。`t()` で埋めたあと textContent でしか入れない
+    const lines = t("set.update.found.msg", { cur: up.currentVersion, next: up.version }).split("\n");
+    (box.querySelector("#up-line1") as HTMLElement).textContent = lines[0] ?? "";
+    (box.querySelector("#up-line2") as HTMLElement).textContent = lines.slice(1).join(" ");
+    const notesEl = box.querySelector("#up-notes") as HTMLElement;
+    notesEl.textContent = (up.body ?? "").trim();
+    notesEl.hidden = !notesEl.textContent;
+    const nowBtn = box.querySelector("#up-now") as HTMLButtonElement;
+    const laterBtn = box.querySelector("#up-later") as HTMLButtonElement;
+    const notesBtn = box.querySelector("#up-notes-btn") as HTMLButtonElement;
+    nowBtn.textContent = t("set.update.now.btn");
+    laterBtn.textContent = t("set.update.later.btn");
+    notesBtn.textContent = t("set.update.notes.btn");
+    const prog = box.querySelector("#up-progress") as HTMLElement;
+    const bar = box.querySelector("#up-bar") as HTMLElement;
+    const phase = box.querySelector("#up-phase") as HTMLElement;
+
+    laterBtn.addEventListener("click", () => {
+      updateDeclinedThisRun = true; // この起動ではもう聞かない
+      close(null);
+    });
+    // 履歴を見ても**選択は残す**（見てから決められるように、ここでは閉じない）
+    notesBtn.addEventListener("click", () => {
+      void openUrl(RELEASE_NOTES_URL).catch((e) => logError("update", `open notes failed: ${e}`));
+    });
+    nowBtn.addEventListener("click", async () => {
+      // 念のための最後の砦。ここへ来るときエディタは閉じている（`updatePromptBlocked`）が、
+      // 「更新＝アプリが終了する」なので、万一開いていて未保存なら必ず確かめる
+      if (editorOpen && editor.dirty && !(await confirmDialog(t("set.quit.dirty.msg")))) return;
+      nowBtn.disabled = true;
+      laterBtn.disabled = true;
+      prog.hidden = false;
+      let total = 0;
+      let got = 0;
+      try {
+        await up.downloadAndInstall((ev) => {
+          if (ev.event === "Started") total = ev.data.contentLength ?? 0;
+          else if (ev.event === "Progress") got += ev.data.chunkLength;
+          else if (ev.event === "Finished") got = total;
+          // 進捗の文字は数字だけ＝訳語を足さずに済む（％が出ない場合は空のまま）
+          const pct = total > 0 ? Math.min(100, Math.round((got / total) * 100)) : 0;
+          bar.style.width = `${pct}%`;
+          phase.textContent = total > 0 ? `${pct}%` : "";
+        });
+        // ここへ戻ってこないのが正常（Windows はインストーラ起動時にアプリを終了させる）
+      } catch (e) {
+        logError("update", `install failed: ${e}`);
+        toast(t("set.update.failed.toast"));
+        close(null);
+      }
+    });
+    return box;
+  });
+}
+
+/** 起動処理の**早い段階**で確認を投げる。`await` しない＝ここから先の起動処理は普通に進む。
+ *  オフの人はここで何もしない＝**通信そのものが起きない**（握りつぶすのではない） */
+function beginStartupUpdateCheck(): void {
+  if (!updateCheckEnabled() || updateCheckRunning) return;
+  updateCheckRunning = true;
+  updateCheckPromise = runUpdateCheck("startup").finally(() => {
+    updateCheckRunning = false;
+  });
+}
+
+/**
+ * 起動時の自動確認の**結果を出す**ほう。**`await` しない**で呼ぶこと。
+ * 通信は `beginStartupUpdateCheck()` がとっくに始めているので、ここは待ち合わせるだけ。
+ */
+async function finishStartupUpdateCheck(): Promise<void> {
+  const p = updateCheckPromise;
+  if (!p) return;
+  const up = await p;
+  if (!up) return; // 最新・通信できない → **何も出さない**
+  // 起動直後はオートセーブの復元ダイアログ等が出ていることがある。1回見て諦めると
+  // ほぼ毎回出せなくなるので、静かになるまで**上限つきで**待つ。
+  // 上限を過ぎても塞がっていたら（＝編集を始めている）**次の起動へ回す**（REQ §6-1）
+  for (let waited = 0; updatePromptBlocked(); waited += UPDATE_QUIET_POLL_MS) {
+    if (waited >= UPDATE_QUIET_WAIT_MS || updateDeclinedThisRun) return;
+    await new Promise((r) => setTimeout(r, UPDATE_QUIET_POLL_MS));
+  }
+  if (updateDeclinedThisRun) return;
+  await presentUpdate(up);
+}
+
+/** 初回だけ「起動時に更新を確認します（⚙ でオフにできます）」と伝える（REQ §6-3）。
+ *  文言は ⚙ のトグルと**同じ2つのキー**を使う＝あとで ⚙ を開いたとき同じ文が見つかる */
+async function updateNoticeOnce(): Promise<void> {
+  if (settings.updateNoticeShown) return;
+  settings.updateNoticeShown = true;
+  invoke("save_settings", { settings }).catch(() => {});
+  await modal((close) => {
+    const box = document.createElement("div");
+    box.innerHTML = `
+      <p class="modal-msg"><b></b></p>
+      <p class="hintline"></p>
+      <div class="modal-actions"><button class="btn primary">OK</button></div>`;
+    (box.querySelector("b") as HTMLElement).textContent = t("set.update.check.label");
+    (box.querySelector(".hintline") as HTMLElement).textContent = t("set.update.check.hint");
+    (box.querySelector("button") as HTMLElement).addEventListener("click", () => close(null));
+    return box;
+  });
+}
+
 /** M7-2b: ⚙ 設定メニュー（エクスプローラー直結を廃止し、ここから各設定へ） */
 async function openSettingsMenu() {
   await modal((close, onClose) => {
@@ -1858,6 +2070,7 @@ async function openSettingsMenu() {
           <button type="button" class="lv" data-lang="es"></button>
           <button type="button" class="lv" data-lang="pt-BR"></button>
           <button type="button" class="lv" data-lang="ko"></button>
+          <button type="button" class="lv" data-lang="zh-Hans"></button>
         </div>
         <p class="hintline">${t("set.lang.hint")}</p>
       </div>
@@ -1865,6 +2078,16 @@ async function openSettingsMenu() {
         <b>${t("set.libdir.label")}</b>
         <p class="modal-path" id="set-dir-path"></p>
         <button class="minibtn" id="set-dir">${t("set.libdir.btn")}</button>
+      </div>
+      <!-- U-1: 起動時の更新確認。**畳まれた下ではなく上のほう**に置く——初回案内が
+           「⚙ でオフにできます」と言うので、スクロールしないと見つからない位置だと嘘になる -->
+      <div class="set-sec">
+        <b>${t("set.update.check.label")}</b>
+        <div class="modal-field">
+          <div class="sw2" id="set-update-sw"></div>
+          <button class="minibtn" id="set-update-now">${t("set.update.checkNow.btn")}</button>
+        </div>
+        <p class="hintline">${t("set.update.check.hint")}</p>
       </div>
       <div class="set-sec">
         <b>${t("set.display.label")}</b>
@@ -1929,6 +2152,7 @@ async function openSettingsMenu() {
           <p>${t("set.legal.disclaimer.msg")}</p>
           <p>${t("set.legal.scope.msg")}</p>
           <p>${t("set.legal.trademark.msg")}</p>
+          <p>${t("set.legal.privacy.msg")}</p>
           <p>${t("set.legal.offline.msg")}</p>
           <p>${t("set.legal.license.msg")}</p>
           <p>${t("set.legal.contact.msg")}</p>
@@ -2063,7 +2287,9 @@ async function openSettingsMenu() {
     // 文字はテンプレートに埋めずプロパティで入れる（M12-1b-2 の R-2 案1 と同じ作法）
     // M12-3: 5言語。**1行のまま**にしている（`i18n-exempt` は行単位なので、折り返すと
     // 日本語 と 한국어 が載る行それぞれに目印が要る＝付け忘れの事故が起きる）
-    const LANG_NAMES: Record<string, string> = { ja: "日本語", en: "English", es: "Español", "pt-BR": "Português (BR)", ko: "한국어" }; // i18n-exempt: 言語名は自称のまま（REQ_M12_2 §2-b）
+    // L-2: 6言語目に简体中文（部分辞書。訳が届いていないキーは英語で出る）。
+    // 「简体中文」も漢字＝検査5 に当たるので、**この行から出さない**（上と同じ理由）
+    const LANG_NAMES: Record<string, string> = { ja: "日本語", en: "English", es: "Español", "pt-BR": "Português (BR)", ko: "한국어", "zh-Hans": "简体中文" }; // i18n-exempt: 言語名は自称のまま（REQ_M12_2 §2-b）
     box.querySelectorAll("#set-lang .lv").forEach((b) => {
       const l = (b as HTMLElement).dataset.lang ?? "";
       (b as HTMLElement).textContent = LANG_NAMES[l] ?? l;
@@ -2097,6 +2323,37 @@ async function openSettingsMenu() {
         toast(t("lib.dirChanged.toast", { dir: settings.libraryDir }));
       }
     });
+    // U-1: 起動時の更新確認のトグル（`#ex-whitebg` と同じ `.sw2` の作法）。
+    // **オフにしても他の機能は一切制限しない**（`COLLAB_PROTOCOL` §1-b 条件1 の義務）ので、
+    // ここでやることは「settings に覚える」だけ。オフのときは起動時に `check()` を呼ばない
+    {
+      const sw = box.querySelector("#set-update-sw") as HTMLElement;
+      const syncSw = () => sw.classList.toggle("on", updateCheckEnabled());
+      syncSw();
+      sw.addEventListener("click", () => {
+        settings.updateCheck = !updateCheckEnabled();
+        syncSw();
+        invoke("save_settings", { settings }).catch(() => {});
+      });
+      // オフの人でも自分で確認できる逃げ道。結果はトースト（z-index 200 ＝ ⚙ の上に出る）で、
+      // 見つかったときだけ ⚙ を閉じて更新ダイアログへ進む
+      const nowBtn = box.querySelector("#set-update-now") as HTMLButtonElement;
+      nowBtn.addEventListener("click", async () => {
+        if (updateCheckRunning) return;
+        nowBtn.disabled = true;
+        try {
+          const up = await runUpdateCheck("manual");
+          if (!up) {
+            toast(t("set.update.latest.toast"));
+            return;
+          }
+          close(null);
+          await presentUpdate(up);
+        } finally {
+          nowBtn.disabled = false;
+        }
+      });
+    }
     (box.querySelector("#set-keys-cur") as HTMLElement).textContent =
       t("set.keys.current.label", { name: presetName(activePreset(keys)) });
     (box.querySelector("#set-keys") as HTMLElement).addEventListener("click", () => {
@@ -4133,6 +4390,11 @@ window.addEventListener("DOMContentLoaded", async () => {
   // 切替 UI は M12-2。ここでは「読む・不正値を弾く・判定する」までを配線する
   setLang(detectLang(settings.lang));
   applyI18n(document);
+  // U-1: 更新の確認を**ここで投げる**（await しない）。以降の起動処理と並行して走らせるため。
+  // 起動処理の最後で投げると、途中のモーダル（オートセーブの復元など）を人が答えるまで
+  // **確認が始まってすらいない**状態になる（実測で判明したので、投げる場所を前へ出した）。
+  // オフの人はここで何もしない＝通信そのものが起きない
+  beginStartupUpdateCheck();
   // 動的に書き換わるノード（data-i18n を振っていない）の初期値。どちらも起動時は hidden
   $("#ed-title").textContent = t("ed.title.newNote.label");
   $("#import-label").textContent = t("imp.progress.label");
@@ -4193,6 +4455,11 @@ window.addEventListener("DOMContentLoaded", async () => {
   // M7-2: 初回ガイド（画面が揃ってから。完了/スキップで guideDone 保存・以後は出ない）
   if (!settings.guideDone) await startGuideFlow(false);
   await checkAutosave();
+  // U-1: 確認の**結果**を出す。通信は起動の早い段階から走っているので、ここは待ち合わせるだけ。
+  // **await しない**＝この先どれだけ待たされても起動処理は完了している
+  //（ネットワークが無い / 遅い環境で体感が変わらないこと・REQ §4 非機能要件）
+  if (updateCheckEnabled()) await updateNoticeOnce(); // 初回だけ一言（オフの人には出さない）
+  void finishStartupUpdateCheck();
 });
 
 /** M7-1 R-A: ライブラリフォルダが見つからないときの空状態（設定は消さない・選び直しで復帰） */
