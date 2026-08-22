@@ -613,6 +613,8 @@ const ja = {
   "ed.xform.peek.btn": "👁 下を見る",
   "ed.xform.reset.toast": "変形をリセットしました",
   "ed.xform.scale.label": "拡縮",
+  "ed.xform.scaleW.label": "横",
+  "ed.xform.scaleH.label": "縦",
   // ---------------- M12-1b: エディタ（editor.ts・道具が効いた 207 箇所ぶん） ----------------
   "ed.audio.mute.label": "ミュート",
   "ed.audio.preview.title": "クリックで再生 / 一時停止",

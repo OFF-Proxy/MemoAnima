@@ -601,6 +601,8 @@ const en: Record<keyof typeof ja, string> = {
   "ed.xform.peek.btn": "👁 See through",
   "ed.xform.reset.toast": "Transform reset",
   "ed.xform.scale.label": "Scale",
+  "ed.xform.scaleW.label": "W",
+  "ed.xform.scaleH.label": "H",
   "ed.xform.snap15.label": "15°",
   "ed.xform.numsFold.title": "Show or hide the rotation and scale numbers",
   "ed.xform.peek.title": "Fade to see underneath, only while held",

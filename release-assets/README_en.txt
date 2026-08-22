@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.4.2
+ MemoAnima v1.4.3
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -15,6 +15,18 @@ Windows only.
 - Your source data (the SD card and so on) is only ever READ. Nothing is
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
+
+== NEW IN v1.4.3 ==
+- Transform (rotate / scale / flip) now applies to all selected layers and
+  folders at once - they rotate around a shared centre.
+- Corner (free) transform now works on the drawn area of the layer: the frame
+  appears around the artwork. Only the selected layers are affected; hidden
+  layers are left alone.
+- There are now 8 handles. Dragging the middle of an edge squashes or
+  stretches from that side in one move.
+- Scale can be applied separately for width and height (two numeric fields).
+  When you drag an edge handle, the opposite edge stays put.
+- Transform outlines and handles are now thin and stay thin at any zoom.
 
 == NEW IN v1.4.2 ==
 - Selections can now add (Shift) and subtract (Alt). Works with rectangle,
@@ -135,7 +147,7 @@ opens as it is, and your settings and shortcuts carry over.
 3. Follow the first-run guide: choose a library folder -> import -> edit -> export
 Note: layers are shared across every frame (the standard way animation tools
 work). Adding a frame gives you a blank frame with the same layer structure.
-Note: there is also an installer (MemoAnima_1.4.2_x64-setup.exe). Just
+Note: there is also an installer (MemoAnima_1.4.3_x64-setup.exe). Just
 double-click it; no administrator rights are needed. IMPORTANT: this portable
 (zip) version cannot update in place - accepting an update installs the
 installer version instead (see ABOUT NETWORK ACCESS below). Moving from the

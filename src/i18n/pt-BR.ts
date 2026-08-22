@@ -601,6 +601,8 @@ const ptBR: Record<keyof typeof ja, string> = {
   "ed.xform.peek.btn": "👁 Ver por baixo",
   "ed.xform.reset.toast": "Transformação redefinida",
   "ed.xform.scale.label": "Escala",
+  "ed.xform.scaleW.label": "L",
+  "ed.xform.scaleH.label": "A",
   "ed.xform.snap15.label": "15°",
   "ed.xform.numsFold.title": "Mostrar ou ocultar os números de giro e escala",
   "ed.xform.peek.title": "Fica transparente para ver por baixo, só enquanto você segura",

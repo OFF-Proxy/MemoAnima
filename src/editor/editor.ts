@@ -28,7 +28,7 @@ import {
   effectiveLayerStates,
 } from "./model";
 import { compositeFrame, presentToCanvas, frameToPngBlob, flattenIndexFrame } from "./render";
-import { History, bufferChangeEntry, multiBufferChangeEntry } from "./history";
+import { History, bufferChangeEntry, multiBufferChangeEntry, type HistoryEntry } from "./history";
 // M10-2a: 変位マップエンジン（歪み3方式と M10-3 のゆらゆらが共有する適用側）
 import { WarpField, applyWarp, isConvexQuad } from "./warp";
 import { buildWobbleFrames, type WobbleKind, type WobbleStrength } from "./wobble";
@@ -572,17 +572,20 @@ export class Editor {
   /** M10-2b: 押しっぱなし連続適用のタイマー */
   private warpTimer: number | null = null;
   // M10-2c: 四隅変形。**transform とは独立した状態機械**にする（REQ §3.5）。
-  // transform は「アクティブレイヤー1枚を floatBuf で切り出す」前提で
-  // xformCutDone / selMoveBefore / cancelSelectionMove と絡んでいるので、
-  // 全レイヤーへ当てる射影変換をそこへ差し込むと M5-3 → M5-5 系の退行を再演する。
+  // transform は xformCutDone / selMoveBefore / cancelSelectionMove と絡んでいるので、
+  // 射影変換をそこへ差し込むと M5-3 → M5-5 系の退行を再演する。
+  // M13-2b (T-2): transform は「N 枚を**同じ1枚のマスク**で切り出した float の集合」（`xformLayers`）になった。
+  // `floatBuf` は幾何の基準（[0] と同寸）として残している。四隅が独立であることは変わらない
   private cornerActive = false;
   /** 変形後の四隅（左上→右上→右下→左下）。ドット座標 */
   private cornerPts: { x: number; y: number }[] = [];
   /** 変形前の矩形（選択範囲があればその外接矩形、なければキャンバス全体） */
   private cornerRect: { x0: number; y0: number; x1: number; y1: number } | null = null;
   private cornerBefore: Record<string, IndexBuf> | null = null;
-  /** 掴んでいるハンドルの index（0..3）。null = 掴んでいない */
+  /** 掴んでいるハンドルの index。M13-2b (T-1): 0..3=四隅 / 4..7=辺の中央。null = 掴んでいない */
   private cornerDrag: number | null = null;
+  /** M13-2b (T-1): ドラッグ開始時の4点とポインタ。辺ハンドルは**開始時からの差分**で毎回作り直す */
+  private cornerDragBase: { pts: { x: number; y: number }[]; start: { x: number; y: number } } | null = null;
   /** 四隅モード中だけ pointer-events を切った浮遊UIと、その元の値 */
   private cornerMuted: { el: HTMLElement; prevPe: string; prevOp: string }[] = [];
   /** M10-3: エディタ内の自前ダイアログの開いている数。>0 の間はショートカットを通さない */
@@ -595,7 +598,15 @@ export class Editor {
 
   // 選択・変形
   private selMask: Uint8Array | null = null;
+  /** 変形の**幾何の基準**になる float（枠・ハンドル・当たり判定・回転中心はこれで決まる）。
+   *  M13-2b: 複数レイヤーのときは `xformLayers[0].float` を指す。全レイヤーの float は
+   *  **同じ1枚のマスク**で切り出すので ox/oy/w/h が全部一致し、どれを基準にしても同じ（REQ §4） */
   private floatBuf: R.FloatBuf | null = null;
+  /** M13-2b (T-2): 変形の対象レイヤー N 枚ぶん。`float` は同じマスクで切り出した浮動、`before` は切り出す前の
+   *  スナップショット（取消・履歴の before）。**絵の無いレイヤーも持ち回る**（確定時のレイヤー集合を
+   *  開始時と一致させ、履歴の対称性を保つため・REQ §6-2）。`cv` はプレビュー用の単色キャンバスのキャッシュ
+   *  （float は変形中に変わらないので1回作れば足りる＝20枚でも追従が遅れない） */
+  private xformLayers: { id: string; float: R.FloatBuf; before: IndexBuf; cv?: HTMLCanvasElement }[] = [];
   private xform: R.Transform = {
     tx: 0,
     ty: 0,
@@ -607,9 +618,21 @@ export class Editor {
   };
   private xformActive = false;
   // M11-8: selmask=選択枠だけの移動（P-1） / layermove=レイヤーの絵の移動（P-2）
-  private dragMode: "" | "move" | "scale" | "rotate" | "selmove" | "selmask" | "layermove" = "";
+  // M13-2b (T-3): scalex / scaley ＝ 辺ハンドルで片方向だけ伸ばす（掴んだ辺だけが動き、対辺は止まる）
+  private dragMode:
+    | ""
+    | "move"
+    | "scale"
+    | "scalex"
+    | "scaley"
+    | "rotate"
+    | "selmove"
+    | "selmask"
+    | "layermove" = "";
   private dragStart: { x: number; y: number } | null = null;
   private dragBase: R.Transform | null = null;
+  /** M13-2b (T-3): 掴んだ辺がローカル軸のどちら側か（+1 / -1）。対辺を止める補正に使う */
+  private dragSide = 1;
   private static clipboard: R.FloatBuf | null = null;
   /** M3.3: ページ／複数ページ・クリップボード（アプリ全体・クロスメモ保持） */
   private static frameClip: FrameClip | null = null;
@@ -725,6 +748,7 @@ export class Editor {
     this.playing = false;
     this.selMask = null;
     this.floatBuf = null;
+    this.xformLayers = []; // M13-2b
     this.xformActive = false;
     // 表示状態は前回セッションを持ち越さない（swapped/回転/ズームのリセット）
     this.previewLarge = false;
@@ -3818,9 +3842,13 @@ export class Editor {
           (this.xform.angle * 180) / Math.PI
         )}" step="1" style="width:64px"> °
           <div class="sw2${this.snap15 ? " on" : ""}" id="ed-x-snap"></div><span class="tog">${t("ed.xform.snap15.label")}</span></div>
-        <div class="row"><span class="tog">${t("ed.xform.scale.label")}</span><input type="number" id="ed-x-scale" value="${(
-          this.xform.sx * 100
-        ).toFixed(0)}" step="1" style="width:64px"> %</div>
+        <div class="row"><span class="tog">${t("ed.xform.scale.label")}</span>
+          <span class="tog">${t("ed.xform.scaleW.label")}</span><input type="number" id="ed-x-scalex" value="${(
+            this.xform.sx * 100
+          ).toFixed(0)}" step="1" style="width:48px">%
+          <span class="tog">${t("ed.xform.scaleH.label")}</span><input type="number" id="ed-x-scaley" value="${(
+            this.xform.sy * 100
+          ).toFixed(0)}" step="1" style="width:48px">%</div>
         <div class="selacts">
           <button class="minibtn" id="ed-x-fliph">${t("ed.xform.flipH.btn")}</button>
           <button class="minibtn" id="ed-x-flipv">${t("ed.xform.flipV.btn")}</button>
@@ -3870,12 +3898,18 @@ export class Editor {
         this.xform.angle =
           ((Number((e.target as HTMLInputElement).value) || 0) * Math.PI) / 180;
         this.redrawOverlay();
+        this.paintUiOverlay();
       });
-      $("#ed-x-scale").addEventListener("input", (e) => {
-        const s = Math.max(1, Number((e.target as HTMLInputElement).value) || 100) / 100;
-        this.xform.sx = s;
-        this.xform.sy = s;
+      // M13-2b (T-3): 横と縦を別々に。数値欄は**中心基準**（従来の等比と同じ流儀。対辺を止めるのは辺ハンドルのドラッグ）
+      $("#ed-x-scalex").addEventListener("input", (e) => {
+        this.xform.sx = Math.max(1, Number((e.target as HTMLInputElement).value) || 100) / 100;
         this.redrawOverlay();
+        this.paintUiOverlay();
+      });
+      $("#ed-x-scaley").addEventListener("input", (e) => {
+        this.xform.sy = Math.max(1, Number((e.target as HTMLInputElement).value) || 100) / 100;
+        this.redrawOverlay();
+        this.paintUiOverlay();
       });
       $("#ed-x-snap").addEventListener("click", () => {
         this.snap15 = !this.snap15;
@@ -5459,6 +5493,8 @@ export class Editor {
     // 指紋を捨ててから描き直すので、ズーム後に古い大きさの輪が残らない
     this.cursorPainted = "";
     this.paintCursorLayer();
+    // M13-2b (T-6): 変形・四隅の枠とハンドルの層も同じ寸法で取り直す（ぼけない・ずれない）
+    this.paintUiOverlay();
     this.applyViewTransform();
     this.refreshSelectionLauncher(); // M11-8: ズーム/リサイズ/回転反転に追従
   }
@@ -5748,8 +5784,7 @@ export class Editor {
     if (this.xformActive && this.floatBuf) {
       this.drawTransformPreview(ctx);
     }
-    // M10-2c: 四隅変形のハンドル
-    if (this.cornerActive) this.drawCornerHandles(ctx);
+    // M10-2c → M13-2b (T-6): 四隅変形の枠とハンドルは画面解像度の層（`paintUiOverlay`）へ移した
     // M11-12: 浮動テキスト（実際のドット＋外接する薄い枠。選択範囲では切らない）
     if (this.textDraft) this.drawTextDraftPreview(ctx);
     // 自由選択の軌跡
@@ -5785,6 +5820,10 @@ export class Editor {
     return cv;
   }
 
+  /** 変形プレビューの**絵だけ**を 320×240 のオーバーレイへ描く（ドット粒度で見えるのが正しい）。
+   *  M13-2b (T-6): 枠・ハンドル・回転ノブは**画面解像度の層**（`paintUiOverlay`）へ移した。
+   *  M13-2b (T-2): N 枚ぶんの float を**同じ Transform**でレイヤー順（下→上）に重ねる。
+   *  中心は全 float で共通（同じマスクで切り出してあるので ox/oy/w/h が同じ） */
   private drawTransformPreview(ctx: CanvasRenderingContext2D) {
     const f = this.floatBuf!;
     const t = this.xform;
@@ -5797,46 +5836,16 @@ export class Editor {
     ctx.translate(cx, cy);
     ctx.rotate(t.angle);
     ctx.scale(t.sx * (t.flipH ? -1 : 1), t.sy * (t.flipV ? -1 : 1));
-    ctx.drawImage(this.floatToCanvas(f), -f.w / 2, -f.h / 2);
-    ctx.restore();
-    // 枠
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(t.angle);
-    ctx.strokeStyle = "#f07a1a";
-    ctx.lineWidth = 1;
-    const hw = (f.w / 2) * t.sx;
-    const hh = (f.h / 2) * t.sy;
-    ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
-    ctx.restore();
-    // M11-11: ハンドル（四隅＋回転ノブ）は**キャンバス座標**で描く。
-    // 枠が画面の外へ出たハンドルは内側へ寄せて描く（外に描いても 320×240 の
-    // オーバーレイでは見えず、掴めなくなるため）。寄せた印として色を変える
-    const hs = this.xformHandleWorld();
-    const topMid = hs[5];
-    const knob = this.clampedHandle(hs[4].x, hs[4].y) ?? hs[4];
-    ctx.save();
-    ctx.strokeStyle = "#f07a1a";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(topMid.x, topMid.y);
-    ctx.lineTo(knob.x, knob.y);
-    ctx.stroke();
-    for (let i = 0; i < 5; i++) {
-      const cl = this.clampedHandle(hs[i].x, hs[i].y);
-      const p = cl ?? hs[i];
-      ctx.save();
-      ctx.translate(p.x, p.y);
-      ctx.rotate(t.angle);
-      ctx.fillStyle = cl ? "#f07a1a" : "#fff"; // 寄せたハンドルは塗りつぶし
-      ctx.fillRect(-2, -2, 4, 4);
-      ctx.strokeRect(-2, -2, 4, 4);
-      ctx.restore();
+    for (const L of this.xformLayers) {
+      // 単色キャンバスは float が変わらない間は使い回す（20枚でも毎 move に作り直さない）
+      if (!L.cv) L.cv = this.floatToCanvas(L.float);
+      ctx.drawImage(L.cv, -L.float.w / 2, -L.float.h / 2);
     }
     ctx.restore();
   }
 
-  /** M11-11: 変形ハンドルのキャンバス座標。[四隅4つ, 回転ノブ, 上辺中央] */
+  /** M11-11: 変形ハンドルのキャンバス座標。
+   *  M13-2b (T-3): 8ハンドル化。[0..3]=四隅, [4]=回転ノブ, [5]=上辺中央, [6]=右辺中央, [7]=下辺中央, [8]=左辺中央 */
   private xformHandleWorld(): { x: number; y: number }[] {
     const f = this.floatBuf!;
     const t = this.xform;
@@ -5850,7 +5859,17 @@ export class Editor {
       x: cx + lx * cos - ly * sin,
       y: cy + lx * sin + ly * cos,
     });
-    return [w(-hw, -hh), w(hw, -hh), w(hw, hh), w(-hw, hh), w(0, -hh - 12), w(0, -hh)];
+    return [
+      w(-hw, -hh),
+      w(hw, -hh),
+      w(hw, hh),
+      w(-hw, hh),
+      w(0, -hh - 12),
+      w(0, -hh),
+      w(hw, 0),
+      w(0, hh),
+      w(-hw, 0),
+    ];
   }
 
   /** M11-11: キャンバスの外へ出たハンドルを内側へ寄せた位置。外に出ていなければ null */
@@ -6248,12 +6267,15 @@ export class Editor {
           // M10-2c: 四隅はモード開始時に場を用意済み。ここではハンドルを掴むだけ
           if (!this.cornerActive) break;
           // 一番近いハンドルを掴む。しきい値はドット単位で ±8
-          // （transform の四隅は ±6。四隅同士が近づいたときに取り違えないよう少し大きめ）
+          // （transform の四隅は ±6。四隅同士が近づいたときに取り違えないよう少し大きめ）。
+          // M13-2b (T-1): 8ハンドル（四隅4＋辺の中央4）。枠が小さくて重なるときは**近いほう**が勝つ＝仕様
+          //（当たり判定のしきい値で逃げる実装は入れない・REQ §6-1-4）
           let best = -1;
           let bestD = 8 * 8 + 1;
-          for (let i = 0; i < 4; i++) {
-            const hdx = this.cornerPts[i].x - pt.x;
-            const hdy = this.cornerPts[i].y - pt.y;
+          const hs = this.cornerHandles();
+          for (let i = 0; i < hs.length; i++) {
+            const hdx = hs[i].x - pt.x;
+            const hdy = hs[i].y - pt.y;
             const d2 = hdx * hdx + hdy * hdy;
             if (d2 < bestD) {
               bestD = d2;
@@ -6261,6 +6283,8 @@ export class Editor {
             }
           }
           this.cornerDrag = best >= 0 ? best : null;
+          this.cornerDragBase =
+            best >= 0 ? { pts: this.cornerPts.map((p) => ({ ...p })), start: { x: pt.x, y: pt.y } } : null;
           break;
         }
         const f = this.project.frames[this.frameIndex];
@@ -6399,22 +6423,13 @@ export class Editor {
           // coalesced の各点では**場に加算するだけ**。適用はループの外で1回だけ。
           // レイヤー10枚なら1適用で 768K 画素のループになるので、点ごとに適用すると詰まる
           if (this.warpMode === "corner") {
-            // M10-2c: 掴んでいるハンドルの位置を更新するだけ。適用はループの外で1回
-            if (this.cornerDrag === null) break;
-            // overlay は 320×240 しかないので、ハンドルはキャンバス内にクランプする
-            // （外へ広げる操作は overlay を広げるまで対応しない）
-            const nx = Math.max(0, Math.min(W, pt.x));
-            const ny = Math.max(0, Math.min(H, pt.y));
-            const prev = this.cornerPts[this.cornerDrag];
-            if (prev.x === nx && prev.y === ny) break;
-            const di = this.cornerDrag;
-            const trial = this.cornerPts.map((p, i2) =>
-              i2 === di ? { x: nx, y: ny } : p
-            );
-            // 非凸になる移動は**受け付けない**（直前の位置に留まる）。
-            // 受け付けると消失線が矩形の内側に入り、分母 w が 0 を跨いで写像が発散する。
-            // 絵が壊れて Esc しか復帰手段が無くなるので、移動そのものを弾く
-            if (!isConvexQuad(trial)) break;
+            // M10-2c: 掴んでいるハンドルの位置を更新するだけ。適用はループの外で1回。
+            // M13-2b (T-1): 四隅＝その1点／辺＝両端2点を法線方向へ（`cornerTrial`）。
+            // キャンバスの外へ出す移動・非凸になる移動は受け付けない（直前の位置に留まる）
+            if (this.cornerDrag === null || !this.cornerDragBase) break;
+            const trial = this.cornerTrial(this.cornerDrag, this.cornerDragBase.pts, this.cornerDragBase.start, pt);
+            if (!trial) break;
+            if (trial.every((p, i2) => p.x === this.cornerPts[i2].x && p.y === this.cornerPts[i2].y)) break;
             this.cornerPts = trial;
             break;
           }
@@ -6463,39 +6478,29 @@ export class Editor {
 
   // ---- M10-2c: 四隅変形（射影変換）。transform とは独立した状態機械 ----
 
-  /** 四隅モードに入る（transform が setTool で即開始するのと同じ流儀） */
+  /** 四隅モードに入る（transform が setTool で即開始するのと同じ流儀）。
+   *
+   *  M13-2b (T-1) で**適用先と枠が変わった**（既存の振る舞いの変更・REQ §6-1）:
+   *   - 適用先: 全レイヤー（非表示も含む） → **選択中レイヤーだけ**（M13-1 の純関数で解決・非表示は除外）
+   *   - 枠    : 選択範囲なしのとき キャンバス全体 → **対象レイヤーの描かれた部分の外接矩形**
+   *            （選択範囲ありは従来どおり選択範囲の外接矩形）
+   *   - 絵が無ければ `ed.xform.nothingToTransform.toast`（従来は全体の枠が出ていた） */
   private beginCornerWarp(): void {
     if (this.cornerActive) return;
     const f = this.project.frames[this.frameIndex];
     if (!f) return;
-    // 変形前の矩形: 選択範囲があればその外接矩形、なければキャンバス全体。
-    // 選択した部分だけを台形にしたいときに、四隅が絵の近くに出るほうが操作しやすい
-    let x0 = 0;
-    let y0 = 0;
-    let x1 = W;
-    let y1 = H;
-    if (this.selMask) {
-      let mnx = W;
-      let mny = H;
-      let mxx = -1;
-      let mxy = -1;
-      for (let y = 0; y < H; y++)
-        for (let x = 0; x < W; x++)
-          if (this.selMask[y * W + x]) {
-            if (x < mnx) mnx = x;
-            if (x > mxx) mxx = x;
-            if (y < mny) mny = y;
-            if (y > mxy) mxy = y;
-          }
-      if (mxx < 0) {
-        this.cb.toast(t("ed.xform.nothingToTransform.toast"));
-        return;
-      }
-      x0 = mnx;
-      y0 = mny;
-      x1 = mxx + 1;
-      y1 = mxy + 1;
+    const tg = this.transformTargets();
+    if (!tg) {
+      this.cb.toast(t("ed.xform.nothingToTransform.toast"));
+      return;
     }
+    // `transformTargets()` のマスク＝選択範囲があればそれ、無ければ対象の合成の非透明画素。
+    // その外接矩形が枠になる（選択した部分だけを台形にしたいときに、四隅が絵の近くに出るほうが操作しやすい）
+    const bb = R.maskBBox(tg.mask)!;
+    const x0 = bb.x;
+    const y0 = bb.y;
+    const x1 = bb.x + bb.w;
+    const y1 = bb.y + bb.h;
     this.cornerRect = { x0, y0, x1, y1 };
     this.cornerPts = [
       { x: x0, y: y0 },
@@ -6503,11 +6508,11 @@ export class Editor {
       { x: x1, y: y1 },
       { x: x0, y: y1 },
     ];
-    // 適用元は常にこのスナップショット。非表示レイヤーも含める
+    // 適用元は常にこのスナップショット。**対象レイヤーだけ**を持つ＝それ以外は1画素も触らない
     const snap: Record<string, IndexBuf> = {};
-    for (const ld of this.project.layerDefs) {
-      const b = f.layers[ld.id];
-      if (b) snap[ld.id] = copyIndexBuf(b);
+    for (const id of tg.ids) {
+      const b = f.layers[id];
+      if (b) snap[id] = copyIndexBuf(b);
     }
     this.cornerBefore = snap;
     // 領域重み（setRegionWeight）は**設定しない**。重みで変位を減衰させると
@@ -6518,22 +6523,84 @@ export class Editor {
     this.updateXformBadge();
     this.buildToolOptions();
     this.redrawOverlay();
+    this.paintUiOverlay();
   }
 
-  /** 四隅から場を作り直して全レイヤーへ適用する。退化していたら何もしない（直前の絵が残る） */
+  /** 四隅から場を作り直して**対象レイヤー**へ適用する。退化していたら何もしない（直前の絵が残る）。
+   *  適用元は常に `cornerBefore`（開始時のスナップショット）。直前の適用結果へは再適用しない */
   private updateCornerPreview(): void {
     if (!this.cornerActive || !this.warpField || !this.cornerBefore || !this.cornerRect)
       return;
     if (!this.warpField.setHomography(this.cornerPts, this.cornerRect)) return;
     const f = this.project.frames[this.frameIndex];
     if (!f) return;
-    for (const ld of this.project.layerDefs) {
-      const src = this.cornerBefore[ld.id];
-      const dst = f.layers[ld.id];
+    // M13-2b (T-1): cornerBefore に入っているレイヤー＝対象だけ（それ以外は触らない）
+    for (const id of Object.keys(this.cornerBefore)) {
+      const src = this.cornerBefore[id];
+      const dst = f.layers[id];
       if (src && dst) applyWarp(src, dst, this.warpField, this.selMask);
     }
     this.renderCanvas();
     this.redrawOverlay();
+    this.paintUiOverlay();
+  }
+
+  /** M13-2b (T-1): 四隅モードの8ハンドルの位置。[0..3]=四隅（`cornerPts` そのもの）、[4..7]=辺の中央
+   *  （辺 i は点 i と点 (i+1)%4 を結ぶ）。**内部の点は4つのまま**（射影変換は4点で決まる） */
+  private cornerHandles(): { x: number; y: number }[] {
+    const p = this.cornerPts;
+    if (p.length !== 4) return [];
+    const mids = p.map((a, i) => {
+      const b = p[(i + 1) % 4];
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    });
+    return [...p, ...mids];
+  }
+
+  /**
+   * M13-2b (T-1): 掴んだハンドル `idx` をポインタ `pt` へ動かしたときの新しい4点。
+   *  - 四隅（0..3）: その1点をポインタへ（従来どおり。キャンバス内にクランプ）
+   *  - 辺（4..7）  : ドラッグ量を**その辺の法線へ射影**し、両端2点へ同じだけ足す＝辺が平行に動く。
+   *                  辺の方向の成分は捨てる（せん断は四隅で。REQ §8-1 暫定案）
+   *  `base` はドラッグ開始時の4点、`start` はそのときのポインタ。**開始時からの差分で毎回作り直す**
+   *  （前回の位置に足し込んでいくと、辺の法線がずれていって平行でなくなる）。
+   *  非凸になる／キャンバスの外へ出る結果は null（＝受け付けない・直前の位置に留まる）
+   */
+  private cornerTrial(
+    idx: number,
+    base: { x: number; y: number }[],
+    start: { x: number; y: number },
+    pt: { x: number; y: number }
+  ): { x: number; y: number }[] | null {
+    let trial: { x: number; y: number }[];
+    if (idx < 4) {
+      const nx = Math.max(0, Math.min(W, pt.x));
+      const ny = Math.max(0, Math.min(H, pt.y));
+      trial = base.map((p, i) => (i === idx ? { x: nx, y: ny } : p));
+    } else {
+      const a = idx - 4;
+      const b = (a + 1) % 4;
+      const ex = base[b].x - base[a].x;
+      const ey = base[b].y - base[a].y;
+      const len = Math.hypot(ex, ey);
+      if (len < 1e-6) return null;
+      // 法線（辺に垂直な単位ベクトル）。向きはどちらでもよい＝射影で符号が決まる
+      const nx = -ey / len;
+      const ny = ex / len;
+      const d = (pt.x - start.x) * nx + (pt.y - start.y) * ny;
+      const mx = d * nx;
+      const my = d * ny;
+      trial = base.map((p, i) => (i === a || i === b ? { x: p.x + mx, y: p.y + my } : p));
+      if (trial.some((p) => p.x < 0 || p.x > W || p.y < 0 || p.y > H)) return null;
+      // 辺を対辺の**向こう側**まで押し込むと、四角形は凸のまま**裏返る**（`isConvexQuad` は向きを見ない）。
+      // そのまま通すと絵が鏡映になるので、符号付き面積の符号が変わる移動も受け付けない
+      const area = (q: { x: number; y: number }[]) =>
+        q.reduce((s, p, i) => s + p.x * q[(i + 1) % 4].y - q[(i + 1) % 4].x * p.y, 0);
+      if (Math.sign(area(trial)) !== Math.sign(area(base))) return null;
+    }
+    // 非凸になる移動は**受け付けない**。受け付けると消失線が矩形の内側に入り、
+    // 分母 w が 0 を跨いで写像が発散する（絵が壊れて Esc しか復帰手段が無くなる）
+    return isConvexQuad(trial) ? trial : null;
   }
 
   /** Enter=確定。ここで初めて履歴に積む（それまでは1件も積まない） */
@@ -6544,13 +6611,14 @@ export class Editor {
       this.endCornerWarp();
       return;
     }
-    // **変化のあったレイヤーだけ** before/after を積む（M10-2a と同じ流儀）
+    // **変化のあったレイヤーだけ** before/after を積む（M10-2a と同じ流儀）。
+    // M13-2b (T-1): 見るのは対象（before に入っているレイヤー）だけ
     const bd: Record<string, IndexBuf> = {};
     const ad: Record<string, IndexBuf> = {};
     let changed = false;
-    for (const ld of this.project.layerDefs) {
-      const b = before[ld.id];
-      const a = f.layers[ld.id];
+    for (const id of Object.keys(before)) {
+      const b = before[id];
+      const a = f.layers[id];
       if (!b || !a) continue;
       let diff = false;
       for (let i = 0; i < PIXELS; i++)
@@ -6559,8 +6627,8 @@ export class Editor {
           break;
         }
       if (!diff) continue;
-      bd[ld.id] = b;
-      ad[ld.id] = copyIndexBuf(a);
+      bd[id] = b;
+      ad[id] = copyIndexBuf(a);
       changed = true;
     }
     if (changed) {
@@ -6596,9 +6664,9 @@ export class Editor {
     const before = this.cornerBefore;
     const f = this.project.frames[this.frameIndex];
     if (before && f)
-      for (const ld of this.project.layerDefs) {
-        const b = before[ld.id];
-        const a = f.layers[ld.id];
+      for (const id of Object.keys(before)) {
+        const b = before[id];
+        const a = f.layers[id];
         if (b && a) a.set(b);
       }
     this.endCornerWarp(silent);
@@ -6611,8 +6679,10 @@ export class Editor {
     this.cornerRect = null;
     this.cornerBefore = null;
     this.cornerDrag = null;
+    this.cornerDragBase = null;
     this.warpField = null;
     this.muteFloatingOverlays(false);
+    if (!silent) this.paintUiOverlay(); // M13-2b (T-6): 枠・ハンドルの層を消す
     // 確定/取消のあとモードを「押す」へ戻す。`endTransform` が tool を pen へ戻すのと同じ流儀。
     // 戻さないと warpMode==="corner" のまま cornerActive===false という**死んだモード**が残り、
     // 同じボタンをもう一度押しても（next===warpMode で早期 return するので）何も起きなくなる
@@ -6671,24 +6741,113 @@ export class Editor {
     if (inp) (inp as HTMLInputElement).disabled = true;
   }
 
-  /** 四隅ハンドルと外周線。色は選択のマーチングアンツに揃える（新しい CSS を足さない） */
-  private drawCornerHandles(ctx: CanvasRenderingContext2D): void {
-    const p = this.cornerPts;
-    if (p.length !== 4) return;
-    ctx.save();
-    ctx.strokeStyle = "rgba(44,38,33,.8)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(p[0].x + 0.5, p[0].y + 0.5);
-    for (let i = 1; i < 4; i++) ctx.lineTo(p[i].x + 0.5, p[i].y + 0.5);
-    ctx.closePath();
-    ctx.stroke();
-    for (const q of p) {
-      ctx.fillStyle = "#fff";
-      ctx.fillRect(q.x - 3, q.y - 3, 6, 6);
-      ctx.strokeRect(q.x - 2.5, q.y - 2.5, 5, 5);
+  /**
+   * M13-2b (T-6): **UI 装飾専用の画面解像度オーバーレイ**（`#ed-overlay-ui`）。
+   *
+   * `#ed-overlay` は 320×240 のキャンバスを CSS で拡大表示しているので、そこに引いた
+   * `lineWidth = 1` は**1ドット＝ズーム倍の画面ピクセル**になる（×8 なら 8px の太線）。
+   * ここは `#ed-grid` / `#ed-cursor` と同じく**バッキングを表示サイズ×devicePixelRatio で確保**し、
+   * 線は物理 px で引く＝ズームしても 1px 相当のまま。
+   *
+   * 描くのは **変形の枠・8ハンドル・回転ノブ／四隅モードの枠・8ハンドル** だけ。
+   * ドット粒度のもの（マーチングアンツ・M13-2a の色マスク・変形プレビューの絵）は従来の 320×240 に残す
+   * ＝**ドットで見えるのが正しい**。
+   *
+   * `redrawOverlay()` の中からは呼ばない（M12-C の「2階の描画」規約と同じ分離）。変形・四隅の状態が
+   * 変わる各所と `applyZoom()`（寸法の変化）から直接呼ぶ。描く物が無ければ hidden にする。
+   */
+  private paintUiOverlay(): void {
+    const cv = document.querySelector("#ed-overlay-ui") as HTMLCanvasElement | null;
+    const canvas = document.querySelector("#ed-canvas") as HTMLCanvasElement | null;
+    if (!cv || !canvas) return;
+    const showXform = this.xformActive && !!this.floatBuf;
+    const showCorner = this.cornerActive && this.cornerPts.length === 4;
+    if (!showXform && !showCorner) {
+      if (!cv.hidden) {
+        cv.hidden = true;
+        cv.getContext("2d")?.clearRect(0, 0, cv.width, cv.height);
+      }
+      return;
     }
-    ctx.restore();
+    const cssW = canvas.offsetWidth;
+    const cssH = canvas.offsetHeight;
+    if (!cssW || !cssH) return;
+    const dpr = window.devicePixelRatio || 1;
+    const pw = Math.max(1, Math.round(cssW * dpr));
+    const ph = Math.max(1, Math.round(cssH * dpr));
+    if (cv.width !== pw) cv.width = pw;
+    if (cv.height !== ph) cv.height = ph;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    cv.hidden = false;
+    ctx.clearRect(0, 0, pw, ph);
+    // ドット座標 → 物理 px（`paintCursorLayer` と同じ式。四隅の点は格子の交点に乗る）
+    const px = (cssW * dpr) / W;
+    const py = (cssH * dpr) / H;
+    const X = (x: number) => x * px;
+    const Y = (y: number) => y * py;
+    const LINE = 1 * dpr; // 1 CSS px
+    const HS = 3.5 * dpr; // ハンドルの□の半径（7 CSS px）
+    const square = (x: number, y: number, fill: string, stroke: string, angle = 0) => {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle);
+      ctx.fillStyle = fill;
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = LINE;
+      ctx.fillRect(-HS, -HS, HS * 2, HS * 2);
+      ctx.strokeRect(-HS, -HS, HS * 2, HS * 2);
+      ctx.restore();
+    };
+
+    if (showXform) {
+      const f = this.floatBuf!;
+      const t = this.xform;
+      const cx = f.ox + f.w / 2 + t.tx;
+      const cy = f.oy + f.h / 2 + t.ty;
+      const hw = Math.abs((f.w / 2) * t.sx);
+      const hh = Math.abs((f.h / 2) * t.sy);
+      // 枠（回転した矩形）
+      ctx.save();
+      ctx.translate(X(cx), Y(cy));
+      ctx.rotate(t.angle);
+      ctx.scale(px, py); // 以降はドット単位で書けるが、線幅は物理 px に戻す
+      ctx.strokeStyle = "#f07a1a";
+      ctx.lineWidth = LINE / Math.max(px, py);
+      ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
+      ctx.restore();
+      // ハンドル（四隅4・辺の中央4・回転ノブ）。M11-11: 画面の外へ出たものは内側へ寄せて**塗りつぶし**で描く
+      //（キャンバス領域の外は描いても掴めない。この処理は画面解像度でも必要＝REQ §6-4）
+      const hs = this.xformHandleWorld();
+      const knob = this.clampedHandle(hs[4].x, hs[4].y) ?? hs[4];
+      ctx.save();
+      ctx.strokeStyle = "#f07a1a";
+      ctx.lineWidth = LINE;
+      ctx.beginPath();
+      ctx.moveTo(X(hs[5].x), Y(hs[5].y));
+      ctx.lineTo(X(knob.x), Y(knob.y));
+      ctx.stroke();
+      ctx.restore();
+      for (let i = 0; i < hs.length; i++) {
+        const cl = this.clampedHandle(hs[i].x, hs[i].y);
+        const p = cl ?? hs[i];
+        square(X(p.x), Y(p.y), cl ? "#f07a1a" : "#fff", "#f07a1a", t.angle);
+      }
+    }
+
+    if (showCorner) {
+      const p = this.cornerPts;
+      ctx.save();
+      ctx.strokeStyle = "rgba(44,38,33,.85)";
+      ctx.lineWidth = LINE;
+      ctx.beginPath();
+      ctx.moveTo(X(p[0].x), Y(p[0].y));
+      for (let i = 1; i < 4; i++) ctx.lineTo(X(p[i].x), Y(p[i].y));
+      ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+      for (const q of this.cornerHandles()) square(X(q.x), Y(q.y), "#fff", "rgba(44,38,33,.85)");
+    }
   }
 
   /** M10-2b: 魚眼を1段階かけてプレビューする。符号はモードが決める（P-5） */
@@ -6780,6 +6939,7 @@ export class Editor {
         // M10-2c: 四隅はハンドルを離すだけ。確定は Enter なので履歴を積まない
         if (this.warpMode === "corner") {
           this.cornerDrag = null;
+          this.cornerDragBase = null;
           break;
         }
         // M10-2b: 連続適用タイマーを最優先で止める（pointercancel もこの経路を通る）
@@ -7327,10 +7487,13 @@ export class Editor {
     this.xformActive = true;
     this.xformBefore = copyIndexBuf(this.activeBuffer()!);
     this.xformCutDone = false;
+    // M13-2b: 貼り付けは従来どおり**アクティブ1枚**（REQ §3「貼り付けの複数レイヤー化はしない」）
+    this.xformLayers = [{ id: this.activeLayerId, float: this.floatBuf, before: this.xformBefore }];
     this.tool = "transform";
     this.updateToolButtons();
     this.buildToolOptions();
     this.redrawOverlay();
+    this.paintUiOverlay();
   }
 
   // ---------------- M8-2: 📷 画像配置（変換結果→浮動→変形経路を流用） ----------------
@@ -7389,10 +7552,12 @@ export class Editor {
     this.xformActive = true;
     this.xformBefore = copyIndexBuf(this.activeBuffer()!);
     this.xformCutDone = false;
+    this.xformLayers = [{ id: this.activeLayerId, float: this.floatBuf, before: this.xformBefore }]; // M13-2b: 1枚
     this.tool = "transform";
     this.updateToolButtons();
     this.buildToolOptions();
     this.redrawOverlay();
+    this.paintUiOverlay();
     this.cb.toast(t("ed.img.place.done.toast"));
   }
 
@@ -7877,6 +8042,7 @@ export class Editor {
         // 変更あり → パラメータをモード開始時にリセット（モードは維持）
         this.xform = { ...init };
         this.redrawOverlay();
+        this.paintUiOverlay();
         this.buildToolOptions(); // 数値表示更新
         this.cb.toast(t("ed.xform.reset.toast"));
       } else {
@@ -7901,7 +8067,7 @@ export class Editor {
         this.cornerPts.some((p, i) => p.x !== home[i].x || p.y !== home[i].y);
       if (dirty && home) {
         this.cornerPts = home;
-        this.updateCornerPreview();
+        this.updateCornerPreview(); // 中で paintUiOverlay も呼ぶ
         this.cb.toast(t("ed.xform.corner.reset.toast"));
       } else {
         this.cancelCornerWarp();
@@ -7983,34 +8149,66 @@ export class Editor {
     }
   }
 
-  private beginTransform() {
-    const buf = this.activeBuffer();
-    if (!buf) return;
-    if (this.xformActive) return;
-    this.xformBefore = copyIndexBuf(buf);
+  /**
+   * M13-2b (T-2): 変形の対象レイヤーと**共通マスク1枚**を決める（REQ §6-2 の手順 1〜2）。
+   *   対象   … M13-1 の純関数（展開・重複除去・実効可視で非表示を除外・空なら activeLayerId）
+   *   マスク … 選択範囲があればそれ。無ければ対象レイヤーの**合成**の非透明画素
+   * 戻り値は layerDefs の順（下→上）。対象が0件・マスクが空なら null。
+   * 1枚だけ選んでいれば、従来の「アクティブ1枚の非透明画素」とビット単位で同じマスクになる。
+   */
+  private transformTargets(): { ids: string[]; mask: Uint8Array } | null {
+    const frame = this.project.frames[this.frameIndex];
+    if (!frame) return null;
+    const want = new Set(this.moveTargetLayerIds());
+    const ids = this.project.layerDefs.map((l) => l.id).filter((id) => want.has(id) && !!frame.layers[id]);
+    if (ids.length === 0) return null;
     let mask = this.selMask;
     if (!mask) {
-      // 選択が無ければレイヤー全体（これは 0/1 マスク。索引ではないので Uint8Array のまま）
+      // 0/1 マスク。索引ではないので Uint8Array のまま（16bit 化しない）
       mask = new Uint8Array(PIXELS);
-      for (let i = 0; i < PIXELS; i++) if (buf[i] !== 0) mask[i] = 1;
+      for (const id of ids) {
+        const b = frame.layers[id];
+        for (let i = 0; i < PIXELS; i++) if (b[i] !== 0) mask[i] = 1;
+      }
     }
-    this.floatBuf = R.extractFloat(buf, mask, true);
-    this.xformCutDone = true;
-    if (!this.floatBuf) {
-      buf.set(this.xformBefore);
-      this.xformBefore = null;
-      this.xformCutDone = false;
+    if (!R.maskBBox(mask)) return null;
+    return { ids, mask };
+  }
+
+  private beginTransform() {
+    if (this.xformActive) return;
+    const frame = this.project.frames[this.frameIndex];
+    if (!frame) return;
+    // M13-2b (T-2): 対象 N 枚を**同じマスク**で切り出す。extractFloat は bbox を**マスク**から決めるので
+    // 全 float の ox/oy/w/h が一致し、回転・拡縮の中心が共通になる（raster.ts には触らない・REQ §4）。
+    // マスクの空判定を**切り出す前**に済ませるので、失敗時にバッファは1画素も動いていない
+    const tg = this.transformTargets();
+    if (!tg) {
       this.cb.toast(t("ed.xform.nothingToTransform.toast"));
       this.tool = this.prevTool;
       this.updateToolButtons();
       return;
     }
+    this.xformLayers = [];
+    for (const id of tg.ids) {
+      const buf = frame.layers[id];
+      const before = copyIndexBuf(buf);
+      const float = R.extractFloat(buf, tg.mask, true);
+      if (!float) continue; // マスクは空でないと確かめてあるので来ない（型の都合）
+      this.xformLayers.push({ id, float, before });
+    }
+    // 幾何の基準は**アクティブレイヤーの float**（無ければ先頭）。寸法は全部同じなのでどれでも同じ
+    const primary = this.xformLayers.find((l) => l.id === this.activeLayerId) ?? this.xformLayers[0];
+    this.floatBuf = primary.float;
+    this.xformBefore = primary.before;
+    this.xformCutDone = true;
     this.xform = { tx: 0, ty: 0, angle: 0, sx: 1, sy: 1, flipH: false, flipV: false };
     this.xformInitial = { ...this.xform }; // L-B: Ctrl+Zリセットの戻し先
     this.xformActive = true;
     this.updateXformBadge();
     this.renderCanvas();
     this.redrawOverlay();
+    this.paintUiOverlay();
   }
 
   /** M6-5 Q-4: 変形ハンドルの2段ヒットテスト（発注者確定仕様）。
@@ -8024,8 +8222,10 @@ export class Editor {
    *  大きい枠でも四隅付近の内側が回転になっていた（作者の実使用フィードバック）。
    *  判定順も「枠内の移動」を回転リングより先にして、内側が回転に飲まれないようにしている。 */
   private xformHitTest(pt: { x: number; y: number }): {
-    mode: "" | "move" | "scale" | "rotate";
+    mode: "" | "move" | "scale" | "scalex" | "scaley" | "rotate";
     cursor: string;
+    /** M13-2b (T-3): 辺ハンドルのとき、掴んだ辺がローカル軸の +側か −側か */
+    side?: 1 | -1;
   } {
     const f = this.floatBuf;
     if (!f) return { mode: "", cursor: "" };
@@ -8042,6 +8242,11 @@ export class Editor {
     const ly = -dx * sin + dy * cos;
     const HIT = 6; // □の当たり半径（ドット）
     const RING = 12; // M11-24: **枠の外側**の回転ゾーン幅（ドット。20→12 に狭めて誤作動を減らす）
+    // M13-2b (T-3): 辺ハンドルのカーソル。回転後のグローバル方位で ↔ / ↕ を選ぶ
+    const edgeCursor = (axisAngle: number) => {
+      const deg = ((((axisAngle * 180) / Math.PI) % 180) + 180) % 180;
+      return deg < 45 || deg >= 135 ? "ew-resize" : "ns-resize";
+    };
     let best = Infinity;
     let bestCorner: readonly [number, number] = [hw, hh];
     for (const c of [
@@ -8064,6 +8269,11 @@ export class Editor {
     }
     if (Math.hypot(lx, ly - (-hh - 12)) <= HIT)
       return { mode: "rotate", cursor: ROTATE_CURSOR }; // 上辺中央の棒付き□
+    // M13-2b (T-3): 辺の中央の□＝その方向だけ伸ばす（上下＝scaley・左右＝scalex）
+    if (Math.hypot(lx, ly + hh) <= HIT) return { mode: "scaley", cursor: edgeCursor(t.angle + Math.PI / 2), side: -1 };
+    if (Math.hypot(lx, ly - hh) <= HIT) return { mode: "scaley", cursor: edgeCursor(t.angle + Math.PI / 2), side: 1 };
+    if (Math.hypot(lx - hw, ly) <= HIT) return { mode: "scalex", cursor: edgeCursor(t.angle), side: 1 };
+    if (Math.hypot(lx + hw, ly) <= HIT) return { mode: "scalex", cursor: edgeCursor(t.angle), side: -1 };
     // M11-11: キャンバスの外へ出たハンドルは内側へ寄せて**描いてある**ので、その位置でも掴める。
     // 画面内にあるハンドルは上の判定で済んでいるので、ここは寄せたものだけを見る
     // （回転ゾーンのリングより先に見る＝寄せたハンドルがリングに飲まれないように）
@@ -8075,11 +8285,15 @@ export class Editor {
         [hw, hh],
         [-hw, hh],
       ];
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < hs.length; i++) {
         const cl = this.clampedHandle(hs[i].x, hs[i].y);
         if (!cl) continue;
         if (Math.hypot(pt.x - cl.x, pt.y - cl.y) > HIT) continue;
         if (i === 4) return { mode: "rotate", cursor: ROTATE_CURSOR };
+        if (i === 5) return { mode: "scaley", cursor: edgeCursor(t.angle + Math.PI / 2), side: -1 };
+        if (i === 6) return { mode: "scalex", cursor: edgeCursor(t.angle), side: 1 };
+        if (i === 7) return { mode: "scaley", cursor: edgeCursor(t.angle + Math.PI / 2), side: 1 };
+        if (i === 8) return { mode: "scalex", cursor: edgeCursor(t.angle), side: -1 };
         const c = locals[i];
         const ga = Math.atan2(c[1], c[0]) + t.angle;
         const deg = ((((ga * 180) / Math.PI) % 180) + 180) % 180;
@@ -8101,7 +8315,13 @@ export class Editor {
    *  回転で歪まないよう #ed-stage（cvwrap の transform の外）に置く。 */
   private xmodeLabelEl: HTMLElement | null = null;
   private showXformModeLabel(mode: string, clientX: number, clientY: number) {
-    const text = mode === "scale" ? t("ed.xform.mode.scale.label") : mode === "rotate" ? t("ed.xform.mode.rotate.label") : "";
+    // M13-2b (T-3): 辺ハンドル（scalex / scaley）も「拡縮」のラベルでよい（新しいキーは足さない）
+    const text =
+      mode === "scale" || mode === "scalex" || mode === "scaley"
+        ? t("ed.xform.mode.scale.label")
+        : mode === "rotate"
+          ? t("ed.xform.mode.rotate.label")
+          : "";
     if (!text) {
       this.hideXformModeLabel();
       return;
@@ -8144,6 +8364,7 @@ export class Editor {
     // Q-4: ヒットしない場所からのドラッグは何もしない（意図しないモード切替の防止）
     const hit = this.xformHitTest(pt);
     this.dragMode = hit.mode || "";
+    this.dragSide = hit.side ?? 1; // M13-2b (T-3)
     // R-2: 掴んだ瞬間からモードが分かるようカーソルも更新（回転中は grabbing）
     const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
     if (wrap) wrap.style.cursor = hit.mode === "rotate" ? "grabbing" : hit.cursor;
@@ -8164,6 +8385,36 @@ export class Editor {
       const s = Math.max(0.05, (r1 / Math.max(1, r0)) * this.dragBase.sx);
       this.xform.sx = s;
       this.xform.sy = Math.max(0.05, (r1 / Math.max(1, r0)) * this.dragBase.sy);
+    } else if (this.dragMode === "scalex" || this.dragMode === "scaley") {
+      // M13-2b (T-3): 辺ハンドル＝その軸だけ伸ばす。ポインタの**ローカル座標**（回転後の軸）で
+      // 掴んだ辺の位置を決め、**対辺が動かないように中心をずらす**（REQ §9: 中心基準で k 倍すると
+      // 対辺は半幅×(k−1) だけ外へ動くので、ローカル軸でその量だけ tx/ty を戻す）
+      const b = this.dragBase;
+      const cos = Math.cos(b.angle);
+      const sin = Math.sin(b.angle);
+      const dx = pt.x - cx;
+      const dy = pt.y - cy;
+      const isX = this.dragMode === "scalex";
+      // ポインタの、掴んだ軸方向のローカル座標（符号つき）
+      const l = isX ? dx * cos + dy * sin : -dx * sin + dy * cos;
+      const half0 = (isX ? f.w / 2 : f.h / 2) * Math.abs(isX ? b.sx : b.sy);
+      const s = this.dragSide;
+      // 掴んだ辺をポインタ l へ、**対辺（ローカル −s·half0）は固定**。新しい辺の長さは
+      // ポインタと対辺の距離 (s·l + half0) なので、半幅はその半分。対辺を越えたら最小幅で止める
+      //（反転は別の操作）。※「中心からの距離 s·l」を半幅にすると辺がポインタの2倍動く（実機で判明）
+      const half1 = Math.max(half0 * 0.05, 1, (s * l + half0) / 2);
+      const k = half1 / Math.max(1e-6, half0);
+      if (isX) this.xform.sx = Math.max(0.05, Math.abs(b.sx) * k);
+      else this.xform.sy = Math.max(0.05, Math.abs(b.sy) * k);
+      // 対辺を止める: 中心を掴んだ側へ (half1 − half0) だけ寄せる（ローカル軸を世界へ戻す）
+      const d = s * (half1 - half0);
+      if (isX) {
+        this.xform.tx = b.tx + d * cos;
+        this.xform.ty = b.ty + d * sin;
+      } else {
+        this.xform.tx = b.tx - d * sin;
+        this.xform.ty = b.ty + d * cos;
+      }
     } else if (this.dragMode === "rotate") {
       const a0 = Math.atan2(this.dragStart.y - cy, this.dragStart.x - cx);
       const a1 = Math.atan2(pt.y - cy, pt.x - cx);
@@ -8176,15 +8427,41 @@ export class Editor {
       this.xform.angle = ang;
     }
     this.redrawOverlay();
+    this.paintUiOverlay(); // M13-2b (T-6): 枠・ハンドルは画面解像度の層
   }
 
   private commitTransform() {
-    const buf = this.activeBuffer();
-    if (!buf || !this.floatBuf || !this.xformBefore) return;
-    R.blitFloatTransformed(buf, this.floatBuf, this.xform);
+    const frame = this.project.frames[this.frameIndex];
+    if (!frame || !this.floatBuf || this.xformLayers.length === 0) return;
+    // M13-2b (T-2): **1つの Transform を全 float に当てて** N 枚へ焼き込む（REQ §6-2 手順4）。
+    // 中心は全 float で共通（同じマスクで切り出したので ox/oy/w/h が同じ）
+    const before: Record<string, IndexBuf> = {};
+    const after: Record<string, IndexBuf> = {};
+    for (const L of this.xformLayers) {
+      const buf = frame.layers[L.id];
+      if (!buf) continue;
+      R.blitFloatTransformed(buf, L.float, this.xform);
+      before[L.id] = L.before;
+      after[L.id] = copyIndexBuf(buf);
+    }
     // M10-22: 変形確定は endTransform で selMask が消えるため、画素とマスク解除を
-    // 1エントリに束ねる（選択なし変形では before/after とも null＝実質従来どおり）
-    this.pushBufferHistory("変形", buf, this.xformBefore, {
+    // 1エントリに束ねる（選択なし変形では before/after とも null＝実質従来どおり）。
+    // M13-2b: N 枚ぶんを**1エントリ**に（手順5）。1枚のときも同じ経路＝中身は従来と同じ before/after。
+    // 実体は id で適用時に解決する＝構造 undo/redo でバッファが再生成されても正しい実体へ戻る
+    const self = this;
+    const base = multiBufferChangeEntry(
+      "変形",
+      (id) => frame.layers[id] ?? null,
+      before,
+      after,
+      () => {
+        self.dirty = true;
+        self.renderCanvas();
+        const fi = self.project.frames.indexOf(frame);
+        if (fi >= 0) self.paintFilmThumb(fi);
+      }
+    );
+    this.pushWithSelection(base, frame, {
       before: this.selMask ? this.selMask.slice() : null,
       after: null,
     });
@@ -8193,8 +8470,11 @@ export class Editor {
   }
 
   private cancelTransform() {
-    const buf = this.activeBuffer();
-    if (buf && this.xformBefore && this.xformCutDone) buf.set(this.xformBefore);
+    // M13-2b (T-2): 切り出した N 枚すべてをスナップショットへ戻す。貼り付け・画像配置（cutDone=false）は
+    // 元のバッファに触れていないので何もしない（従来どおり）
+    const frame = this.project.frames[this.frameIndex];
+    if (frame && this.xformCutDone)
+      for (const L of this.xformLayers) frame.layers[L.id]?.set(L.before);
     this.endTransform();
   }
 
@@ -8210,14 +8490,49 @@ export class Editor {
     this.xformBefore = null;
     this.xformCutDone = false;
     this.floatBuf = null;
+    this.xformLayers = [];
     this.selMask = null;
     this.overlayCtx().clearRect(0, 0, W, H);
+    this.paintUiOverlay(); // M13-2b (T-6): 枠・ハンドルの層を消す
     this.renderCanvas();
     if (this.tool === "transform") {
       this.tool = "pen";
       this.updateToolButtons();
       this.buildToolOptions();
     }
+  }
+
+  /**
+   * M13-2b: バッファ書き換えのエントリ `base` に**選択マスクの復元**を束ねて1エントリで積む
+   * （`pushBufferHistory` の合成エントリと同じ形。マスク復元の「そのコマを表示中のときだけ」規則も同じ）。
+   */
+  private pushWithSelection(
+    base: HistoryEntry,
+    frame: Frame,
+    sel: { before: Uint8Array | null; after: Uint8Array | null }
+  ) {
+    const self = this;
+    const onFrame = () => self.project.frames[self.frameIndex] === frame;
+    const selBefore = sel.before;
+    const selAfter = sel.after;
+    this.history.push({
+      label: base.label,
+      undo() {
+        base.undo();
+        if (onFrame()) {
+          self.selMask = selBefore ? selBefore.slice() : null;
+          self.redrawOverlay();
+        }
+      },
+      redo() {
+        base.redo();
+        if (onFrame()) {
+          self.selMask = selAfter ? selAfter.slice() : null;
+          self.redrawOverlay();
+        }
+      },
+    });
+    this.dirty = true;
   }
 
   // ---------------- 文字/スポイト/紙色/複写/消す ----------------

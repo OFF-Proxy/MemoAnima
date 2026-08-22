@@ -1076,6 +1076,17 @@ button:disabled {
   display: none;
 }
 
+/* M13-2b (T-6): 変形・四隅の枠とハンドル（画面解像度）。ポインタは必ず素通し＝キャンバスの当たり判定を
+   1ドットも邪魔しない。`.cvwrap canvas` の inset:0 / 100% はそのまま効く */
+#ed-overlay-ui {
+  pointer-events: none;
+  z-index: 5;
+}
+
+#ed-overlay-ui[hidden] {
+  display: none;
+}
+
 /* E-4: 変形中バッジ */
 .xform-badge {
   position: absolute;

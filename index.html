@@ -130,6 +130,10 @@
               <!-- M12-C: カーソル層（ペン先の輪・ドット枠）。格子と同じく画面解像度で描く。
                    #ed-overlay は 320×240 のドット解像度なので 1ドット未満の細い線が出せない -->
               <canvas id="ed-cursor" hidden></canvas>
+              <!-- M13-2b (T-6): 変形・四隅の枠とハンドル。格子・カーソル層と同じく画面解像度で描く
+                   （#ed-overlay に引くとズーム倍の太線になる）。ドット粒度のもの（アンツ・色マスク・
+                   変形プレビューの絵）は #ed-overlay に残す -->
+              <canvas id="ed-overlay-ui" hidden></canvas>
               <div class="drawguide"></div>
             </div>
           </div>

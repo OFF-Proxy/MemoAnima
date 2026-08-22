@@ -601,6 +601,8 @@ const es: Record<keyof typeof ja, string> = {
   "ed.xform.peek.btn": "👁 Ver debajo",
   "ed.xform.reset.toast": "Transformación restablecida",
   "ed.xform.scale.label": "Escala",
+  "ed.xform.scaleW.label": "An.",
+  "ed.xform.scaleH.label": "Al.",
   "ed.xform.snap15.label": "15°",
   "ed.xform.numsFold.title": "Mostrar u ocultar las cifras de giro y escala",
   "ed.xform.peek.title": "Se atenúa para ver lo de debajo, solo mientras lo mantiene",

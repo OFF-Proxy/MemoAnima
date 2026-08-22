@@ -603,6 +603,8 @@ const ko: Record<keyof typeof ja, string> = {
   "ed.xform.peek.btn": "👁 비춰 보기",
   "ed.xform.reset.toast": "변형을 초기화했어요",
   "ed.xform.scale.label": "배율",
+  "ed.xform.scaleW.label": "가로",
+  "ed.xform.scaleH.label": "세로",
   "ed.xform.snap15.label": "15°",
   "ed.xform.numsFold.title": "회전과 배율 수치를 보이거나 숨겨요",
   "ed.xform.peek.title": "누르고 있는 동안만 흐려져서 아래가 보여요",
