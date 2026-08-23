@@ -1401,6 +1401,33 @@ button:disabled {
   display: none;
 }
 
+/* M17: マイ柄（カスタムトーン）。「マイ柄」見出し・🎨トグル行はグリッド1行ぶち抜き。
+   チップは既存トーンチップ（.tone-btn）と同じ見た目＝折りたたみ時も選択中だけ残る。
+   ペンの「種類」（6列グリッド）では 64px チップが収まらないので 3 列ぶん使う（2個/行）。 */
+.tex .tone-custom-head {
+  grid-column: 1 / -1;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--ink-soft);
+  margin: 6px 0 0;
+  padding-top: 4px;
+  border-top: 1px solid rgba(122, 111, 96, 0.25);
+}
+.tex.collapsed .tone-custom-head {
+  display: none;
+}
+.tex .tone-colormode {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+.tex:not(.tonegrid) .tone-btn.custom {
+  grid-column: span 3;
+}
+
 /* M16 (D-1): トーン欄の「コマでずらす」トグル行（トーングリッド先頭に1行ぶち抜き）。
    スイッチ＋ラベルを1行に。折りたたみ中も残す（トーン系の設定なので隠さない）。 */
 .tex .tone-dither {

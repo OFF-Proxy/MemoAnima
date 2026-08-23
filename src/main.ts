@@ -139,6 +139,11 @@ type Settings = {
   toneOpen?: boolean;
   /** M16 (D-1): トーンを「コマでずらす」か。**未設定＝オフ**（`=== true` で見る）。追加のみ */
   ditherFrameShift?: boolean;
+  /** M17: マイ柄（カスタムトーン）。色は RGB で持つ（索引ではない）＝どの作品でも同じ色。上限12・追加のみ。
+   *  復元は editor の sanitizeCustomTones（壊れた要素だけ捨てる）。**プロジェクトの保存形式には無関係** */
+  customTones?: { id: number; w: number; h: number; colors: string[] }[];
+  /** M17: マイ柄を「登録した色で塗る」か。**未設定＝オン**（`!== false` で見る）。追加のみ */
+  customToneColor?: boolean;
   /** U-1: 「起動時に更新を確認します（⚙ でオフにできます）」の初回案内を出したか。
    *  `guideDone` とは別にしている——既存利用者は `guideDone: true` を持っているので、
    *  それを流用すると**更新確認のことを一度も知らされないまま**になる */
@@ -1638,6 +1643,9 @@ function showEditor(
   editor.restoreToneOpen(settings.toneOpen);
   // M16 (D-1): トーンのコマ間シフト（true 以外はオフ＝既定）
   editor.restoreDitherFrameShift(settings.ditherFrameShift);
+  // M17: マイ柄（壊れた要素だけ捨てる）／「登録した色で塗る」（false 以外はオン＝既定）
+  editor.restoreCustomTones(settings.customTones);
+  editor.restoreCustomToneColor(settings.customToneColor);
   editor.mount(
     project,
     ctx,
@@ -1681,6 +1689,15 @@ function showEditor(
       // M16 (D-1): 「コマでずらす」トグルも同じ流儀（押した瞬間に保存）
       onDitherFrameShiftChange: (on) => {
         settings.ditherFrameShift = on;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      // M17: マイ柄の登録・削除／「登録した色で塗る」も同じ流儀（変えた瞬間に保存・履歴外）
+      onCustomTonesChange: (list) => {
+        settings.customTones = list;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      onCustomToneColorChange: (on) => {
+        settings.customToneColor = on;
         invoke("save_settings", { settings }).catch(() => {});
       },
       saveProject: async (c, data, thumb) => {

@@ -63,6 +63,8 @@ const KEYED_FILES: readonly (readonly [string, string])[] = [
   // M12-C: 新しく作ったファイルは**ここへ足さないと検査が沈黙する**（M12-1b-2 で踏んだ穴）。
   // 中身は純関数だけで画面文言は持たないが、後から足されたときに気づけるように載せておく
   ["src/editor/cursor.ts", read("src/editor/cursor.ts")],
+  // M17: マイ柄（純関数・画面文言なし）。cursor.ts と同じ理由で載せる（検査5・9 の被覆を欠かさない）
+  ["src/editor/customTone.ts", read("src/editor/customTone.ts")],
 ];
 
 /** 検査4・6・7 が舐めるソース一式（main / editor ＋ キー化済みファイル） */

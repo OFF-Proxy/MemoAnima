@@ -220,6 +220,24 @@ export interface PenOptions {
   clip?: Uint8Array;
   /** M16 (D-1): トーン参照座標のコマ間シフト量（両軸に同量＝斜め）。未指定/0=従来どおり（シフトなし） */
   toneShift?: number;
+  /** M17: マイ柄（色タイル・解決済み索引）。指定時は tone/texture より**先に**判定し、
+   *  タイルの -1（透明）は塗らない。未指定＝従来どおり（この分岐は undefined 判定1つで素通り） */
+  colorTile?: ColorTile | null;
+}
+
+/** M17: マイ柄の色タイル。`idx[y*w+x]` は colorTable の**解決済み索引**、-1 は透明（塗らない）。
+ *  既存の ToneTile（1ビット・正方形）とは**別型**。非正方形可（w,h は 1〜32）。
+ *  索引は描く側が「ストローク開始時に一括解決」してから渡す（16bit 昇格がストローク中に起きないように）。 */
+export interface ColorTile {
+  w: number;
+  h: number;
+  idx: Int32Array;
+}
+
+/** M17: 色タイルの参照（キャンバス座標固定・タイル寸法で折返し）。`shift` は M16 のコマ間シフト（両軸同量）。
+ *  x,y,shift は非負なので % で正しい。戻り値 -1 は透明（呼び出し側は塗らない）。 */
+export function colorTileAt(ct: ColorTile, x: number, y: number, shift = 0): number {
+  return ct.idx[((y + shift) % ct.h) * ct.w + ((x + shift) % ct.w)];
 }
 
 /** M10-7: stamp() のテクスチャ判定（1画素ぶん）。true=塗る / false=飛ばす。
@@ -270,6 +288,12 @@ export function stamp(buf: IndexBuf, cx: number, cy: number, o: PenOptions) {
         if (x < 0 || x >= W) continue;
         // M10-22: 選択範囲クリップ（トーン経路含む全書き込みの直前で判定）
         if (o.clip && !o.clip[y * W + x]) continue;
+        // M17: マイ柄（色タイル）。tone より先に判定・透明(-1)は塗らない。未指定なら従来経路へ素通り
+        if (o.colorTile) {
+          const v = colorTileAt(o.colorTile, x, y, o.toneShift);
+          if (v >= 0) buf[y * W + x] = v;
+          continue;
+        }
         if (o.tone) {
           if (toneAt(o.tone, x, y, o.toneShift)) buf[y * W + x] = o.color;
           continue;
@@ -293,6 +317,12 @@ export function stamp(buf: IndexBuf, cx: number, cy: number, o: PenOptions) {
       if (o.size <= 1 && (dx !== 0 || dy !== 0)) continue;
       // M10-22: 選択範囲クリップ（トーン経路含む全書き込みの直前で判定）
       if (o.clip && !o.clip[y * W + x]) continue;
+      // M17: マイ柄（色タイル）。tone より先に判定・透明(-1)は塗らない。未指定なら従来経路へ素通り
+      if (o.colorTile) {
+        const v = colorTileAt(o.colorTile, x, y, o.toneShift);
+        if (v >= 0) buf[y * W + x] = v;
+        continue;
+      }
       // M5-4: トーンパターン（キャンバス座標固定）。穴は素通し＝下の絵を消さない
       if (o.tone) {
         if (toneAt(o.tone, x, y, o.toneShift)) buf[y * W + x] = o.color;
@@ -334,8 +364,9 @@ export function strokeSegment(
 /** M10-19: ref 上で (sx,sy) と4近傍連結の同添字領域を 0/1 マスク化する（走査線・floodFill と同規則）。
  *  読み取りは添字の === 比較のみ・書き込みはマスクの 0/1 のみ（補間・平均・ブレンドなし）。
  *  floodFill(ref指定時) と autoSelectMask(つながり) の共通領域確定部。
- *  M10-22: clip 指定時は clip=0 の画素を**壁扱い**にする（選択範囲クリップ。未指定=従来どおり） */
-function regionMask(
+ *  M10-22: clip 指定時は clip=0 の画素を**壁扱い**にする（選択範囲クリップ。未指定=従来どおり）
+ *  M17: マイ柄のバケツ（customTone.ts の floodFillColorTile）も同じ領域確定を使うため export（中身は不変） */
+export function regionMask(
   ref: IndexBuf,
   sx: number,
   sy: number,

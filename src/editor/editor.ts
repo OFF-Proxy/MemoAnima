@@ -47,6 +47,8 @@ import {
   panCursorFor,
 } from "./cursor";
 import * as R from "./raster";
+// M17: マイ柄（カスタムトーン）。登録・解決・塗り込みの純関数はここ（settings にだけ保存・保存形式には触れない）
+import * as CT from "./customTone";
 import { FrameClip, makeClip, buildFramesFromClip } from "./frameClip";
 import { FrameSource, projectSource, ExportAudioSource } from "./exporter";
 import {
@@ -169,6 +171,9 @@ const STRIP_CLOSE_MS = 140;
 const ENCLOSE_MIN_PX = 8;
 // M16 (D-1): 「コマでずらす」1コマあたりのトーン参照座標オフセット（斜め (+1,+1)/コマ）。定数化
 const DITHER_SHIFT_STEP = 1;
+// M17: マイ柄チップのプレビュー（32×32 バッキング→CSS ×2・透明は 4px 市松）。実機判断で調整する定数
+const CUSTOM_CHIP_PX = 32;
+const CUSTOM_CHIP_CHECKER = 4;
 // M5-4 B-3: ペンは「ベタ＋スプレー系」のみに整理。
 // 旧 dot(点線)・halftone(網点=ブラシのトーンへ)は撤去、rough(かすれ)は sand（スプレー粗）へ集約・廃止。
 // 既存作品の画素は不変（ツール状態は保存対象外・UIのみの整理）。
@@ -298,6 +303,10 @@ export interface EditorCallbacks {
   onToneOpenChange?: (open: boolean) => void;
   /** M16 (D-1): トーンの「コマでずらす」トグルが変わったら settings.json へ保存する（同じ流儀） */
   onDitherFrameShiftChange?: (on: boolean) => void;
+  /** M17: マイ柄の一覧が変わったら（登録・削除）settings.json へ保存する。履歴には積まない */
+  onCustomTonesChange?: (list: CT.CustomTone[]) => void;
+  /** M17: 「🎨 登録した色で塗る」トグルが変わったら settings.json へ保存する */
+  onCustomToneColorChange?: (on: boolean) => void;
   /** ライブラリ保存（Rust呼び出し）を委譲 */
   saveProject: (
     ctx: EditorSaveContext,
@@ -457,6 +466,15 @@ export class Editor {
    *  既定はベタ＝従来どおりの全消し。ブラシと共有すると、ブラシの既定（網点大）のせいで
    *  **消しゴムが最初からかすれてしまい**「ベタ時は従来どおり」が初期状態で成立しない */
   eraserToneId = "solid";
+  /** M17: ペンの「種類」でマイ柄を選んでいるときの id（"custom:<n>"）。""＝従来どおり texture で描く */
+  penToneId = "";
+  /** M17: 登録済みのマイ柄（settings.customTones から復元・登録順）。履歴には積まない */
+  private customTones: CT.CustomTone[] = [];
+  /** M17: 「🎨 登録した色で塗る」（既定オン・settings）。オフ＝非透明画素を形として現在色で塗る */
+  private customToneColor = true;
+  /** M17: ストローク中に使う解決済みトーン（pointerdown で**バッファ取得より先に**一括解決し、
+   *  move では再解決しない＝ストローク中に 16bit 昇格が起きてバッファ参照が死ぬのを防ぐ） */
+  private strokeTone: { kind: "pen" | "brush" | "eraser"; tone: R.ToneTile | null; colorTile: R.ColorTile | null } | null = null;
   onionLevel = 0;
   stabilizer = true;
   pressureEnabled = true;
@@ -1295,25 +1313,7 @@ export class Editor {
       };
       // M16 (D-1): 「🔀 コマでずらす」トグル（トーン欄の先頭に1行ぶち抜きで）。既定オフ・settings に記憶。
       // 📌全コマ共通レイヤーは1バッファなので揺れない旨を title に書く（仕様）
-      {
-        const row = document.createElement("div");
-        row.className = "tone-dither";
-        const sw = document.createElement("div");
-        sw.className = "sw2" + (this.ditherFrameShift ? " on" : "");
-        const lab = document.createElement("span");
-        lab.className = "tog";
-        lab.textContent = t("ed.tone.ditherShift.label");
-        row.title = t("ed.tone.ditherShift.title");
-        row.appendChild(sw);
-        row.appendChild(lab);
-        const flip = () => {
-          this.ditherFrameShift = !this.ditherFrameShift;
-          sw.classList.toggle("on", this.ditherFrameShift);
-          this.cb.onDitherFrameShiftChange?.(this.ditherFrameShift);
-        };
-        row.addEventListener("click", flip);
-        tex.appendChild(row);
-      }
+      this.appendDitherRow(tex);
       // M12-1c-2: ループ変数は tone（`t` は翻訳関数。M12-1b の TEXTURES と同じ作法）
       for (const tone of R.TONE_TILES) {
         const d = document.createElement("button");
@@ -1346,25 +1346,189 @@ export class Editor {
         tex.appendChild(d);
         if (tone.id === "diag-grid") sep(); // 斜め格子の下に区切り線（文字なし）
       }
+      // M17: 末尾に「マイ柄」節（登録があるときだけ）
+      this.appendCustomToneSection(tex, toneMode, getId, setId);
     } else {
       head.textContent = t("ed.pen.kind.label");
       tex.classList.remove("tonegrid");
       // M12-1b: ループ変数は tx（`t` は翻訳関数）
       for (const tx of TEXTURES) {
         const d = document.createElement("button");
-        d.className = "tx" + (tx.key === this.texture ? " on" : "");
+        // M17: マイ柄を選んでいる間はどの texture も押された表示にしない
+        d.className = "tx" + (tx.key === this.texture && !this.penToneId ? " on" : "");
         d.title = t(tx.labelKey);
         d.textContent = tx.icon;
         d.addEventListener("click", () => {
           this.texture = tx.key;
-          tex.querySelectorAll(".tx").forEach((e) => e.classList.remove("on"));
+          this.penToneId = ""; // M17: texture を選んだらマイ柄は解除
+          tex.querySelectorAll(".tx, .tone-btn").forEach((e) => e.classList.remove("on"));
           d.classList.add("on");
         });
         tex.appendChild(d);
       }
+      // M17: ペンの「種類」にもマイ柄（REQ §2-2 対象経路: ペン）
+      this.appendCustomToneSection(
+        tex,
+        "pen",
+        () => this.penToneId,
+        (id) => {
+          this.penToneId = id;
+        }
+      );
     }
     // M14 (S-3): 折りたたみ状態を反映（head.textContent を書き直したので折りたたみマークも付け直す）
     this.applyToneFold();
+  }
+
+  /** M16 (D-1): 「🔀 コマでずらす」トグル行（1行ぶち抜き）。トーン欄の先頭と、M17 でペンの「マイ柄」節にも出す
+   *（ペン＋マイ柄にもシフトが効くので、ペン側からも見える・切れるように） */
+  private appendDitherRow(tex: HTMLElement) {
+    const row = document.createElement("div");
+    row.className = "tone-dither";
+    const sw = document.createElement("div");
+    sw.className = "sw2" + (this.ditherFrameShift ? " on" : "");
+    const lab = document.createElement("span");
+    lab.className = "tog";
+    lab.textContent = t("ed.tone.ditherShift.label");
+    row.title = t("ed.tone.ditherShift.title");
+    row.appendChild(sw);
+    row.appendChild(lab);
+    row.addEventListener("click", () => {
+      this.ditherFrameShift = !this.ditherFrameShift;
+      sw.classList.toggle("on", this.ditherFrameShift);
+      this.cb.onDitherFrameShiftChange?.(this.ditherFrameShift);
+    });
+    tex.appendChild(row);
+  }
+
+  // ================= M17: マイ柄（カスタムトーン） =================
+  /** トーン一覧／ペンの種類の末尾に「マイ柄」節を足す。登録が無ければ何も出さない。
+   *  チップ: 32×32 バッキングに柄をタイル敷き（透明は市松）→ CSS ×2 pixelated（既存トーンチップと同じ倍率）。
+   *  クリック＝選択／右クリック＝確認つき削除。かすり消し以外には「🎨 登録した色で塗る」トグルも出す */
+  private appendCustomToneSection(
+    tex: HTMLElement,
+    kind: "pen" | "brush" | "fill" | "eraser",
+    getId: () => string,
+    setId: (id: string) => void
+  ) {
+    if (this.customTones.length === 0) return;
+    const head = document.createElement("div");
+    head.className = "tone-custom-head";
+    head.textContent = t("ed.tone.custom.head.label");
+    tex.appendChild(head);
+    // ペンの種類欄にはトーン欄先頭の🔀が無いので、マイ柄節に出す（ペン＋マイ柄にもシフトが効く）
+    if (kind === "pen") this.appendDitherRow(tex);
+    if (kind !== "eraser") {
+      // かすり消しは常に形だけなのでトグルを出さない
+      const row = document.createElement("div");
+      row.className = "tone-colormode";
+      const sw = document.createElement("div");
+      sw.className = "sw2" + (this.customToneColor ? " on" : "");
+      const lab = document.createElement("span");
+      lab.className = "tog";
+      lab.textContent = t("ed.tone.custom.colorMode.label");
+      row.appendChild(sw);
+      row.appendChild(lab);
+      row.addEventListener("click", () => {
+        this.customToneColor = !this.customToneColor;
+        sw.classList.toggle("on", this.customToneColor);
+        this.cb.onCustomToneColorChange?.(this.customToneColor);
+      });
+      tex.appendChild(row);
+    }
+    this.customTones.forEach((ct, n) => {
+      const key = CT.customToneKey(ct.id);
+      const d = document.createElement("button");
+      d.className = "tone-btn custom" + (key === getId() ? " on" : "");
+      d.title = t("ed.tone.custom.chip.title", { n: n + 1 });
+      const cv = document.createElement("canvas");
+      cv.width = CUSTOM_CHIP_PX;
+      cv.height = CUSTOM_CHIP_PX;
+      const ctx = cv.getContext("2d")!;
+      // 市松（透明の見え方）→ 柄をタイル敷き（w,h 周期でそのまま繰り返す＝塗ったときの見え方）
+      for (let y = 0; y < CUSTOM_CHIP_PX; y++)
+        for (let x = 0; x < CUSTOM_CHIP_PX; x++) {
+          ctx.fillStyle = (((x / CUSTOM_CHIP_CHECKER) | 0) + ((y / CUSTOM_CHIP_CHECKER) | 0)) & 1 ? "#ddd" : "#fff";
+          ctx.fillRect(x, y, 1, 1);
+          const c = ct.colors[(y % ct.h) * ct.w + (x % ct.w)];
+          if (c) {
+            ctx.fillStyle = c;
+            ctx.fillRect(x, y, 1, 1);
+          }
+        }
+      d.appendChild(cv);
+      d.addEventListener("click", () => {
+        setId(key);
+        tex.querySelectorAll(".tone-btn, .tx").forEach((e) => e.classList.remove("on"));
+        d.classList.add("on");
+      });
+      d.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void this.deleteCustomTone(ct.id);
+      });
+      tex.appendChild(d);
+    });
+  }
+
+  /** 範囲選択から柄を登録する（選択オプション／ストリップの「柄として登録」）。
+   *  settings にだけ保存（履歴外・トーストで知らせる）。32×32 超は左上を切り出し、全透明は拒否、
+   *  上限 12 で満杯なら「一番古い（登録順の先頭）を消して登録しますか？」 */
+  private async registerCustomTone() {
+    if (this.xformGuard()) return;
+    if (!this.selMask) {
+      this.cb.toast(t("ed.sel.needSelection.toast"));
+      return;
+    }
+    const buf = this.activeBuffer();
+    if (!buf) {
+      this.cb.toast(t("ed.common.needLayer.toast"));
+      return;
+    }
+    const cap = CT.captureCustomTone(buf, this.selMask, this.project.colorTable, CT.CUSTOM_TONE_MAX_SIZE);
+    if (!cap) {
+      this.cb.toast(t("ed.tone.custom.empty.toast"));
+      return;
+    }
+    if (this.customTones.length >= CT.CUSTOM_TONE_MAX_COUNT) {
+      const ok = await this.cb.confirm(t("ed.tone.custom.full.msg"));
+      if (!ok) return;
+      this.customTones.shift(); // 登録順の先頭＝一番古い
+      this.pruneToneIds();
+    }
+    this.customTones.push({ id: CT.nextCustomToneId(this.customTones), w: cap.w, h: cap.h, colors: cap.colors });
+    this.saveCustomTones();
+    this.cb.toast(
+      cap.cropped ? t("ed.tone.custom.cropped.toast", { w: cap.w, h: cap.h }) : t("ed.tone.custom.registered.toast")
+    );
+    this.rebuildTexPicker();
+  }
+
+  /** 右クリック→確認つき削除（settings のみ・履歴外）。選んでいた柄が消えたらベタへ戻す */
+  private async deleteCustomTone(id: number) {
+    const ok = await this.cb.confirm(t("ed.tone.custom.delete.msg"));
+    if (!ok) return;
+    this.customTones = this.customTones.filter((c) => c.id !== id);
+    this.pruneToneIds();
+    this.saveCustomTones();
+    this.cb.toast(t("ed.tone.custom.deleted.toast"));
+    this.rebuildTexPicker();
+  }
+
+  /** 消えたマイ柄を指している道具のトーン選択を既定へ戻す（ブラシ/バケツ/消しゴム=ベタ・ペン=texture） */
+  private pruneToneIds() {
+    const alive = (key: string) => {
+      const cid = CT.parseCustomToneKey(key);
+      return cid === null || this.customTones.some((c) => c.id === cid);
+    };
+    if (!alive(this.brushToneId)) this.brushToneId = "solid";
+    if (!alive(this.fillToneId)) this.fillToneId = "solid";
+    if (!alive(this.eraserToneId)) this.eraserToneId = "solid";
+    if (!alive(this.penToneId)) this.penToneId = "";
+  }
+
+  private saveCustomTones() {
+    this.cb.onCustomTonesChange?.(this.customTones.map((c) => ({ ...c, colors: [...c.colors] })));
   }
 
   /** M14 (S-3): 「種類/トーン」一覧の開閉を DOM へ反映する。閉＝現在の種類（.on）だけ1行表示（CSS 側で
@@ -1413,6 +1577,8 @@ export class Editor {
     }
     this.prevTool = this.tool;
     this.tool = t;
+    // M17: ストローク中に道具が変わったら、前の道具用に解決した色タイルは捨てる（次の move は新しい道具で解決）
+    this.strokeTone = null;
     // M14 (S-1): 別ツールへ切り替えたら、前のツール用に開いていたストリップは畳む
     if (this.stripOpenFor && this.stripOpenFor !== t) this.closeStrip();
     // M11-2: 太さの実体は sizeByTool なので、ここは表示（.sz の on）を合わせるだけ
@@ -3753,6 +3919,14 @@ export class Editor {
                 select: () => { this.selectRefAll = true; this.afterFormatChange(); } },
             ],
           },
+          {
+            // M17: 「柄として登録」（動作ボタン・押された表示は持たない）。単一ソースなのでパネルとストリップの両方に出る
+            key: "register", variant: "oni",
+            items: [
+              { id: "register", labelKey: "ed.sel.registerTone.btn", active: false,
+                select: () => { void this.registerCustomTone(); } },
+            ],
+          },
         ];
       case "pen":
       case "brush":
@@ -5321,6 +5495,17 @@ export class Editor {
     this.ditherFrameShift = v === true;
   }
 
+  /** M17: settings.json の `customTones` から復元（壊れた要素だけ捨てる・上限12・旧 settings は []）。
+   *  mount 前の復元で足りる（rebuildTexPicker が読む） */
+  restoreCustomTones(v: unknown) {
+    this.customTones = CT.sanitizeCustomTones(v);
+  }
+
+  /** M17: settings.json の `customToneColor` から復元。**`false` 以外はオン**（既定オン・追加のみ） */
+  restoreCustomToneColor(v: unknown) {
+    this.customToneColor = v !== false;
+  }
+
   /** いま実際に畳まれているか（個別状態 or 集中） */
   private isCollapsed(key: CollapseKey): boolean {
     return this.focusActive || this.collapsed[key];
@@ -6442,19 +6627,48 @@ export class Editor {
    *  ※ 昇格は全レイヤーバッファを差し替えるため、必ず「色解決 → バッファ取得」の順で使うこと。 */
   private currentColorIndex(): number {
     if (this.colorHex === "") return 0;
+    return this.resolveColorIndex(this.colorHex);
+  }
+
+  /** 任意の "#rrggbb" を colorTable の索引へ解決する（無ければ登録。257 色目で 16bit 昇格→トースト）。
+   *  M17: マイ柄の各色もここを通す（currentColorIndex と同じ規則・同じトースト）。
+   *  ★昇格でバッファが差し替わるので、呼んだ後に activeBuffer() を取り直すこと */
+  private resolveColorIndex(hex: string): number {
     const bitsBefore = this.project.indexBits;
     const lenBefore = this.project.colorTable.length;
-    const idx = ensureColor(this.project, this.colorHex);
+    const idx = ensureColor(this.project, hex);
     if (bitsBefore === 8 && this.project.indexBits === 16) {
       this.cb.toast(t("ed.color.promote16.toast"));
       this.dirty = true;
-    } else if (
-      lenBefore >= 65536 &&
-      this.project.colorTable[idx] !== this.colorHex.toLowerCase()
-    ) {
+    } else if (lenBefore >= 65536 && this.project.colorTable[idx] !== hex.toLowerCase()) {
       this.cb.toast(t("ed.color.paletteFull.toast"));
     }
     return idx;
+  }
+
+  /** M17: 道具ごとのトーン選択 id を「描画エンジンに渡す形」へ解決する。
+   *  - 既存トーン: `{tone, colorTile:null}`（従来どおり）
+   *  - マイ柄: `{tone:null, colorTile}`。かすり消しは常に形だけ（全部 0）。🎨オン＝登録色を**全色一括解決**、
+   *    オフ＝形として現在色。消えたマイ柄を指していたらベタ（tone null）扱い
+   *  ★色を解決する（昇格し得る）ので、**この戻り値を得てから** activeBuffer() を取ること */
+  private resolveToneFor(kind: "pen" | "brush" | "fill" | "eraser"): {
+    tone: R.ToneTile | null;
+    colorTile: R.ColorTile | null;
+  } {
+    const id =
+      kind === "pen" ? this.penToneId : kind === "brush" ? this.brushToneId : kind === "fill" ? this.fillToneId : this.eraserToneId;
+    const cid = CT.parseCustomToneKey(id);
+    if (cid !== null) {
+      const ct = this.customTones.find((c) => c.id === cid);
+      if (ct) {
+        if (kind === "eraser") return { tone: null, colorTile: CT.buildColorTile(ct, { color: 0 }) };
+        if (this.customToneColor)
+          return { tone: null, colorTile: CT.buildColorTile(ct, { resolve: (hex) => this.resolveColorIndex(hex) }) };
+        return { tone: null, colorTile: CT.buildColorTile(ct, { color: this.currentColorIndex() }) };
+      }
+      return { tone: null, colorTile: null }; // 消えたマイ柄＝ベタ
+    }
+    return { tone: kind === "pen" ? null : (R.toneById(id)?.tile ?? null), colorTile: null };
   }
 
   private penOptions(pressure: number): R.PenOptions {
@@ -6464,7 +6678,14 @@ export class Editor {
     }
     let texture = this.texture;
     let tone: R.ToneTile | null | undefined;
+    let colorTile: R.ColorTile | null = null;
     let color: number;
+    // M17: トーンの解決は「ストローク中は pointerdown で一括解決した strokeTone」を使う（move で再解決しない）。
+    // ストローク外（図形の penOptions(0.5) 等）は従来どおりその場で解決。
+    // strokeTone は**同じ道具のときだけ**使う（ストローク中にショートカットで道具が変わったら、前の道具の
+    // 色タイルを流用しない＝消しゴムが色を塗る事故の防止。setTool でも捨てる）
+    const sel = (kind: "pen" | "brush" | "eraser") =>
+      this.strokeTone && this.strokeTone.kind === kind ? this.strokeTone : this.resolveToneFor(kind);
     if (this.tool === "eraser") {
       // 消しゴムは色を解決しない（未使用色の登録＝不要な16bit昇格を避ける）
       color = 0;
@@ -6472,14 +6693,24 @@ export class Editor {
       // M11-14: かすり消し — ベタ以外のトーンを選んでいたら、柄に当たる画素だけを
       // 透明(0)にする（柄はキャンバス座標固定＝なぞり直しても位相が揃う）。
       // ベタ（tile=null）なら tone を渡さない＝従来の全消しとビット単位で同じ経路
-      tone = R.toneById(this.eraserToneId)?.tile ?? null;
+      // M17: マイ柄なら colorTile（全部 0＝形で消す）。既存トーンは従来どおり tone
+      const s = sel("eraser");
+      tone = s.tone;
+      colorTile = s.colorTile;
     } else {
       color = this.currentColorIndex();
       if (this.tool === "brush") {
         // M5-4: ブラシ=うごメモ準拠トーンパターン（座標固定）。ベタ(tile=null)は solid で全塗り
         texture = "solid";
-        tone = R.toneById(this.brushToneId)?.tile ?? null;
+        const s = sel("brush");
+        tone = s.tone;
+        colorTile = s.colorTile;
         size = Math.max(size, 3);
+      } else if (this.tool === "pen" && this.penToneId) {
+        // M17: ペンの「種類」でマイ柄を選んでいるとき（"" なら従来どおり texture＝この分岐に入らない）。
+        // texture は solid に落とす（点線 "dot" は strokeSegment 側で stamp を間引くので、残すと柄が途切れる）
+        texture = "solid";
+        colorTile = sel("pen").colorTile;
       }
     }
     return {
@@ -6493,6 +6724,8 @@ export class Editor {
       clip: this.selMask ?? undefined,
       // M16 (D-1): コマ間シフト（トグルオフや tone なしのときは 0＝従来どおり）
       toneShift: this.toneShiftForDraw(),
+      // M17: マイ柄（未使用なら undefined＝従来どおり）
+      colorTile: colorTile ?? undefined,
     };
   }
 
@@ -6544,6 +6777,7 @@ export class Editor {
     this.lastPointerEvent = null;
     if (this.pointerDown && last) this.onPointerUp(last);
     this.pointerDown = false;
+    this.strokeTone = null; // M17: up が来ないまま畳んだときも解決済みトーンを残さない
     if (this.panState) {
       this.panState = null;
       this.updatePanCursor();
@@ -6620,6 +6854,9 @@ export class Editor {
       case "eraser": {
         // 色解決（penOptions→currentColorIndex）が16bit昇格でバッファを差し替えることが
         // あるため、必ずオプション解決後にバッファを取り直す
+        // M17: マイ柄はここで**全色を一括解決**して strokeTone に固定（move では再解決しない）。
+        // この順序（解決→penOptions→activeBuffer）が 257 色目を跨ぐストロークの安全の要
+        this.strokeTone = { kind: this.tool, ...this.resolveToneFor(this.tool) };
         const o = this.penOptions(e.pressure);
         const buf2 = this.activeBuffer();
         if (!buf2) return;
@@ -6641,6 +6878,8 @@ export class Editor {
           this.enclosePts = [pt];
           break;
         }
+        // M17: マイ柄なら先に**全色を一括解決**（昇格し得る）。既存トーンは従来どおり tile を引くだけ
+        const fillSel = this.resolveToneFor("fill");
         const color = this.currentColorIndex(); // 昇格し得るので先に解決
         const buf2 = this.activeBuffer();
         if (!buf2) return;
@@ -6650,18 +6889,23 @@ export class Editor {
         const ref = this.fillRefAll
           ? flattenIndexFrame(this.project, this.frameIndex)
           : undefined;
-        // M5-5 T-3: トーン塗り（座標固定＝ブラシのトーンと柄が繋がる）。ベタ=従来どおり
-        // M10-22: 選択中は clip=0 を壁として範囲内だけ塗る
-        R.floodFill(
-          buf2,
-          pt.x,
-          pt.y,
-          color,
-          R.toneById(this.fillToneId)?.tile ?? null,
-          ref,
-          this.selMask ?? undefined,
-          this.toneShiftForDraw() // M16 (D-1): コマ間シフト（オフ時 0＝従来どおり）
-        );
+        if (fillSel.colorTile) {
+          // M17: マイ柄のバケツ（領域確定は従来と同じ規則・塗り込みは色タイル）
+          CT.floodFillColorTile(buf2, pt.x, pt.y, fillSel.colorTile, ref, this.selMask ?? undefined, this.toneShiftForDraw());
+        } else {
+          // M5-5 T-3: トーン塗り（座標固定＝ブラシのトーンと柄が繋がる）。ベタ=従来どおり
+          // M10-22: 選択中は clip=0 を壁として範囲内だけ塗る
+          R.floodFill(
+            buf2,
+            pt.x,
+            pt.y,
+            color,
+            fillSel.tone,
+            ref,
+            this.selMask ?? undefined,
+            this.toneShiftForDraw() // M16 (D-1): コマ間シフト（オフ時 0＝従来どおり）
+          );
+        }
         this.pushBufferHistory("塗り", buf2, before);
         this.renderCanvas();
         break;
@@ -7379,6 +7623,7 @@ export class Editor {
     // pointerDown が立っていなくても解放だけは通す
     this.lastPointerEvent = null;
     this.releaseCapture(e.pointerId);
+    this.strokeTone = null; // M17: ストロークの解決済みトーンは離したら捨てる（次は pointerdown で解決し直す）
     if (!this.pointerDown) return;
     // M10-7: 確定時の拘束は**離した瞬間の** Shift 状態で決める（pointerup にも modifier がある）。
     // pointercancel は shiftKey を持つが意味が薄いので、いずれにせよ直前の move と一致する
@@ -7494,7 +7739,8 @@ export class Editor {
             let cnt = 0;
             for (let i = 0; i < PIXELS; i++) if (mask[i]) cnt++;
             // 極小の囲いは何もしない（誤タッチ対策・トーストも出さない）
-            if (cnt >= ENCLOSE_MIN_PX) this.fillMaskWithCurrentColor(mask, R.toneById(this.fillToneId)?.tile ?? null, this.toneShiftForDraw());
+            // M17: マイ柄なら resolveToneFor が全色を一括解決（昇格し得る）→ fillMaskWithCurrentColor 内でバッファ取得の順
+            if (cnt >= ENCLOSE_MIN_PX) this.fillMaskWithCurrentColor(mask, this.resolveToneFor("fill"), this.toneShiftForDraw());
           }
           // ドラッグ中の破線プレビューは**必ず**消す。fillMaskWithCurrentColor は「変化ゼロ」だと
           // 早期 return して redrawOverlay を呼ばない（同じ色で二度囲う・透明で空領域を囲う等）ので、
@@ -8148,12 +8394,28 @@ export class Editor {
    *  - `tone`: トーン柄（null=ベタ）。バケツと同じく**キャンバス座標固定**で toneAt 判定（＝同座標で同柄）
    *  - 現在色が透明（index 0）なら消える（消し囲い）。索引の置き換えのみ・中間色は作らない。Undo 1回。
    *  色解決（currentColorIndex）は 257 色目で 16bit 昇格しバッファを差し替え得るので**先に解決**する（A-3 と同じ注意）。 */
-  private fillMaskWithCurrentColor(mask: Uint8Array, tone: R.ToneTile | null, toneShift = 0) {
+  private fillMaskWithCurrentColor(
+    mask: Uint8Array,
+    sel: { tone: R.ToneTile | null; colorTile: R.ColorTile | null },
+    toneShift = 0
+  ) {
     if (this.xformGuard()) return;
     if (this.playing) this.stopPlayback();
+    // ★順序: sel（マイ柄の全色）は呼び出し側が解決済み → 現在色を解決 → それからバッファ（昇格で差し替わるため）
     const color = this.currentColorIndex(); // 昇格し得るので先に解決（バケツ・A-3 と同じ順）
     const buf = this.activeBuffer();
     if (!buf) return;
+    if (sel.colorTile) {
+      // M17: マイ柄（色タイル）。変化ゼロなら履歴に積まない（従来と同じ作法）
+      const before = copyIndexBuf(buf);
+      if (!CT.applyColorTile(buf, mask, sel.colorTile, toneShift)) return;
+      this.pushBufferHistory("囲い塗り", buf, before);
+      this.renderCanvas();
+      this.redrawOverlay();
+      this.paintFilmThumb(this.frameIndex);
+      return;
+    }
+    const tone = sel.tone;
     const hit = (i: number): boolean =>
       mask[i] !== 0 && (!tone || R.toneAt(tone, i % W, (i / W) | 0, toneShift)); // M16 (D-1): コマ間シフト
     let changed = false;
