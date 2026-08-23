@@ -1384,6 +1384,54 @@ button:disabled {
   height: 32px;
 }
 
+/* M14 (S-3): 「種類/トーン」一覧の折りたたみ。閉じているときは選択中の1つ（.on）だけ残して
+   「現在の種類だけを1行表示」にする（DOM は消さない＝再選択でそのまま開ける）。 */
+.foldhead {
+  cursor: pointer;
+  user-select: none;
+}
+.foldmark {
+  font-size: 10px;
+  color: var(--ink-soft);
+  font-weight: 700;
+}
+.tex.collapsed .tone-btn:not(.on),
+.tex.collapsed .tx:not(.on),
+.tex.collapsed .tone-sep {
+  display: none;
+}
+
+/* M14 (S-1): ツール形式ストリップ（ツールボタン横の一時オーバーレイ）。出ている間だけキャンバスの外に浮く。
+   ボタンは内容幅（.oni の flex:1 は無効化）。パネルの .oni/.lv/.sizes/.sz をそのまま流用して見た目を揃える。 */
+.toolstrip {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px;
+  background: var(--panel);
+  border: 3px solid var(--ink);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+.toolstrip .oni {
+  gap: 5px;
+}
+.toolstrip .oni .lv {
+  flex: 0 0 auto;
+  min-width: 44px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+.toolstrip .sizes {
+  gap: 6px;
+}
+.toolstrip .sz {
+  flex: 0 0 auto;
+  width: 40px;
+}
+
 .pal {
   display: grid;
   grid-template-columns: repeat(8, 1fr);

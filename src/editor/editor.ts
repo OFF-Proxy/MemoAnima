@@ -115,6 +115,34 @@ type Tool =
   | "move";
 
 type ShapeKind = "line" | "rect" | "ellipse";
+// M14 (S-2): 塗りツールの形式。bucket=従来のバケツ塗り / enclose=囲い塗り（ドラッグで囲んだ内側）
+type FillMode = "bucket" | "enclose";
+
+// M14 (S-1): ツール形式ストリップとサイドパネルが**同じ定義から**ボタン群を作るための単一ソース。
+// active は組み立て時のスナップショット（形式が変わるたび buildToolOptions/ストリップを組み直す）。
+interface FormatItem {
+  id: string;
+  /** 文字ラベルの i18n キー（variant="oni"）。既存キーを再利用する */
+  labelKey?: string;
+  titleKey?: string;
+  active: boolean;
+  disabled?: boolean;
+  /** variant="sizes" のドット丸など、ボタンの中身を自前で作るとき */
+  makeInner?: (btn: HTMLButtonElement) => void;
+  /** 押されたときの状態変更（呼び出し側で afterFormatChange 相当まで面倒を見る） */
+  select: () => void;
+}
+interface FormatGroup {
+  key: string;
+  /** 行の見出し（例: 参照）。省略時は見出しなしの .oni 1本 */
+  labelKey?: string;
+  variant: "oni" | "sizes";
+  items: FormatItem[];
+  /** false のとき出さない（例: 範囲選択の参照は「✨自動」のときだけ） */
+  visible?: boolean;
+  /** パネル側だけ N 個ずつ改行する（歪みの4形式は幅が足りず2行）。ストリップは常に1行 */
+  panelChunk?: number;
+}
 
 /** M10-2a: 歪みの方式。M10-2a で動くのは push のみ（残りは M10-2b/2c） */
 type WarpMode = "push" | "bulge" | "pinch" | "corner";
@@ -132,6 +160,12 @@ const MUTED_OVERLAY_SELECTORS = [".cvright", "#ed-mini"];
 const MUTED_OPACITY = "0.4";
 
 const PEN_SIZES = [1, 2, 3, 5, 8, 12];
+// M14 (S-1): ツールボタンにポインタが乗ってからストリップを出すまでの遅延（暴発防止）。実機で調整
+const STRIP_HOVER_MS = 150;
+// M14 (S-1): ボタンから離れてからストリップを畳むまでの猶予（ボタン→ストリップへ渡る間の隙間で消えないように）
+const STRIP_CLOSE_MS = 140;
+// M14 (S-2): 囲い塗りで「これ未満の面積は誤タッチ」とみなして何もしない画素数のしきい値
+const ENCLOSE_MIN_PX = 8;
 // M5-4 B-3: ペンは「ベタ＋スプレー系」のみに整理。
 // 旧 dot(点線)・halftone(網点=ブラシのトーンへ)は撤去、rough(かすれ)は sand（スプレー粗）へ集約・廃止。
 // 既存作品の画素は不変（ツール状態は保存対象外・UIのみの整理）。
@@ -257,6 +291,8 @@ export interface EditorCallbacks {
   onCollapsedChange?: (collapsed: CollapsedState) => void;
   /** M13-2a (A-2): 選択範囲の色付け表示のトグルが変わったら settings.json へ保存する（同じ流儀） */
   onSelMaskShowChange?: (show: boolean) => void;
+  /** M14 (S-3): 右パネルの「種類/トーン」一覧の開閉が変わったら settings.json へ保存する（同じ流儀） */
+  onToneOpenChange?: (open: boolean) => void;
   /** ライブラリ保存（Rust呼び出し）を委譲 */
   saveProject: (
     ctx: EditorSaveContext,
@@ -358,6 +394,18 @@ export class Editor {
   selectAutoGlobal = false;
   /** M10-19: バケツ塗りの参照（false=このレイヤー（既定・従来） / true=全レイヤー）。セッションのみ */
   fillRefAll = false;
+  /** M14 (S-2): 塗りツールの形式（bucket=従来のバケツ / enclose=囲い塗り）。セッションのみ・既定はバケツ */
+  private fillMode: FillMode = "bucket";
+  /** M14 (S-2): 囲い塗りのドラッグ軌跡（自由選択の lassoPts と同じ流儀・別枠で持つ） */
+  private enclosePts: { x: number; y: number }[] = [];
+  /** M14 (S-3): 右パネルの「種類/トーン」一覧を開いているか（既定=閉・settings.json へ永続化） */
+  private toneOpen = false;
+  /** M14 (S-1): 形式ストリップ（ツールボタン横の一時オーバーレイ）の状態 */
+  private stripEl: HTMLElement | null = null;
+  private stripOpenFor: Tool | null = null;
+  private stripAnchor: HTMLElement | null = null;
+  private stripOpenTimer: number | null = null;
+  private stripCloseTimer: number | null = null;
   colorHex: string = UGO_COLORS.black;
   /** M11-2: ツールごとの太さ（ペン/ブラシ/消しゴムが各自の値を覚える）。
    *  図形などはペンの値を流用する（＝独立サイズを持たせない・従来どおり）。
@@ -912,6 +960,9 @@ export class Editor {
     this.cancelFrameDrag();
     this.finishSplitDrag(true); // M11-17: 掴んだまま画面を離れない（変わっていれば保存してから）
     this.closeTlMore(); // M11-18: 「…」メニューを開いたまま画面を離れない
+    // M14 (S-1): 形式ストリップは document.body 直付けの固定オーバーレイなので、画面を離れる前に必ず畳む
+    //（他の浮遊UIと同じ後始末。タイマーも closeStrip の中で全て止める＝ライブラリ画面に残らない）
+    this.closeStrip();
     // M11-10: 矢印キーの移動セッションを持ったまま画面を離れない（確定してから閉じる）
     this.endArrowSession();
     // M11-12: 浮動テキストも同じ（保険。⟵もどる等の通常経路では xformGuard で既に焼けている）。
@@ -1115,9 +1166,19 @@ export class Editor {
       b.innerHTML = `<span class="em">${icon}</span><span class="nm">${label}</span>`;
       return b;
     };
+    // M14 (S-1): ツールボタンへ setTool＋形式ストリップ（ホバー＋選択中の再クリックで開く）を配線する。
+    // ストリップを持つツールだけ（画像・音声・複写・手のひら・スポイト・移動は toolHasStrip=false で出ない）
+    const wireToolButton = (b: HTMLElement, key: Tool) => {
+      b.addEventListener("click", () => {
+        const wasActive = this.tool === key;
+        this.setTool(key);
+        if (wasActive && this.toolHasStrip(key)) this.openStrip(key, b); // 再クリックで開く
+      });
+      if (this.toolHasStrip(key)) this.attachToolStrip(b, key); // ホバーで開く（150ms）
+    };
     for (const t of tools) {
       const b = mk(t.icon, t.label, t.key);
-      b.addEventListener("click", () => this.setTool(t.key));
+      wireToolButton(b, t.key as Tool);
       host.appendChild(b);
     }
     const lbl = document.createElement("div");
@@ -1126,11 +1187,9 @@ export class Editor {
     host.appendChild(lbl);
     for (const t of edits) {
       const b = mk(t.icon, t.label, t.key);
-      b.addEventListener("click", () => {
-        if (t.key === "copyprev") this.copyPrevFrame();
-        else if (t.key === "clear") this.clearFrame();
-        else this.setTool(t.key as Tool);
-      });
+      if (t.key === "copyprev") b.addEventListener("click", () => this.copyPrevFrame());
+      else if (t.key === "clear") b.addEventListener("click", () => this.clearFrame());
+      else wireToolButton(b, t.key as Tool);
       host.appendChild(b);
     }
     // M8-2b: 画像取り込みは左ツール列の「♪ 音声」直上（上部バーから移設）。
@@ -1275,6 +1334,25 @@ export class Editor {
         tex.appendChild(d);
       }
     }
+    // M14 (S-3): 折りたたみ状態を反映（head.textContent を書き直したので折りたたみマークも付け直す）
+    this.applyToneFold();
+  }
+
+  /** M14 (S-3): 「種類/トーン」一覧の開閉を DOM へ反映する。閉＝現在の種類（.on）だけ1行表示（CSS 側で
+   *  .tex.collapsed の非選択を隠す）。ヘッダ末尾に開閉マーク（▾/▸）を付け直す（textContent で消えるため毎回）。 */
+  private applyToneFold() {
+    const head = document.querySelector("#ed-texhead") as HTMLElement | null;
+    const tex = document.querySelector("#ed-tex") as HTMLElement | null;
+    if (tex) tex.classList.toggle("collapsed", !this.toneOpen);
+    if (head) {
+      let mark = head.querySelector(".foldmark") as HTMLElement | null;
+      if (!mark) {
+        mark = document.createElement("span");
+        mark.className = "foldmark";
+        head.appendChild(mark);
+      }
+      mark.textContent = this.toneOpen ? " ▾" : " ▸";
+    }
   }
 
   /** M11-2: そのツールが太さを記憶する枠。ペン/ブラシ/消しゴムは各自、
@@ -1306,6 +1384,8 @@ export class Editor {
     }
     this.prevTool = this.tool;
     this.tool = t;
+    // M14 (S-1): 別ツールへ切り替えたら、前のツール用に開いていたストリップは畳む
+    if (this.stripOpenFor && this.stripOpenFor !== t) this.closeStrip();
     // M11-2: 太さの実体は sizeByTool なので、ここは表示（.sz の on）を合わせるだけ
     this.refreshSizePicker();
     if (t === "transform") this.beginTransform();
@@ -1329,16 +1409,18 @@ export class Editor {
     this.revealToolOptions();
   }
 
-  /** M11-11: ツールオプションはサイドパネルの一番下にあるので、画面が低いと
-   *  「枠からはみ出している」ように見えて確定/キャンセルのボタンに気づけない。
-   *  はみ出しているときだけ、そこまでスクロールして見せる（収まっていれば何もしない） */
+  /** M11-11: ツールオプション（確定/キャンセル等）が画面外だと気づけないので、はみ出していれば見せる。
+   *  M14 (S-3): #ed-toolopts を**パネル最上部**へ移したので、下だけでなく**上**にも隠れ得る。
+   *  パネルを下までスクロールした状態で変形/文字に切り替えると、確定/キャンセルが折り返し線の上に来る。
+   *  上に隠れていれば上へ、下にはみ出していれば下へ寄せる（収まっていれば何もしない）。 */
   private revealToolOptions() {
     const side = document.querySelector("#ed-side") as HTMLElement | null;
     const host = document.querySelector("#ed-toolopts") as HTMLElement | null;
     if (!side || !host || !host.firstChild) return;
     const sr = side.getBoundingClientRect();
     const hr = host.getBoundingClientRect();
-    if (hr.bottom > sr.bottom + 1) host.scrollIntoView({ block: "end" });
+    if (hr.top < sr.top - 1) host.scrollIntoView({ block: "start" });
+    else if (hr.bottom > sr.bottom + 1) host.scrollIntoView({ block: "end" });
   }
 
   private updateToolButtons() {
@@ -1349,9 +1431,12 @@ export class Editor {
 
   private buildSidePanel() {
     const host = $("#ed-side");
+    // M14 (S-3): 並びを刷新。①ツールの形式・オプション（最上部）→②サイズ→③種類/トーン（折りたたみ）
+    // →④色→⑤レイヤー→⑥線の太さ→⑦オニオン→⑧描き心地。各ブロックの中身のロジックは触らず DOM 順序だけ変更
     host.innerHTML = `
+      <div id="ed-toolopts"></div>
       <h3>${t("ed.pen.size.label")}</h3><div class="sizes" id="ed-sizes"></div>
-      <h3 id="ed-texhead">${t("ed.pen.kind.label")}</h3><div class="tex" id="ed-tex"></div>
+      <h3 id="ed-texhead" class="foldhead">${t("ed.pen.kind.label")}</h3><div class="tex" id="ed-tex"></div>
       <h3 id="ed-colhead">${t("ed.color.head.palette.label")}</h3>
       <div class="pal" id="ed-pal"></div>
       <div class="row" style="margin-top:2px">
@@ -1384,8 +1469,13 @@ export class Editor {
       <div class="row"><span class="tog">${t("ed.feel.stabilizer.label")}</span><div class="sw2 on" id="ed-tog-stab"></div></div>
       <div class="row"><span class="tog">${t("ed.feel.pressure.label")}</span><div class="sw2 on" id="ed-tog-press"></div></div>
       <div class="row"><span class="tog">${t("ed.feel.grid.label")}</span><div class="sw2 on" id="ed-tog-grid"></div></div>
-      <div id="ed-toolopts"></div>
     `;
+    // M14 (S-3): 「種類/トーン」ヘッダで一覧を開閉（閉じると現在の種類だけ1行表示）。状態は settings に記憶
+    $("#ed-texhead").addEventListener("click", () => {
+      this.toneOpen = !this.toneOpen;
+      this.applyToneFold();
+      this.cb.onToneOpenChange?.(this.toneOpen);
+    });
     // R-2 案1: 属性はテンプレートに埋めず、組んだあとにプロパティで入れる
     //（訳文に " が入っても属性が割れない。DOM の形・表示は上のテンプレートのまま）
     for (const { sel, titleKey } of [
@@ -3554,39 +3644,360 @@ export class Editor {
     this.updateLayerClipButtons();
   }
 
+  // ================= M14 (S-1): ツール形式の単一ソース =================
+  // ツールごとの「形式（排他ボタン群）」定義はここ**1箇所**。サイドパネルの #ed-toolopts と
+  // 形式ストリップの両方がこれを読んで同じボタンを作る（受け入れ §7: grep で1箇所）。
+  // active は組み立て時のスナップショット（形式が変わるたびに buildToolOptions / rebuildStrip で組み直す）。
+  private toolFormatGroups(tool: Tool): FormatGroup[] {
+    switch (tool) {
+      case "fill":
+        return [
+          {
+            key: "format", variant: "oni",
+            items: [
+              { id: "bucket", labelKey: "ed.fill.bucket.btn", active: this.fillMode === "bucket",
+                select: () => { this.fillMode = "bucket"; this.enclosePts = []; this.afterFormatChange(); } },
+              { id: "enclose", labelKey: "ed.fill.enclose.btn", active: this.fillMode === "enclose",
+                select: () => { this.fillMode = "enclose"; this.enclosePts = []; this.afterFormatChange(); } },
+            ],
+          },
+          {
+            key: "ref", labelKey: "ed.fill.ref.label", variant: "oni",
+            items: [
+              { id: "self", labelKey: "ed.fill.refSelf.btn", active: !this.fillRefAll,
+                select: () => { this.fillRefAll = false; this.afterFormatChange(); } },
+              { id: "all", labelKey: "ed.fill.refAll.btn", titleKey: "ed.fill.refAll.title", active: this.fillRefAll,
+                select: () => { this.fillRefAll = true; this.afterFormatChange(); } },
+            ],
+          },
+        ];
+      case "shape":
+        // ★i18n キーは静的リテラルで持つ（テンプレート合成すると検査の未使用判定に引っかかる・M12 の教訓）
+        return [
+          {
+            key: "kind", variant: "oni",
+            items: [
+              { id: "line", labelKey: "ed.shape.line.btn", active: this.shapeKind === "line",
+                select: () => { this.shapeKind = "line"; this.afterFormatChange(); } },
+              { id: "rect", labelKey: "ed.shape.rect.btn", active: this.shapeKind === "rect",
+                select: () => { this.shapeKind = "rect"; this.afterFormatChange(); } },
+              { id: "ellipse", labelKey: "ed.shape.ellipse.btn", active: this.shapeKind === "ellipse",
+                select: () => { this.shapeKind = "ellipse"; this.afterFormatChange(); } },
+            ],
+          },
+        ];
+      case "warp":
+        return [
+          {
+            key: "mode", variant: "oni", panelChunk: 2,
+            items: [
+              { id: "push", labelKey: "ed.warp.push.btn", active: this.warpMode === "push",
+                select: () => this.selectWarpMode("push") },
+              { id: "bulge", labelKey: "ed.warp.bulge.btn", active: this.warpMode === "bulge",
+                select: () => this.selectWarpMode("bulge") },
+              { id: "pinch", labelKey: "ed.warp.pinch.btn", active: this.warpMode === "pinch",
+                select: () => this.selectWarpMode("pinch") },
+              { id: "corner", labelKey: "ed.warp.corner.btn", active: this.warpMode === "corner",
+                select: () => this.selectWarpMode("corner") },
+            ],
+          },
+        ];
+      case "select":
+        return [
+          {
+            key: "kind", variant: "oni",
+            items: [
+              { id: "rect", labelKey: "ed.sel.rect.btn", active: this.selectKind === "rect",
+                select: () => { this.selectKind = "rect"; this.afterFormatChange(); } },
+              { id: "lasso", labelKey: "ed.sel.lasso.btn", active: this.selectKind === "lasso",
+                select: () => { this.selectKind = "lasso"; this.afterFormatChange(); } },
+              { id: "auto", labelKey: "ed.sel.auto.btn", active: this.selectKind === "auto",
+                select: () => { this.selectKind = "auto"; this.afterFormatChange(); } },
+            ],
+          },
+          {
+            key: "ref", labelKey: "ed.sel.ref.label", variant: "oni", visible: this.selectKind === "auto",
+            items: [
+              { id: "self", labelKey: "ed.sel.refSel.btn", active: !this.selectRefAll,
+                select: () => { this.selectRefAll = false; this.afterFormatChange(); } },
+              { id: "all", labelKey: "ed.sel.refAll.btn", active: this.selectRefAll,
+                select: () => { this.selectRefAll = true; this.afterFormatChange(); } },
+            ],
+          },
+        ];
+      case "pen":
+      case "brush":
+      case "eraser": {
+        const cur = this.sizeByTool[this.sizeSlot(tool)];
+        return [
+          {
+            key: "size", variant: "sizes",
+            items: PEN_SIZES.map((s) => ({
+              id: String(s), active: cur === s, titleKey: undefined,
+              makeInner: (btn) => {
+                const i = document.createElement("i");
+                const px = Math.min(18, s + 2);
+                i.style.width = `${px}px`;
+                i.style.height = `${px}px`;
+                btn.appendChild(i);
+                btn.title = t("ed.pen.sizePick.title", { n: s });
+              },
+              select: () => { this.penSize = s; this.refreshSizePicker(); this.afterFormatChange(); },
+            })),
+          },
+        ];
+      }
+      case "text":
+        return [
+          {
+            key: "font", variant: "oni",
+            items: FONTS.map((f) => ({
+              id: f.key, labelKey: f.labelKey, active: this.textFamily === f.key,
+              select: () => {
+                this.textFamily = f.key;
+                const d = fontDef(this.textFamily);
+                this.textSize = nearestSize(d, this.textSize);
+                if (!d.hasBold) this.textBold = false;
+                this.syncTextDraftStyle();
+                this.afterFormatChange();
+                this.redrawOverlay();
+                this.cb.onTextSettingsChange?.(this.textSettings());
+              },
+            })),
+          },
+        ];
+      case "transform":
+        return [
+          {
+            key: "flip", variant: "oni",
+            items: [
+              { id: "fliph", labelKey: "ed.xform.flipH.btn", active: this.xform.flipH,
+                select: () => { this.xform.flipH = !this.xform.flipH; this.afterFormatChange(); this.redrawOverlay(); } },
+              { id: "flipv", labelKey: "ed.xform.flipV.btn", active: this.xform.flipV,
+                select: () => { this.xform.flipV = !this.xform.flipV; this.afterFormatChange(); this.redrawOverlay(); } },
+            ],
+          },
+        ];
+      default:
+        // move / hand / eyedrop はストリップも形式も持たない
+        return [];
+    }
+  }
+
+  /** M14 (S-1): FormatItem 1つからボタンを作る（.lv=形式 / .sz=サイズ）。クリックの実処理は clickFor で差し替え可能
+   *  （パネルは it.select 直呼び・ストリップは「必要なら setTool してから select」を挟む） */
+  private makeFormatButton(
+    it: FormatItem,
+    cls: "lv" | "sz",
+    clickFor: (it: FormatItem) => () => void
+  ): HTMLButtonElement {
+    const b = document.createElement("button");
+    b.className = cls + (it.active ? " on" : "");
+    b.dataset.fid = it.id;
+    if (it.disabled) b.disabled = true;
+    if (it.makeInner) it.makeInner(b);
+    else if (it.labelKey) b.textContent = t(it.labelKey);
+    if (it.titleKey) b.title = t(it.titleKey);
+    const run = clickFor(it);
+    b.addEventListener("click", () => {
+      if (b.disabled) return;
+      run();
+    });
+    return b;
+  }
+
+  /** M14 (S-1): FormatGroup[] を DOM に起こす。ctx="panel" は従来の見た目（参照ラベル付き行・歪みは2段）、
+   *  ctx="strip" は常に1行の横並び。clickFor で「押されたときの処理」を注入する（単一ソースの肝）。 */
+  private renderFormatGroups(
+    groups: FormatGroup[],
+    ctx: "panel" | "strip",
+    clickFor: (it: FormatItem) => () => void
+  ): DocumentFragment {
+    const frag = document.createDocumentFragment();
+    for (const g of groups) {
+      if (g.visible === false) continue;
+      if (g.variant === "sizes") {
+        const row = document.createElement("div");
+        row.className = "sizes";
+        for (const it of g.items) row.appendChild(this.makeFormatButton(it, "sz", clickFor));
+        frag.appendChild(row);
+        continue;
+      }
+      const chunk = ctx === "panel" && g.panelChunk ? g.panelChunk : g.items.length || 1;
+      const rows: HTMLElement[] = [];
+      for (let i = 0; i < g.items.length; i += chunk) {
+        const oni = document.createElement("div");
+        oni.className = "oni";
+        if (rows.length > 0) oni.style.marginTop = "5px";
+        for (const it of g.items.slice(i, i + chunk)) oni.appendChild(this.makeFormatButton(it, "lv", clickFor));
+        rows.push(oni);
+      }
+      if (rows.length === 0) continue;
+      if (g.labelKey && ctx === "panel") {
+        // パネルでは「参照」等のラベルを左に添えた1行（従来の見た目）
+        const row = document.createElement("div");
+        row.className = "row";
+        const lab = document.createElement("span");
+        lab.className = "tog";
+        lab.textContent = t(g.labelKey);
+        row.appendChild(lab);
+        rows[0].style.flex = "1";
+        row.appendChild(rows[0]);
+        frag.appendChild(row);
+        for (let i = 1; i < rows.length; i++) frag.appendChild(rows[i]);
+      } else {
+        for (const r of rows) frag.appendChild(r);
+      }
+    }
+    return frag;
+  }
+
+  /** M14 (S-1): 形式が変わったあとにパネルの #ed-toolopts と（開いていれば）ストリップを組み直す。
+   *  select クロージャは this.tool が対象ツールに一致している前提（ストリップ側で先に setTool 済み）。 */
+  private afterFormatChange() {
+    this.buildToolOptions();
+    if (this.stripOpenFor) this.rebuildStrip();
+  }
+
+  /** M14 (S-1): 歪みモードの切替（旧 #ed-warpmode のクリック処理と同一）。四隅の開始/取消もここで面倒を見る */
+  private selectWarpMode(m: WarpMode) {
+    if (this.warpMode === m) return;
+    if (this.cornerActive) this.cancelCornerWarp(); // 四隅から抜けるときは未確定の変形を取り消す
+    this.warpMode = m;
+    if (m === "corner") this.beginCornerWarp();
+    this.afterFormatChange();
+  }
+
+  // ================= M14 (S-1): 形式ストリップ（ツールボタン横の一時オーバーレイ） =================
+  /** そのツールに形式ストリップを出すか（＝形式定義が1つでもある）。
+   *  画像・音声・複写・手のひら・スポイト・移動は toolFormatGroups が空なので false */
+  private toolHasStrip(tool: Tool): boolean {
+    return this.toolFormatGroups(tool).length > 0;
+  }
+
+  /** ツールボタンにホバー配線（150ms 遅延で開く・離れたら猶予後に畳む） */
+  private attachToolStrip(btn: HTMLElement, tool: Tool) {
+    btn.addEventListener("pointerenter", () => {
+      if (this.stripCloseTimer !== null) {
+        clearTimeout(this.stripCloseTimer);
+        this.stripCloseTimer = null;
+      }
+      if (this.stripOpenTimer !== null) clearTimeout(this.stripOpenTimer);
+      this.stripOpenTimer = window.setTimeout(() => {
+        this.stripOpenTimer = null;
+        this.openStrip(tool, btn);
+      }, STRIP_HOVER_MS);
+    });
+    btn.addEventListener("pointerleave", () => {
+      if (this.stripOpenTimer !== null) {
+        clearTimeout(this.stripOpenTimer);
+        this.stripOpenTimer = null;
+      }
+      this.scheduleStripClose();
+    });
+  }
+
+  private scheduleStripClose() {
+    if (this.stripCloseTimer !== null) clearTimeout(this.stripCloseTimer);
+    this.stripCloseTimer = window.setTimeout(() => {
+      this.stripCloseTimer = null;
+      this.closeStrip();
+    }, STRIP_CLOSE_MS);
+  }
+
+  /** 形式ストリップを開く（ツールボタンの右横）。**描画ストローク中は出さない**。 */
+  private openStrip(tool: Tool, anchor: HTMLElement) {
+    if (this.pointerDown) return; // ストローク中は出さない
+    if (!this.toolHasStrip(tool)) {
+      this.closeStrip();
+      return;
+    }
+    this.stripOpenFor = tool;
+    this.stripAnchor = anchor;
+    this.renderStrip();
+  }
+
+  /** 形式変更後などに中身を組み直す（開いていなければ何もしない） */
+  private rebuildStrip() {
+    if (this.stripOpenFor && this.stripAnchor) this.renderStrip();
+  }
+
+  private renderStrip() {
+    const tool = this.stripOpenFor;
+    const anchor = this.stripAnchor;
+    if (!tool || !anchor) return;
+    if (!this.stripEl) {
+      const el = document.createElement("div");
+      el.className = "toolstrip";
+      // ストリップの上にいる間は畳まない（ボタン→ストリップへ渡る隙間で消えないように）
+      el.addEventListener("pointerenter", () => {
+        if (this.stripCloseTimer !== null) {
+          clearTimeout(this.stripCloseTimer);
+          this.stripCloseTimer = null;
+        }
+      });
+      el.addEventListener("pointerleave", () => this.scheduleStripClose());
+      document.body.appendChild(el);
+      this.stripEl = el;
+    }
+    const el = this.stripEl;
+    el.innerHTML = "";
+    // ストリップのクリック: 対象ツールでなければ先に切り替えてから形式を適用（select は this.tool 前提）
+    const stripClick = (it: FormatItem) => () => {
+      if (this.tool !== tool) this.setTool(tool);
+      it.select();
+    };
+    el.appendChild(this.renderFormatGroups(this.toolFormatGroups(tool), "strip", stripClick));
+    // 位置決め（ボタンの右横・画面内へクランプ）。measure のため一度隠して置く
+    const r = anchor.getBoundingClientRect();
+    el.style.visibility = "hidden";
+    el.style.left = "0px";
+    el.style.top = "0px";
+    const ew = el.offsetWidth;
+    const eh = el.offsetHeight;
+    let left = r.right + 6;
+    if (left + ew > window.innerWidth - 4) left = Math.max(4, r.left - ew - 6); // 右に入らなければ左へ
+    let top = r.top;
+    if (top + eh > window.innerHeight - 4) top = Math.max(4, window.innerHeight - 4 - eh);
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+    el.style.visibility = "visible";
+  }
+
+  private closeStrip() {
+    if (this.stripOpenTimer !== null) {
+      clearTimeout(this.stripOpenTimer);
+      this.stripOpenTimer = null;
+    }
+    if (this.stripCloseTimer !== null) {
+      clearTimeout(this.stripCloseTimer);
+      this.stripCloseTimer = null;
+    }
+    if (this.stripEl) {
+      this.stripEl.remove();
+      this.stripEl = null;
+    }
+    this.stripOpenFor = null;
+    this.stripAnchor = null;
+  }
+
   private buildToolOptions() {
     const host = $("#ed-toolopts");
     host.innerHTML = "";
+    // M14 (S-1): パネル側のクリックは it.select 直呼び（this.tool は既に対象ツール）
+    const panelClick = (it: FormatItem) => it.select;
     if (this.tool === "fill") {
-      // M10-19: バケツ塗りの参照レイヤー選択（トーンは従来どおり #ed-tex 側のピッカー）
-      host.innerHTML = `<h3>${t("ed.fill.head.label")}</h3>
-        <div class="row"><span class="tog">${t("ed.fill.ref.label")}</span><div class="oni" style="flex:1" id="ed-fillref">
-          <button class="lv${this.fillRefAll ? "" : " on"}" data-v="self">${t("ed.fill.refSelf.btn")}</button>
-          <button class="lv${
-            this.fillRefAll ? " on" : ""
-          }" data-v="all">${t("ed.fill.refAll.btn")}</button>
-        </div></div>`;
-      // R-2 案1: 属性はプロパティで
-      (host.querySelector('#ed-fillref [data-v="all"]') as HTMLElement).title = t("ed.fill.refAll.title");
-      host.querySelectorAll("#ed-fillref .lv").forEach((b) =>
-        b.addEventListener("click", () => {
-          this.fillRefAll = (b as HTMLElement).dataset.v === "all";
-          this.buildToolOptions();
-        })
-      );
+      // M14 (S-1): 形式（バケツ/囲い塗り）＋参照はツール形式の単一ソースから生成（ストリップと共通）
+      host.innerHTML = `<h3>${t("ed.fill.head.label")}</h3>`;
+      host.appendChild(this.renderFormatGroups(this.toolFormatGroups("fill"), "panel", panelClick));
     } else if (this.tool === "shape") {
-      host.innerHTML = `<h3>${t("ed.shape.head.label")}</h3><div class="oni">
-        <button class="lv${this.shapeKind === "line" ? " on" : ""}" data-k="line">${t("ed.shape.line.btn")}</button>
-        <button class="lv${this.shapeKind === "rect" ? " on" : ""}" data-k="rect">${t("ed.shape.rect.btn")}</button>
-        <button class="lv${this.shapeKind === "ellipse" ? " on" : ""}" data-k="ellipse">${t("ed.shape.ellipse.btn")}</button>
-      </div>
-      <div class="row"><span class="tog">${t("ed.shape.fill.label")}</span><div class="sw2${this.shapeFill ? " on" : ""}" id="ed-shapefill"></div></div>`;
-      host.querySelectorAll(".lv").forEach((b) =>
-        b.addEventListener("click", () => {
-          this.shapeKind = (b as HTMLElement).dataset.k as ShapeKind;
-          this.buildToolOptions();
-        })
-      );
+      // M14 (S-1): 形式（直線/四角/丸）は単一ソースから。塗りつぶしトグルはこのツール固有の追加UI
+      host.innerHTML = `<h3>${t("ed.shape.head.label")}</h3>`;
+      host.appendChild(this.renderFormatGroups(this.toolFormatGroups("shape"), "panel", panelClick));
+      const fillRow = document.createElement("div");
+      fillRow.className = "row";
+      fillRow.innerHTML = `<span class="tog">${t("ed.shape.fill.label")}</span><div class="sw2${this.shapeFill ? " on" : ""}" id="ed-shapefill"></div>`;
+      host.appendChild(fillRow);
       $("#ed-shapefill").addEventListener("click", () => {
         this.shapeFill = !this.shapeFill;
         this.buildToolOptions();
@@ -3702,16 +4113,7 @@ export class Editor {
         if (drafting && document.activeElement === document.body) this.focusTextInput();
       }
     } else if (this.tool === "warp") {
-      // M10-2a: モードボタンは最初から4つ置き、未実装の3つは無効表示で残す。
-      // M10-2b/2c で並びが変わって段組みが崩れる（M5-3→M5-5 の再演）のを避けるため。
-      const modes: { k: WarpMode; label: string; ready: boolean }[] = [
-        { k: "push", label: t("ed.warp.push.btn"), ready: true },
-        { k: "bulge", label: t("ed.warp.bulge.btn"), ready: true },
-        { k: "pinch", label: t("ed.warp.pinch.btn"), ready: true },
-        { k: "corner", label: t("ed.warp.corner.btn"), ready: true }, // M10-2c
-      ];
-      // M10-2c: 四隅は半径・強さが意味を持たないが、行は残して disabled にする
-      // （消すとパネルの高さが跳ねる。M10-2a でボタンを disabled で残したのと同じ理由）
+      // M10-2c: 四隅は半径・強さが意味を持たない。行は残して disabled にする（消すとパネル高が跳ねる）
       const isCorner = this.warpMode === "corner";
       const warpHint = isCorner
         ? t("ed.warp.cornerHint.hint")
@@ -3720,18 +4122,8 @@ export class Editor {
           : this.warpMode === "pinch"
             ? t("ed.warp.pinchHint.hint")
             : t("ed.warp.pushHint.hint");
-      // M11-2: 4つを1本の .oni に並べると `.oni .lv{flex:1}` ＋ `white-space:nowrap` で
-      // ラベルがパネル右端からはみ出す（作者報告）。**2個ずつ2行**の .oni に分ける
-      // （styles.css は触らない・既存クラスのみ。行間は .oni の gap と同じ 5px）
-      const modeBtn = (m: (typeof modes)[number]) =>
-        `<button class="lv${m.k === this.warpMode ? " on" : ""}" data-m="${m.k}"${
-          m.ready ? "" : " disabled"
-        }>${m.label}</button>`;
       host.innerHTML = `<h3>${t("ed.warp.head.label")}</h3>
-        <div id="ed-warpmode">
-          <div class="oni">${modes.slice(0, 2).map(modeBtn).join("")}</div>
-          <div class="oni" style="margin-top:5px">${modes.slice(2).map(modeBtn).join("")}</div>
-        </div>
+        <div id="ed-warpmode"></div>
         <div class="row"><span class="tog">${t("ed.warp.radius.label")} <b id="ed-warpr-v">${this.warpRadius}</b>px</span><div id="ed-warpr" style="flex:1"></div></div>
         <div class="row"><span class="tog">${t("ed.warp.strength.label")} <b id="ed-warps-v">${this.warpStrength}</b>%</span><div id="ed-warps" style="flex:1"></div></div>
         <p class="hintline">${warpHint}</p>${
@@ -3742,18 +4134,9 @@ export class Editor {
       </div>`
             : ""
         }`;
-      host.querySelectorAll("#ed-warpmode .lv").forEach((b) =>
-        b.addEventListener("click", () => {
-          if ((b as HTMLButtonElement).disabled) return;
-          const next = (b as HTMLElement).dataset.m as WarpMode;
-          if (next === this.warpMode) return;
-          // M10-2c: 四隅から抜けるときは未確定の変形を取り消す（焼き込まない）
-          if (this.cornerActive) this.cancelCornerWarp();
-          this.warpMode = next;
-          if (next === "corner") this.beginCornerWarp();
-          this.buildToolOptions();
-        })
-      );
+      // M14 (S-1): 4形式（押す/ふくらませ/へこませ/四隅）は単一ソースから。
+      // M11-2: 4つを1本の .oni に並べると幅が足りずはみ出すので、パネルは2個ずつ2段（panelChunk:2）
+      $("#ed-warpmode").appendChild(this.renderFormatGroups(this.toolFormatGroups("warp"), "panel", panelClick));
       if (isCorner) {
         host
           .querySelector("#ed-corner-ok")
@@ -3795,19 +4178,13 @@ export class Editor {
         if (isCorner) this.disableSlider(s.root);
       }
     } else if (this.tool === "select") {
-      // M10-19: 3種目「✨ 自動」（クリックで同添字領域を即選択）。auto 時のみ参照/範囲の2行を出す
-      host.innerHTML = `<h3>${t("ed.sel.head.label")}</h3><div class="oni">
-        <button class="lv${this.selectKind === "rect" ? " on" : ""}" data-k="rect">${t("ed.sel.rect.btn")}</button>
-        <button class="lv${this.selectKind === "lasso" ? " on" : ""}" data-k="lasso">${t("ed.sel.lasso.btn")}</button>
-        <button class="lv${this.selectKind === "auto" ? " on" : ""}" data-k="auto">${t("ed.sel.auto.btn")}</button>
-      </div>
+      // M14 (S-1/S-4): 形式（矩形/自由/✨自動）＋参照は単一ソースから。範囲（つながり/全体）と
+      // マスク表示・選択操作はこのツール固有の追加UI。「🪣 今の色で塗る」ボタンは廃止（塗りツールで代替）
+      host.innerHTML = `<h3>${t("ed.sel.head.label")}</h3>
+      <div id="ed-selformats"></div>
       ${
         this.selectKind === "auto"
-          ? `<div class="row"><span class="tog">${t("ed.sel.ref.label")}</span><div class="oni" style="flex:1" id="ed-selref">
-          <button class="lv${this.selectRefAll ? "" : " on"}" data-v="self">${t("ed.sel.refSel.btn")}</button>
-          <button class="lv${this.selectRefAll ? " on" : ""}" data-v="all">${t("ed.sel.refAll.btn")}</button>
-        </div></div>
-        <div class="row"><span class="tog">${t("ed.sel.scope.label")}</span><div class="oni" style="flex:1" id="ed-selscope">
+          ? `<div class="row"><span class="tog">${t("ed.sel.scope.label")}</span><div class="oni" style="flex:1" id="ed-selscope">
           <button class="lv${this.selectAutoGlobal ? "" : " on"}" data-v="conn">${t("ed.sel.scopeConn.btn")}</button>
           <button class="lv${this.selectAutoGlobal ? " on" : ""}" data-v="global">${t("ed.sel.scopeGlobal.btn")}</button>
         </div></div>`
@@ -3821,36 +4198,20 @@ export class Editor {
         <button class="minibtn" id="ed-sel-del">${t("ed.sel.delete.btn")}</button>
         <button class="minibtn" id="ed-sel-none">${t("ed.sel.deselect.btn")}</button>
       </div>
-      <div class="selacts">
-        <button class="minibtn" id="ed-sel-fill">${t("ed.sel.fillColor.btn")}</button>
-      </div>
       <p class="hintline">${
         this.selectKind === "auto"
           ? t("ed.sel.auto.hint")
           : t("ed.sel.drag.hint")
       }</p>`;
-      // M13-2a: 訳文は属性へ埋めず、組んだあとにプロパティで入れる（検査6・R-2 案1）
-      $("#ed-sel-fill").title = t("ed.sel.fillColor.title");
-      $("#ed-sel-fill").addEventListener("click", () => this.fillSelectionWithColor());
+      // M14 (S-1): 形式（種別）＋参照（✨自動のときだけ表示）を単一ソースから差し込む
+      $("#ed-selformats").appendChild(this.renderFormatGroups(this.toolFormatGroups("select"), "panel", panelClick));
       $("#ed-sel-mask").addEventListener("click", () => {
         this.selMaskShow = !this.selMaskShow;
         $("#ed-sel-mask").classList.toggle("on", this.selMaskShow);
         this.cb.onSelMaskShowChange?.(this.selMaskShow); // 変えた瞬間に settings.json へ
         this.redrawOverlay();
       });
-      // M10-19: 種別切替は data-k のボタンだけに束ねる（参照/範囲の .lv と混線させない）
-      host.querySelectorAll("[data-k]").forEach((b) =>
-        b.addEventListener("click", () => {
-          this.selectKind = (b as HTMLElement).dataset.k as "rect" | "lasso" | "auto";
-          this.buildToolOptions();
-        })
-      );
-      host.querySelectorAll("#ed-selref .lv").forEach((b) =>
-        b.addEventListener("click", () => {
-          this.selectRefAll = (b as HTMLElement).dataset.v === "all";
-          this.buildToolOptions();
-        })
-      );
+      // M10-19: 範囲（つながり/全体）は auto 専用の追加UI（形式ストリップには出さない）
       host.querySelectorAll("#ed-selscope .lv").forEach((b) =>
         b.addEventListener("click", () => {
           this.selectAutoGlobal = (b as HTMLElement).dataset.v === "global";
@@ -3889,10 +4250,7 @@ export class Editor {
           <span class="tog">${t("ed.xform.scaleH.label")}</span><input type="number" id="ed-x-scaley" value="${(
             this.xform.sy * 100
           ).toFixed(0)}" step="1" style="width:48px">%</div>
-        <div class="selacts">
-          <button class="minibtn" id="ed-x-fliph">${t("ed.xform.flipH.btn")}</button>
-          <button class="minibtn" id="ed-x-flipv">${t("ed.xform.flipV.btn")}</button>
-        </div>
+        <div id="ed-x-flip"></div>
       </div>
       <div class="selacts">
         <button class="minibtn ok" id="ed-x-ok">${t("ed.common.commit.btn")}</button>
@@ -3955,14 +4313,8 @@ export class Editor {
         this.snap15 = !this.snap15;
         this.buildToolOptions();
       });
-      $("#ed-x-fliph").addEventListener("click", () => {
-        this.xform.flipH = !this.xform.flipH;
-        this.redrawOverlay();
-      });
-      $("#ed-x-flipv").addEventListener("click", () => {
-        this.xform.flipV = !this.xform.flipV;
-        this.redrawOverlay();
-      });
+      // M14 (S-1): 反転（H/V）は単一ソースから（ストリップと共通・現在の反転状態が押された表示で分かる）
+      $("#ed-x-flip").appendChild(this.renderFormatGroups(this.toolFormatGroups("transform"), "panel", panelClick));
       $("#ed-x-ok").addEventListener("click", () => this.commitTransform());
       $("#ed-x-cancel").addEventListener("click", () => {
         this.cancelTransform();
@@ -4928,6 +5280,12 @@ export class Editor {
     this.frameDeleteConfirm = v !== false;
   }
 
+  /** M14 (S-3): settings.json の `toneOpen` から復元。**`true` のときだけ開く**（既定=閉・追加のみ）。
+   *  ⚙ の設定ではなくパネルのヘッダで開閉するので、mount 前の復元で足りる（buildSidePanel が読む） */
+  restoreToneOpen(v: unknown) {
+    this.toneOpen = v === true;
+  }
+
   /** いま実際に畳まれているか（個別状態 or 集中） */
   private isCollapsed(key: CollapseKey): boolean {
     return this.focusActive || this.collapsed[key];
@@ -5836,6 +6194,19 @@ export class Editor {
       for (const p of this.lassoPts) ctx.lineTo(p.x + 0.5, p.y + 0.5);
       ctx.stroke();
     }
+    // M14 (S-2): 囲い塗りの軌跡（破線＋始点終点を結んだ閉じの目安）。離すと内側が塗られる
+    if (this.enclosePts.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(44,38,33,.85)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath();
+      ctx.moveTo(this.enclosePts[0].x + 0.5, this.enclosePts[0].y + 0.5);
+      for (const p of this.enclosePts) ctx.lineTo(p.x + 0.5, p.y + 0.5);
+      ctx.closePath(); // 始点と終点を結んだ「閉じ」を見せる（塗られる範囲の目安）
+      ctx.stroke();
+      ctx.restore();
+    }
     // M11-8 P-3: 選択の状態が変わる経路はすべてここを通るので、ランチャーもここで更新する
     this.refreshSelectionLauncher();
   }
@@ -6155,6 +6526,7 @@ export class Editor {
     //（フォーカスを奪われて up が届かなかった場合の自己修復。正常時は何もしない）
     if (this.pointerDown || this.capturedPointerId !== null) this.endPointerSession("down");
     this.shiftHeld = e.shiftKey; // M10-7: pointer 側の modifier を真実として同期
+    this.closeStrip(); // M14 (S-1): キャンバスへ触れたら（描き始め）形式ストリップは畳む
     this.lastPointerEvent = e;
     try {
       ($("#ed-cvwrap") as HTMLElement).setPointerCapture(e.pointerId);
@@ -6207,6 +6579,12 @@ export class Editor {
         break;
       }
       case "fill": {
+        // M14 (S-2): 囲い塗り — ドラッグで軌跡を集め、離した瞬間に内側を塗る（確定は onPointerUp）。
+        // ここでは軌跡の起点を置くだけ（バケツのような即時 flood はしない）
+        if (this.fillMode === "enclose") {
+          this.enclosePts = [pt];
+          break;
+        }
         const color = this.currentColorIndex(); // 昇格し得るので先に解決
         const buf2 = this.activeBuffer();
         if (!buf2) return;
@@ -6433,6 +6811,15 @@ export class Editor {
           // M10-7: 生の終点を控えてから拘束をかける（Shift の即時反映で使う）
           this.shapeLastPt = pt;
           this.previewShape(this.shapeStart, this.shapeEnd(pt));
+          break;
+        }
+        case "fill": {
+          // M14 (S-2): 囲い塗りの軌跡を伸ばす（自由選択と同じ 2px 間引き）
+          if (this.fillMode === "enclose" && this.enclosePts.length) {
+            const last = this.enclosePts[this.enclosePts.length - 1];
+            if (Math.abs(last.x - pt.x) + Math.abs(last.y - pt.y) >= 2) this.enclosePts.push(pt);
+            this.redrawOverlay();
+          }
           break;
         }
         case "text": {
@@ -7035,6 +7422,28 @@ export class Editor {
         this.dirty = true;
         this.renderCanvas();
         this.paintFilmThumb(this.frameIndex);
+        break;
+      }
+      case "fill": {
+        // M14 (S-2): 囲い塗りの確定。「軌跡＋始点終点を結んだ閉じ」の内側を、現在色（トーン選択中は柄）で塗る。
+        // 実装は自由選択のマスク生成（lassoMask=多角形→走査線）＋ A-3 の塗り込みエンジンの合成（新規ラスタライザなし）
+        if (this.fillMode === "enclose") {
+          const pts = this.enclosePts;
+          this.enclosePts = [];
+          if (pts.length >= 3) {
+            const mask = R.lassoMask(pts); // 始点と終点は自動で結ばれる（(i+1)%n）
+            // 選択範囲があればその中だけ（範囲外は1ドットも変えない）
+            if (this.selMask) for (let i = 0; i < PIXELS; i++) if (!this.selMask[i]) mask[i] = 0;
+            let cnt = 0;
+            for (let i = 0; i < PIXELS; i++) if (mask[i]) cnt++;
+            // 極小の囲いは何もしない（誤タッチ対策・トーストも出さない）
+            if (cnt >= ENCLOSE_MIN_PX) this.fillMaskWithCurrentColor(mask, R.toneById(this.fillToneId)?.tile ?? null);
+          }
+          // ドラッグ中の破線プレビューは**必ず**消す。fillMaskWithCurrentColor は「変化ゼロ」だと
+          // 早期 return して redrawOverlay を呼ばない（同じ色で二度囲う・透明で空領域を囲う等）ので、
+          // ここで無条件に描き直す（enclosePts は空にした後なので軌跡は消える・二度描画は無害）
+          this.redrawOverlay();
+        }
         break;
       }
       case "shape": {
@@ -7676,28 +8085,31 @@ export class Editor {
    *  - ⚠ **色の解決を先に、バッファの取得を後に**（257色目で16bitへ昇格すると全バッファが差し替わる）
    *  - 履歴1エントリ。変化ゼロなら積まない（`deleteSelection` と同じ作法）
    */
-  private fillSelectionWithColor() {
+  /** M14 (S-4): A-3（v1.4.2）の「選択マスクを現在色で塗る」エンジンを一般化したもの。
+   *  「🪣 今の色で塗る」ボタンは M14 で廃止したが、この塗り込みエンジンは**囲い塗り（S-2）が使う**ので残す。
+   *  - `mask`: 塗る範囲（0/1）。囲い塗りは lassoMask、選択塗りは selMask を渡す
+   *  - `tone`: トーン柄（null=ベタ）。バケツと同じく**キャンバス座標固定**で toneAt 判定（＝同座標で同柄）
+   *  - 現在色が透明（index 0）なら消える（消し囲い）。索引の置き換えのみ・中間色は作らない。Undo 1回。
+   *  色解決（currentColorIndex）は 257 色目で 16bit 昇格しバッファを差し替え得るので**先に解決**する（A-3 と同じ注意）。 */
+  private fillMaskWithCurrentColor(mask: Uint8Array, tone: R.ToneTile | null) {
     if (this.xformGuard()) return;
-    if (!this.selMask) {
-      this.cb.toast(t("ed.sel.needSelection.toast"));
-      return;
-    }
     if (this.playing) this.stopPlayback();
-    const color = this.currentColorIndex(); // 昇格し得るので先に解決
+    const color = this.currentColorIndex(); // 昇格し得るので先に解決（バケツ・A-3 と同じ順）
     const buf = this.activeBuffer();
     if (!buf) return;
-    const mask = this.selMask;
+    const hit = (i: number): boolean =>
+      mask[i] !== 0 && (!tone || R.toneAt(tone, i % W, (i / W) | 0));
     let changed = false;
     for (let i = 0; i < PIXELS; i++) {
-      if (mask[i] && buf[i] !== color) {
+      if (hit(i) && buf[i] !== color) {
         changed = true;
         break;
       }
     }
-    if (!changed) return;
+    if (!changed) return; // 変化ゼロは履歴に積まない（deleteSelection と同じ作法）
     const before = copyIndexBuf(buf);
-    for (let i = 0; i < PIXELS; i++) if (mask[i]) buf[i] = color;
-    this.pushBufferHistory("選択範囲を塗る", buf, before);
+    for (let i = 0; i < PIXELS; i++) if (hit(i)) buf[i] = color;
+    this.pushBufferHistory("囲い塗り", buf, before); // 履歴ラベル（画面に出ない内部識別子・検査5 除外）
     this.renderCanvas();
     this.redrawOverlay();
     this.paintFilmThumb(this.frameIndex);
@@ -10198,6 +10610,11 @@ export class Editor {
       return;
     }
     if (e.code === "Escape") {
+      // M14 (S-1): 形式ストリップが出ているときは、まずそれを畳む（他の Esc の意味より先）
+      if (this.stripOpenFor) {
+        this.closeStrip();
+        return;
+      }
       if (this.rowDrag) {
         // M3.9 H-2: レイヤードラッグ中の Esc はドラッグだけキャンセル
         this.cancelRowDrag();

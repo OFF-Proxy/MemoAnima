@@ -765,8 +765,6 @@ const ko: Record<keyof typeof ja, string> = {
   "ed.sel.refAll.btn": "전체 레이어",
   "ed.sel.refSel.btn": "선택 중",
   "ed.sel.maskShow.label": "색 표시",
-  "ed.sel.fillColor.btn": "🪣 현재 색으로 채우기",
-  "ed.sel.fillColor.title": "선택 영역을 지금 고른 색으로 채웁니다 (투명이면 지워져요)",
   "ed.sel.scopeConn.btn": "이어진 곳",
   "ed.sel.scopeGlobal.btn": "전체",
 
@@ -938,6 +936,8 @@ const ko: Record<keyof typeof ja, string> = {
   "ed.file.saveFailed.toast": "저장하지 못했어요: {err}",
   "ed.file.saved.toast": "저장했어요: {path}",
   "ed.fill.head.label": "채우기",
+  "ed.fill.bucket.btn": "🪣 페인트통",
+  "ed.fill.enclose.btn": "◯ 둘러 채우기",
   "ed.fill.ref.label": "기준",
   "ed.fill.refAll.btn": "전체 레이어",
   "ed.fill.refAll.title": "보이는 모든 레이어를 경계로 써요(칠해지는 곳은 이 레이어예요)",

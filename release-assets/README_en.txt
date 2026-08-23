@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.4.4
+ MemoAnima v1.4.5
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -15,6 +15,15 @@ Windows only.
 - Your source data (the SD card and so on) is only ever READ. Nothing is
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
+
+== NEW IN v1.4.5 ==
+- Hover (or re-click) a tool button to see its modes in a strip and switch on the spot
+- New "enclose fill" for the fill tool: draw a loop and the inside fills
+  instantly with the current color (or the selected tone)
+- The right panel is reorganized: tool options on top, a collapsible tone
+  list, and the layer list is easier to reach
+- The selection "fill with current color" button was removed (the fill tool
+  covers it)
 
 == NEW IN v1.4.4 ==
 - Layers can be "shared across all frames" (pin): draw a background once and
@@ -154,7 +163,7 @@ opens as it is, and your settings and shortcuts carry over.
 3. Follow the first-run guide: choose a library folder -> import -> edit -> export
 Note: layers are shared across every frame (the standard way animation tools
 work). Adding a frame gives you a blank frame with the same layer structure.
-Note: there is also an installer (MemoAnima_1.4.4_x64-setup.exe). Just
+Note: there is also an installer (MemoAnima_1.4.5_x64-setup.exe). Just
 double-click it; no administrator rights are needed. IMPORTANT: this portable
 (zip) version cannot update in place - accepting an update installs the
 installer version instead (see ABOUT NETWORK ACCESS below). Moving from the

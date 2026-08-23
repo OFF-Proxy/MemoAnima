@@ -134,6 +134,8 @@ type Settings = {
   /** M13-2a (A-4): コマを消すときに確認を出すか。**未設定＝オン**（＝従来どおり）。追加のみ。
    *  効くのはコマの削除だけ（レイヤー・フォルダ・ライブラリの削除の確認には無関係） */
   frameDeleteConfirm?: boolean;
+  /** M14 (S-3): 右パネルの「種類/トーン」一覧を開いているか。**未設定＝閉**（`=== true` で見る）。追加のみ */
+  toneOpen?: boolean;
   /** U-1: 「起動時に更新を確認します（⚙ でオフにできます）」の初回案内を出したか。
    *  `guideDone` とは別にしている——既存利用者は `guideDone: true` を持っているので、
    *  それを流用すると**更新確認のことを一度も知らされないまま**になる */
@@ -1615,6 +1617,8 @@ function showEditor(
   // M13-2a: 選択範囲の色付け（false 以外はオン）／コマ削除の確認（false 以外はオン＝従来どおり）
   editor.restoreSelMaskShow(settings.selMask);
   editor.restoreFrameDeleteConfirm(settings.frameDeleteConfirm);
+  // M14 (S-3): トーン一覧の折りたたみ（true 以外は閉＝既定）
+  editor.restoreToneOpen(settings.toneOpen);
   editor.mount(
     project,
     ctx,
@@ -1648,6 +1652,11 @@ function showEditor(
       // M13-2a: 選択範囲の色付け表示も同じ流儀（トグルを押した瞬間に保存）
       onSelMaskShowChange: (show) => {
         settings.selMask = show;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      // M14 (S-3): トーン一覧の開閉も同じ流儀（ヘッダを押した瞬間に保存）
+      onToneOpenChange: (open) => {
+        settings.toneOpen = open;
         invoke("save_settings", { settings }).catch(() => {});
       },
       saveProject: async (c, data, thumb) => {

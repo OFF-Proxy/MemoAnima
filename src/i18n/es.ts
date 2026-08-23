@@ -763,8 +763,6 @@ const es: Record<keyof typeof ja, string> = {
   "ed.sel.refAll.btn": "Todas",
   "ed.sel.refSel.btn": "Seleccionadas",
   "ed.sel.maskShow.label": "Colorear",
-  "ed.sel.fillColor.btn": "🪣 Rellenar",
-  "ed.sel.fillColor.title": "Rellena el área seleccionada con el color actual (transparente la borra)",
   "ed.sel.scopeConn.btn": "Contigua",
   "ed.sel.scopeGlobal.btn": "Todo",
 
@@ -936,6 +934,8 @@ const es: Record<keyof typeof ja, string> = {
   "ed.file.saveFailed.toast": "No se pudo guardar: {err}",
   "ed.file.saved.toast": "Guardado: {path}",
   "ed.fill.head.label": "Relleno",
+  "ed.fill.bucket.btn": "🪣 Cubo",
+  "ed.fill.enclose.btn": "◯ Cercar",
   "ed.fill.ref.label": "Según",
   "ed.fill.refAll.btn": "Todas",
   "ed.fill.refAll.title": "Usa todas las capas visibles como límite (el relleno sigue yendo a esta capa)",

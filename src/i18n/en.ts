@@ -760,8 +760,6 @@ const en: Record<keyof typeof ja, string> = {
   "ed.sel.refAll.btn": "All layers",
   "ed.sel.refSel.btn": "Selected",
   "ed.sel.maskShow.label": "Tint",
-  "ed.sel.fillColor.btn": "🪣 Fill with color",
-  "ed.sel.fillColor.title": "Fill the selected area with the current color (transparent erases it)",
   "ed.sel.scopeConn.btn": "Connected",
   "ed.sel.scopeGlobal.btn": "Everywhere",
 
@@ -927,6 +925,8 @@ const en: Record<keyof typeof ja, string> = {
   "ed.file.saveFailed.toast": "Couldn't save: {err}",
   "ed.file.saved.toast": "Saved: {path}",
   "ed.fill.head.label": "Fill",
+  "ed.fill.bucket.btn": "🪣 Bucket",
+  "ed.fill.enclose.btn": "◯ Enclose",
   "ed.fill.ref.label": "Based on",
   "ed.fill.refAll.btn": "All layers",
   "ed.fill.refAll.title": "Uses every visible layer as the boundary (it still fills this layer)",

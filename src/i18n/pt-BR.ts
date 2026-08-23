@@ -763,8 +763,6 @@ const ptBR: Record<keyof typeof ja, string> = {
   "ed.sel.refAll.btn": "Todas",
   "ed.sel.refSel.btn": "Selecionadas",
   "ed.sel.maskShow.label": "Colorir",
-  "ed.sel.fillColor.btn": "🪣 Preencher",
-  "ed.sel.fillColor.title": "Preenche a área selecionada com a cor atual (transparente apaga)",
   "ed.sel.scopeConn.btn": "Contígua",
   "ed.sel.scopeGlobal.btn": "Tudo",
 
@@ -936,6 +934,8 @@ const ptBR: Record<keyof typeof ja, string> = {
   "ed.file.saveFailed.toast": "Não foi possível salvar: {err}",
   "ed.file.saved.toast": "Salvo: {path}",
   "ed.fill.head.label": "Preencher",
+  "ed.fill.bucket.btn": "🪣 Balde",
+  "ed.fill.enclose.btn": "◯ Cercar",
   "ed.fill.ref.label": "Base",
   "ed.fill.refAll.btn": "Todas",
   "ed.fill.refAll.title": "Usa todas as camadas visíveis como limite (o preenchimento continua indo nesta camada)",
