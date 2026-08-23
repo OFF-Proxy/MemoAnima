@@ -411,7 +411,7 @@ const es: Record<keyof typeof ja, string> = {
   "img.fit.contain.btn": "Encajar (margen = papel)",
   "img.fit.cover.btn": "Llenar el cuadro",
   "img.fit.label": "Ajuste",
-  "img.fps.label": "Velocidad",
+  "img.fps.label": "Fotogramas/s",
   "img.import.btn": "Importar",
   "img.importDone.toast": "Importado: {album} / {name}.memoanima",
   "img.importFail.toast": "Falló la importación: {err}",

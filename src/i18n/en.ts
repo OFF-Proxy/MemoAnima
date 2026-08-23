@@ -412,7 +412,7 @@ const en: Record<keyof typeof ja, string> = {
   "img.fit.contain.btn": "Fit inside (margins = paper)",
   "img.fit.cover.btn": "Fill the frame",
   "img.fit.label": "Fitting",
-  "img.fps.label": "Speed",
+  "img.fps.label": "Frame rate",
   "img.import.btn": "Import",
   "img.importDone.toast": "Imported: {album} / {name}.memoanima",
   "img.importFail.toast": "Import failed: {err}",

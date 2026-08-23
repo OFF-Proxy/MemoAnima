@@ -413,7 +413,7 @@ const ko: Record<keyof typeof ja, string> = {
   "img.fit.contain.btn": "전체 넣기(여백=종이)",
   "img.fit.cover.btn": "화면 채우기",
   "img.fit.label": "맞춤",
-  "img.fps.label": "속도",
+  "img.fps.label": "프레임 속도",
   "img.import.btn": "가져오기",
   "img.importDone.toast": "가져왔어요: {album} / {name}.memoanima",
   "img.importFail.toast": "가져오기에 실패했어요: {err}",

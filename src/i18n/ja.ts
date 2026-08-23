@@ -225,7 +225,7 @@ const ja = {
   "img.fit.contain.btn": "全体を入れる（余白=紙）",
   "img.fit.cover.btn": "画面いっぱい",
   "img.fit.label": "おさめ方",
-  "img.fps.label": "速さ",
+  "img.fps.label": "コマ速度",
   "img.import.btn": "取り込む",
   "img.importDone.toast": "取り込みました: {album} / {name}.memoanima",
   "img.importFail.toast": "取り込みに失敗: {err}",

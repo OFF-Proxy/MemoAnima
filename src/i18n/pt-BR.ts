@@ -411,7 +411,7 @@ const ptBR: Record<keyof typeof ja, string> = {
   "img.fit.contain.btn": "Caber (margem = papel)",
   "img.fit.cover.btn": "Preencher o quadro",
   "img.fit.label": "Ajuste",
-  "img.fps.label": "Velocidade",
+  "img.fps.label": "Quadros/s",
   "img.import.btn": "Importar",
   "img.importDone.toast": "Importado: {album} / {name}.memoanima",
   "img.importFail.toast": "A importação falhou: {err}",

@@ -19,6 +19,12 @@ import zhHans from "./zh-Hans";
 export const LANGS = ["ja", "en", "es", "pt-BR", "ko", "zh-Hans"] as const;
 export type Lang = (typeof LANGS)[number];
 
+/** M18 (L-3): ⚙ の言語一覧に**出さない**言語（翻訳が届くまで隠す・作者指示 2026-08-23）。
+ *  隠すのは**一覧だけ**。`LANGS`・辞書・フォールバック・`sanitizeLang`・検査は不変なので、
+ *  settings.lang に隠した言語が残っていてもそのまま動く（一覧に無いだけ）。
+ *  翻訳が届いたら**この集合から1行消すだけ**で再表示される。 */
+export const HIDDEN_LANGS: ReadonlySet<Lang> = new Set<Lang>(["zh-Hans"]);
+
 /** 辞書の型。`ja` のキー集合が正 */
 export type Dict = Record<keyof typeof ja, string>;
 export type DictKey = keyof Dict;

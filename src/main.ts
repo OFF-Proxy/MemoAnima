@@ -47,7 +47,7 @@ import {
 } from "./editor/exporter";
 import { mimeFromExt } from "./editor/audio";
 // M12-1a: i18n（自前・依存なし）。設計は docs/REQ_M12_i18n_master.md §3
-import { t, setLang, getLang, sanitizeLang, detectLang, applyI18n, type Lang } from "./i18n";
+import { t, setLang, getLang, sanitizeLang, detectLang, applyI18n, HIDDEN_LANGS, type Lang } from "./i18n";
 // M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
 import {
   defaultAlbumName,
@@ -2359,8 +2359,15 @@ async function openSettingsMenu() {
     // L-2: 6言語目に简体中文（部分辞書。訳が届いていないキーは英語で出る）。
     // 「简体中文」も漢字＝検査5 に当たるので、**この行から出さない**（上と同じ理由）
     const LANG_NAMES: Record<string, string> = { ja: "日本語", en: "English", es: "Español", "pt-BR": "Português (BR)", ko: "한국어", "zh-Hans": "简体中文" }; // i18n-exempt: 言語名は自称のまま（REQ_M12_2 §2-b）
+    // M18 (L-3): 翻訳が届くまで隠す言語（HIDDEN_LANGS・i18n/index.ts の定数1つ）は**一覧から外すだけ**。
+    // テンプレートのボタンはそのまま残し、ここで DOM から取り除く（辞書・LANGS・フォールバック・検査は不変。
+    // settings.lang に隠した言語が残っていても getLang() はそのまま＝一覧に押された表示が無いだけで動作は従来どおり）
     box.querySelectorAll("#set-lang .lv").forEach((b) => {
       const l = (b as HTMLElement).dataset.lang ?? "";
+      if ((HIDDEN_LANGS as ReadonlySet<string>).has(l)) {
+        b.remove();
+        return;
+      }
       (b as HTMLElement).textContent = LANG_NAMES[l] ?? l;
     });
     const syncLang = () => {

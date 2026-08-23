@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.4.7
+ MemoAnima v1.5.0
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -15,6 +15,14 @@ Windows only.
 - Your source data (the SD card and so on) is only ever READ. Nothing is
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
+
+== NEW IN v1.5.0 (the v1.4 series, summarized) ==
+- In-app updates (installer edition)
+- Selection add/subtract with tinted display
+- Multi-layer transform, separate W/H scaling, corner free transform
+- Pinned all-frame layers and non-destructive layer color
+- Enclose fill, tool mode strips, "My patterns" custom tones,
+  per-frame dither shift, modifier+click shortcuts, MP4 loop export
 
 == NEW IN v1.4.7 ==
 - "My patterns": select part of your drawing and register it as a tone.
@@ -178,7 +186,7 @@ opens as it is, and your settings and shortcuts carry over.
 3. Follow the first-run guide: choose a library folder -> import -> edit -> export
 Note: layers are shared across every frame (the standard way animation tools
 work). Adding a frame gives you a blank frame with the same layer structure.
-Note: there is also an installer (MemoAnima_1.4.7_x64-setup.exe). Just
+Note: there is also an installer (MemoAnima_1.5.0_x64-setup.exe). Just
 double-click it; no administrator rights are needed. IMPORTANT: this portable
 (zip) version cannot update in place - accepting an update installs the
 installer version instead (see ABOUT NETWORK ACCESS below). Moving from the
