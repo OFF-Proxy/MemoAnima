@@ -55,8 +55,41 @@ function blendLayer(
   buf: IndexBuf,
   lut: Uint32Array,
   opacity: number,
-  mask: IndexBuf | null = null
+  mask: IndexBuf | null = null,
+  /** M15 (K-2): レイヤーカラー。undefined＝従来どおり lut[v]（この既定のときホットパスは1命令も変わらない）。
+   *  数値のとき、その RGBA を**索引に依らず一律で**使う（不透明ピクセルの色だけを置換・形は不変）。 */
+  tint?: number
 ) {
+  // M15 (K-2): 表示色が指定されているときだけ、index→RGBA 解決を tint に差し替える早期分岐。
+  // tint === undefined の下は M11-20 から 1 命令も変えていない（displayColor 無しの合成は従来と同一＝スモークで固定）。
+  if (tint !== undefined) {
+    if (mask) {
+      if (opacity >= 1) {
+        for (let i = 0; i < PIXELS; i++) {
+          const v = buf[i];
+          if (v !== 0 && mask[i] !== 0) out[i] = tint;
+        }
+      } else if (opacity > 0) {
+        for (let i = 0; i < PIXELS; i++) {
+          const v = buf[i];
+          if (v !== 0 && mask[i] !== 0) blendPixel(out, i, tint, opacity);
+        }
+      }
+      return;
+    }
+    if (opacity >= 1) {
+      for (let i = 0; i < PIXELS; i++) {
+        const v = buf[i];
+        if (v !== 0) out[i] = tint;
+      }
+    } else if (opacity > 0) {
+      for (let i = 0; i < PIXELS; i++) {
+        const v = buf[i];
+        if (v !== 0) blendPixel(out, i, tint, opacity);
+      }
+    }
+    return;
+  }
   if (mask) {
     if (opacity >= 1) {
       for (let i = 0; i < PIXELS; i++) {
@@ -82,6 +115,15 @@ function blendLayer(
       if (v !== 0) blendPixel(out, i, lut[v], opacity);
     }
   }
+}
+
+/** M15 (K-2): "#RRGGBB" → 0xAABBGGRR（buildLut と同じ並び・不透明）。不正値は undefined。 */
+function displayColorRgba(hex: string | undefined): number | undefined {
+  if (typeof hex !== "string" || !/^#[0-9a-fA-F]{6}$/.test(hex)) return undefined;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return ((0xff << 24) | (b << 16) | (g << 8) | r) >>> 0;
 }
 
 /** M11-20: clip レイヤー ld の**土台バッファ**を返す。土台なし／土台が実効非表示／土台のバッファが
@@ -239,7 +281,8 @@ export function compositeFrame(
     // clip: 土台の同じ画素が非0の所だけ描く。土台なし／土台非表示／土台バッファなし → 描かない
     const mask = clipMaskFor(ld, frame, eff, bases);
     if (mask === null) continue;
-    blendLayer(buf, lb, lut, e.opacity, mask ?? null);
+    // M15 (K-2): レイヤーカラー。undefined なら従来どおり lut で描く（displayColor 無しは完全に元の経路）
+    blendLayer(buf, lb, lut, e.opacity, mask ?? null, displayColorRgba(ld.displayColor));
   }
   return buf;
 }

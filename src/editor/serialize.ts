@@ -403,7 +403,41 @@ export async function projectFromBytes(bytes: Uint8Array): Promise<Project> {
       if (ld && typeof ld === "object" && "clip" in ld && (ld as LayerDef).clip !== true) {
         delete (ld as { clip?: unknown }).clip;
       }
+      // M15 (K-2): displayColor は "#RRGGBB" のみ有効。壊れた値・非文字列はキーを落とす（clip と同じ作法）
+      if (ld && typeof ld === "object" && "displayColor" in ld) {
+        const dc = (ld as LayerDef).displayColor;
+        if (typeof dc !== "string" || !/^#[0-9a-fA-F]{6}$/.test(dc)) {
+          delete (ld as { displayColor?: unknown }).displayColor;
+        }
+      }
+      // M15 (K-1): shared は true のみ有効。それ以外はキーを落とす
+      if (ld && typeof ld === "object" && "shared" in ld && (ld as LayerDef).shared !== true) {
+        delete (ld as { shared?: unknown }).shared;
+      }
     }
+    // M15 (K-1): 旧版で共通レイヤーのコマ間に差が生まれた場合の裁定（REQ §4）。
+    // 保存時は全コマへ同一内容を書くので、読み込んだ各コマのバッファが**すべて一致**していれば
+    // 共通は健在。1つでも違うコマがあれば「旧ビルドで編集された」＝共通を外してそのまま開く
+    //（旧版の編集を捨てない・作者決定）。実体の張り直し（全コマ同一参照へ）は editor 側の relinkShared。
+    let conflict = false;
+    for (const ld of p.layerDefs) {
+      if (ld.shared !== true) continue;
+      const base = frames[0]?.layers[ld.id];
+      let differs = false;
+      for (const f of frames) {
+        const b = f.layers[ld.id];
+        if (!base || !b || b.length !== base.length) { differs = true; break; }
+        for (let i = 0; i < b.length; i++) if (b[i] !== base[i]) { differs = true; break; }
+        if (differs) break;
+      }
+      if (differs) {
+        delete (ld as { shared?: unknown }).shared;
+        conflict = true;
+      }
+    }
+    // 呼び出し側（editor.mount）が1回だけトーストを出すための一時フラグ（settings の __recovered の前例）。
+    // Project の interface には足さない（読んだら消す運用）
+    if (conflict) (p as { __sharedConflict?: boolean }).__sharedConflict = true;
   }
   // 壊れた parent（存在しないid・循環）をルートへ隔離（絵は必ず開ける）
   sanitizeFolders(p);

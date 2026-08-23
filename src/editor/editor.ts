@@ -26,6 +26,7 @@ import {
   UGO3D_BLUE,
   clipBaseMap,
   effectiveLayerStates,
+  relinkShared,
 } from "./model";
 import { compositeFrame, presentToCanvas, frameToPngBlob, flattenIndexFrame } from "./render";
 import { History, bufferChangeEntry, multiBufferChangeEntry, type HistoryEntry } from "./history";
@@ -43,6 +44,7 @@ import {
   footprintEdges,
   antColor,
   canvasCursorFor,
+  panCursorFor,
 } from "./cursor";
 import * as R from "./raster";
 import { FrameClip, makeClip, buildFramesFromClip } from "./frameClip";
@@ -737,6 +739,9 @@ export class Editor {
     opts: { askSaveTarget?: boolean } = {}
   ) {
     this.project = project;
+    // M15 (K-1): 共通レイヤーの不変条件（全コマが同一バッファを参照）を読み込み直後に確立する。
+    // serialize は「差があれば shared を外す」までを済ませているので、残った shared は張り直すだけ
+    relinkShared(project);
     this.saveCtx = saveCtx;
     this.askSaveTarget = opts.askSaveTarget ?? saveCtx == null;
     this.cb = cb;
@@ -839,6 +844,12 @@ export class Editor {
     this.cursorPainted = "";
     this.applyZoom();
     this.refreshAll();
+    // M15 (K-1): 旧版で共通レイヤーが編集され、コマ間に差があったため共通を外して開いた場合に一言。
+    // serialize が付けた一時フラグを読んで消す（settings の __recovered と同じ運用）
+    if ((this.project as { __sharedConflict?: boolean }).__sharedConflict) {
+      delete (this.project as { __sharedConflict?: boolean }).__sharedConflict;
+      this.cb.toast(t("ed.layer.sharedConflict.toast"));
+    }
     // F-0対策: レイアウト確定後にサイズ確定＋再描画（表示直後は clientWidth が不定になり得る）。
     // 以後のサイズ変化にも ResizeObserver で追従する（applyZoom はサイズ設定のみなので再描画も呼ぶ）。
     requestAnimationFrame(() =>
@@ -1309,6 +1320,10 @@ export class Editor {
     // M12-C: 1階（CSS の cursor）と2階（輪・枠）をツールに合わせ直す。
     // ここは既にある redrawOverlay の直後で、ホバー経路とは無関係（頻度はツール切替のときだけ）
     this.applyCanvasCursor();
+    // A-21: 手のひら/Space パンで `#ed-cvwrap` に残った grab/grabbing を、切り替えた道具に合わせて畳む。
+    // ペンで pointerdown すると外枠が setPointerCapture でカーソルの決定権を握るので、
+    // canvas 側だけ直しても掴んだ瞬間に外枠の grab が出てしまう（capture の仕様）
+    this.updatePanCursor();
     this.cursorPainted = "";
     this.paintCursorLayer();
     this.revealToolOptions();
@@ -3491,10 +3506,35 @@ export class Editor {
           this.dirty = true;
         },
       });
+      // M15 (K-1): 📌 全コマ共通トグル（クリップの隣）。フォルダには付けない＝レイヤー行だけ
+      const pin = document.createElement("span");
+      pin.className = "eye lay-shared" + (ld.shared === true ? " on" : "");
+      pin.textContent = "📌";
+      pin.style.opacity = ld.shared === true ? "1" : "0.35";
+      pin.title = ld.shared === true ? t("ed.layer.shared.on.title") : t("ed.layer.shared.off.title");
+      pin.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (this.xformGuard()) return;
+        void this.toggleLayerShared(ld.id);
+      });
+      // M15 (K-2): レイヤーカラーの色チップ（不透明度スライダーの右）。未設定＝枠だけ
+      const chip = document.createElement("span");
+      chip.className = "lay-colorchip" + (ld.displayColor ? " on" : "");
+      if (ld.displayColor) chip.style.background = ld.displayColor;
+      chip.title = ld.displayColor
+        ? t("ed.layer.displayColor.on.title", { color: ld.displayColor })
+        : t("ed.layer.displayColor.off.title");
+      chip.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (this.xformGuard()) return;
+        this.toggleLayerDisplayColor(ld.id);
+      });
       row.appendChild(eye);
       row.appendChild(cm);
+      row.appendChild(pin);
       row.appendChild(nm);
       row.appendChild(op.root);
+      row.appendChild(chip);
       row.addEventListener("click", (e) => {
         if (this.xformGuard()) return; // E-4: 変形対象レイヤーの切替を防ぐ
         this.updateSelection(ld.id, "layer", e);
@@ -6052,13 +6092,15 @@ export class Editor {
   private updatePanCursor(grabbing = false) {
     const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
     if (!wrap) return;
-    if (this.panState || grabbing) wrap.style.cursor = "grabbing";
-    else if (this.tool === "hand" || this.spaceHeld) wrap.style.cursor = "grab";
-    else wrap.style.cursor = "";
+    const panning = !!this.panState || grabbing;
+    const hand = this.tool === "hand" || this.spaceHeld;
+    // A-21: 外枠のカーソルは純関数で決める（capture 中は外枠のカーソルが出るので、ここが正しくないと
+    // ペンで掴んだ瞬間に "grab" が残る）。setTool からも呼んで、手のひら→ペンの切替でも畳む
+    wrap.style.cursor = panCursorFor(panning, hand);
     // M12-G: キャンバスの上にも出す（従来は枠の 4px にしか出ていなかった）。
     // 手のひら／Space パン以外のときは**今のツールのカーソルへ戻す**（空にすると点が消える）
-    if (this.panState || grabbing) this.setCanvasCursor("grabbing");
-    else if (this.tool === "hand" || this.spaceHeld) this.setCanvasCursor("grab");
+    if (panning) this.setCanvasCursor("grabbing");
+    else if (hand) this.setCanvasCursor("grab");
     else this.applyCanvasCursor();
   }
 
@@ -9243,6 +9285,125 @@ export class Editor {
     apply();
   }
 
+  /**
+   * M15 (K-1): レイヤーの「全コマ共通」を切り替える。
+   *  ON: いま見ているコマの絵で全コマを統一する。**他のコマに絵があって内容が違うときだけ**確認する
+   *      （空 or 同一なら黙って ON）。以後どのコマで描いても全コマに反映（全コマが同一バッファを参照）。
+   *  OFF: 各コマが**自分のコピー**を持つ（見た目は変わらない）。
+   *  履歴は1エントリ: ON/OFF フラグ ＋ 全コマのこのレイヤーの before バッファ（copy）を持ち、Undo で完全復元。
+   *  ★索引の複製だけ（混色なし）。フォルダには出さない（レイヤー行だけ）。
+   */
+  private async toggleLayerShared(id: string) {
+    if (this.xformGuard()) return;
+    const ld = this.project.layerDefs.find((l) => l.id === id);
+    if (!ld) return;
+    const frames = this.project.frames;
+    const turningOn = ld.shared !== true;
+    if (turningOn) {
+      // いま見ているコマの絵。空判定と「他コマに違う絵があるか」を先に見る
+      const cur = frames[this.frameIndex]?.layers[id];
+      if (!cur) return;
+      let curEmpty = true;
+      for (let i = 0; i < PIXELS; i++) if (cur[i] !== 0) { curEmpty = false; break; }
+      let othersDiffer = false;
+      for (let fi = 0; fi < frames.length; fi++) {
+        if (fi === this.frameIndex) continue;
+        const b = frames[fi].layers[id];
+        if (!b) continue;
+        let empty = true;
+        let same = true;
+        for (let i = 0; i < PIXELS; i++) {
+          if (b[i] !== 0) empty = false;
+          if (b[i] !== cur[i]) same = false;
+          if (!empty && !same) break;
+        }
+        if (!empty && !same) { othersDiffer = true; break; }
+      }
+      // 他コマに「今と違う絵」があるときだけ確認（空 or 同一なら黙って ON）
+      if (othersDiffer && !(await this.cb.confirm(t("ed.layer.shared.replace.msg")))) return;
+      void curEmpty; // 空でも ON にはできる（全コマ空で統一）
+    }
+    // 履歴: 全コマの before バッファ（copy）＋ 元の shared 状態
+    const beforeBufs = frames.map((f) => copyIndexBuf(f.layers[id] ?? allocIndexBuf(this.project)));
+    const wasShared = ld.shared === true;
+    const curFrame = this.frameIndex;
+    const self = this;
+    const apply = () => {
+      const p = self.project;
+      const ldNow = p.layerDefs.find((l) => l.id === id);
+      if (!ldNow) return;
+      if (turningOn) {
+        ldNow.shared = true;
+        // いま見ているコマの絵を canonical にして全コマへ同一参照
+        const canonical = copyIndexBuf(p.frames[curFrame]?.layers[id] ?? allocIndexBuf(p));
+        for (const f of p.frames) f.layers[id] = canonical;
+      } else {
+        delete ldNow.shared;
+        // 各コマに独立コピーを持たせる（現状は全コマ同一参照なので、同じ内容の別実体に分ける）
+        const src = p.frames[0]?.layers[id] ?? allocIndexBuf(p);
+        for (const f of p.frames) f.layers[id] = copyIndexBuf(src);
+      }
+      self.dirty = true;
+      self.afterLayerChange();
+      self.rebuildFilm();
+    };
+    const revert = () => {
+      const p = self.project;
+      const ldNow = p.layerDefs.find((l) => l.id === id);
+      if (!ldNow) return;
+      if (wasShared) ldNow.shared = true; else delete ldNow.shared;
+      p.frames.forEach((f, fi) => {
+        const nb = allocIndexBuf(p);
+        nb.set(beforeBufs[fi]);
+        f.layers[id] = nb;
+      });
+      // wasShared のときは全コマ同一参照へ張り直す（relinkShared と同じ不変条件）
+      relinkShared(p);
+      self.dirty = true;
+      self.afterLayerChange();
+      self.rebuildFilm();
+    };
+    this.history.push({ label: turningOn ? "全コマ共通ON" : "全コマ共通OFF", undo: revert, redo: apply });
+    apply();
+  }
+
+  /**
+   * M15 (K-2): レイヤーカラー（表示色）を切り替える。未設定→いまの色を設定・設定中→解除。
+   *  絵の索引は1ドットも変えない（合成時に置換するだけ）。履歴は可視トグルと同じ流儀
+   *  （id で解決する軽いエントリ・afterLayerChange で即追従）。 */
+  private toggleLayerDisplayColor(id: string) {
+    if (this.xformGuard()) return;
+    const ld = this.project.layerDefs.find((l) => l.id === id);
+    if (!ld) return;
+    const before = ld.displayColor;
+    // 現在の色（透明のときは黒に倒す＝透明を表示色にはできない。索引0は「透明」の予約）
+    const after = before ? undefined : (this.colorHex || UGO_COLORS.black);
+    const self = this;
+    this.history.push({
+      label: before ? "レイヤーカラー解除" : "レイヤーカラー",
+      undo() {
+        const l = self.project.layerDefs.find((x) => x.id === id);
+        if (!l) return;
+        if (before) l.displayColor = before; else delete l.displayColor;
+        self.dirty = true;
+        self.afterLayerChange();
+        self.rebuildFilm();
+      },
+      redo() {
+        const l = self.project.layerDefs.find((x) => x.id === id);
+        if (!l) return;
+        if (after) l.displayColor = after; else delete l.displayColor;
+        self.dirty = true;
+        self.afterLayerChange();
+        self.rebuildFilm();
+      },
+    });
+    if (after) ld.displayColor = after; else delete ld.displayColor;
+    this.dirty = true;
+    this.afterLayerChange();
+    this.rebuildFilm();
+  }
+
   private mergeLayerDown() {
     if (this.xformGuard()) return; // E-4
     const idx = this.project.layerDefs.findIndex((l) => l.id === this.activeLayerId);
@@ -9252,6 +9413,12 @@ export class Editor {
     }
     const top = this.project.layerDefs[idx];
     const bottom = this.project.layerDefs[idx - 1];
+    // M15 (K-1): 共通レイヤーを含む結合は禁止（片方が全コマ共通だと、統合先が
+    // 「あるコマだけ違う」状態になり共有の意味が壊れる）。共通を解除してから結合する
+    if (top.shared === true || bottom.shared === true) {
+      this.cb.toast(t("ed.layer.mergeSharedBlocked.toast"));
+      return;
+    }
     const savedBottom: IndexBuf[] = this.project.frames.map((f) =>
       copyIndexBuf(f.layers[bottom.id] ?? allocIndexBuf(this.project))
     );
@@ -9646,6 +9813,9 @@ export class Editor {
 
   private afterFrameStructureChange() {
     this.dirty = true;
+    // M15 (K-1): コマの追加・複製・削除・並べ替え・挿入でバッファ参照が枝分かれし得るので、
+    // 共通レイヤーを全コマ同一参照へ張り直す（共通でないレイヤーには触れない・参照代入のみ）
+    relinkShared(this.project);
     // コマの追加/削除/並べ替え/挿入で範囲選択はインデックスがずれるためリセット
     this.rangeSel = null;
     this.rangeAnchor = null;

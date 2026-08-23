@@ -100,6 +100,23 @@ export function canvasCursorFor(dynamic: string, style: CursorStyle): string {
   return dynamic;
 }
 
+/**
+ * M15 (A-21): `#ed-cvwrap`（キャンバスの外枠）に入れるカーソル。
+ *
+ * A-21 の正体: 手のひらで触ると `#ed-cvwrap` に "grab"/"grabbing" を書くが、**ツールを切り替えても
+ * ここが消えていなかった**。`#ed-canvas` 側のカーソルは切り替えで直るのに、ペンで pointerdown すると
+ * `#ed-cvwrap` が `setPointerCapture` で**カーソルの決定権を握る**（capture 中は捕捉要素のカーソルが出る
+ * ＝DOM の仕様）ため、掴んだ瞬間に外枠の "grab" が出てしまう。
+ *
+ * → 外枠のカーソルも「いまの状態から純粋に決める」1関数にして、ツール切替時にも必ず呼ぶ。
+ *   panning=いまパン中（panState あり or 引数 grabbing）／ hand=手のひら or Space 一時パン。
+ */
+export function panCursorFor(panning: boolean, hand: boolean): string {
+  if (panning) return "grabbing";
+  if (hand) return "grab";
+  return ""; // それ以外は外枠のカーソル指定を外す（#ed-canvas 側のツールカーソルに委ねる）
+}
+
 /** 2階（輪・ドット枠）を出さないツール。 */
 export function cursorLayerHidden(tool: string): boolean {
   return tool === "hand" || tool === "transform" || tool === "text";

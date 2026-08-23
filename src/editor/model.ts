@@ -88,18 +88,46 @@ export function copyIndexBuf(src: IndexBuf): IndexBuf {
 
 /** 8bit→16bit へプロジェクト全体を一度だけ昇格（可逆・値保存）。既に16bitなら何もしない。
  *  注意: 全フレームのレイヤーバッファを差し替えるため、呼び出し後は保持していた
- *  バッファ参照を取り直すこと（色解決→バッファ取得の順序を守る）。 */
+ *  バッファ参照を取り直すこと（色解決→バッファ取得の順序を守る）。
+ *
+ *  M15: **バッファの同一性を保存する**。共通レイヤー（LayerDef.shared）は全コマが同一の
+ *  Uint8Array 実体を参照しているので、コマ×レイヤーで**個別に**新品へ差し替えると
+ *  共有が「コマごとに別実体」に分裂する。旧→新の対応表（`Map`）で、同じ元実体には
+ *  同じ新実体を割り当てることで、昇格後も共有が保たれる。 */
 export function promoteTo16(p: Project): void {
   if (p.indexBits === 16) return;
+  const remap = new Map<IndexBuf, Uint16Array>();
   for (const f of p.frames) {
     for (const id of Object.keys(f.layers)) {
       const src = f.layers[id];
-      const dst = new Uint16Array(PIXELS);
-      dst.set(src); // 値をそのままコピー（昇格は完全可逆）
+      let dst = remap.get(src);
+      if (!dst) {
+        dst = new Uint16Array(PIXELS);
+        dst.set(src); // 値をそのままコピー（昇格は完全可逆）
+        remap.set(src, dst);
+      }
       f.layers[id] = dst;
     }
   }
   p.indexBits = 16;
+}
+
+/** M15 (K-1): 共通レイヤー（`shared:true`）の不変条件を再確立する。
+ *  各共通レイヤーについて、全コマが**同一の1バッファ**（先頭コマの実体）を参照するように張り直す。
+ *  コマの追加・複製・削除・並べ替え・16bit 昇格などでバッファ参照が枝分かれし得るので、
+ *  コマ構造が変わる各所と読み込み直後に呼ぶ。共通でないレイヤーには一切触れない。
+ *  ★索引の複製・混色はしない（参照代入だけ）。先頭コマにバッファが無ければ確保して canonical にする。 */
+export function relinkShared(p: Project): void {
+  if (!p.frames.length) return;
+  for (const ld of p.layerDefs) {
+    if (ld.shared !== true) continue;
+    let canonical = p.frames[0].layers[ld.id];
+    if (!canonical) {
+      canonical = allocIndexBuf(p);
+      p.frames[0].layers[ld.id] = canonical;
+    }
+    for (const f of p.frames) f.layers[ld.id] = canonical;
+  }
 }
 
 export interface LayerDef {
@@ -115,6 +143,15 @@ export interface LayerDef {
    *  **表示時のマスクだけ**でバッファは全画素そのまま。保存形式は PROJECT_VERSION=5 のまま
    *  任意キーとして書く（M10-14 thumbFrame の前例。旧ビルドは未知キーとして素通し） */
   clip?: boolean;
+  /** M15 (K-1): 全コマ共通レイヤー（📌）。true のとき、このレイヤーは全コマが**同一のバッファ**を
+   *  参照する（どのコマで描いても全コマに反映）。保存形式は PROJECT_VERSION=5 のまま任意キー
+   *  （clip の前例）。旧ビルドは未知キーとして無視し、「全コマに同じ絵があるレイヤー」として開ける。
+   *  フォルダには付けない。取り込み（kwz/ppm）レイヤーには付かない。 */
+  shared?: true;
+  /** M15 (K-2): レイヤーカラー（表示色）。"#RRGGBB"。設定中は、このレイヤーの**不透明ピクセル全部**が
+   *  この色で合成される（画面・サムネ・書き出し）。**索引データは1ドットも変えない**＝解除で元に戻る。
+   *  塗り・✨自動選択の境界判定（flattenIndexFrame）には効かせない（表示だけ）。任意キー。 */
+  displayColor?: string;
 }
 
 /** M3.7: レイヤーフォルダ（組織化レイヤー・ネスト対応）。

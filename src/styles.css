@@ -1467,6 +1467,31 @@ button:disabled {
   border-left: 8px solid var(--red);
 }
 
+/* M15 (K-1): 全コマ共通トグル（📌）。off は薄く・on ははっきり（clipmask と同じ流儀） */
+.lay .lay-shared {
+  opacity: 0.35;
+  font-weight: 800;
+}
+.lay .lay-shared.on {
+  opacity: 1;
+}
+
+/* M15 (K-2): レイヤーカラーの色チップ（不透明度スライダーの右）。未設定＝枠だけ・設定中＝その色で塗る */
+.lay .lay-colorchip {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--ink);
+  border-radius: 4px;
+  cursor: pointer;
+  /* 未設定は市松で「透明（＝元の色のまま）」を示す */
+  background: repeating-conic-gradient(#d4d4d4 0 25%, #f4f4f4 0 50%) 0 / 8px 8px;
+}
+.lay .lay-colorchip.on {
+  /* 背景色はインラインで指定。市松を消す */
+  background-image: none;
+}
+
 /* M6-6 R-1: 行内ボタン（フォルダ🗑等）も縮めない */
 .lay .minibtn {
   flex: 0 0 auto;
