@@ -37,6 +37,23 @@ export function pcmS16ToWav(
   return new Uint8Array(buf);
 }
 
+/** M16 (X-1): 44バイトヘッダ WAV（pcmS16ToWav 由来）の PCM を n 回連結する。
+ *  各周は同じ整数サンプル列＝**周ごとに頭から**の繰り返し。単純連結なので境界に無音も欠落も出ず、
+ *  周ごとに丸め直さない＝丸め誤差の累積もない（総サンプル数＝1周ぶん×n で決定的）。n<=1 は同一参照を返す。 */
+export function repeatWav(wav: Uint8Array, n: number): Uint8Array {
+  if (n <= 1) return wav;
+  const HDR = 44; // pcmS16ToWav は data チャンクを offset 36・PCM を 44 から書く（canonical）
+  const pcm = wav.subarray(HDR);
+  const dataSize = pcm.length * n;
+  const out = new Uint8Array(HDR + dataSize);
+  out.set(wav.subarray(0, HDR), 0);
+  for (let k = 0; k < n; k++) out.set(pcm, HDR + k * pcm.length);
+  const v = new DataView(out.buffer);
+  v.setUint32(4, 36 + dataSize, true); // RIFF chunk size
+  v.setUint32(40, dataSize, true); // data chunk size
+  return out;
+}
+
 /** ファイル拡張子から mime（対応: mp3/wav/ogg） */
 export function mimeFromExt(name: string): string | null {
   const ext = name.toLowerCase().split(".").pop() ?? "";

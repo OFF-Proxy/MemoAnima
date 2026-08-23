@@ -20,11 +20,15 @@ import { t } from "./i18n";
 import { customPresetBaseName } from "./i18n/defaults";
 
 export interface KeyBinding {
-  /** KeyboardEvent.code（"KeyP" / "BracketLeft" / "Delete" …） */
+  /** KeyboardEvent.code（"KeyP" / "BracketLeft" / "Delete" …）。
+   *  M16 (K-4): **ポインタ割り当てのときは "" **（button 側が実体）。追加のみ＝旧データは code だけ持つ */
   code: string;
   ctrl?: boolean;
   shift?: boolean;
   alt?: boolean;
+  /** M16 (K-4): 修飾キー＋クリックのポインタ割り当て（0=左 / 1=中 / 2=右）。
+   *  **素の左クリック（無修飾 button=0）は割り当て不可**（描画と衝突・sanitize で弾く）。未指定＝キーボード割り当て */
+  button?: 0 | 1 | 2;
 }
 
 /** 設定画面の分類（**識別子**。表示名は COMMAND_GROUPS の labelKey で引く） */
@@ -83,6 +87,9 @@ export const COMMANDS = [
   },
   { id: "edit.copyPrev", labelKey: "keys.cmd.editCopyPrev.label", group: "edit" },
   { id: "edit.clearFrame", labelKey: "keys.cmd.editClearFrame.label", group: "edit" },
+  // M16 (K-4): 修飾キー＋クリックで色を拾う（スポイト tool と違い**ツールを切り替えない**＝その場で1回拾うだけ）。
+  // 既定プリセットで Alt＋クリックに割り当てる（クリスタ準拠）
+  { id: "edit.pickColor", labelKey: "keys.cmd.editPickColor.label", group: "edit", noteKey: "keys.cmd.editPickColor.hint" },
   // ---- M11-19: 線を太らせる／細らせる（1ドット）。**repeatable にしない**（押しっぱなしで履歴が暴発するため）----
   {
     id: "edit.thicken",
@@ -217,7 +224,10 @@ function normCode(code: string): string {
  *  折り畳むと Win+Z が Ctrl+Z と一致して元に戻ってしまう）。割り当て側は meta を持てないので、
  *  Win を押しながらの打鍵は**どのコマンドにも一致しない**＝従来どおり何も起きない */
 export function bindingKey(b: KeyBinding): string {
-  return `${b.ctrl ? "C" : ""}${b.shift ? "S" : ""}${b.alt ? "A" : ""}|${normCode(b.code)}`;
+  const mods = `${b.ctrl ? "C" : ""}${b.shift ? "S" : ""}${b.alt ? "A" : ""}`;
+  // M16 (K-4): ポインタ割り当ては `…|B0/B1/B2`。code（"KeyP" 等）とは字面が重ならない＝キーボードと衝突しない
+  if (b.button !== undefined) return `${mods}|B${b.button}`;
+  return `${mods}|${normCode(b.code)}`;
 }
 
 /** KeyboardEvent から引き当て表のキーを作る */
@@ -227,9 +237,38 @@ export function eventKey(e: KeyboardEvent): string {
   }|${normCode(e.code)}`;
 }
 
+/** M16 (K-4): pointerdown から引き当て表のキーを作る（ポインタ割り当ての照合用）。
+ *  meta（Win）は割り当て側が持てないので M を混ぜて**わざと一致させない**（eventKey と同じ考え方）。 */
+export function pointerEventKey(e: {
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  button: number;
+}): string {
+  return `${e.ctrlKey ? "C" : ""}${e.shiftKey ? "S" : ""}${e.altKey ? "A" : ""}${
+    e.metaKey ? "M" : ""
+  }|B${e.button}`;
+}
+
 /** KeyboardEvent → KeyBinding（設定画面のキー取得用）。Windows キーは無視する（登録できない） */
 export function bindingFromEvent(e: KeyboardEvent): KeyBinding {
   const b: KeyBinding = { code: normCode(e.code) };
+  if (e.ctrlKey) b.ctrl = true;
+  if (e.shiftKey) b.shift = true;
+  if (e.altKey) b.alt = true;
+  return b;
+}
+
+/** M16 (K-4): PointerEvent → KeyBinding（設定画面の修飾キー＋クリック取得用）。
+ *  code は "" にして button を実体にする。**素の左クリック（無修飾 button=0）は呼び出し側が渡さない**（弾く）。 */
+export function bindingFromPointer(e: {
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+  button: number;
+}): KeyBinding {
+  const b: KeyBinding = { code: "", button: (e.button === 1 ? 1 : e.button === 2 ? 2 : 0) as 0 | 1 | 2 };
   if (e.ctrlKey) b.ctrl = true;
   if (e.shiftKey) b.shift = true;
   if (e.altKey) b.alt = true;
@@ -286,10 +325,21 @@ export function codeLabel(code: string): string {
   return map[code] ?? code;
 }
 
+/** M16 (K-4): ポインタボタンの表示名（0=クリック / 1=中クリック / 2=右クリック）。訳文は辞書から */
+function pointerLabel(button: 0 | 1 | 2): string {
+  return button === 1
+    ? t("keys.pointer.mid.label")
+    : button === 2
+      ? t("keys.pointer.right.label")
+      : t("keys.pointer.left.label");
+}
+
 export function keyLabel(b: KeyBinding | null | undefined): string {
   if (!b) return "";
   const mods = [b.ctrl ? "Ctrl" : "", b.shift ? "Shift" : "", b.alt ? "Alt" : ""].filter(Boolean);
-  return [...mods, codeLabel(b.code)].join("+");
+  // M16 (K-4): ポインタ割り当ては「Alt＋クリック」等（末尾がボタン名）
+  const last = b.button !== undefined ? pointerLabel(b.button) : codeLabel(b.code);
+  return [...mods, last].join("+");
 }
 
 export type Bindings = Partial<Record<CommandId, KeyBinding>>;
@@ -344,6 +394,8 @@ const STANDARD: Bindings = {
   "frame.copyPage": { code: "KeyC", ctrl: true, shift: true },
   "frame.pastePage": { code: "KeyV", ctrl: true, shift: true },
   "play.toggle": { code: "Enter" },
+  // M16 (K-4): Alt＋クリックでスポイト（クリスタ準拠）。組み込み既定にだけ入れる（ユーザー保存済みには足さない）
+  "edit.pickColor": { code: "", button: 0, alt: true },
 };
 
 /** 組み込み「左手向け」。左手が届く範囲（QWER/ASDF/ZXCV）に道具を集約する。
@@ -374,6 +426,8 @@ const LEFTY: Bindings = {
   "frame.copyPage": { code: "KeyC", ctrl: true, shift: true },
   "frame.pastePage": { code: "KeyV", ctrl: true, shift: true },
   "play.toggle": { code: "Enter" },
+  // M16 (K-4): Alt＋クリックでスポイト（クリスタ準拠）。組み込み既定にだけ入れる
+  "edit.pickColor": { code: "", button: 0, alt: true },
 };
 
 export const BUILTIN_PRESETS: Preset[] = [
@@ -398,12 +452,25 @@ const COMMAND_IDS = new Set<string>(COMMANDS.map((c) => c.id));
 function sanitizeBinding(v: unknown): KeyBinding | null {
   if (!v || typeof v !== "object") return null;
   const o = v as Record<string, unknown>;
+  const ctrl = o.ctrl === true;
+  const shift = o.shift === true;
+  const alt = o.alt === true;
+  // M16 (K-4): ポインタ割り当て（button が 0/1/2）。**素の左クリック（無修飾 button=0）は拒否**
+  //（描画と衝突するため受け付けない。中/右クリックは無修飾でも描画と衝突しないので可）
+  if (o.button === 0 || o.button === 1 || o.button === 2) {
+    if (o.button === 0 && !ctrl && !shift && !alt) return null;
+    const b: KeyBinding = { code: "", button: o.button };
+    if (ctrl) b.ctrl = true;
+    if (shift) b.shift = true;
+    if (alt) b.alt = true;
+    return b;
+  }
   if (typeof o.code !== "string" || !o.code || o.code.length > 32) return null;
   if (RESERVED_CODES.has(o.code)) return null; // 予約キーは読み込み時にも受け付けない
   const b: KeyBinding = { code: o.code };
-  if (o.ctrl === true) b.ctrl = true;
-  if (o.shift === true) b.shift = true;
-  if (o.alt === true) b.alt = true;
+  if (ctrl) b.ctrl = true;
+  if (shift) b.shift = true;
+  if (alt) b.alt = true;
   return b;
 }
 

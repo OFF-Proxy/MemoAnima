@@ -65,6 +65,7 @@ import {
   activePreset,
   bindingCaveat,
   bindingFromEvent,
+  bindingFromPointer,
   commandLabel,
   defaultKeysSettings,
   findConflict,
@@ -136,6 +137,8 @@ type Settings = {
   frameDeleteConfirm?: boolean;
   /** M14 (S-3): 右パネルの「種類/トーン」一覧を開いているか。**未設定＝閉**（`=== true` で見る）。追加のみ */
   toneOpen?: boolean;
+  /** M16 (D-1): トーンを「コマでずらす」か。**未設定＝オフ**（`=== true` で見る）。追加のみ */
+  ditherFrameShift?: boolean;
   /** U-1: 「起動時に更新を確認します（⚙ でオフにできます）」の初回案内を出したか。
    *  `guideDone` とは別にしている——既存利用者は `guideDone: true` を持っているので、
    *  それを流用すると**更新確認のことを一度も知らされないまま**になる */
@@ -638,6 +641,10 @@ function openExportDialog(
         </div>
         <p class="modal-path" id="ex-len-note"></p>
       </div>
+      <div class="modal-field" id="ex-loop-wrap" hidden><span>${t("export.loopCount.label")}</span>
+        <input id="ex-loop" type="number" min="1" max="10" value="1" style="width:70px">
+        <span class="modal-path" style="margin:0;flex:1">${t("export.loopCount.hint")}</span>
+      </div>
       <div id="ex-progress" hidden>
         <div class="bar"><i id="ex-bar" style="width:0%"></i></div>
         <p class="modal-path" id="ex-phase"></p>
@@ -703,8 +710,12 @@ function openExportDialog(
     let syncMode: "audioToAnim" | "animToAudio" = audioSrc?.syncMode ?? "audioToAnim";
     const lenWrap = box.querySelector("#ex-len-wrap") as HTMLElement;
     const lenNote = box.querySelector("#ex-len-note") as HTMLElement;
+    // M16 (X-1): ループ回数は MP4 のときだけ（音声の有無に関わらず・映像だけのループも可）
+    const loopWrap = box.querySelector("#ex-loop-wrap") as HTMLElement;
+    const loopInput = box.querySelector("#ex-loop") as HTMLInputElement;
     const updateLenUI = () => {
       lenWrap.hidden = !(format === "mp4" && hasAudio);
+      loopWrap.hidden = format !== "mp4";
       box.querySelectorAll("[data-l]").forEach((b) =>
         b.classList.toggle("on", (b as HTMLElement).dataset.l === syncMode)
       );
@@ -828,11 +839,15 @@ function openExportDialog(
         // M11-23: 実行直前の見積もり（コマ数・倍率・形式・GIF は実使用色数）。**危険域のときだけ**確認を出す。
         // 見積もりの色数は書き出しと同じ `collectGifPalette`（>256色＝null は従来の NeuQuant 経路）
         const gifPal = format === "gif" ? collectGifPalette(src, whiteBg) : null;
-        // 「曲の長さで書き出す」= 映像を -stream_loop で曲の尺まで回すので、x264 が実際に処理するコマ数はこれ
+        // M16 (X-1): MP4 のループ回数（1〜10）。見積もりも書き出しも同じ値を使う（過小見積り防止）
+        const loops =
+          format === "mp4" ? Math.max(1, Math.min(10, Math.floor(Number(loopInput.value) || 1))) : 1;
+        // 「曲の長さで書き出す」= 映像を -stream_loop で曲の尺まで回すので、x264 が実際に処理するコマ数はこれ。
+        // M16 (X-1): ループ時は N 周ぶん（映像 N 周・animToAudio は尺も N 倍）＝実エンコード量に一致させる
         const encodedFrames =
-          exportAudio && exportAudio.syncMode === "animToAudio"
+          (exportAudio && exportAudio.syncMode === "animToAudio"
             ? Math.max(src.count, Math.ceil(exportAudio.durationSec * src.fps))
-            : src.count;
+            : src.count) * loops;
         const est = estimateExport({
           format,
           scale,
@@ -895,6 +910,8 @@ function openExportDialog(
           cancel,
           audio: exportAudio,
           whiteBg,
+          // M16 (X-1): MP4 のみ・1〜10。既定1（=従来と同一入力）。見積もりと同じ loops を使う
+          loopCount: loops,
           onProgress: (done, total, phase) => {
             bar.style.width = `${Math.round((done / Math.max(1, total)) * 100)}%`;
             // M11-23: 残り時間は「出せるようになってから」だけ添える（短い書き出しでは最後まで出ない）
@@ -1619,6 +1636,8 @@ function showEditor(
   editor.restoreFrameDeleteConfirm(settings.frameDeleteConfirm);
   // M14 (S-3): トーン一覧の折りたたみ（true 以外は閉＝既定）
   editor.restoreToneOpen(settings.toneOpen);
+  // M16 (D-1): トーンのコマ間シフト（true 以外はオフ＝既定）
+  editor.restoreDitherFrameShift(settings.ditherFrameShift);
   editor.mount(
     project,
     ctx,
@@ -1657,6 +1676,11 @@ function showEditor(
       // M14 (S-3): トーン一覧の開閉も同じ流儀（ヘッダを押した瞬間に保存）
       onToneOpenChange: (open) => {
         settings.toneOpen = open;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      // M16 (D-1): 「コマでずらす」トグルも同じ流儀（押した瞬間に保存）
+      onDitherFrameShiftChange: (on) => {
+        settings.ditherFrameShift = on;
         invoke("save_settings", { settings }).catch(() => {});
       },
       saveProject: async (c, data, thumb) => {
@@ -2479,6 +2503,7 @@ function captureKey(): { promise: Promise<KeyBinding | null>; cancel: () => void
   const promise = new Promise<KeyBinding | null>((resolve) => {
     const finish = (v: KeyBinding | null) => {
       window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("pointerdown", onPointer, true);
       resolve(v);
     };
     const onKey = (e: KeyboardEvent) => {
@@ -2488,8 +2513,20 @@ function captureKey(): { promise: Promise<KeyBinding | null>; cancel: () => void
       e.stopPropagation();
       finish(e.code === "Escape" ? null : bindingFromEvent(e));
     };
+    // M16 (K-4): 修飾キー＋クリックも取る。**素の左クリック（無修飾 button=0）は待ち続ける**
+    //（描画と衝突するので割り当て不可＝そのクリックは素通しさせて「変更」を続けられる）。
+    // Win（meta）＋クリックも登録不可なので待ち続ける
+    const onPointer = (e: PointerEvent) => {
+      const mods = e.ctrlKey || e.altKey || e.shiftKey;
+      if (e.metaKey) return; // Win は登録できない
+      if (e.button === 0 && !mods) return; // 素の左クリックは割り当て不可（待機継続）
+      e.preventDefault();
+      e.stopPropagation();
+      finish(bindingFromPointer(e));
+    };
     cancel = () => finish(null);
     window.addEventListener("keydown", onKey, true);
+    window.addEventListener("pointerdown", onPointer, true);
   });
   return { promise, cancel };
 }

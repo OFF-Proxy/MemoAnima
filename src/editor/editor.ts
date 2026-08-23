@@ -76,6 +76,7 @@ import {
   COMMANDS,
   buildLookup,
   eventKey,
+  pointerEventKey,
   type CommandId,
   type Preset,
 } from "../keymap";
@@ -166,6 +167,8 @@ const STRIP_HOVER_MS = 150;
 const STRIP_CLOSE_MS = 140;
 // M14 (S-2): 囲い塗りで「これ未満の面積は誤タッチ」とみなして何もしない画素数のしきい値
 const ENCLOSE_MIN_PX = 8;
+// M16 (D-1): 「コマでずらす」1コマあたりのトーン参照座標オフセット（斜め (+1,+1)/コマ）。定数化
+const DITHER_SHIFT_STEP = 1;
 // M5-4 B-3: ペンは「ベタ＋スプレー系」のみに整理。
 // 旧 dot(点線)・halftone(網点=ブラシのトーンへ)は撤去、rough(かすれ)は sand（スプレー粗）へ集約・廃止。
 // 既存作品の画素は不変（ツール状態は保存対象外・UIのみの整理）。
@@ -293,6 +296,8 @@ export interface EditorCallbacks {
   onSelMaskShowChange?: (show: boolean) => void;
   /** M14 (S-3): 右パネルの「種類/トーン」一覧の開閉が変わったら settings.json へ保存する（同じ流儀） */
   onToneOpenChange?: (open: boolean) => void;
+  /** M16 (D-1): トーンの「コマでずらす」トグルが変わったら settings.json へ保存する（同じ流儀） */
+  onDitherFrameShiftChange?: (on: boolean) => void;
   /** ライブラリ保存（Rust呼び出し）を委譲 */
   saveProject: (
     ctx: EditorSaveContext,
@@ -400,6 +405,9 @@ export class Editor {
   private enclosePts: { x: number; y: number }[] = [];
   /** M14 (S-3): 右パネルの「種類/トーン」一覧を開いているか（既定=閉・settings.json へ永続化） */
   private toneOpen = false;
+  /** M16 (D-1): トーンを「コマでずらす」か（既定=オフ・settings.json へ永続化）。オンで描くと
+   *  コマ番号ぶんトーン参照座標が斜めにずれて焼かれる＝再生で点が揺れる。オフは従来と完全一致 */
+  private ditherFrameShift = false;
   /** M14 (S-1): 形式ストリップ（ツールボタン横の一時オーバーレイ）の状態 */
   private stripEl: HTMLElement | null = null;
   private stripOpenFor: Tool | null = null;
@@ -1285,6 +1293,27 @@ export class Editor {
         s.className = "tone-sep";
         tex.appendChild(s);
       };
+      // M16 (D-1): 「🔀 コマでずらす」トグル（トーン欄の先頭に1行ぶち抜きで）。既定オフ・settings に記憶。
+      // 📌全コマ共通レイヤーは1バッファなので揺れない旨を title に書く（仕様）
+      {
+        const row = document.createElement("div");
+        row.className = "tone-dither";
+        const sw = document.createElement("div");
+        sw.className = "sw2" + (this.ditherFrameShift ? " on" : "");
+        const lab = document.createElement("span");
+        lab.className = "tog";
+        lab.textContent = t("ed.tone.ditherShift.label");
+        row.title = t("ed.tone.ditherShift.title");
+        row.appendChild(sw);
+        row.appendChild(lab);
+        const flip = () => {
+          this.ditherFrameShift = !this.ditherFrameShift;
+          sw.classList.toggle("on", this.ditherFrameShift);
+          this.cb.onDitherFrameShiftChange?.(this.ditherFrameShift);
+        };
+        row.addEventListener("click", flip);
+        tex.appendChild(row);
+      }
       // M12-1c-2: ループ変数は tone（`t` は翻訳関数。M12-1b の TEXTURES と同じ作法）
       for (const tone of R.TONE_TILES) {
         const d = document.createElement("button");
@@ -5286,6 +5315,12 @@ export class Editor {
     this.toneOpen = v === true;
   }
 
+  /** M16 (D-1): settings.json の `ditherFrameShift` から復元。**`true` のときだけオン**（既定=オフ・追加のみ）。
+   *  ⚙ ではなくトーン欄のトグルで切り替えるので、mount 前の復元で足りる（rebuildTexPicker が読む） */
+  restoreDitherFrameShift(v: unknown) {
+    this.ditherFrameShift = v === true;
+  }
+
   /** いま実際に畳まれているか（個別状態 or 集中） */
   private isCollapsed(key: CollapseKey): boolean {
     return this.focusActive || this.collapsed[key];
@@ -6456,7 +6491,16 @@ export class Editor {
       tone: tone ?? undefined,
       // M10-22: 選択中は選択範囲内にのみ描く（選択なしは undefined＝従来どおり・追加コストゼロ）
       clip: this.selMask ?? undefined,
+      // M16 (D-1): コマ間シフト（トグルオフや tone なしのときは 0＝従来どおり）
+      toneShift: this.toneShiftForDraw(),
     };
+  }
+
+  /** M16 (D-1): いま描くコマのトーン参照座標オフセット。トグルオフなら 0（＝従来と完全一致）。
+   *  オンなら **コマ番号 × 斜め定数**（両軸に同量足す＝斜め (+1,+1)/コマ・タイル周期は toneAt 側で折返し）。
+   *  📌全コマ共通レイヤーは全コマが1バッファなので f が変わっても同じ画素＝揺れない（仕様・title に明記）。 */
+  private toneShiftForDraw(): number {
+    return this.ditherFrameShift ? this.frameIndex * DITHER_SHIFT_STEP : 0;
   }
 
   /** E-1: 手のひら/Spaceパンのカーソル表示 */
@@ -6508,6 +6552,18 @@ export class Editor {
   }
 
   private onPointerDown(e: PointerEvent) {
+    // M16 (K-4): 修飾キー＋クリックの割り当てを**最優先**で見る（右/中クリックの割り当ても効くよう
+    // 右ボタンガードより前）。ただし: 再生中は「触れたら止めるだけ」を優先／Space パン中は見ない／
+    // **範囲選択ツール中の Shift/Alt＋左クリックはマスク加減算が優先**（M13-2a）。素の左クリック（無修飾
+    // button=0）は割り当て不可なので pointerCommandFor は null＝ここは素通りして従来の描画へ進む
+    if (!this.playing && !this.spaceHeld) {
+      const pcmd = this.pointerCommandFor(e);
+      if (pcmd && !(this.tool === "select" && e.button === 0 && (e.shiftKey || e.altKey))) {
+        e.preventDefault();
+        this.runPointerCommand(pcmd, e); // 描画は始めない（pointerDown も立てない）
+        return;
+      }
+    }
     // M10-19: 右ボタンでは何も始めない（Windows のペン長押しは右クリック扱いになるため、
     // contextmenu 抑止とセットで「長押しで点を描いてしまう」事故を防ぐ。中ボタンは従来どおり）
     // M10-21b: スポイトだけは例外 — 狙いを定めるゆっくりタップが長押し判定で右クリック化され
@@ -6603,7 +6659,8 @@ export class Editor {
           color,
           R.toneById(this.fillToneId)?.tile ?? null,
           ref,
-          this.selMask ?? undefined
+          this.selMask ?? undefined,
+          this.toneShiftForDraw() // M16 (D-1): コマ間シフト（オフ時 0＝従来どおり）
         );
         this.pushBufferHistory("塗り", buf2, before);
         this.renderCanvas();
@@ -7437,7 +7494,7 @@ export class Editor {
             let cnt = 0;
             for (let i = 0; i < PIXELS; i++) if (mask[i]) cnt++;
             // 極小の囲いは何もしない（誤タッチ対策・トーストも出さない）
-            if (cnt >= ENCLOSE_MIN_PX) this.fillMaskWithCurrentColor(mask, R.toneById(this.fillToneId)?.tile ?? null);
+            if (cnt >= ENCLOSE_MIN_PX) this.fillMaskWithCurrentColor(mask, R.toneById(this.fillToneId)?.tile ?? null, this.toneShiftForDraw());
           }
           // ドラッグ中の破線プレビューは**必ず**消す。fillMaskWithCurrentColor は「変化ゼロ」だと
           // 早期 return して redrawOverlay を呼ばない（同じ色で二度囲う・透明で空領域を囲う等）ので、
@@ -8091,14 +8148,14 @@ export class Editor {
    *  - `tone`: トーン柄（null=ベタ）。バケツと同じく**キャンバス座標固定**で toneAt 判定（＝同座標で同柄）
    *  - 現在色が透明（index 0）なら消える（消し囲い）。索引の置き換えのみ・中間色は作らない。Undo 1回。
    *  色解決（currentColorIndex）は 257 色目で 16bit 昇格しバッファを差し替え得るので**先に解決**する（A-3 と同じ注意）。 */
-  private fillMaskWithCurrentColor(mask: Uint8Array, tone: R.ToneTile | null) {
+  private fillMaskWithCurrentColor(mask: Uint8Array, tone: R.ToneTile | null, toneShift = 0) {
     if (this.xformGuard()) return;
     if (this.playing) this.stopPlayback();
     const color = this.currentColorIndex(); // 昇格し得るので先に解決（バケツ・A-3 と同じ順）
     const buf = this.activeBuffer();
     if (!buf) return;
     const hit = (i: number): boolean =>
-      mask[i] !== 0 && (!tone || R.toneAt(tone, i % W, (i / W) | 0));
+      mask[i] !== 0 && (!tone || R.toneAt(tone, i % W, (i / W) | 0, toneShift)); // M16 (D-1): コマ間シフト
     let changed = false;
     for (let i = 0; i < PIXELS; i++) {
       if (hit(i) && buf[i] !== color) {
@@ -9202,7 +9259,8 @@ export class Editor {
     ctx.restore();
   }
 
-  private pickColor(pt: { x: number; y: number }) {
+  /** M16 (K-4): 色を拾うだけ（**ツールは切り替えない**）。スポイト tool と Alt＋クリックの共通の実体。 */
+  private pickColorAt(pt: { x: number; y: number }) {
     const f = this.project.frames[this.frameIndex];
     if (!f) return;
     const i = pt.y * W + pt.x;
@@ -9214,15 +9272,37 @@ export class Editor {
       if (v !== 0) {
         this.colorHex = this.project.colorTable[v];
         this.rebuildPalette();
-        this.setTool(this.prevTool === "eyedrop" ? "pen" : this.prevTool);
         this.logPick(pt, `layer=${ld.id} idx=${v}`);
         return;
       }
     }
     this.colorHex = this.project.colorTable[f.paper];
     this.rebuildPalette();
-    this.setTool(this.prevTool === "eyedrop" ? "pen" : this.prevTool);
     this.logPick(pt, "paper");
+  }
+
+  /** スポイト tool の1回ぶん: 色を拾って**元のツールへ戻す**（従来の挙動）。 */
+  private pickColor(pt: { x: number; y: number }) {
+    this.pickColorAt(pt);
+    this.setTool(this.prevTool === "eyedrop" ? "pen" : this.prevTool);
+  }
+
+  /** M16 (K-4): pointerdown が修飾キー＋クリックの割り当てに一致すればそのコマンドIDを返す。
+   *  素の左クリック（無修飾 button=0）は割り当て不可＝ keyLookup に無いので null（＝描画へ素通し）。 */
+  private pointerCommandFor(e: PointerEvent): CommandId | null {
+    const ids = this.keyLookup.get(pointerEventKey(e));
+    return ids && ids.length ? ids[0] : null;
+  }
+
+  /** M16 (K-4): 修飾キー＋クリックのコマンドを実行（描画は始めない）。スポイトは**その場で1回拾うだけ**。 */
+  private runPointerCommand(id: CommandId, e: PointerEvent) {
+    if (id === "edit.pickColor") {
+      if (this.playing) this.stopPlayback();
+      this.pickColorAt(this.clientToPixel(e.clientX, e.clientY));
+      return;
+    }
+    this.lastPointerEvent = e; // 位置を要するコマンドの保険
+    this.runCommand(id);
   }
 
   /** M10-21: pickColor 到達と解決色の診断ログ（フラグ時のみ。通常は即 return） */
@@ -10351,6 +10431,11 @@ export class Editor {
         break;
       case "edit.clearFrame":
         void this.clearFrame();
+        break;
+      // M16 (K-4): 主にポインタ割り当て（Alt＋クリック）用。キーに割り当てられたときは直近のカーソル位置で拾う
+      case "edit.pickColor":
+        if (this.lastPointerEvent)
+          this.pickColorAt(this.clientToPixel(this.lastPointerEvent.clientX, this.lastPointerEvent.clientY));
         break;
       // M11-19: 線を太らせる／細らせる（非 repeatable＝キーリピートでは1回だけ）
       case "edit.thicken":

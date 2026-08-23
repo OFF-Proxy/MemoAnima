@@ -57,11 +57,17 @@ const TONE_SIDE: Record<number, number> = { 9: 3 };
  *
  *  ここは描画のホットパスなので、**既存の 8×8 はビット演算の従来経路のまま**
  *  （結果・速度ともに不変）。可変サイズ（今は 3×3 の1種）だけ剰余で敷き詰める。
- *  x, y はキャンバス座標＝常に非負なので % で正しい。 */
-export function toneAt(tile: ToneTile, x: number, y: number): boolean {
-  if (tile.length === 64) return tile[(y & 7) * 8 + (x & 7)] !== 0;
+ *  x, y はキャンバス座標＝常に非負なので % で正しい。
+ *
+ *  M16 (D-1): `shift` は「コマでずらす」用の参照座標オフセット（両軸に同量足す＝斜め）。
+ *  **既定 0 のとき従来と完全一致**（x+0/y+0＝呼び出し側が 0 を渡せばピクセル不変）。
+ *  shift は非負（コマ番号×定数）。x+shift も非負なので & 7 / % s はタイル周期で正しく折り返す。 */
+export function toneAt(tile: ToneTile, x: number, y: number, shift = 0): boolean {
+  const sx = x + shift;
+  const sy = y + shift;
+  if (tile.length === 64) return tile[(sy & 7) * 8 + (sx & 7)] !== 0;
   const s = TONE_SIDE[tile.length] ?? (Math.sqrt(tile.length) | 0);
-  return tile[(y % s) * s + (x % s)] !== 0;
+  return tile[(sy % s) * s + (sx % s)] !== 0;
 }
 
 /** N行×N文字（'#'=塗る）からタイルを作る（行数＝辺長。従来の8行はそのまま8×8になる） */
@@ -212,6 +218,8 @@ export interface PenOptions {
   /** M10-22: 選択範囲クリップ（0/1 マスク）。指定時はマスク外へ一切書かない。
    *  「書くか書かないか」の判定のみ（補間・平均はしない）。未指定=従来どおり全面 */
   clip?: Uint8Array;
+  /** M16 (D-1): トーン参照座標のコマ間シフト量（両軸に同量＝斜め）。未指定/0=従来どおり（シフトなし） */
+  toneShift?: number;
 }
 
 /** M10-7: stamp() のテクスチャ判定（1画素ぶん）。true=塗る / false=飛ばす。
@@ -263,7 +271,7 @@ export function stamp(buf: IndexBuf, cx: number, cy: number, o: PenOptions) {
         // M10-22: 選択範囲クリップ（トーン経路含む全書き込みの直前で判定）
         if (o.clip && !o.clip[y * W + x]) continue;
         if (o.tone) {
-          if (toneAt(o.tone, x, y)) buf[y * W + x] = o.color;
+          if (toneAt(o.tone, x, y, o.toneShift)) buf[y * W + x] = o.color;
           continue;
         }
         if (!texturePasses(o, x, y, dx * dx + dy * dy, r)) continue;
@@ -287,7 +295,7 @@ export function stamp(buf: IndexBuf, cx: number, cy: number, o: PenOptions) {
       if (o.clip && !o.clip[y * W + x]) continue;
       // M5-4: トーンパターン（キャンバス座標固定）。穴は素通し＝下の絵を消さない
       if (o.tone) {
-        if (toneAt(o.tone, x, y)) buf[y * W + x] = o.color;
+        if (toneAt(o.tone, x, y, o.toneShift)) buf[y * W + x] = o.color;
         continue;
       }
       if (!texturePasses(o, x, y, d2, r)) continue;
@@ -398,7 +406,8 @@ export function floodFill(
   color: number,
   tone?: ToneTile | null,
   ref?: IndexBuf,
-  clip?: Uint8Array
+  clip?: Uint8Array,
+  toneShift = 0 // M16 (D-1): トーン参照座標のコマ間シフト（0=従来どおり）
 ) {
   if (sx < 0 || sx >= W || sy < 0 || sy >= H) return;
   // M10-22: 選択範囲クリップ — clip=0 の画素は壁扱い（種が壁の中なら何もしない）
@@ -414,7 +423,7 @@ export function floodFill(
       for (let y = 0; y < H; y++) {
         const row = y * W;
         for (let x = 0; x < W; x++) {
-          if (mask[row + x] !== 0 && toneAt(tone, x, y)) buf[row + x] = color;
+          if (mask[row + x] !== 0 && toneAt(tone, x, y, toneShift)) buf[row + x] = color;
         }
       }
     } else {
@@ -471,7 +480,7 @@ export function floodFill(
     for (let y = 0; y < H; y++) {
       const row = y * W;
       for (let x = 0; x < W; x++) {
-        if (mask[row + x] !== 0 && toneAt(tone, x, y)) buf[row + x] = color;
+        if (mask[row + x] !== 0 && toneAt(tone, x, y, toneShift)) buf[row + x] = color;
       }
     }
   }

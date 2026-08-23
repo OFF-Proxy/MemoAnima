@@ -9,6 +9,7 @@ import UPNG from "upng-js";
 import gifWorkerUrl from "gif.js/dist/gif.worker.js?url";
 import { Project, FPS_TABLE, W, H, PIXELS } from "./model";
 import { compositeFrame } from "./render";
+import { repeatWav } from "./audio"; // M16 (X-1): ループ時の音声（1周ミックスを N 連結）
 import { t } from "../i18n";
 
 export interface FrameSource {
@@ -348,6 +349,9 @@ export interface ExportOptions {
   cancel: { cancelled: boolean };
   /** MP4 のみ使用。GIF/APNG/PNG連番は無音仕様のため無視 */
   audio?: ExportAudio | null;
+  /** M16 (X-1): MP4 のループ回数（1〜10・既定1）。映像はフレーム供給を N 周、音声は1周ミックスを N 連結。
+   *  **MP4 以外は無視**。1（既定）のときはエンコーダ入力が従来と完全に同一（x1 バイト一致） */
+  loopCount?: number;
   /** M10-13: 透過部分を純白 #ffffff で塗ってから書き出す。
    *  .kwz 直接書き出しは透明画素をそのまま流すため、MP4 は yuv420p 変換で
    *  alpha が捨てられて黒、GIF は透明色の解釈がプレイヤー依存で黒く見える。
@@ -758,7 +762,10 @@ export async function exportApng(src: FrameSource, o: ExportOptions): Promise<Bl
 // ---------------- MP4（無音・M6-2で音声対応） ----------------
 
 export async function exportMp4(src: FrameSource, o: ExportOptions): Promise<Blob | null> {
-  o.onProgress(0, src.count + 1, "encoderInit");
+  // M16 (X-1): ループ回数（1〜10）。1（既定）のとき下は従来と完全に同一の経路を通る（x1 バイト一致）
+  const loops = Math.max(1, Math.min(10, Math.floor(o.loopCount ?? 1)));
+  const total = src.count * loops;
+  o.onProgress(0, total + 1, "encoderInit");
   // ffmpeg.wasm core はアプリに同梱（オフライン動作・実行時ネットワーク取得なし）
   const [{ FFmpeg }, { toBlobURL }, coreJs, coreWasm] = await Promise.all([
     import("@ffmpeg/ffmpeg"),
@@ -773,12 +780,13 @@ export async function exportMp4(src: FrameSource, o: ExportOptions): Promise<Blo
   });
   try {
     const scaler = new FrameScaler(o.scale, o.whiteBg);
-    for (let i = 0; i < src.count; i++) {
+    // M16 (X-1): フレーム供給を N 周（i%count で元コマへ）。loops=1 なら i=0..count-1＝従来と同一の書き出し
+    for (let i = 0; i < total; i++) {
       if (o.cancel.cancelled) return CANCELLED;
-      const blob = await scaler.toPngBlob(src.getFrameRgba(i));
+      const blob = await scaler.toPngBlob(src.getFrameRgba(i % src.count));
       if (!blob) throw new Error(t("export.pngGenFailed.msg"));
       await ffmpeg.writeFile(`f${pad4(i)}.png`, new Uint8Array(await blob.arrayBuffer()));
-      o.onProgress(i + 1, src.count + 1, "frameWrite");
+      o.onProgress(i + 1, total + 1, "frameWrite");
     }
     if (o.cancel.cancelled) return CANCELLED;
     ffmpeg.on("progress", ({ progress }) => {
@@ -790,16 +798,17 @@ export async function exportMp4(src: FrameSource, o: ExportOptions): Promise<Blo
         }
         return;
       }
-      o.onProgress(
-        src.count + Math.max(0, Math.min(1, progress)),
-        src.count + 1,
-        "mp4Encode"
-      );
+      o.onProgress(total + Math.max(0, Math.min(1, progress)), total + 1, "mp4Encode");
     });
     // フレームは拡大済みのため scale 不要（M11-21 の scale フィルタは色変換の指定だけで解像度は触らない）。
     // 分数fps（0.2等）も -framerate で正確。引数列は mp4ExecArgs（純関数・スモークで pin）
     const audio = o.audio ?? null;
-    if (!audio) {
+    // M16 (X-1): ループ時は音声も N 連結（周ごとに頭から）＋尺を N 倍。loops=1 なら audio をそのまま使う＝従来と同一
+    const effAudio: ExportAudio | null =
+      audio && loops > 1
+        ? { wav: repeatWav(audio.wav, loops), durationSec: audio.durationSec * loops, syncMode: audio.syncMode }
+        : audio;
+    if (!effAudio) {
       // 無音経路（M6-1 と同一・M11-21 で色引数だけ追加）
       await ffmpeg.exec(mp4ExecArgs(src.fps, null));
     } else {
@@ -809,18 +818,18 @@ export async function exportMp4(src: FrameSource, o: ExportOptions): Promise<Blo
       await ffmpeg.writeFile(
         "mix.wav",
         new Uint8Array(
-          audio.wav.buffer.slice(audio.wav.byteOffset, audio.wav.byteOffset + audio.wav.byteLength)
+          effAudio.wav.buffer.slice(effAudio.wav.byteOffset, effAudio.wav.byteOffset + effAudio.wav.byteLength)
         )
       );
       if (o.cancel.cancelled) return CANCELLED;
-      // 長さ合わせ: -t=audio.durationSec（syncMode 規則で確定済み）
-      //   audioToAnim（音をアニメに）: 映像1周 → 尺=アニメ
-      //   animToAudio（アニメを音に）: 映像を無限ループ → 尺=（トリム後を rate 再生した）曲
-      await ffmpeg.exec(mp4ExecArgs(src.fps, audio));
+      // 長さ合わせ: -t=effAudio.durationSec（syncMode 規則で確定済み・ループ時は ×N）
+      //   audioToAnim（音をアニメに）: 映像 N 周 → 尺=アニメ×N
+      //   animToAudio（アニメを音に）: 映像を無限ループ → 尺=（トリム後を rate 再生した）曲×N
+      await ffmpeg.exec(mp4ExecArgs(src.fps, effAudio));
     }
     if (o.cancel.cancelled) return CANCELLED;
     const data = (await ffmpeg.readFile("out.mp4")) as Uint8Array;
-    o.onProgress(src.count + 1, src.count + 1, "done");
+    o.onProgress(total + 1, total + 1, "done");
     return new Blob([data as unknown as BlobPart], { type: "video/mp4" });
   } finally {
     try {

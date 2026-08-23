@@ -1401,6 +1401,17 @@ button:disabled {
   display: none;
 }
 
+/* M16 (D-1): トーン欄の「コマでずらす」トグル行（トーングリッド先頭に1行ぶち抜き）。
+   スイッチ＋ラベルを1行に。折りたたみ中も残す（トーン系の設定なので隠さない）。 */
+.tex .tone-dither {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+
 /* M14 (S-1): ツール形式ストリップ（ツールボタン横の一時オーバーレイ）。出ている間だけキャンバスの外に浮く。
    ボタンは内容幅（.oni の flex:1 は無効化）。パネルの .oni/.lv/.sizes/.sz をそのまま流用して見た目を揃える。 */
 .toolstrip {
