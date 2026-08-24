@@ -1,0 +1,90 @@
+# M19 (Phase 0): Mac ビルドの偵察 — 「そもそもビルドが通るか」を GitHub Actions の macOS ランナーで事実にする。
+#
+# - 発火は **手動（workflow_dispatch）のみ**。push では走らない
+# - 実際に走るのは**公開リポ（OFF-Proxy/MemoAnima）だけ**。私有リポではジョブ先頭の if で即スキップ
+#   （私有の macOS 分は10倍課金枠のため。公開リポの Actions は無料）
+# - アプリのソースには触れない（src/ src-tauri/ tauri.conf.json 差分0）。版上げ・タグ・リリース無し
+# - updater 署名は**使い捨て鍵をジョブ内でその場生成**して通す（ビルド経路を本番＝make_release.ts と同型に保つ）。
+#   本物の鍵・パスワードは GitHub に一切置かない（secrets にも置かない＝不変条件）。
+#   鍵の中身はビルドのステップ内 export だけに載せ、**ログには一切表示しない**。
+#   使い捨て鍵で作られた .sig は成果物に含めない
+# - 使う action は GitHub 公式（actions/*）のみ
+name: Mac smoke build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # 私有リポでは何もしない。公開リポでだけ実行（macOS 10倍課金枠を消費しない）
+    if: github.repository == 'OFF-Proxy/MemoAnima'
+    runs-on: macos-latest
+    timeout-minutes: 90 # ハング保険（実測の目安: universal で 20〜40 分）
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # universal（Intel/Apple Silicon 両対応）に必要な2ターゲット。
+      # ランナーには rustup + stable が入っている（ターゲットを足すだけ）
+      - name: Add Rust targets (universal)
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # 使い捨ての updater 署名鍵（パスワード空）。$RUNNER_TEMP はジョブ終了で消える。
+      # 鍵の中身は画面に出さない（表示するコマンドを書かない）。ランナーは CI=true なのでプロンプトも出ない
+      - name: Generate throwaway updater signing key
+        run: npm run tauri signer generate -- -w "$RUNNER_TEMP/smoke.key" --password ""
+
+      # 本番（scripts/make_release.ts）と同型:
+      #   - createUpdaterArtifacts は tauri.conf.json に置かず、一時 config の --config で足す
+      #     （置くと鍵の無い環境の npm run tauri:build が最後に必ず落ちる — U-1 の実測）
+      #   - RUSTFLAGS の --remap-path-prefix でホームの絶対パスを成果物から除く（本番と同じ監査規則）
+      #   - 秘密鍵の**中身**を TAURI_SIGNING_PRIVATE_KEY へ（CLI 2.11.4 の案内どおり。ステップ内の
+      #     export だけ＝ログにも後続ステップにも出ない。echo/cat での表示はしない）
+      - name: Build (universal .app / .dmg / updater .app.tar.gz)
+        run: |
+          export TAURI_SIGNING_PRIVATE_KEY="$(cat "$RUNNER_TEMP/smoke.key")"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          printf '{"bundle":{"createUpdaterArtifacts":true}}' > "$RUNNER_TEMP/updater.json"
+          export RUSTFLAGS="--remap-path-prefix=$HOME=~"
+          npm run tauri:build -- --target universal-apple-darwin --config "$RUNNER_TEMP/updater.json"
+
+      # Phase 0 は「知る」のが目的なので、何ができたかをログに一覧しておく（ファイル名とサイズだけ・鍵は出ない）
+      - name: List bundle output
+        if: always()
+        run: ls -lR src-tauri/target/universal-apple-darwin/release/bundle || true
+
+      # 受け入れ（REQ §3）の「.dmg と .app.tar.gz の両方」を**明示検査**する。
+      # upload-artifact の if-no-files-found は「全 glob が0件」のときしか落ちないので、
+      # 片方だけできて緑になる silent-green をここで塞ぐ（無ければこのステップが赤＝runが赤）
+      - name: Verify both artifacts exist
+        run: |
+          B=src-tauri/target/universal-apple-darwin/release/bundle
+          ls "$B"/dmg/*.dmg || { echo "::error::.dmg が見つかりません"; exit 1; }
+          ls "$B"/macos/*.app.tar.gz || { echo "::error::.app.tar.gz（updater 配信物）が見つかりません"; exit 1; }
+
+      # 成果物: .dmg（借用Macへ持ち込む）と .app.tar.gz（updater 配信物の形の確認用）。
+      # 使い捨て鍵の .sig は含めない（*.app.tar.gz は .sig にマッチしない＋念のため除外も明記）。
+      # if: always() — ビルドが途中（例: 署名）で落ちても、できていた分（.dmg 等）は回収して調査に使う。
+      # 緑の run では直前の Verify が両方の存在を保証している。保持期間は既定（90日）
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MemoAnima-mac-universal-smoke
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            !**/*.sig
+          if-no-files-found: warn
