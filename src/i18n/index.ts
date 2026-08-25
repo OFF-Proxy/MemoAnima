@@ -13,17 +13,21 @@ import es from "./es";
 import ptBR from "./pt-BR";
 import ko from "./ko";
 import zhHans from "./zh-Hans";
+import zhHant from "./zh-Hant";
 
-/** 対応言語（master §0 の5言語 ＋ L-2 で `zh-Hans`）。
+/** 対応言語（master §0 の5言語 ＋ L-2 で `zh-Hans` ＋ V152 で `zh-Hant`）。
  *  **言語を1つ足す作業は、ここと `DICTS` と `detectLang()` の3箇所**（`sanitizeLang` は `LANGS` を見る）。 */
-export const LANGS = ["ja", "en", "es", "pt-BR", "ko", "zh-Hans"] as const;
+export const LANGS = ["ja", "en", "es", "pt-BR", "ko", "zh-Hans", "zh-Hant"] as const;
 export type Lang = (typeof LANGS)[number];
 
 /** M18 (L-3): ⚙ の言語一覧に**出さない**言語（翻訳が届くまで隠す・作者指示 2026-08-23）。
  *  隠すのは**一覧だけ**。`LANGS`・辞書・フォールバック・`sanitizeLang`・検査は不変なので、
  *  settings.lang に隠した言語が残っていてもそのまま動く（一覧に無いだけ）。
- *  翻訳が届いたら**この集合から1行消すだけ**で再表示される。 */
-export const HIDDEN_LANGS: ReadonlySet<Lang> = new Set<Lang>(["zh-Hans"]);
+ *  翻訳が届いたら**この集合から1行消すだけ**で再表示される。
+ *
+ *  V152: 簡・繁とも訳が揃ったので**空**にした（＝隠す言語は現在なし）。仕組みは残す:
+ *  一覧から外す `main.ts` 側も、`detectLang()`（下の A-24 対応）も、この集合を見るだけで効く。 */
+export const HIDDEN_LANGS: ReadonlySet<Lang> = new Set<Lang>([]);
 
 /** 辞書の型。`ja` のキー集合が正 */
 export type Dict = Record<keyof typeof ja, string>;
@@ -34,8 +38,19 @@ export type DictKey = keyof Dict;
  *
  *  L-2: `zh-Hans` は**部分辞書**（`Partial<Dict>`）。翻訳が届いた行から順に載る。
  *  未訳キーは `lookup()` が **en → ja** の順に落とすので、1キームも無くても画面は英語で成立する。
- *  この型（`Partial<Record<Lang, Partial<Dict>>>`）は M12-1a から部分辞書を想定している＝**変えない**。 */
-const DICTS: Partial<Record<Lang, Partial<Dict>>> = { ja, en, es, "pt-BR": ptBR, ko, "zh-Hans": zhHans };
+ *  この型（`Partial<Record<Lang, Partial<Dict>>>`）は M12-1a から部分辞書を想定している＝**変えない**。
+ *
+ *  V152: `zh-Hans` / `zh-Hant` とも全907キー揃った（ドラフト訳）。型は `Partial` のまま＝
+ *  レビュー差し替えで一時的に欠けても画面は英語で成立する（部分辞書の設計は捨てない）。 */
+const DICTS: Partial<Record<Lang, Partial<Dict>>> = {
+  ja,
+  en,
+  es,
+  "pt-BR": ptBR,
+  ko,
+  "zh-Hans": zhHans,
+  "zh-Hant": zhHant,
+};
 
 let current: Lang = "ja";
 
@@ -51,17 +66,30 @@ export function sanitizeLang(v: unknown): Lang | undefined {
  * 追加の依存（tauri-plugin-os）は入れない。WebView2 の navigator.language は OS の表示言語を反映する。
  */
 export function detectLang(saved?: unknown): Lang {
+  // 明示的に選ばれた言語は**隠し言語でも尊重する**（利用者が自分で選んだものを消すほうが事故）
   const fromSettings = sanitizeLang(saved);
   if (fromSettings) return fromSettings;
+  const auto = autoLangFromNavigator();
+  // A-24 (V152): **自動選択だけは `HIDDEN_LANGS` を避ける**。隠している言語＝訳が未着なので、
+  // 当てると「画面は英語なのに ⚙ ではどの言語も押されていない」迷子の状態になる（M18 で zh 圏の
+  // 新規利用者に実際に起きた）。いまは HIDDEN_LANGS が空なので実害は無いが、**次に隠す言語が
+  // 出たときに同じ穴を掘らないよう仕組みとして残す**
+  return auto && !HIDDEN_LANGS.has(auto) ? auto : "en"; // 判定できない利用者の多数は海外側なので既定は英語
+}
+
+/** `navigator.language` から当てられる言語（当てられなければ undefined）。
+ *  隠し言語の除外は呼び出し側（`detectLang`）で行う＝ここは「素の判定」だけを持つ。 */
+function autoLangFromNavigator(): Lang | undefined {
   const nav = (typeof navigator !== "undefined" && navigator.language ? navigator.language : "").toLowerCase();
   if (nav.startsWith("ja")) return "ja";
   if (nav.startsWith("ko")) return "ko";
   if (nav.startsWith("es")) return "es";
   if (nav.startsWith("pt")) return "pt-BR"; // ポルトガル語はブラジル向けを正とする
-  // L-2: 中国語は**簡体字だけ**。繁体字圏（zh-Hant / zh-TW / zh-HK / zh-MO）は簡体字へ落とさず
-  // 英語のままにする（繁体字は別に足す予定。簡体字を当てるほうが読み手に不親切なため）
-  if (nav.startsWith("zh") && !/^zh-(hant|tw|hk|mo)/.test(nav)) return "zh-Hans";
-  return "en"; // 判定できないユーザーの多数は海外側なので既定は英語
+  // V152: 中国語は**字体で分ける**。台湾・香港・マカオ・明示の Hant（`zh-hant-tw` のような
+  // 長い形も前方一致で拾う）は繁体字、それ以外の zh（zh-CN / zh-SG / 素の zh）は簡体字。
+  // L-2 の「繁体字圏は英語のまま」は、繁体字辞書が無かった時代の妥協なので取り消す
+  if (nav.startsWith("zh")) return /^zh-(hant|tw|hk|mo)/.test(nav) ? "zh-Hant" : "zh-Hans";
+  return undefined;
 }
 
 export function setLang(l: Lang) {
@@ -108,8 +136,8 @@ export function t(key: string, vars?: Record<string, unknown>): string {
   // 複数形: { count } があり `キー_other` が在るときだけ解決する（master §3-d・乱用しない）
   if (vars && typeof vars.count === "number" && lookup(`${key}_other`) !== undefined) {
     // M12-1b: 以前は `current === "pt-BR" ? "pt-BR" : current` と書いていたが両辺とも同じ＝無意味だった。
-    // Lang の値（"ja" / "en" / "es" / "pt-BR" / "ko" / "zh-Hans"）はそのまま BCP-47 として通る
-    //（"zh-Hans" は言語＋文字体系の正しい形。地域の "zh-CN" ではない）
+    // Lang の値（"ja" / "en" / "es" / "pt-BR" / "ko" / "zh-Hans" / "zh-Hant"）はそのまま BCP-47 として通る
+    //（"zh-Hans" / "zh-Hant" は言語＋文字体系の正しい形。地域の "zh-CN" / "zh-TW" ではない）
     const cat = new Intl.PluralRules(current).select(vars.count);
     const v = lookup(`${key}_${cat}`) ?? lookup(`${key}_other`);
     if (v !== undefined) return fill(v, vars);

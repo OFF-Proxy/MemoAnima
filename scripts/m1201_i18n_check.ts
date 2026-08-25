@@ -88,12 +88,14 @@ check("ja.ts が読める（1行1エントリ）", ja.size > 100, `${ja.size} �
 // M12-3: 5言語ぶん読む。検査1・2（キー集合／プレースホルダ）と検査3（言語別の字数）で使う。
 // ブロックの外に出しておく（下の検査3 から見えるように）
 // L-2: `zh-Hans` を6言語目として足した。**足すのはこの1行だけ**で、検査2・3・9 の対象になる
+// V152: `zh-Hant`（台湾準拠）が7言語目。同じく1行で全検査に載る
 const TRANSLATIONS: readonly (readonly [Lang, string])[] = [
   ["en", "src/i18n/en.ts"],
   ["es", "src/i18n/es.ts"],
   ["pt-BR", "src/i18n/pt-BR.ts"],
   ["ko", "src/i18n/ko.ts"],
   ["zh-Hans", "src/i18n/zh-Hans.ts"],
+  ["zh-Hant", "src/i18n/zh-Hant.ts"],
 ];
 
 /**
@@ -108,7 +110,8 @@ const TRANSLATIONS: readonly (readonly [Lang, string])[] = [
  *
  * 訳が全部埋まったらここから外す。**外し忘れを防ぐため、未訳0件になったら警告を出す**。
  */
-const IN_PROGRESS: ReadonlySet<Lang> = new Set<Lang>(["zh-Hans"]);
+// V152: 簡・繁とも全907キー揃ったので**空**（＝移行中の言語なし）。仕組みは次の言語のために残す
+const IN_PROGRESS: ReadonlySet<Lang> = new Set<Lang>([]);
 const DICTS_BY_LANG = new Map<string, Map<string, string>>(
   TRANSLATIONS.map(([lang, path]) => [lang, parseDict(read(path))])
 );
@@ -368,13 +371,83 @@ const OVER_BASELINE_EN = new Set<string>([
 ]);
 
 /**
- * L-2: `zh-Hans` の既知超過。**まだ1件も無い**（訳が1文字も届いていないため）。
+ * L-2: `zh-Hans` の既知超過。V152 で全907キーのドラフト訳が載ったので中身が入った。
  *
  * ほかの言語と同じ順番を踏むこと: **実画面を先に見る → 収まらないものは訳を短くする →
  * それでも残ったものだけをここへ載せる**。先にここへ入れると「入っているから良し」になり、
- * はみ出したまま通ってしまう（M12-2 の反省）。
+ * はみ出したまま通ってしまう（M12-2 の反省）。V152 でもこの順番で踏んだ:
+ * DEV フックで各画面を開いて実測 → はみ出し 0 件を確認 → 字数の目安だけ超えているものを登録。
+ * **訳を詰めたのは `ed.audio.se.targetRange.hint` の1件だけ**（唯一どの言語にも前例が無い超過）。
  */
-const OVER_BASELINE_ZH = new Set<string>([]);
+const OVER_BASELINE_ZH = new Set<string>([
+  // --- ホーム・取り込み・保存先（7 件） ---
+  // ※ V152b（ますみそさんの A分類を反映）で3件増え1件減った。`lib.openFile.filter.label` は
+  //    新しい訳「3DS作品（.kwz/.ppm）」が 16字＝上限ちょうどに収まったので**外した**
+  // ※ V152b で訳が差し替わったキーは**実画面で測り直した**（字数も px も新しい訳の実測値）
+  "common.saveTarget.path.hint", // 34字 / 上限 30（実測 433px・2行・ja 427px とほぼ同じ。中身はほぼ利用者のパス）
+  "lib.chooseDir.label", // 18字 / 上限 16（V152b・OS のフォルダ選択ダイアログの表題＝DOM に出ない。ja/en に前例）
+  "lib.import.btn", // 16字 / 上限 12（実測 197px・ja 201px より短い）
+  "lib.import.progress.label", // 30字 / 上限 16（V152b 再実測 220px・ja 229px より短い）
+  "imp.cancelling.label", // 19字 / 上限 16（V152b・実測 294px 枠に1行・ja 26字より短い。ja/en/es/pt-BR/ko に前例）
+  "imp.progress.hint", // 38字 / 上限 30（V152b 再実測 294px・ja と同幅）
+  "img.dialog.target.hint", // 34字 / 上限 30（ja 36字より短い）
+  // --- 設定・ショートカット（2 件） ---
+  // ※ `set.about.author.label` は V152 のレビューで「作者: arcana」（他4言語と同じラテン表記）に直したので
+  //    12字＝上限内になり、ここから外した
+  "keys.row.sharedMates.label", // 22字 / 上限 16（ja 26字より短い）
+  "keys.cmd.viewFocusToggle.hint", // 36字 / 上限 30（ja 53字より大幅に短い・折り返して表示）
+  // --- エディタ（5 件） ---
+  "ed.save.btn", // 13字 / 上限 12（ja も 13字）
+  "ed.sel.drag.hint", // 31字 / 上限 30（V152b・範囲選択パネルの説明。実測 227px 枠に2行・切れ0。en/es/pt-BR/ko に前例）
+  "ed.feel.head.label", // 21字 / 上限 16（実測 223px < 親 247px）
+  "ed.view.badge.label", // 21字 / 上限 16（キャンバス上のバッジ・実測 71px）
+  "ed.view.zoominfo.label", // 28字 / 上限 16（同上・実測 215px）
+  // --- エディタ: 変形・レイヤー（3 件） ---
+  "ed.xform.badge.label", // 24字 / 上限 16（ja 27字より短い）
+  "ed.layer.dragGhostMulti.label", // 22字 / 上限 16（V152b 再実測 119px・ja 99px。浮遊ゴーストなので枠に縛られない。
+  //                                   ※値に半角スペースの二重打ちがあり字数を2つ押し上げている＝次便で訳者に正規化を依頼）
+  "ed.layerclip.pasteTo.btn", // 19字 / 上限 12（ja 21字より短い）
+  // --- エディタ: 音声（6 件） ---
+  "ed.audio.load.btn", // 15字 / 上限 12
+  "ed.audio.se.add.btn", // 13字 / 上限 12
+  "ed.audio.status.kwz.label", // 32字 / 上限 16（音声パネル見出し・実測はみ出し0）
+  "ed.audio.status.replaced.label", // 20字 / 上限 16（同じ見出し枠・上より短い）
+  "ed.audio.status.replacedName.label", // 28字 / 上限 16（同上）
+  "ed.audio.wave.info.label", // 42字 / 上限 16（波形 canvas に fillText・実測 180px / 幅 1434px）
+]);
+
+/**
+ * V152: `zh-Hant`（台湾準拠）の既知超過。`OVER_BASELINE_ZH` と同じ手順・同じ基準で作る。
+ * 簡体字と1件ずれることがある（繁体字のほうが画数の多い字を使うが**字数は同じか少し多い**程度）。
+ */
+const OVER_BASELINE_ZH_HANT = new Set<string>([
+  // 元は簡体字と同じ22件だった。**V152b（ますみそさんの A分類・簡体字だけ差し替え）以後は簡23件と食い違う**:
+  //   簡だけ: lib.chooseDir.label / imp.cancelling.label / ed.sel.drag.hint ／ 繁だけ: keys.cmd.viewMiniToggle.hint
+  // 繁体字の訳はこの回で1文字も変わっていないので、以下は V152 の実測のまま（再測定不要）
+  "common.saveTarget.path.hint", // 35字 / 上限 30
+  "lib.import.btn", // 18字 / 上限 12
+  "lib.import.progress.label", // 29字 / 上限 16
+  "lib.openFile.filter.label", // 18字 / 上限 16（OS のダイアログのフィルタ名）
+  "imp.progress.hint", // 38字 / 上限 30
+  "img.dialog.target.hint", // 34字 / 上限 30
+  "keys.row.sharedMates.label", // 22字 / 上限 16
+  "keys.cmd.viewFocusToggle.hint", // 36字 / 上限 30
+  "ed.save.btn", // 13字 / 上限 12
+  "ed.feel.head.label", // 21字 / 上限 16
+  "ed.view.badge.label", // 21字 / 上限 16
+  "ed.view.zoominfo.label", // 28字 / 上限 16
+  "ed.xform.badge.label", // 24字 / 上限 16
+  "ed.layer.dragGhostMulti.label", // 18字 / 上限 16
+  "ed.layerclip.pasteTo.btn", // 19字 / 上限 12
+  "ed.audio.load.btn", // 15字 / 上限 12
+  "ed.audio.se.add.btn", // 13字 / 上限 12
+  "ed.audio.status.kwz.label", // 32字 / 上限 16
+  "ed.audio.status.replaced.label", // 20字 / 上限 16
+  "ed.audio.status.replacedName.label", // 28字 / 上限 16
+  "ed.audio.wave.info.label", // 42字 / 上限 16
+  // 繁体字だけの1件（ko にも同じキーの前例あり）
+  "keys.cmd.viewMiniToggle.hint", // 31字 / 上限 30（ja 47字・簡体字 29字。キーボード設定の説明・折り返して表示）
+]);
 
 const OVER_BASELINE = new Set<string>([
   // --- M12-1a（index.html / main.ts）17 件 ---
@@ -467,14 +540,27 @@ const OVER_BASELINE = new Set<string>([
   // 旧値（es / pt-BR ×1.7）は勘の数字で、実測は es 2.09 / pt-BR 2.00 だった。
   // en 1.82 と ko 1.00 は元の 1.8 / 1.1 とほぼ一致したので据え置き。
   // L-2: `zh-Hans` は **暫定 1.0**（＝ ja と同じ上限）。中国語は日本語より短くなることが多いので
-  // 締める側に倒してある。**訳が揃った時点で 853キーの ja 比を実測して確定する**（決まり6 と同じ手順）
-  const LANG_FACTOR: Record<string, number> = { en: 1.8, es: 2.1, "pt-BR": 2.0, ko: 1.1, "zh-Hans": 1.0 };
+  // 締める側に倒してある。**訳が揃った時点で ja 比を実測して確定する**（決まり6 と同じ手順）
+  // → V152 で全907キーが揃ったので実測した: **合計字数比 簡 0.774 / 繁 0.783**（ja 13,163字 に対し
+  //   簡 10,190字・繁 10,301字。ja より長いキーは 簡 59件・繁 63件）。**係数は 1.0 のまま据え置く**——
+  //   実測比より緩い係数にすると、いま実画面で確認済みの 22/23件より多くの文言が「上限内」に化けて
+  //   検査が効かなくなる。1.0 は実測（0.78）より厳しい側なので安全側。
+  // V152: `zh-Hant` も **1.0**（同上。簡体字と同じ尺で見る＝繁体字だけ緩めない）
+  const LANG_FACTOR: Record<string, number> = {
+    en: 1.8,
+    es: 2.1,
+    "pt-BR": 2.0,
+    ko: 1.1,
+    "zh-Hans": 1.0,
+    "zh-Hant": 1.0,
+  };
   const BASELINES: Record<string, Set<string>> = {
     en: OVER_BASELINE_EN,
     es: OVER_BASELINE_ES,
     "pt-BR": OVER_BASELINE_PT,
     ko: OVER_BASELINE_KO,
     "zh-Hans": OVER_BASELINE_ZH,
+    "zh-Hant": OVER_BASELINE_ZH_HANT,
   };
   for (const [lang] of TRANSLATIONS) {
     const d = DICTS_BY_LANG.get(lang)!;
@@ -931,9 +1017,15 @@ function jaLiterals(
 }
 
 // ---------------- 追加: 辞書の値に HTML タグを入れない ----------------
+// V152: **ja だけでなく全辞書**を見る。訳文は外部（対照表 CSV）から機械で流し込まれ、値は
+// `innerHTML` のテンプレートへ差し込まれる箇所がある＝ja が綺麗でも訳文にタグが混ざれば同じ穴。
+// 「レビュー版 CSV を再 import するだけ」の回で気づけるように、ここを言語横断にしておく。
 {
-  const withTag = [...ja.entries()].filter(([, v]) => /<[a-zA-Z/!]/.test(v));
-  check("辞書の値に HTML タグが無い（テンプレートへ差し込むため）", withTag.length === 0, withTag.map(([k]) => k).join(" "));
+  const withTag: string[] = [];
+  for (const [lang, dict] of [["ja", ja] as const, ...DICTS_BY_LANG.entries()]) {
+    for (const [k, v] of dict) if (/<[a-zA-Z/!]/.test(v)) withTag.push(`${lang}:${k}`);
+  }
+  check("辞書の値に HTML タグが無い（全言語・テンプレートへ差し込むため）", withTag.length === 0, withTag.join(" "));
 }
 
 // ---------------- 追加: キー命名の規約 ----------------

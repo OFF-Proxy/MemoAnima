@@ -160,11 +160,17 @@ type Settings = {
  *  英語 UI でも日本語のまま出ていた（M12-2 §9-e で見つかった「英語版で日本語が残る唯一の面」）。
  *  **辞書には移さない**——名義とリンクの塊で、5言語に割ると保守が重くなるため。
  *  6行→8行に増えるが、設定ダイアログは元から縦スクロールするので縦は許容（横は要確認）。
+ *  V152b で翻訳協力の2行を足して**10行**（同じ理由で縦は許容・横は実画面で確認済み）。
  *  検査5（ハードコード日本語）はこの定数を除外済み。**除外の仕組みを広げないこと**。 */
 const CREDITS: string[] = [
   "企画・ディレクション・絵: アルカナ (arcana)（X: @Arcana_Proxy）",
   "開発: アルカナ (arcana)",
   "Planning, direction, art and development: arcana (X: @Arcana_Proxy)",
+  // A-15 (V152b): 訳文を載せる版から翻訳協力を明記する（RELEASE_GATE_v1_5）。
+  // 表記は**本人希望**（「masumiso」または「鱒味噌」）に基づく併記。勝手に変えないこと
+  //（出典: docs/i18n/TRANSLATE_REQUEST_zh.md / docs/BACKLOG_v1_3_1.md A-15）
+  "中国語翻訳協力: masumiso（鱒味噌）",
+  "Chinese translation support: masumiso",
   "素材や作品はこちら / More work → BOOTH: https://shitamatsuge-com.booth.pm/",
   "使用OSS / Open source used: flipnote.js / ffmpeg.wasm / gif.js / UPNG.js / fflate / Tauri / PixiJS ほか",
   "本体は GNU GPL v3 以降で公開 / Released under the GNU GPL v3 or later:",
@@ -2261,6 +2267,7 @@ async function openSettingsMenu() {
           <button type="button" class="lv" data-lang="pt-BR"></button>
           <button type="button" class="lv" data-lang="ko"></button>
           <button type="button" class="lv" data-lang="zh-Hans"></button>
+          <button type="button" class="lv" data-lang="zh-Hant"></button>
         </div>
         <p class="hintline">${t("set.lang.hint")}</p>
       </div>
@@ -2490,7 +2497,8 @@ async function openSettingsMenu() {
     // 日本語 と 한국어 が載る行それぞれに目印が要る＝付け忘れの事故が起きる）
     // L-2: 6言語目に简体中文（部分辞書。訳が届いていないキーは英語で出る）。
     // 「简体中文」も漢字＝検査5 に当たるので、**この行から出さない**（上と同じ理由）
-    const LANG_NAMES: Record<string, string> = { ja: "日本語", en: "English", es: "Español", "pt-BR": "Português (BR)", ko: "한국어", "zh-Hans": "简体中文" }; // i18n-exempt: 言語名は自称のまま（REQ_M12_2 §2-b）
+    // V152: 7言語目に繁體中文（台湾準拠）。**この1行のまま**保つこと（折り返すと検査5 が落ちる）
+    const LANG_NAMES: Record<string, string> = { ja: "日本語", en: "English", es: "Español", "pt-BR": "Português (BR)", ko: "한국어", "zh-Hans": "简体中文", "zh-Hant": "繁體中文" }; // i18n-exempt: 言語名は自称のまま（REQ_M12_2 §2-b）
     // M18 (L-3): 翻訳が届くまで隠す言語（HIDDEN_LANGS・i18n/index.ts の定数1つ）は**一覧から外すだけ**。
     // テンプレートのボタンはそのまま残し、ここで DOM から取り除く（辞書・LANGS・フォールバック・検査は不変。
     // settings.lang に隠した言語が残っていても getLang() はそのまま＝一覧に押された表示が無いだけで動作は従来どおり）

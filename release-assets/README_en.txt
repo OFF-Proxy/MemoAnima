@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.5.1
+ MemoAnima v1.5.2
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -15,6 +15,10 @@ Windows only.
 - Your source data (the SD card and so on) is only ever READ. Nothing is
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
+
+== NEW IN v1.5.2 ==
+- Chinese (Simplified and Traditional) is now available in Settings
+- Translations will keep improving in future updates
 
 == NEW IN v1.5.1 ==
 - Batch image import: pick multiple images with the camera button to add
@@ -192,7 +196,7 @@ opens as it is, and your settings and shortcuts carry over.
 3. Follow the first-run guide: choose a library folder -> import -> edit -> export
 Note: layers are shared across every frame (the standard way animation tools
 work). Adding a frame gives you a blank frame with the same layer structure.
-Note: there is also an installer (MemoAnima_1.5.1_x64-setup.exe). Just
+Note: there is also an installer (MemoAnima_1.5.2_x64-setup.exe). Just
 double-click it; no administrator rights are needed. IMPORTANT: this portable
 (zip) version cannot update in place - accepting an update installs the
 installer version instead (see ABOUT NETWORK ACCESS below). Moving from the

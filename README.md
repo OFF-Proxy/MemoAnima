@@ -10,9 +10,9 @@ A Windows tool for importing the flipbook animations you made on a Nintendo 3DS 
 > - It contains **no** programs, images, sounds, fonts, data or keys owned by Nintendo Co., Ltd.
 > - "Nintendo 3DS", "Flipnote Studio" and related names are trademarks or registered trademarks of Nintendo Co., Ltd. They are mentioned only to explain which file formats and environments are supported.
 
-## What it does (v1.3.0)
+## What it does (v1.5.2)
 
-- **5 languages**: Japanese, English, Spanish, Portuguese (Brazil) and Korean. It follows your Windows display language on first launch, and you can change it from the settings at any time — the change takes effect without a restart.
+- **7 languages**: Japanese, English, Spanish, Portuguese (Brazil), Korean, Chinese (Simplified) and Chinese (Traditional). It follows your Windows display language on first launch, and you can change it from the settings at any time — the change takes effect without a restart.
 - **Import**: recursively scans the save folder read-only and copies into your PC library (the originals are never modified). Duplicates are skipped by SHA-256, and the album structure is preserved. Single `.kwz` / `.ppm` files shared with you are supported too.
 - **Editor**: a 320×240 canvas at 1:1 pixels. Pen (6 sizes × textures) / brush (21 tone patterns) / eraser / fill / shapes / text / eyedropper / selection / move / transform (rotate, scale, flip) / copy-previous / paper colour / onion skin. Stabilizer and pressure toggles. Unlimited layers with nestable folders. Undo/redo and a 15-second autosave.
 - **Selection**: box, lasso and auto. The bar under the selection gives you invert / grow / shrink / erase / cut to a new layer / copy to a new layer / transform / deselect. Arrow keys nudge by one pixel (Shift by ten).
@@ -95,9 +95,9 @@ npx tsx scripts/make_release.ts   # dist-release/MemoAnima_v<version>_win64.zip
 > - 任天堂株式会社が権利を有するプログラム・画像・音声・フォント・データ・鍵等は **一切同梱していません**。
 > - 「ニンテンドー3DS」「うごくメモ帳」「Flipnote Studio」は任天堂株式会社の商標または登録商標です。対応形式・動作環境の説明目的でのみ言及しています。
 
-## できること（v1.3.0）
+## できること（v1.5.2）
 
-- **5言語対応**: 日本語／英語／スペイン語／ポルトガル語（ブラジル）／韓国語。初回は Windows の表示言語に合わせて開き、⚙ からいつでも変更できます（**再起動なしで反映**）。
+- **7言語対応**: 日本語／英語／スペイン語／ポルトガル語（ブラジル）／韓国語／中国語（簡体字）／中国語（繁体字）。初回は Windows の表示言語に合わせて開き、⚙ からいつでも変更できます（**再起動なしで反映**）。
 - **カーソル**: 編集中のカーソルを点／十字／矢印から選択。いま置いたら塗られる範囲を示す輪と、カーソルが乗っている1ドットの枠をそれぞれ切り替えられます。
 - **取り込み**: 保存フォルダを read-only で再帰スキャンし、PCライブラリへ独立コピー（元データは不変）。SHA-256 で重複回避、アルバム構成を保持。単発の `.kwz` / `.ppm` の受け取り（合作）にも対応。
 - **エディタ**: 320×240 のドット等倍キャンバス。ペン（6サイズ×テクスチャ）／ブラシ（トーン21種）／消しゴム／塗り／図形／文字／スポイト／範囲選択／移動／変形（回転・拡縮・反転）／複写／紙色／オニオンスキン。手ブレ補正・筆圧トグル。レイヤー無制限＋フォルダ（ネスト可）。Undo/Redo・15秒オートセーブ。
