@@ -2097,6 +2097,15 @@ input[type="text"] {
   font-family: inherit;
 }
 
+/* V151: hidden 属性の恒久修正。UA の [hidden]{display:none} は作者スタイルの display 指定
+   （.modal-field / .imgimp-pager の flex 等）に**常に負ける**ため、hidden を付けても表示され続ける
+   バグが5箇所で実在した（📷の fps 行・色数行・ページ送り、書き出しのループ回数行・JPEG背景行）。
+   個別に X[hidden] を足す従来のもぐら叩き（10箇所）を卒業し、ここで一括して意味を保証する。
+   ※ hidden 属性を付けたまま style.display で見せる箇所は無いことを走査済み（V151 報告書 §8） */
+[hidden] {
+  display: none !important;
+}
+
 /* ============ モーダル / トースト ============ */
 
 .modal-back {
@@ -2139,6 +2148,24 @@ input[type="text"] {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
+}
+
+/* V151 E-8: 確認ダイアログの「次回から表示しない」行 */
+.confirm-skip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 14px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  cursor: pointer;
+  user-select: none;
+}
+
+.confirm-skip input {
+  accent-color: var(--ink);
+  cursor: pointer;
 }
 
 .modal-field {

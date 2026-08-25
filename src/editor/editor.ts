@@ -303,6 +303,11 @@ export interface EditorCallbacks {
   onToneOpenChange?: (open: boolean) => void;
   /** M16 (D-1): トーンの「コマでずらす」トグルが変わったら settings.json へ保存する（同じ流儀） */
   onDitherFrameShiftChange?: (on: boolean) => void;
+  /** V151 (E-8): 「次回から表示しない」チェックつき確認。ok=はい／skip=チェックが入っていた
+   *  （skip を覚えるのは editor 側の confirmWithSkip。未実装の呼び出し側では confirm と同じに扱う） */
+  confirmSkippable?: (msg: string) => Promise<{ ok: boolean; skip: boolean }>;
+  /** V151 (E-8): 非表示にした確認の一覧が変わったら settings.json へ保存する（⚙ でいつでも戻せる） */
+  onHiddenConfirmsChange?: (ids: string[]) => void;
   /** M17: マイ柄の一覧が変わったら（登録・削除）settings.json へ保存する。履歴には積まない */
   onCustomTonesChange?: (list: CT.CustomTone[]) => void;
   /** M17: 「🎨 登録した色で塗る」トグルが変わったら settings.json へ保存する */
@@ -404,6 +409,10 @@ export class Editor {
   /** M13-2a (A-4): コマを消すときに確認を出すか（既定オン＝従来どおり・settings.json へ永続化）。
    *  効くのは**コマの削除の確認だけ**。レイヤー・フォルダの削除の確認には触れない */
   frameDeleteConfirm = true;
+  /** V151 (E-8): 「次回から表示しない」で非表示にした確認の id 集合（settings.hiddenConfirms）。
+   *  対象は3つだけ: "clearFrame"（キャンバスの消す）/ "layerDelete" / "folderDelete"（作者決定）。
+   *  📌全コマ共通の統一確認は対象外＝毎回出す */
+  private hiddenConfirms = new Set<string>();
   /** M10-19: 自動選択の範囲（false=つながり=4方向連結 / true=画面全体の同添字） */
   selectAutoGlobal = false;
   /** M10-19: バケツ塗りの参照（false=このレイヤー（既定・従来） / true=全レイヤー）。セッションのみ */
@@ -3355,7 +3364,9 @@ export class Editor {
     if (this.xformGuard()) return;
     const folder = this.folderById(id);
     if (!folder) return;
-    const ok = await this.cb.confirm(t("ed.layer.folderDeleteConfirm.msg", { name: folder.name }));
+    // V151 (E-8): 「次回から表示しない」対象の1つ（id: folderDelete）。省くのは**この1段目だけ**。
+    // 2段目（中身も削除するか）は yes/no どちらも先へ進む「選択」なので、非表示にしても従来どおり出る
+    const ok = await this.confirmWithSkip("folderDelete", t("ed.layer.folderDeleteConfirm.msg", { name: folder.name }));
     if (!ok) return;
     const memberIdx = this.folderLayerIndices(id);
     const withContents =
@@ -5493,6 +5504,29 @@ export class Editor {
    *  ⚙ ではなくトーン欄のトグルで切り替えるので、mount 前の復元で足りる（rebuildTexPicker が読む） */
   restoreDitherFrameShift(v: unknown) {
     this.ditherFrameShift = v === true;
+  }
+
+  /** V151 (E-8): settings.json の `hiddenConfirms` から復元。知らない id は捨てる（追加のみ・旧 settings は []） */
+  restoreHiddenConfirms(v: unknown) {
+    this.hiddenConfirms = new Set(
+      Array.isArray(v) ? v.filter((x): x is string => x === "clearFrame" || x === "layerDelete" || x === "folderDelete") : []
+    );
+  }
+
+  /** V151 (E-8): 「次回から表示しない」チェックつき確認の唯一の入口。
+   *  - 非表示に設定済み（hiddenConfirms に id がある）→ ダイアログを出さず true
+   *  - 「はい」＋チェック → 以後非表示にして settings へ（⚙ の「確認ダイアログ」節でいつでも戻せる）
+   *  - 「いいえ」ならチェックされていても**覚えない**（キャンセルで非表示になる事故を防ぐ）
+   *  - confirmSkippable が未配線（旧ホスト）なら従来の confirm と同じに動く */
+  private async confirmWithSkip(id: "clearFrame" | "layerDelete" | "folderDelete", msg: string): Promise<boolean> {
+    if (this.hiddenConfirms.has(id)) return true;
+    if (!this.cb.confirmSkippable) return this.cb.confirm(msg);
+    const r = await this.cb.confirmSkippable(msg);
+    if (r.ok && r.skip) {
+      this.hiddenConfirms.add(id);
+      this.cb.onHiddenConfirmsChange?.([...this.hiddenConfirms]);
+    }
+    return r.ok;
   }
 
   /** M17: settings.json の `customTones` から復元（壊れた要素だけ捨てる・上限12・旧 settings は []）。
@@ -8315,6 +8349,88 @@ export class Editor {
     this.cb.toast(t("ed.img.place.done.toast"));
   }
 
+  /** V151 (M8-3): 変換済み複数コマ（imageConvert の出力 Project）を**今のコマの後ろへ挿入**する（連番一括）。
+   *  - 色索引の不変条件は placeConvertedImage と同じ: ①全コマの使用色を ensureColor で**全部先に**解決
+   *    （途中で16bit昇格し得る）→ ②昇格後の幅で確保・remap。パレットは src が全コマ共通（convertToProject の既定）
+   *  - 挿入・履歴・上限ガードは pasteFrames の複数ページ挿入と同じ作法（Undo 1回で N コマ全部戻る）
+   *  - 変形は通さない（「おさめ方」に従った自動配置のまま焼く）。挿入されるコマは通常のコマと同一バイト */
+  placeConvertedFrames(src: Project, transparentPaper: boolean) {
+    const active = this.activeBuffer();
+    if (!active) {
+      this.cb.toast(t("ed.img.place.noLayer.toast"));
+      return;
+    }
+    if (this.xformActive) {
+      this.cb.toast(t("ed.img.place.xformBusy.toast"));
+      return;
+    }
+    const ld = this.project.layerDefs.find((l) => l.id === this.activeLayerId);
+    if (ld?.shared === true) {
+      // 📌全コマ共通レイヤーは全コマが1バッファ＝コマごとに違う絵を持てない。
+      // 挿入後の relinkShared で絵が黙って消えるので、先に断る
+      this.cb.toast(t("ed.img.place.sharedBlocked.toast"));
+      return;
+    }
+    const n = src.frames.length;
+    if (this.project.frames.length + n > 65535) {
+      this.cb.toast(t("ed.tl.pasteLimit.toast")); // pasteFrames と同じ上限ガード
+      return;
+    }
+    if (this.playing) this.stopPlayback();
+    // ① 全コマの使用色を一括解決（透過ONなら紙色一致の画素は登録しない＝パレット汚染防止・1枚版と同じ規則）
+    const paperHex = (src.colorTable[src.frames[0].paper] || "#ffffff").toLowerCase();
+    const used = new Set<number>();
+    for (const f of src.frames) {
+      const b = f.layers["L1"];
+      for (let i = 0; i < PIXELS; i++) if (b[i] > 0) used.add(b[i] as number);
+    }
+    const bitsBefore = this.project.indexBits;
+    const map = new Map<number, number>();
+    for (const si of used) {
+      const hex = src.colorTable[si].toLowerCase();
+      if (transparentPaper && hex === paperHex) continue;
+      map.set(si, ensureColor(this.project, hex));
+    }
+    let paperIdx = 0;
+    if (!transparentPaper) paperIdx = ensureColor(this.project, paperHex);
+    if (bitsBefore === 8 && this.project.indexBits === 16) {
+      this.cb.toast(t("ed.color.promote16.toast"));
+      this.dirty = true;
+    }
+    // ② 昇格後の幅で新コマを組む（紙は今のコマを継承・アクティブレイヤーへ remap・他レイヤーは空）
+    const curPaper = this.project.frames[this.frameIndex]?.paper ?? 1;
+    const activeId = this.activeLayerId;
+    const newFrames = src.frames.map((sf) => {
+      const nf = makeEmptyFrame(this.project, curPaper);
+      const data = nf.layers[activeId] ?? allocIndexBuf(this.project);
+      const sb = sf.layers["L1"];
+      for (let i = 0; i < PIXELS; i++) {
+        const si = sb[i] as number;
+        if (si > 0) data[i] = map.get(si) ?? 0;
+        else data[i] = paperIdx; // 透過ONは 0 のまま＝紙が透ける（1枚版と同じ）
+      }
+      nf.layers[activeId] = data;
+      return nf;
+    });
+    // ③ 挿入（pasteFrames の複数ページ挿入と同じ履歴単位・redo は昇格跨ぎを正規化）
+    const at = this.frameIndex + 1;
+    const self = this;
+    const apply = () => {
+      for (const f of newFrames) conformFrameWidth(self.project, f);
+      self.project.frames.splice(at, 0, ...newFrames);
+      self.frameIndex = at; // 挿入した最初のコマへ移動
+      self.afterFrameStructureChange();
+    };
+    const revert = () => {
+      self.project.frames.splice(at, n);
+      self.frameIndex = Math.min(at - 1, self.project.frames.length - 1);
+      self.afterFrameStructureChange();
+    };
+    this.history.push({ label: "連番挿入", undo: revert, redo: apply });
+    apply();
+    this.cb.toast(t("ed.tl.insertedMulti.toast", { count: n }));
+  }
+
   /** 選択範囲の中を消す。**選択は維持する**（M11-9 P-3）。
    *  Delete / Backspace・側パネルの「削除」・ランチャーの「消去」の3つの入口が
    *  同じ結果になるよう、実体はこの1つだけにしてある。
@@ -9675,7 +9791,9 @@ export class Editor {
     // M12-1b-2（監査 #58）: 文の途中へ断片（{scope}）を差し込むのをやめ、
     // フォルダ×全/範囲・レイヤー×全/範囲の**完全文4キー**にした（語順が変わる言語でも訳せる）
     const hasSel = !!this.selMask;
-    const ok = await this.cb.confirm(
+    // V151 (E-8): 「次回から表示しない」対象の1つ（id: clearFrame・4文面で1確認）
+    const ok = await this.confirmWithSkip(
+      "clearFrame",
       folder
         ? hasSel
           ? t("ed.tl.clearFrame.folderSel.msg", { folder: folder.name, count: targets.length })
@@ -10006,7 +10124,8 @@ export class Editor {
     const idx = this.project.layerDefs.findIndex((l) => l.id === this.activeLayerId);
     if (idx < 0) return;
     const def = this.project.layerDefs[idx];
-    const ok = await this.cb.confirm(t("ed.layer.delete.msg", { layer: def.name }));
+    // V151 (E-8): 「次回から表示しない」対象の1つ（id: layerDelete）
+    const ok = await this.confirmWithSkip("layerDelete", t("ed.layer.delete.msg", { layer: def.name }));
     if (!ok) return;
     const saved: IndexBuf[] = this.project.frames.map((f) =>
       copyIndexBuf(f.layers[def.id] ?? allocIndexBuf(this.project))

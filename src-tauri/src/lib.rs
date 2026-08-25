@@ -489,6 +489,12 @@ fn append_log(app: tauri::AppHandle, text: String) -> Result<(), String> {
 }
 
 /// アプリ設定を保存する。
+/// V151 (A-22): tmp→rename の原子的書込へ（プロジェクト保存 pclib と同じ作法）。
+/// 従来の fs::write 直書きは、書込中のクラッシュ/電源断で settings.json が途中までの
+/// 壊れた JSON になり、次回起動の load_settings が .broken へ退避して**全設定を失う**。
+/// tmp に書き切ってから rename すれば、いつクラッシュしても settings.json は
+/// 「旧の完全な内容」か「新の完全な内容」のどちらかにしかならない
+/// （Windows の fs::rename は既存ファイルへの置換 = MOVEFILE_REPLACE_EXISTING）。
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, settings: serde_json::Value) -> Result<(), String> {
     let dir = app
@@ -497,7 +503,14 @@ fn save_settings(app: tauri::AppHandle, settings: serde_json::Value) -> Result<(
         .map_err(|e| format!("設定フォルダ取得失敗: {e}"))?;
     fs::create_dir_all(&dir).map_err(|e| format!("設定フォルダ作成失敗: {e}"))?;
     let s = serde_json::to_string_pretty(&settings).map_err(|e| format!("設定生成失敗: {e}"))?;
-    fs::write(dir.join("settings.json"), s).map_err(|e| format!("設定保存失敗: {e}"))
+    let dest = dir.join("settings.json");
+    let tmp = dir.join("settings.json.tmp");
+    fs::write(&tmp, s).map_err(|e| format!("設定保存失敗: {e}"))?;
+    if let Err(e) = fs::rename(&tmp, &dest) {
+        let _ = fs::remove_file(&tmp); // 失敗時は tmp を残さない（settings.json は旧内容のまま無傷）
+        return Err(format!("設定保存の確定失敗（旧設定は維持）: {e}"));
+    }
+    Ok(())
 }
 
 /// M7-2c N-2: 旧identifier（com.root.animemo）の設定を新ディレクトリへ**コピー**する起動時移行。

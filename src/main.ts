@@ -144,6 +144,9 @@ type Settings = {
   customTones?: { id: number; w: number; h: number; colors: string[] }[];
   /** M17: マイ柄を「登録した色で塗る」か。**未設定＝オン**（`!== false` で見る）。追加のみ */
   customToneColor?: boolean;
+  /** V151 (E-8): 「次回から表示しない」にした確認の id（"clearFrame" | "layerDelete" | "folderDelete"）。
+   *  未設定＝[]（全部出す）。⚙ の「確認ダイアログ」節でいつでも戻せる。追加のみ */
+  hiddenConfirms?: string[];
   /** U-1: 「起動時に更新を確認します（⚙ でオフにできます）」の初回案内を出したか。
    *  `guideDone` とは別にしている——既存利用者は `guideDone: true` を持っているので、
    *  それを流用すると**更新確認のことを一度も知らされないまま**になる */
@@ -298,7 +301,7 @@ if (import.meta.env.DEV) {
   ((window as unknown as Record<string, unknown>).__animemo as Record<string, unknown>).imageImport =
     (paths: string[]) => openImageImportFlow(paths);
   ((window as unknown as Record<string, unknown>).__animemo as Record<string, unknown>).imageImportEditor =
-    (path: string) => openImageImportFlowForEditor(path);
+    (path: string | string[]) => openImageImportFlowForEditor(path); // V151: 複数も受ける（連番モードの検証用）
   // M10-14: ドロップ経路の実機検証用（onDragDropEvent と同じ handleDroppedPaths を通す）
   ((window as unknown as Record<string, unknown>).__animemo as Record<string, unknown>).dropFiles =
     (paths: string[]) => handleDroppedPaths(paths);
@@ -438,6 +441,37 @@ function confirmDialog(msg: string, labels?: { yes: string; no: string }): Promi
     );
     return box;
   }).then((v) => !!v);
+}
+
+/** V151 (E-8): 「☐ 次回から表示しない」チェックつき確認（confirmDialog と同じ骨格＋1行）。
+ *  戻り値 skip はチェック状態そのもの。**覚えるかどうかの判断は呼び出し側**（editor の
+ *  confirmWithSkip が「はい のときだけ」覚える＝いいえ＋チェックで消える事故を防ぐ）。
+ *  背面クリックで閉じたときは ok:false（confirm と同じく「いいえ」扱い。skip はチェック状態のまま
+ *  返るが、ok:false なので呼び出し側は覚えない＝実害なし・V151 レビューで文言を実装に合わせた） */
+function confirmSkippableDialog(msg: string): Promise<{ ok: boolean; skip: boolean }> {
+  let skip = false;
+  return modal((close) => {
+    const box = document.createElement("div");
+    box.innerHTML = `<p class="modal-msg"></p>
+      <label class="confirm-skip"><input type="checkbox" id="cs-skip"> <span></span></label>
+      <div class="modal-actions">
+        <button class="btn primary" data-v="1"></button>
+        <button class="btn" data-v="0"></button>
+      </div>`;
+    (box.querySelector('[data-v="1"]') as HTMLElement).textContent = t("common.yes.btn");
+    (box.querySelector('[data-v="0"]') as HTMLElement).textContent = t("common.no.btn");
+    (box.querySelector(".confirm-skip span") as HTMLElement).textContent = t("common.dontShowAgain.label");
+    const msgEl = box.querySelector(".modal-msg") as HTMLElement;
+    if (msg.includes("\n")) msgEl.style.whiteSpace = "pre-line";
+    msgEl.textContent = msg;
+    (box.querySelector("#cs-skip") as HTMLInputElement).addEventListener("change", (e) => {
+      skip = (e.target as HTMLInputElement).checked;
+    });
+    box.querySelectorAll(".modal-actions button").forEach((b) =>
+      b.addEventListener("click", () => close((b as HTMLElement).dataset.v === "1"))
+    );
+    return box;
+  }).then((v) => ({ ok: !!v, skip }));
 }
 
 function promptDialog(msg: string, def: string): Promise<string | null> {
@@ -1267,29 +1301,73 @@ async function openImageImportFlow(paths?: string[]) {
   await openImageImportDialog(images, defaultTitle);
 }
 
-/** M8-2: エディタ📷入口（1枚のみ → 調整 → 現在ページへ浮動配置） */
-async function openImageImportFlowForEditor(path?: string) {
+/** V151 (M8-3): 連番一括で50枚を超えたら確認を出すしきい値（REQ_M8_3 U-4・設定化しない） */
+const BATCH_IMPORT_CONFIRM_AT = 50;
+
+/** M8-2 → V151 (M8-3): エディタ📷入口。1枚 = 調整 → 現在ページへ浮動配置（従来と完全に同じ経路）／
+ *  複数枚 = 共通設定で一括変換 → 今のコマの後ろへ 1枚=1コマで挿入（`placeConvertedFrames`） */
+async function openImageImportFlowForEditor(path?: string | string[]) {
   let sel: string | string[] | null = path ?? null;
   if (!sel) {
+    // V151 (M8-3): 複数選択を受け付ける。1枚だけ選んだときの下流は従来と完全に同じ（最重要回帰）
     sel = await open({
-      multiple: false,
+      multiple: true,
       title: t("img.pickEditor.title"),
       filters: [{ name: t("img.pick.filter.label"), extensions: ["png", "jpg", "jpeg"] }],
     });
   }
-  if (!sel || typeof sel !== "string") return;
-  let image: SourceImage;
+  if (!sel) return;
+  const files = (Array.isArray(sel) ? sel : [sel]).filter((f) => typeof f === "string" && f);
+  if (!files.length) return;
+  const base = (p: string) => p.split(/[\\/]/).pop() ?? p;
+  // V151 (M8-3 U-1): ファイル名の自然順（img2 < img10）。連番素材が目的なのでダイアログの返却順に頼らない
+  files.sort((a, b) => base(a).localeCompare(base(b), undefined, { numeric: true }));
+  // V151 (M8-3 U-4): 50枚超は時間がかかる旨の確認（書き出しの見積もり確認と同じ考え方）
+  if (files.length > BATCH_IMPORT_CONFIRM_AT) {
+    const ok = await confirmDialog(t("img.manyConfirm.msg", { n: files.length }));
+    if (!ok) return;
+  }
+  // V151 (M8-3 U-5): 50枚超のときだけ読み込みの進捗を出す（imp.progress.* 流用・数字は素の n/total）
+  let prog: { back: HTMLElement; label: HTMLElement } | null = null;
+  if (files.length > BATCH_IMPORT_CONFIRM_AT) {
+    const back = document.createElement("div");
+    back.className = "modal-back";
+    back.innerHTML = `<div class="modal-box"><p class="modal-msg"><b>${t("imp.progress.label")}</b></p><p class="modal-path" id="bi-prog"></p></div>`;
+    document.body.appendChild(back);
+    prog = { back, label: back.querySelector("#bi-prog") as HTMLElement };
+  }
+  // 読めないファイルはそのファイルだけ飛ばし、残りは取り込む（全部を巻き戻さない）
+  const images: SourceImage[] = [];
   try {
-    image = await decodeImageFile(sel);
-  } catch (e) {
-    toast(t("img.decodeFail.toast", { name: sel.split(/[\\/]/).pop(), err: e }));
+    for (let i = 0; i < files.length; i++) {
+      if (prog) prog.label.textContent = `${i + 1} / ${files.length}`;
+      try {
+        images.push(await decodeImageFile(files[i]));
+      } catch (e) {
+        toast(t("img.decodeFail.toast", { name: base(files[i]), err: e }));
+      }
+    }
+  } finally {
+    prog?.back.remove();
+  }
+  if (!images.length) return;
+  const info = editor.placementInfo();
+  const title = stripExt(base(files[0]) ?? IMG_DEFAULT_TITLE_EDITOR);
+  if (images.length === 1) {
+    // 従来と完全に同じ経路（調整モーダル → このページに配置 → 浮動 → 変形 → Enter）
+    await openImageImportDialog([images[0]], title, {
+      layerName: info.layerName,
+      frameNo: info.frameNo,
+      onPlace: (proj, transparentPaper) => editor.placeConvertedImage(proj, transparentPaper),
+    });
     return;
   }
-  const info = editor.placementInfo();
-  await openImageImportDialog([image], stripExt(sel.split(/[\\/]/).pop() ?? IMG_DEFAULT_TITLE_EDITOR), {
+  // V151 (M8-3): 連番モード — 設定は全枚一括・確定で今のコマの後ろへ Nコマ挿入（変形は通さない）
+  await openImageImportDialog(images, title, {
     layerName: info.layerName,
     frameNo: info.frameNo,
     onPlace: (proj, transparentPaper) => editor.placeConvertedImage(proj, transparentPaper),
+    onPlaceFrames: (proj, transparentPaper) => editor.placeConvertedFrames(proj, transparentPaper),
   });
 }
 
@@ -1298,6 +1376,8 @@ interface EditorImportCtx {
   layerName: string;
   frameNo: number;
   onPlace: (proj: ReturnType<typeof convertToProject>, transparentPaper: boolean) => void;
+  /** V151 (M8-3): 2枚以上のとき＝連番モード。全コマを今のコマの後ろへ挿入する（変形は通さない） */
+  onPlaceFrames?: (proj: ReturnType<typeof convertToProject>, transparentPaper: boolean) => void;
 }
 
 /** 調整モーダル（リアルタイムプレビュー＋モードタブ3つ・ライブラリ/エディタ共用）。
@@ -1318,7 +1398,10 @@ function openImageImportDialog(
     const paperSwatches = ["#ffffff", "#fbefd6", "#9aa4b2", "#141414"];
     const fpsChoices = [1, 2, 4, 6, 8, 12];
     const headNote = editorCtx
-      ? t("img.dialog.target.hint", { layer: escapeHtml(editorCtx.layerName), frame: editorCtx.frameNo })
+      ? images.length > 1
+        ? // V151 (M8-3 U-2): 連番モードの枚数ヒントは新キー（「{n}枚 → {n}コマ」・UI 用語「コマ」に合わせる）
+          t("img.dialog.frames.hint", { n: images.length })
+        : t("img.dialog.target.hint", { layer: escapeHtml(editorCtx.layerName), frame: editorCtx.frameNo })
       : t("img.dialog.pages.hint", { n: images.length }) +
         (images.length > 1 ? t("img.dialog.pagesAnime.hint") : "");
     // M11-24: 「複数ページのアニメ背景は、ライブラリ画面の📷を…」の案内を削除した。
@@ -1377,14 +1460,26 @@ function openImageImportDialog(
             ${paperSwatches.map((c) => `<button type="button" class="ii-sw${c === o.paper ? " on" : ""}" data-c="${c}" style="background:${c}"></button>`).join("")}
             <input type="color" id="ii-paper-custom" value="${o.paper}">
           </div></div>
-          <div class="modal-field" ${images.length > 1 ? "" : "hidden"}><span>${t("img.fps.label")}</span><div class="oni" id="ii-fps" style="flex:1">
+          <div class="modal-field" ${
+            // V151: fps はライブラリ×複数枚（=新規メモの速度）のときだけ意味を持つ。エディタ連番は既存コマ列に
+            // 挿入するだけなので出さない（hidden の実効性は styles.css の [hidden] 一括規則が保証・v1.5.0 まで
+            // .modal-field の display:flex に負けて表示され続ける実表示バグだった）
+            images.length > 1 && !editorCtx ? "" : "hidden"
+          }><span>${t("img.fps.label")}</span><div class="oni" id="ii-fps" style="flex:1">
             ${fpsChoices.map((f) => `<button type="button" class="lv${f === o.fps ? " on" : ""}" data-fps="${f}">${f}fps</button>`).join("")}
           </div></div>
           ${editorCtx ? `<div class="modal-field"><span>${t("img.transparent.label")}</span><button type="button" class="lv on" id="ii-transparent">${t("img.transparent.on.btn")}</button></div>` : ""}
         </div>
       </div>
       <div class="modal-actions">
-        <button class="btn primary" id="ii-ok">${editorCtx ? t("img.place.btn") : t("img.import.btn")}</button>
+        <button class="btn primary" id="ii-ok">${
+          // V151 レビュー指摘: 連番モードは「このページに配置」ではなく後ろへNコマ挿入なので、ボタンも正直に言う
+          editorCtx
+            ? images.length > 1
+              ? t("img.placeFrames.btn")
+              : t("img.place.btn")
+            : t("img.import.btn")
+        }</button>
         <button class="btn" id="ii-cancel">${t("common.cancel.btn")}</button>
       </div>`;
 
@@ -1403,10 +1498,18 @@ function openImageImportDialog(
     const cctx = cv.getContext("2d")!;
 
     // ---- リアルタイムプレビュー（100ms debounce） ----
+    // V151 レビュー指摘: 全枚変換のプレビューは N が大きいとスライダー1目盛りごとに数秒固まる
+    // （medianCut が N×76,800 画素を実体化する）。9枚以上は**表示中ページだけ**変換して応答を保つ。
+    // その場合パレットは近似（確定時は従来どおり全ページ共通で量子化）——ヘッダの「{n}枚 → {n}コマ」の
+    // とおり設定は全枚共通なので、プレビューの役目（設定の当たりを付ける）には足りる。
+    const PREVIEW_EXACT_MAX = 8;
     let timer: number | undefined;
     const render = () => {
-      const proj = convertToProject(images, o);
-      const rgba = frameToRgba(proj, Math.min(page, proj.frames.length - 1));
+      const exact = images.length <= PREVIEW_EXACT_MAX;
+      const proj = exact
+        ? convertToProject(images, o)
+        : convertToProject([images[Math.min(page, images.length - 1)]], o);
+      const rgba = frameToRgba(proj, exact ? Math.min(page, proj.frames.length - 1) : 0);
       cctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), W, H), 0, 0);
       q("#ii-pageno").textContent = `${page + 1} / ${images.length}`;
     };
@@ -1525,12 +1628,28 @@ function openImageImportDialog(
       if (editorCtx) {
         busy = true;
         try {
-          const proj = convertToProject([images[0]], o);
-          close(true);
-          editorCtx.onPlace(proj, transparentPaper);
+          if (images.length > 1 && editorCtx.onPlaceFrames) {
+            // V151 (M8-3): 連番モード — 全枚を1回で変換（共通パレット）し、Nコマ挿入へ。
+            // レビュー指摘: 変換は同期で N 枚ぶん走る（55枚で数秒）ので、先にボタンを無効化して
+            // 取り込み中の文言を出し、1フレーム譲って描画させてから重い処理に入る（無言の凍結を避ける）
+            const okBtn = q<HTMLButtonElement>("#ii-ok");
+            okBtn.disabled = true;
+            okBtn.textContent = t("imp.progress.label");
+            await new Promise((r) => setTimeout(r, 30));
+            const proj = convertToProject(images, o);
+            close(true);
+            editorCtx.onPlaceFrames(proj, transparentPaper);
+          } else {
+            const proj = convertToProject([images[0]], o);
+            close(true);
+            editorCtx.onPlace(proj, transparentPaper);
+          }
         } catch (e) {
           toast(t("img.placeFail.toast", { err: e }));
           busy = false;
+          const okBtn = q<HTMLButtonElement>("#ii-ok");
+          okBtn.disabled = false;
+          okBtn.textContent = images.length > 1 ? t("img.placeFrames.btn") : t("img.place.btn");
         }
         return;
       }
@@ -1646,6 +1765,8 @@ function showEditor(
   // M17: マイ柄（壊れた要素だけ捨てる）／「登録した色で塗る」（false 以外はオン＝既定）
   editor.restoreCustomTones(settings.customTones);
   editor.restoreCustomToneColor(settings.customToneColor);
+  // V151 (E-8): 非表示にした確認（知らない id は捨てる・未設定は []＝全部出す）
+  editor.restoreHiddenConfirms(settings.hiddenConfirms);
   editor.mount(
     project,
     ctx,
@@ -1679,6 +1800,12 @@ function showEditor(
       // M13-2a: 選択範囲の色付け表示も同じ流儀（トグルを押した瞬間に保存）
       onSelMaskShowChange: (show) => {
         settings.selMask = show;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      // V151 (E-8): 「次回から表示しない」チェックつき確認＋非表示一覧の保存（同じ流儀）
+      confirmSkippable: confirmSkippableDialog,
+      onHiddenConfirmsChange: (ids) => {
+        settings.hiddenConfirms = ids;
         invoke("save_settings", { settings }).catch(() => {});
       },
       // M14 (S-3): トーン一覧の開閉も同じ流儀（ヘッダを押した瞬間に保存）
@@ -2200,11 +2327,16 @@ async function openSettingsMenu() {
         </div>
         <p class="hintline">${t("set.cursor.hint")}</p>
       </div>
-      <!-- M13-2a (A-4): コマ削除の確認。効くのはコマの削除だけ（レイヤー・フォルダの削除は従来どおり確認する） -->
+      <!-- V151 (E-8): 「確認ダイアログ」節。オン=確認を出す。
+           「次回から表示しない」で消した確認（消す/レイヤー削除/フォルダ削除）をここでいつでも戻せる。
+           既存のコマ削除の確認（M13-2a A-4・settings.frameDeleteConfirm）は表示だけこの節へ統合（キーは既存のまま） -->
       <div class="set-sec">
-        <b>${t("set.frameDeleteConfirm.label")}</b>
-        <div class="modal-field"><div class="sw2" id="set-framedel-sw"></div></div>
-        <p class="hintline">${t("set.frameDeleteConfirm.hint")}</p>
+        <b>${t("set.confirms.label")}</b>
+        <div class="modal-field"><div class="sw2" id="set-conf-clearFrame"></div><span class="tog">${t("set.confirms.clearFrame.label")}</span></div>
+        <div class="modal-field"><div class="sw2" id="set-conf-layerDelete"></div><span class="tog">${t("set.confirms.layerDelete.label")}</span></div>
+        <div class="modal-field"><div class="sw2" id="set-conf-folderDelete"></div><span class="tog">${t("set.confirms.folderDelete.label")}</span></div>
+        <div class="modal-field"><div class="sw2" id="set-framedel-sw"></div><span class="tog">${t("set.frameDeleteConfirm.label")}</span></div>
+        <p class="hintline">${t("set.confirms.hint")}</p>
       </div>
       <div class="set-sec">
         <b>${t("set.keys.label")}</b>
@@ -2434,11 +2566,27 @@ async function openSettingsMenu() {
     // エディタはライブラリ画面からしか開けないので、ここで settings に覚えるだけで次の mount から効く
     {
       const sw = box.querySelector("#set-framedel-sw") as HTMLElement;
+      sw.title = t("set.frameDeleteConfirm.hint"); // V151: 節の統合でヒント行→title へ（キーは既存のまま）
       const on = () => settings.frameDeleteConfirm !== false;
       sw.classList.toggle("on", on());
       sw.addEventListener("click", () => {
         settings.frameDeleteConfirm = !on();
         sw.classList.toggle("on", on());
+        invoke("save_settings", { settings }).catch(() => {});
+      });
+    }
+    // V151 (E-8): 「次回から表示しない」にした3確認の戻し口。オン=確認を出す（hiddenConfirms に無い）。
+    // 同じく settings に覚えるだけで次の mount（restoreHiddenConfirms）から効く
+    for (const id of ["clearFrame", "layerDelete", "folderDelete"] as const) {
+      const sw = box.querySelector(`#set-conf-${id}`) as HTMLElement;
+      const hidden = () => (settings.hiddenConfirms ?? []).includes(id);
+      sw.classList.toggle("on", !hidden());
+      sw.addEventListener("click", () => {
+        const cur = new Set(settings.hiddenConfirms ?? []);
+        if (hidden()) cur.delete(id);
+        else cur.add(id);
+        settings.hiddenConfirms = [...cur];
+        sw.classList.toggle("on", !hidden());
         invoke("save_settings", { settings }).catch(() => {});
       });
     }
@@ -2808,6 +2956,11 @@ function guideSteps(): GuideStep[] {
       title: t("guide.export.label"),
       text: t("guide.export.msg"),
       target: "#stage-meta .chip.export",
+    },
+    // V151 (③): v1.4〜v1.5 系で増えた主要機能の紹介（target なし＝中央表示。既存5ステップの後ろに1節）
+    {
+      title: t("guide.recent.label"),
+      text: t("guide.recent.msg"),
     },
   ];
 }
