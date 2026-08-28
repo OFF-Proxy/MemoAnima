@@ -29,6 +29,7 @@ import {
   H,
   sanitizeFolders,
   sanitizeAudio,
+  MAX_JSON_CHARS,
 } from "./model";
 
 const MAGIC = "ANIMEMO";
@@ -254,15 +255,76 @@ export async function projectToBytesInterruptible(
   return encodeProject(p, opts);
 }
 
+/** V154b: gzip の末尾4バイト（ISIZE）＝**展開後の大きさ**（mod 2^32・LE）。
+ *  **展開する前に**大きさが分かるので、「開けないと分かっているものを、まず開こうとして
+ *  メモリを使い切る」のを避けられる。4 GiB を超える作品では一周してしまうが、
+ *  そこまで来ると下の例外分けで拾えるので実害はない。 */
+function gzipIsize(bytes: Uint8Array): number {
+  const n = bytes.length;
+  if (n < 4) return 0;
+  return (
+    (bytes[n - 4] | (bytes[n - 3] << 8) | (bytes[n - 2] << 16) | (bytes[n - 1] << 24)) >>> 0
+  );
+}
+
+/** V154b: 展開に失敗した理由が「大きすぎる」なのか「壊れている」なのかを分ける。
+ *
+ *  `DecompressionStream` は中身が合わないと `TypeError`（`incorrect data check` /
+ *  `truncated`）を投げ、メモリを確保できないと `RangeError`（`Array buffer allocation failed` /
+ *  `Invalid string length`）を投げる。**この2つを混ぜて「壊れています」と言ってはいけない。** */
+function isSizeFailure(e: unknown): boolean {
+  if (e instanceof RangeError) return true;
+  const m = String((e as { message?: string })?.message ?? e);
+  return /allocation|Invalid string length|out of memory|too large/i.test(m);
+}
+
 export async function projectFromBytes(bytes: Uint8Array): Promise<Project> {
+  // V154b: 大きさの上限を**利用者向けの言葉**にするための材料（MiB は概数でよい）
+  const mib = (n: number) => {
+    const m = n / 1024 / 1024;
+    return m >= 1024 ? `${Math.round((m / 1024) * 10) / 10}GB` : `${Math.round(m * 10) / 10}MB`;
+  };
+  const tooLarge = (rawBytes: number) =>
+    new Error(
+      t("ed.load.tooLarge.msg", {
+        size: rawBytes > 0 ? mib(rawBytes) : mib(bytes.length),
+        max: mib(MAX_JSON_CHARS),
+      })
+    );
+
+  // V154b: **gzip のマジック（1f 8b）があれば、それは gzip。**
+  //
+  // 以前はここが無条件の try/catch で、展開に失敗すると**gzip の生バイトをそのまま
+  // JSON として読もうとして** `SyntaxError: Unexpected token '\ufffd'` になっていた。
+  // 画面には「読み込みエラー: … is not valid JSON」と出るので、**1バイトも壊れていない
+  // ファイルなのに「あなたのデータは壊れています」としか読めない**。これが嘘の正体。
+  // 「非圧縮かもしれない」の保険は、**マジックが無いときだけ**に限る。
+  const isGzip = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
   let json: Uint8Array;
-  try {
-    json = await gunzip(bytes);
-  } catch {
-    // 旧・非圧縮の可能性に備える（前方互換の保険）
+  if (isGzip) {
+    // 展開する前に、末尾の ISIZE で「そもそも文字列にできない大きさか」を見る
+    const isize = gzipIsize(bytes);
+    if (isize > MAX_JSON_CHARS) throw tooLarge(isize);
+    try {
+      json = await gunzip(bytes);
+    } catch (e) {
+      // 大きすぎて確保できなかったのか、中身が合わないのかを分ける（混ぜない）
+      if (isSizeFailure(e)) throw tooLarge(isize);
+      throw new Error(t("ed.load.decompressFailed.msg"));
+    }
+  } else {
+    // 旧・非圧縮の可能性に備える（前方互換の保険）。**マジックが無いときだけ**
     json = bytes;
   }
-  const doc = JSON.parse(new TextDecoder().decode(json));
+  let text: string;
+  try {
+    text = new TextDecoder().decode(json);
+  } catch (e) {
+    // 展開はできたが、1本の文字列にできなかった（V8 の上限）。これも「壊れている」ではない
+    if (isSizeFailure(e)) throw tooLarge(json.length);
+    throw e;
+  }
+  const doc = JSON.parse(text);
   if (doc.magic !== MAGIC) throw new Error(t("ed.load.notProject.msg"));
   if (typeof doc.version !== "number" || doc.version > PROJECT_VERSION) {
     throw new Error(
@@ -444,4 +506,106 @@ export async function projectFromBytes(bytes: Uint8Array): Promise<Project> {
   // M5-1: 壊れた bgm/se・未知SE配置の隔離＋nextSeId 健全化（絵は必ず開ける）
   sanitizeAudio(p);
   return p;
+}
+
+// ---------------- V154 (W-6): 保存したものが読み戻せるかを確かめる ----------------
+
+/** V154 (W-6): 検証の結果。`ok` 以外は**保存を確定させない**（控えを捨てない）。 */
+export interface SavedCheck {
+  ok: boolean;
+  /** 失敗の理由。**画面には出さない**（利用者向けの文言は `ed.file.saveBroken.msg`）。
+   *  ログと報告に使う識別子なので ASCII で書く（grep しやすく・ログの文字化けも避ける） */
+  reason: string;
+  /** 展開できたバイト数（0 = 展開できなかった） */
+  rawBytes: number;
+  /** 数えられたコマ数（-1 = 数えられなかった） */
+  frames: number;
+}
+
+/**
+ * V154 (W-6): **保存したバイト列が本当に読み戻せるか**を確かめる。
+ *
+ * なぜ要るか: 手動保存はこれまで `data` の中身を一切見ずに「書けた＝成功」としていた。
+ * そのため**壊れたバイト列が「保存成功」として確定し、控え（`.bak`）とオートセーブの
+ * 両方をアプリ自身が捨てていた**（V154 追記の事故モデル）。確定の前にここを通す。
+ *
+ * 見るもの（要件の最低線）:
+ *   1. 長さが 0 でない
+ *   2. gzip である（先頭 `1f 8b`）
+ *   3. **展開できる** — ここが本命。gzip は末尾に CRC32 と長さを持ち、
+ *      `DecompressionStream` はそれを検証して合わなければ例外を投げる。
+ *      つまり**1バイトでも化けていれば必ず落ちる**（途中切れも同じ）
+ *   4. 先頭に `{"magic":"ANIMEMO","version":N` があり、N が読める版である
+ *   5. 大きさが 320×240 である
+ *   6. **コマ数が期待どおり**
+ *
+ * 重い作品でも耐えられるよう、**展開したものは保持しない**（読み捨てながら数える）。
+ * 保持するのは先頭 512 文字と、チャンク境界をまたぐ 8 文字だけ。
+ * `expectFrames` に負数を渡すとコマ数の検査だけ省く（数えた結果は返す）。
+ */
+export async function verifySavedBytes(
+  bytes: Uint8Array | null | undefined,
+  expectFrames: number
+): Promise<SavedCheck> {
+  const fail = (reason: string, rawBytes = 0, frames = -1): SavedCheck => ({
+    ok: false,
+    reason,
+    rawBytes,
+    frames,
+  });
+  if (!bytes || bytes.length === 0) return fail("empty-file");
+  if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) {
+    return fail(`not-gzip: head ${bytes[0]} ${bytes[1]}`);
+  }
+  // コマ1つは JSON.stringify(SerializedFrame) ＝ 必ず `{"paper":` で始まる（encodeProject）。
+  // base64 には `"` が入らないので、絵のデータの中で偶然一致することはない
+  const NEEDLE = '{"paper":';
+  const KEEP = NEEDLE.length - 1;
+  let rawBytes = 0;
+  let frames = 0;
+  let head = "";
+  let overlap = "";
+  let first = true;
+  try {
+    const ds = new DecompressionStream("gzip");
+    const reader = new Blob([bytes as BlobPart])
+      .stream()
+      .pipeThrough(ds)
+      .getReader();
+    const dec = new TextDecoder();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      rawBytes += value.byteLength;
+      const hay = overlap + dec.decode(value, { stream: true });
+      if (first) {
+        head = hay.slice(0, 512);
+        first = false;
+      }
+      let at = -1;
+      while ((at = hay.indexOf(NEEDLE, at + 1)) >= 0) frames++;
+      // 次のチャンクとの境目で切れたコマを取りこぼさない（重複して数えない長さに保つ）
+      overlap = hay.slice(Math.max(0, hay.length - KEEP));
+    }
+  } catch (e) {
+    // gzip の CRC・長さが合わない＝**書いたものが壊れている**
+    return fail(`gunzip-failed: ${String(e)}`, rawBytes, -1);
+  }
+  if (rawBytes === 0) return fail("empty-after-gunzip", 0, -1);
+  if (!head.startsWith(`{"magic":"${MAGIC}","version":`)) {
+    return fail(`bad-header: ${JSON.stringify(head.slice(0, 40))}`, rawBytes, frames);
+  }
+  const mv = head.match(/^\{"magic":"[A-Z]+","version":(\d+)/);
+  const ver = mv ? Number(mv[1]) : NaN;
+  if (!Number.isFinite(ver) || ver < 1 || ver > PROJECT_VERSION) {
+    return fail(`bad-version: ${mv?.[1] ?? "?"}`, rawBytes, frames);
+  }
+  if (!head.includes(`"width":${W},"height":${H}`)) {
+    return fail(`bad-size: want ${W}x${H}`, rawBytes, frames);
+  }
+  if (expectFrames >= 0 && frames !== expectFrames) {
+    return fail(`frames-mismatch: want ${expectFrames} got ${frames}`, rawBytes, frames);
+  }
+  return { ok: true, reason: "", rawBytes, frames };
 }

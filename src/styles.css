@@ -213,6 +213,13 @@ button:disabled {
   font-size: 21px;
   color: #fff;
   text-shadow: 0 2px 0 rgba(44, 38, 33, 0.35);
+  /* V153: 幅が足りないとき、ロゴの中の文字が折り返して**トップバーの高さが伸びていた**
+   *（日本語 960px で 63px → 108px の3行。S-1 で 80px の2行まで減ったが、まだ伸びる）。
+   *  高さは「壊すな」の対象なので、**折り返さずに末尾を切る**形に固定する。
+   *  十分な幅では切れないので 1280 の見た目は変わらない（実測で確認済み）。 */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 .logo .mark {
@@ -250,6 +257,23 @@ button:disabled {
   flex: 1;
 }
 
+/* V153 (S-2): **トップバーのボタンは潰さない**。文字を折り返したり幅を削られたりすると
+ *  「押せるが読めない」になるので、縮むのは検索バーだけにする（.search は flex: 0 1 auto）。
+ *  ⚙ は DOM の最後尾＝いちばん先に画面外へ出る位置にあるので、ここで守る意味が大きい。
+ *  **DOM 順は変えない**（index.html は無変更）。`order` も使っていない——S-1 と
+ *  `minWidth`（tauri.conf.json）の2つで足りることを7言語×5幅の実測で確認したため。 */
+.topbar .btn {
+  flex-shrink: 0;
+}
+
+/* V153: **検索バーは縮む**。以前は `min-width: 200px` でここが下限になり、幅が足りなくなると
+ *  最後尾の ⚙（#lib-change-dir）から順に画面外へ押し出されて**設定に一切たどり着けなかった**
+ *  （1920×1080 の利用者からの報告。1100px の es / pt-BR で既に発生していた）。
+ *
+ *  `flex-grow` は **0 のまま**にすること。1 にすると余白（.topbar .spacer）と取り合って、
+ *  十分な幅（1280）でも検索バーが 218px → 約350px に広がり**見た目が変わる**（実測で確認）。
+ *  ここで欲しいのは「余ったら広がる」ではなく「足りなければ縮む」なので `0 1 auto` が正しい。
+ *  `overflow: hidden` は、極端に狭いときに 🔍 と入力欄が重なったり枠から出たりしないための保険。 */
 .search {
   display: flex;
   align-items: center;
@@ -259,7 +283,9 @@ button:disabled {
   border-radius: 999px;
   padding: 6px 14px;
   box-shadow: var(--shadow);
-  min-width: 200px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .search input {
@@ -268,6 +294,9 @@ button:disabled {
   font: inherit;
   background: transparent;
   width: 100%;
+  /* V153: input は既定で内在幅（size 属性ぶん）を持ち、親が縮んでも自分は縮まない。
+   *  親に追随させるにはこの1行が要る（無いと .search の min-width:0 が効かない） */
+  min-width: 0;
 }
 
 .lib-main {
@@ -2766,4 +2795,116 @@ input[type="text"] {
     width: 100%;
     height: auto;
   }
+}
+
+/* V154 (W-2): 作品の大きさメーター（右パネル末尾・常時表示の3行）。
+   小さい作品では地味な3行のまま＝邪魔をしない。注意/警告のときだけ色と1行が増える。 */
+.szmeter {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.szmeter .szrow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.szmeter .szrow span {
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.szmeter .szrow b {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.szmeter .szrow.tot {
+  border-top: 2px solid var(--ink);
+  margin-top: 2px;
+  padding-top: 2px;
+}
+.szmeter .sznote {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-soft);
+}
+.szmeter .sznote.adv {
+  color: var(--ink);
+  background: var(--orange-l);
+  border: 2px solid var(--orange);
+  border-radius: 8px;
+  padding: 4px 6px;
+}
+.szmeter.lv-caution .szrow.tot b {
+  color: var(--orange);
+}
+.szmeter.lv-warn .szrow.tot b {
+  color: var(--red);
+}
+.szmeter.lv-warn .sznote.adv {
+  border-color: var(--red);
+  background: #ffecec;
+}
+
+/* ---------------- V154b (W-8/W-9): 重い処理のあいだの表示 ---------------- */
+
+/* W-9: 重い処理の最中は、エディタの中身に触れない。
+   進捗（.modal-back）が出るまでの 450ms も含めて**最初から**効かせる——
+   その隙に触られると、エンコード中の変更が混ざったバイト列ができ得る（要件 W-9）。
+   キー入力は editor.ts の dialogOpen() が止める。 */
+#screen-editor.ed-busy {
+  pointer-events: none;
+}
+
+/* W-8: 「◯◯中です」。取り込みの進捗と同じ .modal-box の上に乗る */
+.busy-box {
+  min-width: min(360px, 86vw);
+  text-align: center;
+}
+.busy-box .bar {
+  margin: 10px 0 6px;
+}
+.busy-box .busy-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+/* 進み具合ではなく「動いている」ことだけを見せる（％も回数も出さない・要件 W-8）。
+   数字が止まって見えるより、動く帯のほうが「待てばいい」と伝わる */
+.bar.indet > i {
+  width: 40%;
+  transition: none;
+  animation: ma-indet 1.1s ease-in-out infinite;
+}
+@keyframes ma-indet {
+  0% {
+    transform: translateX(-105%);
+  }
+  100% {
+    transform: translateX(255%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* 動きが苦手な人には、動かさずに満たした帯で見せる（止まって見えないよう色は同じ） */
+  .bar.indet > i {
+    width: 100%;
+    animation: none;
+  }
+}
+
+/* V154b: 読み込み失敗の帯だけは**折り返す**。
+   ふつうのチップ（320×240・コマ数・fps）は短いので横に並べばよいが、
+   失敗の説明は1文が長く、縮まないチップのままだと画面からはみ出す。
+   ここは「読める」ことが最優先なので、1行いっぱいを使って折り返す。 */
+.meta-row .chip.wrap {
+  flex: 1 1 100%;
+  min-width: 0;
+  white-space: normal;
+  text-align: left;
+  line-height: 1.5;
+  border-radius: 12px;
 }

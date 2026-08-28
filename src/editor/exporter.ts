@@ -233,6 +233,15 @@ export function formatBytes(n: number): string {
   return `${Math.round(n / (1024 * 1024))}MB`;
 }
 
+/** V154: 小さい値も読める表示（KB/MB/GB）。
+ *  `formatBytes` は書き出しの見積もり用で 1MB 未満が全部「0MB」になる。
+ *  作品の大きさメーターや復元の一覧は**小さい作品でも意味のある数字**を出したいので、
+ *  1MB 未満は KB で出す（見積もり側の表示は変えない＝既存の画面は1文字も動かない）。 */
+export function formatSize(n: number): string {
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)}KB`;
+  return formatBytes(n);
+}
+
 /**
  * M11-23: 残り時間の目安。`onProgress` のたびに `update()` を呼び、表示する文字列（""=まだ出さない）を返す。
  * 時刻は呼び出し側から渡す（純粋・スモークで検査できる）。

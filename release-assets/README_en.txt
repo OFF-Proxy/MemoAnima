@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.5.2
+ MemoAnima v1.5.4
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -15,6 +15,40 @@ Windows only.
 - Your source data (the SD card and so on) is only ever READ. Nothing is
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
+
+== FIXED IN v1.5.4 ==
+- [Data safety] If the app is closed while saving, your animation is no longer
+  lost. The contents from just before the save are kept as a backup, and the
+  next launch asks whether to restore them. (Until now the backup was deleted,
+  which could leave an animation impossible to open.)
+- Also fixed: the startup tidy-up no longer removes list entries that still
+  have a backup on disk.
+- A save is now confirmed only after the file is read back and checked. If the
+  check does not pass, the previous version is put back and both the backup and
+  the autosave are kept - nothing is thrown away before the check passes.
+- Autosave now pauses while exporting (on large animations, exporting and
+  saving at the same time could crash the app).
+- While saving or loading audio, "Saving" now appears in the middle of the
+  screen, and buttons and editing are held until it finishes. Clicking again
+  does nothing - the work never runs twice. (Pressing save repeatedly on a
+  large animation used to pile up memory and crash the app.)
+- New in Settings: "Open the log folder". It is a record to send us if
+  something goes wrong; it holds no art and no names (capped at 1 MB).
+- The right panel now shows the memory in use (animation / undo / total),
+  with advice when it gets large. Nothing is ever blocked.
+- When more than 256 colours switch the animation to high-detail mode, large
+  animations now get a notice about the memory it uses (this cannot be undone).
+- On very large animations, fewer steps can be undone. This is deliberate: it
+  keeps the app from running out of memory. Small animations are unchanged.
+- Deleting an animation now also cleans up its backup and leftover temporary
+  files.
+- The settings button could be pushed off the screen when the window was not
+  wide enough, so it could not be clicked. The search box now shrinks first.
+- The window now has a minimum size (900x540).
+- New shortcut: "Open settings" (Ctrl+, by default, on the home screen), so you
+  can reach settings even when the button is out of reach.
+- Overwriting a save now keeps the previous version as a backup, so the library
+  folder can use up to twice the space (also noted in Settings).
 
 == NEW IN v1.5.2 ==
 - Chinese (Simplified and Traditional) is now available in Settings
@@ -196,7 +230,7 @@ opens as it is, and your settings and shortcuts carry over.
 3. Follow the first-run guide: choose a library folder -> import -> edit -> export
 Note: layers are shared across every frame (the standard way animation tools
 work). Adding a frame gives you a blank frame with the same layer structure.
-Note: there is also an installer (MemoAnima_1.5.2_x64-setup.exe). Just
+Note: there is also an installer (MemoAnima_1.5.4_x64-setup.exe). Just
 double-click it; no administrator rights are needed. IMPORTANT: this portable
 (zip) version cannot update in place - accepting an update installs the
 installer version instead (see ABOUT NETWORK ACCESS below). Moving from the

@@ -109,6 +109,51 @@ pub struct LibraryView {
     pub sorted_at: u64,
 }
 
+/// V154 (W-1): **置き換えの確定だけ**を担う共通ヘルパー。tmp は呼び出し側が用意する。
+///
+/// 手順は従来どおり「既存を `<file>.bak` へ退避 → tmp を本体へ rename」だが、
+/// **最後に `.bak` を消さない**。ここが V154 の本体:
+///
+/// 退避と確定は2回の rename で、そのあいだに**プロセスが死ぬ窓**がある
+///（メモリ枯渇で落ちるのは、まさにこの「死ぬ」ケース）。窓で死ぬと本体が存在しない状態が残るが、
+/// **`.bak` を残しておけば中身はディスクに在る**＝次の起動で拾って戻せる（`scan_recoverable`）。
+/// 消えるより 1世代ぶんディスクを食うほうがましだ、という判断（要件 §2-b ⑥・許容）。
+///
+/// **世代は1つのまま**: 次の保存の先頭で古い `.bak` を消してから退避するので、増えていかない。
+/// **ロールバックは弱めない**: 確定の rename が失敗したら退避を本体へ戻す（従来と同じ）。
+///
+/// 呼び出し側は `pclib::save_project_impl`（手動保存）と `lib.rs::atomic_replace`
+///（**オートセーブ・15秒ごと**）の2つ。**同じ手順が2か所に書かれていたこと自体が事故のもと**
+/// だったので、確定の3手順はここ1つに寄せた（要件 §2-b ①）。
+pub fn commit_replace(dir: &Path, dest: &Path, tmp: &Path) -> Result<(), String> {
+    let name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "保存先の名前を解決できません".to_string())?;
+    if dest.exists() {
+        let bak = dir.join(format!("{name}.bak"));
+        // 前回の退避は捨てる（**世代は常に1つ**）
+        let _ = fs::remove_file(&bak);
+        if let Err(e) = fs::rename(dest, &bak) {
+            let _ = fs::remove_file(tmp);
+            return Err(format!("旧ファイルの退避に失敗: {e}"));
+        }
+        if let Err(e) = fs::rename(tmp, dest) {
+            // ロールバック: 旧ファイルを戻す（従来どおり）
+            let _ = fs::rename(&bak, dest);
+            let _ = fs::remove_file(tmp);
+            return Err(format!("保存確定失敗（旧ファイルは維持）: {e}"));
+        }
+        // V154: ここで `.bak` を**消さない**（従来は remove_file していた）
+        Ok(())
+    } else if let Err(e) = fs::rename(tmp, dest) {
+        let _ = fs::remove_file(tmp);
+        Err(format!("保存確定失敗: {e}"))
+    } else {
+        Ok(())
+    }
+}
+
 fn index_path(lib_root: &Path) -> PathBuf {
     lib_root.join(INDEX_FILE)
 }
@@ -432,23 +477,242 @@ fn relocate_moved_notes(lib: &Path, index: &mut LibraryIndex, alive: &[bool]) ->
 ///   と同じコストで即座に返る＝通常スキャンを一切重くしない（ハンドオフの計測条件）
 /// - サムネキャッシュ（.animemo/thumbs/）は触らない（同ハッシュの別行が生きている場合がある）
 fn heal_index_rows(lib: &Path, index: &mut LibraryIndex) -> (usize, usize) {
-    let alive: Vec<bool> = index
-        .items
-        .iter()
-        .map(|i| lib.join(&i.rel_path).is_file())
-        .collect();
+    // V154 (W-1b): **退避（`.bak`）がある行は「実体あり」として扱う**。
+    // 保存の窓（退避 → 確定のあいだ）で死ぬと本体が消えた状態になるが、中身は `.bak` に在る。
+    // ここで行を落とすと**再起動が復旧のとどめを刺す**（Culoe さんの報告「再起動しても直らず」）。
+    // 落とさずに残しておけば、`scan_recoverable` → 復元プロンプトへつながる。
+    // ※「実ファイルは一切消さない」という既存の原則はそのまま（消してよいのは台帳の行だけ）
+    let has_row_file = |rel: &str| lib.join(rel).is_file() || lib.join(format!("{rel}.bak")).is_file();
+    let alive: Vec<bool> = index.items.iter().map(|i| has_row_file(&i.rel_path)).collect();
     if alive.iter().all(|a| *a) {
         return (0, 0); // 幽霊行なし＝探索も掃除も不要（ファイルは1つも読まない）
     }
     let relocated = relocate_moved_notes(lib, index, &alive);
     let before = index.items.len();
     // 復旧できなかった行だけを落とす（復旧済みの行は実体があるので残る）
-    index.items.retain(|i| lib.join(&i.rel_path).is_file());
+    index.items.retain(|i| has_row_file(&i.rel_path));
     // 同じ実体を指す行が2行できていたら1行にする（M10-18 の「重複行を作らない」規約の保険。
     // 実在判定と探索のあいだで一時的に stat が失敗した場合などに起こりうる）
     let mut seen: HashSet<String> = HashSet::new();
     index.items.retain(|i| seen.insert(i.rel_path.to_ascii_lowercase()));
     (relocated, before - index.items.len())
+}
+
+/// V154 (W-6): **書いたものを読み戻して、書いたつもりのバイト列と同じか**を確かめる。
+///
+/// なぜ要るか（追記の事故モデル）: 報告者のフォルダに `.bak` が1つも無かった＝
+/// **保存は最後まで成功していた**。「窓で死んだ」のではなく、**壊れたバイト列が
+/// 「保存成功」として確定し、正しい版が2つとも捨てられた**というのが最も合う筋書き。
+/// 書きっぱなしで成功を名乗らず、必ず1回読み直す。
+///
+/// 違っていたら**前の版（`<name>.bak`）へ戻す**。壊れたほうは `<name>.broken` として
+/// 残す（消さない＝原因を調べられる。同名があれば連番）。控えが無ければ戻さず、
+/// 書いたものをそのまま残して Err にする（**何も消さない**のはどちらでも同じ）。
+///
+/// 費用: ファイルをもう1回読む（同じ大きさのメモリを一時的に使う）。
+/// 保存のたびに1回だけで、絵を描いている最中には走らない。
+pub fn verify_or_rollback(dir: &Path, dest: &Path, want: &[u8]) -> Result<(), String> {
+    let got = match fs::read(dest) {
+        Ok(b) => b,
+        Err(e) => return Err(format!("保存を確認できませんでした（読み戻せません）: {e}")),
+    };
+    if got.len() == want.len() && got == want {
+        return Ok(());
+    }
+    let detail = if got.len() != want.len() {
+        format!("長さが違います（書いた {} / 読めた {}）", want.len(), got.len())
+    } else {
+        "中身が違います".to_string()
+    };
+    Err(rollback_to_bak(dir, dest, &detail))
+}
+
+/// V154 (W-6): 検証に落ちたときの後始末。**前の版へ戻し、壊れたほうは残す**。
+/// 戻り値はそのまま利用者向けの理由になる文字列。
+fn rollback_to_bak(dir: &Path, dest: &Path, detail: &str) -> String {
+    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let bak = dir.join(format!("{name}.bak"));
+    if !bak.is_file() {
+        return format!("保存できませんでした（{detail}）");
+    }
+    let mut broken = dir.join(format!("{name}.broken"));
+    for i in 2..100 {
+        if !broken.exists() {
+            break;
+        }
+        broken = dir.join(format!("{name}.broken{i}"));
+    }
+    if fs::rename(dest, &broken).is_ok() && fs::rename(&bak, dest).is_ok() {
+        return format!(
+            "保存できませんでした（{detail}）。前の版に戻しました。書けなかったものは {} に残しています",
+            broken.file_name().and_then(|n| n.to_str()).unwrap_or("")
+        );
+    }
+    // 戻せなかった場合も**何も消さない**（控えはそのまま）
+    format!("保存できませんでした（{detail}）。前の版は控え（.bak）に残っています")
+}
+
+/// V154 (W-1): 復元できそうな残骸（保存の窓で死んだ跡）。フロントの復元プロンプト用。
+#[derive(Debug, Serialize)]
+pub struct RecoverableView {
+    pub album: String,
+    /// 本体のファイル名（`.bak` を外した形。例: `さくひん.memoanima`）
+    pub name: String,
+    /// ライブラリからの相対パス（例: `アルバム/さくひん.memoanima`）
+    pub rel_path: String,
+    /// 退避（`<name>.bak`）のバイト数。0 なら退避なし＝`.tmp` だけがある状態
+    pub bak_size: u64,
+    /// 退避の更新時刻（UNIX秒・取得できなければ 0）
+    pub bak_at: u64,
+    /// 保存途中で残った `.tmp`（**新しいほうの世代**の可能性がある）。絶対パスと大きさ
+    pub tmp_files: Vec<(String, u64)>,
+}
+
+/// V154 (W-1): ライブラリを走査して「保存の途中で終了した跡」を集める。
+///
+/// 拾うのは **本体が無いのに `<本体>.bak` がある**プロジェクトだけ
+///（本体が在るなら、`.bak` は正常な1世代前の控え＝出さない）。
+/// あわせて同じ本体名の `.tmp` も添える（要件 §0: `.tmp` は**新しいほうの世代**かもしれないので、
+/// **こちらから勝手に消さない**。復元の判断材料として見せるだけ）。
+///
+/// **何も消さない・何も書かない**（読むだけ）。復元は `recover_project` で明示的に行う。
+pub fn scan_recoverable(lib_root: &str) -> Result<Vec<RecoverableView>, String> {
+    let lib = Path::new(lib_root);
+    if !lib.is_dir() {
+        return Err(format!("ライブラリフォルダが見つかりません: {lib_root}"));
+    }
+    let mut out: Vec<RecoverableView> = Vec::new();
+    for album in list_albums(lib_root)? {
+        let dir = lib.join(&album);
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        // 1周目: `.bak` を集める（本体が無いものだけ）
+        let mut tmp_by_base: std::collections::HashMap<String, Vec<(String, u64)>> =
+            std::collections::HashMap::new();
+        let mut baks: Vec<(String, u64, u64)> = Vec::new(); // (本体名, size, mtime)
+        let list: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+        for p in &list {
+            let Some(fname) = p.file_name().and_then(|n| n.to_str()) else { continue };
+            if let Some(base) = fname.strip_suffix(".bak") {
+                // `.bak` の本体がプロジェクトの拡張子でなければ相手にしない（索引や設定の控えを拾わない）
+                let base_ext = Path::new(base)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !is_project_ext(&base_ext) {
+                    continue;
+                }
+                if dir.join(base).is_file() {
+                    continue; // 本体が在る＝正常な控え
+                }
+                let meta = fs::metadata(p).ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                if size == 0 {
+                    // 中身が空の控えは**復元しても開けない**。候補に出すと「戻したのに開けない」に
+                    // なるだけなので出さない（ファイルは消さない＝手で触る道は残す）
+                    continue;
+                }
+                let at = meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                baks.push((base.to_string(), size, at));
+            } else if fname.ends_with(".tmp") {
+                // `<本体>.<数字>-<数字>.tmp` / `<本体>.<数字>.tmp` の**本体名**を取り出す
+                if let Some(base) = tmp_base_name(fname) {
+                    let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                    tmp_by_base
+                        .entry(base)
+                        .or_default()
+                        .push((p.to_string_lossy().to_string(), size));
+                }
+            }
+        }
+        for (base, size, at) in baks {
+            let tmp_files = tmp_by_base.get(&base).cloned().unwrap_or_default();
+            out.push(RecoverableView {
+                album: album.clone(),
+                name: base.clone(),
+                rel_path: format!("{album}/{base}"),
+                bak_size: size,
+                bak_at: at,
+                tmp_files,
+            });
+        }
+    }
+    // 新しい順（拾いやすさ優先）
+    out.sort_by(|a, b| b.bak_at.cmp(&a.bak_at));
+    Ok(out)
+}
+
+/// `<本体名>.<数字>-<数字>.tmp` / `<本体名>.<数字>.tmp` から本体名を取り出す。
+/// 一時名の作り方は `save_project_impl`（timestamp-counter）と `lib.rs::atomic_replace`（counter）の2種類。
+fn tmp_base_name(fname: &str) -> Option<String> {
+    let stem = fname.strip_suffix(".tmp")?;
+    let (base, tail) = stem.rsplit_once('.')?;
+    // tail は「数字」または「数字-数字」だけを認める（利用者のファイル名を誤爆しないため）
+    let ok = !tail.is_empty()
+        && tail
+            .split('-')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+    if !ok {
+        return None;
+    }
+    let base_ext = Path::new(base)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !is_project_ext(&base_ext) {
+        return None;
+    }
+    Some(base.to_string())
+}
+
+/// V154 (W-1): 退避（`.bak`）から本体を戻す。**上書きはしない**（本体が在るなら何もしない）。
+///
+/// 戻すのは rename 1回だけ＝`.bak` の中身をそのまま本体名にする。
+/// 失敗しても `.bak` は残る（利用者が手で戻す道を塞がない）。
+pub fn recover_project(lib_root: &str, rel_path: &str) -> Result<String, String> {
+    let _guard = lock_lib();
+    let lib = Path::new(lib_root);
+    if !lib.is_dir() {
+        return Err(format!("ライブラリフォルダが見つかりません: {lib_root}"));
+    }
+    let lib_c = lib.canonicalize().map_err(|e| format!("ライブラリ確認失敗: {e}"))?;
+    // 相対パスは「アルバム/ファイル名」の2要素だけを認める（`..` や絶対パスを弾く）
+    let (album, name) = rel_path
+        .split_once('/')
+        .ok_or_else(|| "復元対象の指定が不正です".to_string())?;
+    let album_s = validate_album(album)?;
+    let name_s = sanitize_component(name);
+    let ext = Path::new(&name_s)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !is_project_ext(&ext) {
+        return Err("プロジェクト（.memoanima / .animemo）以外は復元できません".into());
+    }
+    let dir = lib.join(&album_s);
+    let dest = dir.join(&name_s);
+    let bak = dir.join(format!("{name_s}.bak"));
+    if !bak.is_file() {
+        return Err("復元のもとになる控えが見つかりません".into());
+    }
+    // 封じ込め: 控えは必ずライブラリ配下であること
+    let bak_c = bak.canonicalize().map_err(|e| format!("控えの確認に失敗: {e}"))?;
+    if !bak_c.starts_with(&lib_c) {
+        return Err("ライブラリ外のファイルは復元できません".into());
+    }
+    if dest.exists() {
+        // 本体が在るなら触らない（上書きは絶対にしない）
+        return Err("同じ名前の作品が既にあります（控えは残したままにしました）".into());
+    }
+    fs::rename(&bak_c, &dest).map_err(|e| format!("復元に失敗: {e}"))?;
+    Ok(dest.to_string_lossy().to_string())
 }
 
 /// 取り込み元を read-only スキャンし、未取り込み分だけをライブラリへ独立コピーする。
@@ -1225,23 +1489,24 @@ fn save_project_impl(
             }
         }
     }
-    if dest.exists() {
-        let bak = dir.join(format!("{file}.bak"));
-        let _ = fs::remove_file(&bak);
-        if let Err(e) = fs::rename(&dest, &bak) {
-            let _ = fs::remove_file(&tmp);
-            return Err(format!("旧ファイルの退避に失敗: {e}"));
+    // V154 (W-1): 確定の3手順は `commit_replace` へ集約した（**`.bak` は残す**）
+    commit_replace(&dir, &dest, &tmp)?;
+    // V154 (W-6): 書いたものを読み戻して確かめる。違っていたら前の版へ戻して Err にする。
+    // 取り込み（ProjectSource::File）は元ファイルを丸ごともう1回読むことになるので、
+    // **長さの一致だけ**見る（こちらは「編集して保存」ではなく複製で、事故の経路でもない）
+    match src {
+        ProjectSource::Bytes(data) => verify_or_rollback(&dir, &dest, data)?,
+        ProjectSource::File(p) => {
+            let want = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let got = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            if want != got {
+                return Err(rollback_to_bak(
+                    &dir,
+                    &dest,
+                    &format!("長さが違います（元 {want} / 読めた {got}）"),
+                ));
+            }
         }
-        if let Err(e) = fs::rename(&tmp, &dest) {
-            // ロールバック: 旧ファイルを戻す
-            let _ = fs::rename(&bak, &dest);
-            let _ = fs::remove_file(&tmp);
-            return Err(format!("保存確定失敗（旧ファイルは維持）: {e}"));
-        }
-        let _ = fs::remove_file(&bak);
-    } else if let Err(e) = fs::rename(&tmp, &dest) {
-        let _ = fs::remove_file(&tmp);
-        return Err(format!("保存確定失敗: {e}"));
     }
     if !thumb_png.is_empty() {
         let thumb = dir.join(format!("{file}.png"));
@@ -1384,9 +1649,30 @@ pub fn delete_item(lib_root: &str, hash: &str, album: &str, name: &str) -> Resul
         }
     } else {
         // canonical 済みターゲット起点でサイドカーを導出（ライブラリ内が保証される）
-        let mut side = tgt_c.into_os_string();
+        let mut side = tgt_c.clone().into_os_string();
         side.push(".png");
         let _ = fs::remove_file(PathBuf::from(side));
+    }
+    // 4) V154（要件 §2-b ⑤）: 保存の控え（`.bak`）と保存途中の残骸（`.tmp`）も片づける。
+    //    W-1 で `.bak` を残す運用にしたので、これが無いと**消した作品の控えが残り続け**、
+    //    起動時の復元プロンプトが「削除した作品を復元しますか？」と誤爆する。
+    //    **本体削除が成功した後**に、サムネと同じ「失敗してもエラーにしない」扱いで行う
+    //    （索引ロールバックの順序＝索引先行・本体・ロールバックには触れない）。
+    {
+        let mut bak = tgt_c.clone().into_os_string();
+        bak.push(".bak");
+        let _ = fs::remove_file(PathBuf::from(bak));
+        if let (Some(parent), Some(fname)) = (tgt_c.parent(), tgt_c.file_name().and_then(|n| n.to_str())) {
+            if let Ok(entries) = fs::read_dir(parent) {
+                for ent in entries.flatten() {
+                    let p = ent.path();
+                    let Some(n) = p.file_name().and_then(|x| x.to_str()) else { continue };
+                    if tmp_base_name(n).as_deref() == Some(fname) {
+                        let _ = fs::remove_file(&p);
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }

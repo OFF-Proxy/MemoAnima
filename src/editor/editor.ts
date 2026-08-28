@@ -27,9 +27,19 @@ import {
   clipBaseMap,
   effectiveLayerStates,
   relinkShared,
+  projectBytes,
+  projectFaces,
+  loadWallFaces,
+  LOAD_WALL_BYTES,
 } from "./model";
 import { compositeFrame, presentToCanvas, frameToPngBlob, flattenIndexFrame } from "./render";
-import { History, bufferChangeEntry, multiBufferChangeEntry, type HistoryEntry } from "./history";
+import {
+  History,
+  bufferChangeEntry,
+  entryBytes,
+  multiBufferChangeEntry,
+  type HistoryEntry,
+} from "./history";
 // M10-2a: 変位マップエンジン（歪み3方式と M10-3 のゆらゆらが共有する適用側）
 import { WarpField, applyWarp, isConvexQuad } from "./warp";
 import { buildWobbleFrames, type WobbleKind, type WobbleStrength } from "./wobble";
@@ -50,7 +60,7 @@ import * as R from "./raster";
 // M17: マイ柄（カスタムトーン）。登録・解決・塗り込みの純関数はここ（settings にだけ保存・保存形式には触れない）
 import * as CT from "./customTone";
 import { FrameClip, makeClip, buildFramesFromClip } from "./frameClip";
-import { FrameSource, projectSource, ExportAudioSource } from "./exporter";
+import { FrameSource, projectSource, ExportAudioSource, formatBytes, formatSize } from "./exporter";
 import {
   AudioPreview,
   decodeAudio,
@@ -345,11 +355,27 @@ export interface EditorCallbacks {
    *  音声だけ MP3 192kbps に抽出されてから、外部音声と同じ形で返ってくる。 */
   pickAudioFile: () => Promise<{ bytes: Uint8Array; mime: string; name: string } | null>;
   confirm: (msg: string) => Promise<boolean>;
+  /** V154 (W-3): 「読んで閉じるだけ」の知らせ（ボタンは1つ）。選ばせる場面ではないので confirm と分ける。
+   *  未実装の呼び出し側ではトーストに落ちる（editor 側で `?.` して分岐する） */
+  notice?: (msg: string) => Promise<void>;
   prompt: (msg: string, def: string) => Promise<string | null>;
   toast: (msg: string) => void;
   /** M10-21: 入力診断ログ（ローカルの memoanima.log へ）。`?inputlog` か
    *  VITE_INPUTLOG=1 ビルドでのみ editor から呼ばれる。通常は一切呼ばれない */
+  /** M10-21 → V154b (W-10): `app_config_dir/logs/memoanima.log` へ1行足す。
+   *
+   *  もとは `?inputlog` のときだけ使う入力診断用だったが、V154 以降は
+   *  **常時オンの節目のログ**（保存の成否・検証の失敗・復元・16bit 昇格・大きさの警告・起動）
+   *  も同じ流し先を使う。**作品名・パス・作品の中身は書かない**——「送ってください」と
+   *  頼む前提のものなので、個人が分かるものを入れない（Rust 側でも `<user>` に伏せる）。 */
   appendLog?: (text: string) => void;
+  /** V154 (W-6): 保存したファイルを読み戻す（確定の前に中身を確かめるため）。
+   *  未実装なら読み戻しの検査は省く（書く前の検査と Rust 側のバイト照合は効いたまま） */
+  readSavedFile?: (path: string) => Promise<Uint8Array | null>;
+  /** V154b (W-8): 画面中央に「◯◯中です」を出す。**戻り値を呼ぶと畳む**。
+   *  取り込みの進捗（`openImportProgressModal`）と同じ骨格で、数字は出さない。
+   *  未実装なら進捗が出ないだけ（W-7 のロックと W-9 の遮断は効いたまま） */
+  busy?: (msg: string) => () => void;
 }
 
 /** M10-23: メインスレッドを一瞬手放して、待っている入力イベントを先に処理させる。
@@ -598,6 +624,25 @@ export class Editor {
   /** 保存/破棄でインクリメント。古い世代のオートセーブ書き込みを無効化する */
   private autosaveEpoch = 0;
   private autosaveInFlight: Promise<void> | null = null;
+  /** V154 (W-5): 書き出し中か。true のあいだオートセーブは見送る（`autosavePending` は残す） */
+  private exporting = false;
+  /** V154b (W-7/W-8/W-9): いま走っている重い処理（""＝走っていない）。
+   *
+   *  **これ1つで3つを同時に satisfies する**:
+   *   - W-7: 入口を閉じる（飛行中の呼び出しは**黙って捨てる**。キューに積まない）
+   *   - W-8: 進捗を出す（少し遅らせて出す＝一瞬で終わる保存ではチラつかない）
+   *   - W-9: 編集を受け付けない（`dialogOpen()` に混ぜてキーを止め、
+   *     `#screen-editor.ed-busy` でポインタを止める）
+   *
+   *  オートセーブの `autosaveInFlight` と同じ流儀（あちらは自分の周期を見送るだけなので別枠）。 */
+  private busyKind: "" | "save" | "audio" | "export" = "";
+  /** 進捗を畳む手（`cb.busy` の戻り値）。出していなければ null */
+  private busyHide: (() => void) | null = null;
+  /** 進捗を出すまでの遅延タイマー（0＝予約なし） */
+  private busyTimer = 0;
+  /** 進捗を出すまでの待ち時間。**一瞬で終わる保存でチラつかせない**ための遅延。
+   *  50コマの保存は実測 0.4 秒台なので、ここを超えるものだけ「待つ画面」を出す */
+  private static readonly BUSY_DELAY_MS = 450;
   /** 保存時に必ず保存先ピッカーを出すか（新規メモ・合作・保存先未定） */
   askSaveTarget = false;
 
@@ -833,6 +878,10 @@ export class Editor {
     this.history.clear();
     this.dirty = false;
     this.mounted = true;
+    // V154: 知らせは「作品につき1回」＝別の作品を開いたら出し直す（Editor は使い回される）
+    this.promoteNoticed = false;
+    this.sizeNoticedLevel = "";
+    this.exporting = false; // W-5: 書き出し中に戻る→別の作品を開く、で取り残さない
     this.playing = false;
     this.selMask = null;
     this.floatBuf = null;
@@ -1058,6 +1107,15 @@ export class Editor {
       // 重なり得る。多重併走すると invalidateAutosave が後発の飛行中書き込みを待てない
       //（レビュー検出）。前の便が飛行中なら見送る（pending は残るので次の機会に走る）
       this.autosaveInFlight != null ||
+      // V154b (W-7): **手動保存・音声の読み込み・書き出しの最中は見送る。**
+      // 手動保存が譲るようになった（W-8）ので、15秒タイマーがそのすき間に割り込み得る。
+      // 割り込むと本体2つぶんのメモリを同時に積む＝この回で潰している事故そのもの
+      this.busyKind !== "" ||
+      // V154 (W-5): 書き出し中は見送る。600コマの動画をエンコードしている最中に
+      // 15秒ごとに作品まるごと（138〜276MB）を直列化し直すと、書き出しと保存が
+      // 同時に山を作って落ちる。**書き出し中は編集できない＝取りこぼす変更が無い**ので、
+      // pending を残したまま見送り、終わった直後に走らせる（setExporting）
+      this.exporting ||
       this.pointerDown ||
       this.xformActive ||
       this.floatBuf ||
@@ -1069,7 +1127,7 @@ export class Editor {
     this.autosavePending = false;
     const epoch = this.autosaveEpoch;
     const job = (async () => {
-      const { projectToBytesInterruptible } = await import("./serialize");
+      const { projectToBytesInterruptible, verifySavedBytes } = await import("./serialize");
       // M10-23: 大型作品でエンコードがメインスレッドを数秒塞いでいた（300ページで約2.7秒
       // →ペンの pointerdown が最大1.9秒待たされる実測）。チャンクごとに入力へ譲り、
       // エンコード中に編集が起きたら破棄して次の機会に回す（途切れたスナップショットは
@@ -1099,6 +1157,17 @@ export class Editor {
       }
       // 直前にライブラリ保存/破棄が完了していたら、この古いスナップショットは書かない
       if (epoch !== this.autosaveEpoch || !this.mounted) return;
+      // V154 (W-6): **手動保存と同じ扱い**。書く前に中身を確かめ、通らなければ書かない。
+      // オートセーブの上書きは1世代前を `.bak` へ退避するので、壊れたものを書くと
+      // **良い世代が1つ押し出される**。書かなければ、前の世代がそのまま残る。
+      // 期待コマ数は**エンコード中に構造が変わっていない**ことが `aborted` で保証されている
+      const okAuto = await verifySavedBytes(data, this.project.frames.length);
+      if (!okAuto.ok) {
+        this.cb.appendLog?.(`[V154 W-6] autosave skipped (bad bytes): ${okAuto.reason}`);
+        // 変更は残っているので保存待ちに戻す（次の周期でもう一度作り直す）
+        if (this.mounted && epoch === this.autosaveEpoch) this.autosavePending = true;
+        return;
+      }
       await this.cb.autosave(data, {
         title: this.project.meta.title ?? untitledTitle(),
         album: this.saveCtx?.album ?? null,
@@ -1119,6 +1188,22 @@ export class Editor {
     await flight;
     // 入口ガードにより多重併走はしない想定だが、万一に備え自分の便のときだけ空にする
     if (this.autosaveInFlight === flight) this.autosaveInFlight = null;
+  }
+
+  /** V154 (W-5): 書き出しの開始/終了を知らせる（`main.ts` のエクスポートダイアログが呼ぶ）。
+   *  終わったら、待たせていた便を**次の周期を待たずに**走らせる（最大15秒の空白を作らない）。 */
+  setExporting(v: boolean) {
+    if (this.exporting === v) return;
+    this.exporting = v;
+    // V154b (W-9): 書き出しの実行中も編集を受け付けない。
+    // **進捗は出さない**——書き出しダイアログが自前の進捗（％と段階）を出しているので、
+    // その上にもう1枚重ねると、どちらを見ればいいのか分からなくなる
+    if (v) {
+      if (!this.busyKind) this.beginBusy("export");
+    } else if (this.busyKind === "export") {
+      this.endBusy();
+    }
+    if (!v && this.autosavePending) void this.runAutosave();
   }
 
   /** 進行中のオートセーブを待ち、以後の古い書き込みを無効化してからスロットを消す */
@@ -1673,7 +1758,11 @@ export class Editor {
       <div class="row"><span class="tog">${t("ed.feel.stabilizer.label")}</span><div class="sw2 on" id="ed-tog-stab"></div></div>
       <div class="row"><span class="tog">${t("ed.feel.pressure.label")}</span><div class="sw2 on" id="ed-tog-press"></div></div>
       <div class="row"><span class="tog">${t("ed.feel.grid.label")}</span><div class="sw2 on" id="ed-tog-grid"></div></div>
+      <!-- V154 (W-2): 作品の大きさ。**実体を数える**（掛け算ではない）・履歴は別行 -->
+      <h3 id="ed-szhead">${t("ed.size.head.label")}</h3>
+      <div class="szmeter" id="ed-szmeter"></div>
     `;
+    $("#ed-szhead").title = t("ed.size.head.title");
     // M14 (S-3): 「種類/トーン」ヘッダで一覧を開閉（閉じると現在の種類だけ1行表示）。状態は settings に記憶
     $("#ed-texhead").addEventListener("click", () => {
       this.toneOpen = !this.toneOpen;
@@ -1716,7 +1805,20 @@ export class Editor {
     const fc = $("#ed-fullcolor");
     fc.classList.toggle("on", this.project.colorMode === "fullcolor");
     $("#ed-colorpick").hidden = this.project.colorMode !== "fullcolor";
-    fc.addEventListener("click", () => {
+    fc.addEventListener("click", async () => {
+      // V154 (W-3): 大きい作品でフルカラーを**入れる直前**だけ、これから起きることを見せる。
+      // ここが「257色目でメモリが倍になる」への入口＝止められる最後の地点（小さい作品では出ない）
+      if (
+        this.project.colorMode === "palette" &&
+        this.project.indexBits === 8 &&
+        projectBytes(this.project) >= Editor.SIZE_CAUTION
+      ) {
+        const now = projectBytes(this.project);
+        const ok = await this.cb.confirm(
+          t("ed.color.fullcolor.big.msg", { size: formatBytes(now), after: formatBytes(now * 2) })
+        );
+        if (!ok) return;
+      }
       this.project.colorMode =
         this.project.colorMode === "palette" ? "fullcolor" : "palette";
       fc.classList.toggle("on", this.project.colorMode === "fullcolor");
@@ -1781,6 +1883,106 @@ export class Editor {
       }
     );
     this.buildToolOptions();
+    this.updateSizeMeter(); // V154 (W-2): 組み直したら中身を入れる
+  }
+
+  // ---------------- V154 (W-2/W-3/W-4): 作品の大きさ ----------------
+
+  /** しきい値。**環境で変えない**（要件 §2-W-2）。
+   *  搭載メモリを見て変えると「同じ作品なのに人によって違う警告が出る」＝説明できない挙動になり、
+   *  「あの人は大丈夫だったのに」で相談が噛み合わなくなる。`sysinfo` 等の依存も足さない。
+   *
+   *  V154b（作者の訂正・2026-08-28）: **壁（`LOAD_WALL_BYTES` = 384 MiB）から逆算する**。
+   *  以前の 256/512 MiB は仮置きで、**512 MiB は壁の向こう側**だった——
+   *  警告が出るより先に「保存はできるのに開けない」に落ちてしまう。
+   *  いまは 384 MiB の **50% で注意・75% で警告**（＝壁に当たる前に必ず声がかかる）。 */
+  private static readonly SIZE_CAUTION = 192 * 1024 * 1024; // 384 MiB の 50%
+  private static readonly SIZE_WARN = 288 * 1024 * 1024; // 384 MiB の 75%
+  /** 履歴に許すバイト数の下限・上限（W-4） */
+  private static readonly HIST_BUDGET_MIN = 16 * 1024 * 1024;
+  private static readonly HIST_BUDGET_MAX = 256 * 1024 * 1024;
+  /** 注意/警告のときに足す助言。**動的キーは `*Key` のプロパティで持つ**
+   *  （`m1201_i18n_check` の検査4 がこの形だけを拾える。文字列を組み立てると検査が沈黙する） */
+  private static readonly SIZE_ADVICE = {
+    caution: { msgKey: "ed.size.caution.msg" },
+    warn: { msgKey: "ed.size.warn.msg" },
+  } as const;
+  /** 16bit 昇格の案内は**1つの作品につき1回**（毎回出すと邪魔・要件「止まらないこと」） */
+  private promoteNoticed = false;
+  /** 大きさの知らせを出した帯（"" =まだ出していない）。帯が上がったときだけ出す */
+  private sizeNoticedLevel: "" | "caution" | "warn" = "";
+
+  /** V154: メーターの3行を書き、履歴の予算（W-4）を作品の大きさに合わせる。
+   *  呼ぶ場所は「絵の量が変わり得た直後」だけ（ストローク中は呼ばない）。 */
+  private updateSizeMeter() {
+    const host = document.querySelector("#ed-szmeter") as HTMLElement | null;
+    // W-4: 作品が大きいほど履歴に許す量を減らす（＝戻せる回数が自動で減る）。
+    // 小さい作品では上限に張り付く＝64件の従来どおり（体感を変えない）
+    const proj = projectBytes(this.project);
+    this.history.budgetBytes = Math.max(
+      Editor.HIST_BUDGET_MIN,
+      Math.min(Editor.HIST_BUDGET_MAX, Editor.SIZE_CAUTION - proj)
+    );
+    if (!host) return;
+    const hist = this.history.totalBytes();
+    const total = proj + hist;
+    const level: "ok" | "caution" | "warn" =
+      total >= Editor.SIZE_WARN ? "warn" : total >= Editor.SIZE_CAUTION ? "caution" : "ok";
+    host.className = "szmeter lv-" + level;
+    const row = (label: string, n: number, cls = "") =>
+      `<div class="szrow ${cls}"><span>${label}</span><b>${formatSize(n)}</b></div>`;
+    // V154b: **面数（レイヤー×コマ）と、開ける上限**。
+    // バイト数より壁に直結していて分かりやすい（作者の指示）。上限はビット幅で変わる
+    //（8bit 5,242 / 16bit 2,621）ので、いまの幅で出す
+    const faces = projectFaces(this.project);
+    const faceMax = loadWallFaces(this.project.indexBits === 16 ? 16 : 8);
+    const overWall = faces > faceMax;
+    host.innerHTML =
+      row(t("ed.size.project.label"), proj) +
+      row(t("ed.size.history.label"), hist) +
+      row(t("ed.size.total.label"), total, "tot") +
+      `<p class="sznote${overWall ? " adv" : ""}">${t("ed.size.faces.msg", {
+        n: faces.toLocaleString(),
+        max: faceMax.toLocaleString(),
+      })}</p>` +
+      // 上限を超えている＝**保存できても開き直せない**。いちばん強い知らせを出す
+      (overWall ? `<p class="sznote adv">${t("ed.size.overWall.msg")}</p>` : "") +
+      // 「統合したのに『元に戻す』が減らない」を**説明なしで**分かるようにする1行（要件 §2-W-2）
+      `<p class="sznote">${t("ed.size.history.msg")}</p>` +
+      (level === "ok" ? "" : `<p class="sznote adv">${t(Editor.SIZE_ADVICE[level].msgKey)}</p>`);
+    // 右パネルは縦に長い＝**下端のメーターは画面の高さによっては見えない**（900×540 で実測: 内容 943px /
+    // 見える高さ 458px）。色が付いても気づかない人がいるので、**帯が上がったときだけ一度知らせる**。
+    // 失われた 500〜600コマの作品はちょうど「注意」の帯（132〜264MB）だった＝ここで黙っていると
+    // 今回の事故と同じことが起きる（Codex レビュー指摘・優先度 高）。
+    // 1つの作品で最大2回（注意で1回・警告に上がってもう1回）・小さい作品では絶対に出ない・
+    // 閉じるだけで何も起きない（止めない）
+    if (level !== "ok" && this.sizeNoticedLevel !== "warn" && this.sizeNoticedLevel !== level) {
+      this.sizeNoticedLevel = level;
+      this.cb.appendLog?.(
+        `[V154b] size ${level} project=${proj} history=${hist} total=${total} ` +
+          `faces=${projectFaces(this.project)}/${loadWallFaces(
+            this.project.indexBits === 16 ? 16 : 8
+          )} wall=${LOAD_WALL_BYTES}`
+      );
+      // 数字は本文に混ぜず、**いまの合計**を頭に添える（訳文を増やさずに現在値を見せる）
+      const head = `${t("ed.size.total.label")} ${formatSize(total)}`;
+      void this.cb.notice?.(head + "\n\n" + t(Editor.SIZE_ADVICE[level].msgKey));
+    }
+  }
+
+  /** V154 (W-3): 16bit 昇格＝**メモリの使用量が倍**になり、色を減らしても戻らない一方通行
+   *  （`editor.ts` の promoteTo16 は片道）。**小さい作品ではこれまでどおりトーストだけ**。
+   *  大きい作品のときだけ、いまの量を添えて**作品につき一度**知らせる（止めはしない）。 */
+  private noticePromote16() {
+    const proj = projectBytes(this.project);
+    if (this.promoteNoticed || proj < Editor.SIZE_CAUTION || !this.cb.notice) {
+      this.cb.toast(t("ed.color.promote16.toast")); // 従来どおり（小さい作品の体感を変えない）
+      return;
+    }
+    this.promoteNoticed = true;
+    this.cb.appendLog?.(`[V154b] promote16 bytes=${proj}`);
+    // ここに来た時点で昇格は済んでいる＝`proj` は**倍になったあと**の量
+    void this.cb.notice(t("ed.color.promote16.big.msg", { size: formatBytes(proj) }));
   }
 
   // ---------------- 音声UI（M6-3: 波形調整パネル） ----------------
@@ -1796,6 +1998,8 @@ export class Editor {
    *  M5-1: BGM側は従来どおり作業コピー（適用までプロジェクトに触らない）。
    *  SE側（トラック・コマ配置）は**即時反映＋Undo履歴**（handoff §6 の規則）。 */
   private async openAudioPanel() {
+    // V154b (W-9): **「保存中に音楽タブ触った」が報告の一節**。重い処理の最中は開かない
+    if (this.busyKind) return;
     if (this.audioPanelEl) return;
     if (this.playing) this.stopPlayback();
     const proj = this.project;
@@ -2299,6 +2503,8 @@ export class Editor {
 
     const bind = () => {
       box.querySelector("#ap-load")?.addEventListener("click", async () => {
+        // V154b (W-7): 読み込み中の再入を止める（動画からの抽出は数十秒かかることがある）
+        if (self.busyKind) return;
         const picked = await self.cb.pickAudioFile();
         if (!picked) return;
         w.bytes = picked.bytes;
@@ -2313,10 +2519,16 @@ export class Editor {
         viewStart = 0;
         stopMarkT = null; // Q-2: 音源が変わるのでマーカーもクリア
         buffer = null;
+        // V154b (W-8): 波形にするデコードは長い曲で数秒かかる。「読み込み中です」を出し、
+        // その間は編集を受け付けない（W-9）
+        self.beginBusy("audio");
         try {
+          self.showBusyAfterDelay(t("ed.busy.audio.label"));
           buffer = await decodeAudio(w.bytes);
         } catch {
           self.cb.toast(t("ed.audio.decodeFailed.toast"));
+        } finally {
+          self.endBusy();
         }
         render();
       });
@@ -2573,6 +2785,7 @@ export class Editor {
         self.audioPreview.invalidate();
         self.updateAudioToolButton();
         self.updateFilmSeMarks();
+        self.updateSizeMeter(); // V154 (W-2 ③): BGM のバイト列もメモリに載る
         close();
       });
       box.querySelector("#ap-cancel")?.addEventListener("click", () => close());
@@ -2674,9 +2887,16 @@ export class Editor {
       host.appendChild(addRow);
     };
     const addSe = async () => {
+      if (self.busyKind) return; // V154b (W-7)
       const picked = await self.cb.pickAudioFile();
       if (!picked) return;
-      self.addSeTrack(picked);
+      self.beginBusy("audio");
+      try {
+        self.showBusyAfterDelay(t("ed.busy.audio.label"));
+        self.addSeTrack(picked);
+      } finally {
+        self.endBusy();
+      }
     };
     // パネルが開いている間、SE操作（Undo含む）でセクションを再描画する
     this.seSectionRefresh = renderSeSection;
@@ -2699,10 +2919,15 @@ export class Editor {
 
     // 初期デコード（波形用）
     if (w.bytes) {
+      // V154b (W-8): ここも長い曲では待たされる。同じ「読み込み中です」を出す
+      this.beginBusy("audio");
       try {
+        this.showBusyAfterDelay(t("ed.busy.audio.label"));
         buffer = await decodeAudio(w.bytes);
       } catch {
         this.cb.toast(t("ed.audio.waveDecodeFailed.toast"));
+      } finally {
+        this.endBusy();
       }
     }
     render();
@@ -2777,6 +3002,7 @@ export class Editor {
     this.updateAudioToolButton();
     this.updateFilmSeMarks();
     this.seSectionRefresh?.();
+    this.updateSizeMeter(); // V154 (W-2 ③): 音声もメモリに載っている
   }
 
   private seById(id: string): SeTrack | undefined {
@@ -2805,7 +3031,13 @@ export class Editor {
       if (a) a.se = a.se.filter((s) => s.id !== track.id);
       self.afterSeChange();
     };
-    this.history.push({ label: "SE追加", undo: revert, redo: apply });
+    // V154 (W-2 ③): 取り消すと、この音源のバイト列は履歴のクロージャだけが持つ（Codex レビュー指摘）
+    this.history.push({
+      label: "SE追加",
+      bytesIfUndone: entryBytes(track),
+      undo: revert,
+      redo: apply,
+    });
     apply();
   }
 
@@ -2843,7 +3075,13 @@ export class Editor {
       }
       self.afterSeChange();
     };
-    this.history.push({ label: "SE削除", undo: revert, redo: apply });
+    // V154 (W-2 ③): 消した効果音のバイト列も履歴が抱えたまま（戻せばプロジェクト側へ帰る）
+    this.history.push({
+      label: "SE削除",
+      bytesIfApplied: entryBytes(track),
+      undo: revert,
+      redo: apply,
+    });
     apply();
   }
 
@@ -3425,6 +3663,7 @@ export class Editor {
     const self = this;
     this.history.push({
       label: "フォルダごと削除",
+      bytes: entryBytes(savedBuffers), // V154 (W-2): 中身のレイヤーを全コマぶん抱える
       undo() {
         self.restoreStructure(structBefore);
         self.project.frames.forEach((f, fi) => {
@@ -4768,7 +5007,13 @@ export class Editor {
       self.frameIndex = Math.min(self.frameIndex, self.project.frames.length - 1);
       self.afterFrameStructureChange();
     };
-    this.history.push({ label: "ゆらゆら差分", undo: revert, redo: apply });
+    // V154 (W-2): 取り消したコマは履歴が抱える（同上）
+    this.history.push({
+      label: "ゆらゆら差分",
+      bytesIfUndone: entryBytes(newFrames),
+      undo: revert,
+      redo: apply,
+    });
     apply();
     if (willWarn)
       this.cb.toast(t("ed.common.manyFrames.toast"));
@@ -5267,6 +5512,7 @@ export class Editor {
     $("#ed-save").onclick = () => this.save();
     $("#ed-saveas").onclick = () => this.saveAs();
     $("#ed-export").onclick = () => {
+      if (this.busyKind) return; // V154b (W-7): 重い処理の最中は開かない
       if (this.xformGuard()) return; // E-4
       if (this.playing) this.stopPlayback();
       this.cb.openExport(
@@ -5297,6 +5543,7 @@ export class Editor {
     this.history.onchange = () => {
       ($("#ed-undo") as HTMLButtonElement).disabled = !this.history.canUndo;
       ($("#ed-redo") as HTMLButtonElement).disabled = !this.history.canRedo;
+      this.updateSizeMeter(); // V154 (W-2): 履歴が動いたら「元に戻す」の行も動く
     };
     this.history.onchange();
     // 表示操作
@@ -5937,7 +6184,98 @@ export class Editor {
   // ---------------- 保存 ----------------
 
   /** 保存。成功時 true / キャンセル・失敗時 false（saveAs のフラグ復元に使う） */
+  /** V154 (W-6): 保存したファイルを読み戻して中身を確かめる。
+   *
+   *  読み戻せないとき（コマンド未実装・巨大すぎて読めない）は**検査を省いて通す**。
+   *  ここで落とすと、確かめる手段が無いだけの人が保存できなくなるため。
+   *  その場合も「書く前の検査」と Rust 側のバイト照合は効いている。 */
+  private async verifySavedFile(
+    path: string,
+    expectFrames: number
+  ): Promise<{ ok: boolean; reason: string }> {
+    if (!this.cb.readSavedFile) return { ok: true, reason: "" };
+    let bytes: Uint8Array | null = null;
+    try {
+      bytes = await this.cb.readSavedFile(path);
+    } catch (e) {
+      // 読み出しそのものが失敗＝**確かめられなかった**だけ。保存は成功している可能性が高い
+      this.cb.appendLog?.(`[V154 W-6] read-back-unavailable (check skipped): ${String(e)}`);
+      return { ok: true, reason: "" };
+    }
+    if (!bytes) return { ok: true, reason: "" };
+    const { verifySavedBytes } = await import("./serialize");
+    const r = await verifySavedBytes(bytes, expectFrames);
+    return { ok: r.ok, reason: r.reason };
+  }
+
+  // ---------------- V154b (W-7/W-8/W-9): 重い処理は1本だけ ----------------
+
+  /** V154b: 重い処理に入る。**入口を閉じてから**呼ぶこと（`busyKind` が空でないときは呼ばない）。
+   *  ロック（W-7/W-9）は**この瞬間から**効く。進捗（W-8）は `showBusyAfterDelay` で別に出す
+   *  ——保存先ピッカーのように「利用者を待っている時間」に進捗を出さないため。 */
+  private beginBusy(kind: "save" | "audio" | "export") {
+    this.busyKind = kind;
+    // ポインタを止める（キーは dialogOpen() が見る）。**遅延なしで即座に**——
+    // 進捗が出るまでの 450ms に触られたら、そこで混ざったものが保存される
+    document.querySelector("#screen-editor")?.classList.add("ed-busy");
+    this.updateBusyButtons();
+  }
+
+  /** V154b (W-8): 少し待ってから進捗を出す（一瞬で終わる処理ではチラつかせない） */
+  private showBusyAfterDelay(msg: string) {
+    if (!this.busyKind || this.busyTimer || this.busyHide) return;
+    this.busyTimer = window.setTimeout(() => {
+      this.busyTimer = 0;
+      if (!this.busyKind) return; // もう終わっていた
+      this.busyHide = this.cb.busy?.(msg) ?? null;
+    }, Editor.BUSY_DELAY_MS);
+  }
+
+  /** V154b: 重い処理から出る。**どの経路でも必ず呼ぶ**（finally で呼ぶこと）。 */
+  private endBusy() {
+    if (this.busyTimer) {
+      clearTimeout(this.busyTimer);
+      this.busyTimer = 0;
+    }
+    this.busyHide?.();
+    this.busyHide = null;
+    this.busyKind = "";
+    document.querySelector("#screen-editor")?.classList.remove("ed-busy");
+    this.updateBusyButtons();
+  }
+
+  /** V154b (W-7): 重い処理の入口（保存・別名保存・書き出し）のボタンを、
+   *  走っている間だけ押せなくする。**押せないことが見て分かる**のが要点で、
+   *  実際の防御は `busyKind` の判定のほう（ボタン以外の経路もあるため）。 */
+  private updateBusyButtons() {
+    const busy = this.busyKind !== "";
+    for (const sel of ["#ed-save", "#ed-saveas", "#ed-export"]) {
+      const b = document.querySelector(sel) as HTMLButtonElement | null;
+      if (b) b.disabled = busy;
+    }
+  }
+
+  /** V154 (W-6): 保存を確定させずに失敗を伝える。**控えは一切捨てない**。 */
+  private reportSaveBroken(where: string, reason: string, err?: unknown): false {
+    this.cb.appendLog?.(`[V154 W-6] save not committed (${where}): ${reason}`);
+    // V154b (W-10): 送ってもらえれば原因が分かる、と**その場で**伝える。
+    // Codex レビュー（優先度 中）: 例外で落ちた保存はトーストだけで、**控えが残っていることも
+    // ログのことも伝わっていなかった**。いちばん普通に起きる失敗（書き込めない等）なので、
+    // そこにも同じ知らせを出す（文面だけ「読み戻したら壊れていた」と分ける）
+    const head = err === undefined
+      ? t("ed.file.saveBroken.msg")
+      : t("ed.file.saveFailed.msg", { err: String(err) });
+    const msg = head + "\n" + t("ed.log.sendHint.msg");
+    if (this.cb.notice) void this.cb.notice(msg);
+    else this.cb.toast(msg);
+    return false; // dirty は true のまま／オートセーブも残したまま
+  }
+
   async save(): Promise<boolean> {
+    // V154b (W-7): **飛行中の呼び出しは黙って捨てる。**キューに積まない——積むと
+    // 同じことが遅れて起きるだけで、900コマ×20レイヤーでは1回ぶんが 3〜6 GiB の山になる。
+    // 連打（＝重いから押したくなる）がそのまま倍々でメモリを食っていた
+    if (this.busyKind) return false;
     if (this.xformGuard()) return false; // E-4
     if (this.askSaveTarget || !this.saveCtx) {
       // F-4: 既存アルバムのピッカー（＋新規フォルダ作成）で保存先を選ぶ
@@ -5955,7 +6293,13 @@ export class Editor {
         baseName: picked.baseName,
       };
     }
+    // V154b (W-7): ここから先が重い処理。**入口を閉じる**（進捗は下で別に出す——
+    // 保存先ピッカーは「利用者を待つ時間」なので、そこに「保存中です」を出さない）
+    this.beginBusy("save");
+    const t0 = performance.now();
     try {
+      // V154b (W-8): 少し待ってから「保存中です」を出す（一瞬で終わる保存ではチラつかない）
+      this.showBusyAfterDelay(t("ed.busy.saving.label"));
       // M10-14: 手動保存（Ctrl+S・保存ボタン・別名保存）のときだけサムネコマを更新。
       // 15秒オートセーブは projectToBytes を直接呼ぶだけなので既存値のまま
       //（オートセーブでサムネが揺れない＝作者明示仕様）
@@ -5963,21 +6307,56 @@ export class Editor {
         0,
         Math.min(this.project.frames.length - 1, this.frameIndex)
       );
-      const { projectToBytes } = await import("./serialize");
-      const data = await projectToBytes(this.project);
+      const { projectToBytesInterruptible, verifySavedBytes } = await import("./serialize");
+      // V154 (W-6): 期待するコマ数は**直列化の直前**の値。以降の検査はこれと突き合わせる
+      const expectFrames = this.project.frames.length;
+      // V154b (W-8/W-9): 手動保存も**チャンクごとにメインスレッドを手放す**。
+      //
+      // 従来は `projectToBytes`（一気呵成）で、300コマでも 2 秒近くメインスレッドを握ったまま。
+      // その間はタイマーもペイントも走らないので、**「保存中です」を出しても誰にも見えない**
+      // （実測: 出す予約はされるが、画面に出る前に保存が終わる／出ても描かれない）。
+      // 譲れるようにしたのは W-9 で**編集を受け付けなくした**からで、
+      // 「譲るとエンコード中の変更が混ざる」という危険はロックで消してある。
+      // 出力バイト列は一気呵成の経路と**同一**（`encodeProject` のコメントの機械検証済みの前提）。
+      const data = await projectToBytesInterruptible(this.project, {
+        yieldNow: yieldToInput,
+        // 手動保存は**中断しない**（利用者が押した保存を勝手にやめない）。
+        // 例外はエディタを離れたとき——書く先が無いので捨てる
+        aborted: () => !this.mounted,
+      });
+      if (!data) return this.reportSaveBroken("encode", "aborted (unmounted)");
+      // V154 (W-6) ①: **書く前に**中身を確かめる。
+      // 壊れたものを、いま在る正しいファイルに上書きしない（上書きしてしまうと、
+      // 控えを残していても「良い版が1つ減る」ことに変わりはない）
+      const pre = await verifySavedBytes(data, expectFrames);
+      if (!pre.ok) return this.reportSaveBroken("pre-write", pre.reason);
       const blob = await frameToPngBlob(this.project, this.project.thumbFrame);
       const thumb = blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
       const path = await this.cb.saveProject(this.saveCtx, data, thumb);
+      // V154 (W-6) ②: **書いたものを読み戻して**確かめる。
+      // Rust 側でも書き戻し照合をしているが、こちらは IPC を跨いだ経路ごと確かめる
+      //（アプリから見て「ディスクにあるファイルが開ける」ことの確認）
+      const post = await this.verifySavedFile(path, expectFrames);
+      if (!post.ok) return this.reportSaveBroken("read-back", post.reason);
+      // V154 (W-6) ③: **ここまで通ってはじめて確定する。**
+      // 順序が要: dirty=false とオートセーブの破棄は、検査が通ったあとでしか行わない
+      //（以前はここが保存の直後にあり、壊れたものを保存すると控えを2つとも自分で捨てていた）
       this.dirty = false;
       this.askSaveTarget = false;
       // 進行中の古いオートセーブが保存後に復活しないよう世代を進めてから消す
       await this.invalidateAutosave();
+      this.cb.appendLog?.(
+        `[V154b] save ok frames=${expectFrames} bytes=${data.length} ms=${Math.round(
+          performance.now() - t0
+        )}`
+      );
       this.cb.toast(t("ed.file.saved.toast", { path }));
       this.cb.onSaved(path);
       return true;
     } catch (e) {
-      this.cb.toast(t("ed.file.saveFailed.toast", { err: e }));
-      return false;
+      return this.reportSaveBroken("exception", String(e), e);
+    } finally {
+      this.endBusy();
     }
   }
 
@@ -6080,12 +6459,13 @@ export class Editor {
       };
       this.history.push({
         label: "ページ貼り付け",
+        bytes: entryBytes(beforeLayers, afterLayers), // V154 (W-2)
         undo: () => restore(beforeLayers, beforePaper, beforeOrder, beforeSe),
         redo: () => restore(afterLayers, afterPaper, undefined, afterSe),
       });
       restore(afterLayers, afterPaper, undefined, afterSe);
       if (bitsBefore === 8 && this.project.indexBits === 16) {
-        this.cb.toast(t("ed.color.promote16.toast"));
+        this.noticePromote16(); // V154 (W-3)
       }
       this.cb.toast(t("ed.frameclip.pastedOne.toast"));
       return;
@@ -6111,10 +6491,16 @@ export class Editor {
       self.frameIndex = Math.min(at - 1, self.project.frames.length - 1);
       self.afterFrameStructureChange();
     };
-    this.history.push({ label: "ページ挿入", undo: revert, redo: apply });
+    // V154 (W-2): 取り消したコマは履歴が抱える（同上）
+    this.history.push({
+      label: "ページ挿入",
+      bytesIfUndone: entryBytes(newFrames),
+      undo: revert,
+      redo: apply,
+    });
     apply();
     if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.cb.toast(t("ed.color.promote16.toast"));
+      this.noticePromote16(); // V154 (W-3)
     }
     this.cb.toast(t("ed.tl.insertedMulti.toast", { count: n }));
   }
@@ -6672,7 +7058,7 @@ export class Editor {
     const lenBefore = this.project.colorTable.length;
     const idx = ensureColor(this.project, hex);
     if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.cb.toast(t("ed.color.promote16.toast"));
+      this.noticePromote16(); // V154 (W-3)
       this.dirty = true;
     } else if (lenBefore >= 65536 && this.project.colorTable[idx] !== hex.toLowerCase()) {
       this.cb.toast(t("ed.color.paletteFull.toast"));
@@ -6820,6 +7206,10 @@ export class Editor {
   }
 
   private onPointerDown(e: PointerEvent) {
+    // V154b (W-9): 重い処理の最中は描かない。`#screen-editor.ed-busy` の
+    // `pointer-events:none` で普通は届かないが、**ポインタ捕捉中は届いてしまう**
+    // （捕捉はヒットテストを上書きする）ので、ここでも止める
+    if (this.busyKind) return;
     // M16 (K-4): 修飾キー＋クリックの割り当てを**最優先**で見る（右/中クリックの割り当ても効くよう
     // 右ボタンガードより前）。ただし: 再生中は「触れたら止めるだけ」を優先／Space パン中は見ない／
     // **範囲選択ツール中の Shift/Alt＋左クリックはマスク加減算が優先**（M13-2a）。素の左クリック（無修飾
@@ -7070,6 +7460,10 @@ export class Editor {
   }
 
   private onPointerMove(e: PointerEvent) {
+    // V154b (W-9): 重い処理の最中は描かない。`#screen-editor.ed-busy` の
+    // `pointer-events:none` で普通は届かないが、**ポインタ捕捉中は届いてしまう**
+    // （捕捉はヒットテストを上書きする）ので、ここでも止める
+    if (this.busyKind) return;
     // M11-6: 掴んでいるポインタ以外の移動は無視する（ペンで描いている最中に
     // 手のひらが触れて線が飛ぶのを防ぐ）。**down 側には入れない** —
     // 取りこぼしたキャプチャを次の pointerdown で畳んで直すのが M11-5 の復帰経路で、
@@ -7650,6 +8044,10 @@ export class Editor {
   }
 
   private onPointerUp(e: PointerEvent) {
+    // V154b (W-9): 重い処理の最中は描かない。`#screen-editor.ed-busy` の
+    // `pointer-events:none` で普通は届かないが、**ポインタ捕捉中は届いてしまう**
+    // （捕捉はヒットテストを上書きする）ので、ここでも止める
+    if (this.busyKind) return;
     // M11-6: 掴んでいるポインタ以外の up では、描きかけのストロークを切らない
     //（2本目の指を離しただけでペンの線が終わってしまうのを防ぐ）
     if (this.capturedPointerId !== null && e.pointerId !== this.capturedPointerId) return;
@@ -8261,7 +8659,7 @@ export class Editor {
       Editor.clipboard.data.some((v) => v > 255)
     ) {
       promoteTo16(this.project);
-      this.cb.toast(t("ed.color.promote16.toast"));
+      this.noticePromote16(); // V154 (W-3)
       this.dirty = true;
     }
     // 貼り付け → 変形モードで位置決め
@@ -8322,7 +8720,7 @@ export class Editor {
     let paperIdx = 0;
     if (!transparentPaper) paperIdx = ensureColor(this.project, paperHex);
     if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.cb.toast(t("ed.color.promote16.toast"));
+      this.noticePromote16(); // V154 (W-3)
       this.dirty = true;
     }
     // ② 昇格後の幅でバッファ確保 → remap（index0=透明は FloatBuf の透明と同義）
@@ -8394,7 +8792,7 @@ export class Editor {
     let paperIdx = 0;
     if (!transparentPaper) paperIdx = ensureColor(this.project, paperHex);
     if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.cb.toast(t("ed.color.promote16.toast"));
+      this.noticePromote16(); // V154 (W-3)
       this.dirty = true;
     }
     // ② 昇格後の幅で新コマを組む（紙は今のコマを継承・アクティブレイヤーへ remap・他レイヤーは空）
@@ -8426,7 +8824,13 @@ export class Editor {
       self.frameIndex = Math.min(at - 1, self.project.frames.length - 1);
       self.afterFrameStructureChange();
     };
-    this.history.push({ label: "連番挿入", undo: revert, redo: apply });
+    // V154 (W-2): 取り消したコマは履歴が抱える（同上）
+    this.history.push({
+      label: "連番挿入",
+      bytesIfUndone: entryBytes(newFrames),
+      undo: revert,
+      redo: apply,
+    });
     apply();
     this.cb.toast(t("ed.tl.insertedMulti.toast", { count: n }));
   }
@@ -8899,6 +9303,7 @@ export class Editor {
     };
     this.history.push({
       label: cut ? "切り取って新規レイヤー" : "コピーして新規レイヤー",
+      bytes: entryBytes(beforeSrc, mask), // V154 (W-2)
       undo: revert,
       redo: apply,
     });
@@ -9705,7 +10110,7 @@ export class Editor {
       const bitsBefore = this.project.indexBits;
       newPaper = ensureColor(this.project, hex);
       if (bitsBefore === 8 && this.project.indexBits === 16) {
-        this.cb.toast(t("ed.color.promote16.toast"));
+        this.noticePromote16(); // V154 (W-3)
       }
     }
     if (oldPaper === newPaper) return;
@@ -9749,6 +10154,7 @@ export class Editor {
     const fi = this.frameIndex;
     this.history.push({
       label: "複写",
+      bytes: entryBytes(beforeLayers, afterLayers), // V154 (W-2)
       undo() {
         const f = self.project.frames[fi];
         for (const [k, v] of Object.entries(beforeLayers)) f.layers[k]?.set(v);
@@ -9998,7 +10404,12 @@ export class Editor {
       self.afterLayerChange();
       self.paintFilmThumb(frameIdx);
     };
-    this.history.push({ label: "新規レイヤーへ貼り付け", undo: revert, redo: apply });
+    this.history.push({
+      label: "新規レイヤーへ貼り付け",
+      bytes: entryBytes(clipCopy), // V154 (W-2)
+      undo: revert,
+      redo: apply,
+    });
     apply();
   }
 
@@ -10054,7 +10465,13 @@ export class Editor {
       self.renderCanvas();
       self.rebuildFilm();
     };
-    this.history.push({ label: "全コマへレイヤー貼り付け", undo: revert, redo: apply });
+    // V154 (W-2): 全コマぶんの before スナップショットを抱える（コマ数ぶん効く）
+    this.history.push({
+      label: "全コマへレイヤー貼り付け",
+      bytes: entryBytes(touched.map((x) => x.before), clipCopy),
+      undo: revert,
+      redo: apply,
+    });
     apply();
     const ms = Math.round(performance.now() - t0);
     this.cb.toast(
@@ -10154,7 +10571,9 @@ export class Editor {
       self.activeLayerId = def.id;
       self.afterLayerChange();
     };
-    this.history.push({ label: "レイヤー削除", undo: revert, redo: apply });
+    // V154 (W-2 ②): 消したレイヤーの実体は**履歴が抱えたまま**なので申告する
+    //（「削除したのに減らない」の正体。ここを黙っているとメーターが嘘をつく）
+    this.history.push({ label: "レイヤー削除", bytes: entryBytes(saved), undo: revert, redo: apply });
     apply();
   }
 
@@ -10328,7 +10747,14 @@ export class Editor {
       self.activeLayerId = top.id;
       self.afterLayerChange();
     };
-    this.history.push({ label: "レイヤー統合", undo: revert, redo: apply });
+    // V154 (W-2): **統合しても履歴が統合前の実体を握っている**（要件 §2-W-2 の欠陥②）。
+    // ここを申告することで「作品」は減っても「元に戻す」が減らないことが数字に出る
+    this.history.push({
+      label: "レイヤー統合",
+      bytes: entryBytes(savedTop, savedBottom),
+      undo: revert,
+      redo: apply,
+    });
     apply();
   }
 
@@ -10362,7 +10788,13 @@ export class Editor {
       self.frameIndex = Math.min(self.frameIndex, self.project.frames.length - 1);
       self.afterFrameStructureChange();
     };
-    this.history.push({ label: duplicate ? "コマ複製" : "コマ追加", undo: revert, redo: apply });
+    // V154 (W-2): 取り消すと、このコマの実体は履歴のクロージャだけが持つ（Codex レビュー指摘）
+    this.history.push({
+      label: duplicate ? "コマ複製" : "コマ追加",
+      bytesIfUndone: entryBytes(nf),
+      undo: revert,
+      redo: apply,
+    });
     apply();
   }
 
@@ -10418,7 +10850,14 @@ export class Editor {
       self.frameIndex = at;
       self.afterFrameStructureChange();
     };
-    this.history.push({ label: count > 1 ? `コマ削除（${count}枚）` : "コマ削除", undo: revert, redo: apply });
+    // V154 (W-2): 消したコマは履歴が丸ごと抱えている（600コマ削除なら 138MB がここに残る）。
+    // Undo で戻すと実体はプロジェクト側へ帰るので、そのときは数えない（`bytesIfApplied`）
+    this.history.push({
+      label: count > 1 ? `コマ削除（${count}枚）` : "コマ削除",
+      bytesIfApplied: entryBytes(removed),
+      undo: revert,
+      redo: apply,
+    });
     apply();
   }
 
@@ -10599,6 +11038,9 @@ export class Editor {
       const onFrame = () => self.project.frames[self.frameIndex] === frame;
       this.history.push({
         label,
+        // V154 (W-2): base（バッファのスナップショット）を包むので、その申告を引き継ぐ
+        //（マスクは 0/1 の Uint8Array・76.8KB に対して十分小さいが、同じ流儀で足す）
+        bytes: (base.bytes ?? 0) + entryBytes(selBefore, selAfter),
         undo() {
           base.undo();
           if (onFrame()) {
@@ -10658,6 +11100,7 @@ export class Editor {
     this.rebuildLayers();
     this.renderCanvas();
     this.paintFilmThumb(this.frameIndex);
+    this.updateSizeMeter(); // V154 (W-2): レイヤーの増減で実体の数が変わる
   }
 
   /** M11-20: レイヤーのクリッピング on/off。**履歴に積む（undo 1回）**。
@@ -10702,6 +11145,7 @@ export class Editor {
     this.rebuildFilm();
     this.renderCanvas();
     this.redrawOverlay();
+    this.updateSizeMeter(); // V154 (W-2): コマの増減で実体の数が変わる
   }
 
   private refreshAll() {
@@ -10716,7 +11160,10 @@ export class Editor {
    *  `modalDepth` はゆらゆらダイアログしか増やさないため、main.ts の `modal()` が作る
    *  `.modal-back` の実在も見る。**再生トグルを裏で走らせないための番人**（レビュー検出） */
   private dialogOpen(): boolean {
-    return this.modalDepth > 0 || !!document.querySelector(".modal-back");
+    // V154b (W-9): **重い処理の最中もここに含める**。進捗が出るまでの 450ms も含めて、
+    // ショートカット（Ctrl+S の連打・道具切り替え・再生）を一切通さない。
+    // 「譲るかどうか」を調べて直すより、そもそも触れなくするほうが確実（要件 W-9）
+    return this.busyKind !== "" || this.modalDepth > 0 || !!document.querySelector(".modal-back");
   }
 
   /** M11-2: 文字入力中か（Space/Enter のショートカットを発火させない対象）。

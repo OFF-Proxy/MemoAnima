@@ -567,3 +567,65 @@ export function cloneFrame(f: Frame): Frame {
     se: f.se && f.se.length > 0 ? [...f.se] : undefined,
   };
 }
+
+/** V154 (W-2): いま**メモリに載っている**作品の量（バイト）。
+ *
+ *  ★掛け算（コマ数 × レイヤー数 × 76.8KB）では**間違える**。数えるのは実体:
+ *  - 📌 全コマ共通レイヤー（`shared`）は全コマが**同じ1バッファ**を指す（`relinkShared`）。
+ *    掛け算だと 700 コマで 700 倍に見積もってしまう
+ *  - `Set` に入れてから合計するので、参照が枝分かれしているぶんだけ正しく増える
+ *  - 音声（BGM・効果音）も**同じメモリに載っている**ので足す（要件 §2-b ③）
+ *
+ *  ここに**履歴は入らない**（履歴は `History.totalBytes()`。表示は別の行に出す＝
+ *  「統合したのに減らない」の理由が見えるように）。 */
+export function projectBytes(p: Project): number {
+  const seen = new Set<ArrayBufferView>();
+  let total = 0;
+  const add = (b: ArrayBufferView | null | undefined) => {
+    if (!b || seen.has(b)) return;
+    seen.add(b);
+    total += b.byteLength;
+  };
+  for (const f of p.frames) for (const b of Object.values(f.layers)) add(b);
+  add(p.audio?.bgm?.data);
+  for (const s of p.audio?.se ?? []) add(s.data);
+  return total;
+}
+
+/** V154b: **読み込みの壁**（生バッファのバイト数）。
+ *
+ *  `serialize.ts` の `projectFromBytes` は JSON 全体を**1本の文字列**にしてから `JSON.parse` する。
+ *  V8（Chromium／WebView2）の文字列上限は **536,870,888 文字**（実測）で、
+ *  レイヤーは base64（4/3 倍）で書かれるので、生バッファがこの数を超えると**開けなくなる**:
+ *
+ *      536,870,888 ÷ (4/3) = 402,653,166 バイト = 384.0 MiB
+ *
+ *  base64 が一律 4/3 なので、**8bit でも 16bit でも同じ 384 MiB**（面数の上限は変わる）。
+ *  JSON の骨組み（キー名・カンマ）のぶん、実際の壁はもう少し手前にある。
+ *
+ *  ★この値は「保存はできるのに開けない」を防ぐための目安に使う（メーターのしきい値・面数の上限）。
+ *  壁そのものを無くすには読み込み側を分割パースにする必要があり、それは別の回。 */
+export const LOAD_WALL_BYTES = 402_653_166;
+
+/** V154b: V8（Chromium／WebView2）の**文字列の上限**。実測 536,870,888 文字。
+ *  `projectFromBytes` は JSON 全体を1本の文字列にするので、**展開後がこれを超えたら開けない**。
+ *  `LOAD_WALL_BYTES` はこれを base64 の 4/3 で割った生バッファぶんの言い換え。 */
+export const MAX_JSON_CHARS = 536_870_888;
+
+/** V154b: いまのビット幅で「あと何面まで開けるか」。
+ *  面＝**レイヤー×コマ**（1コマ1レイヤーぶんの索引バッファ）。
+ *  8bit なら 5,242 面／16bit なら 2,621 面。バイト数より**壁に直結していて分かりやすい**。 */
+export function loadWallFaces(indexBits: 8 | 16): number {
+  return Math.floor(LOAD_WALL_BYTES / (PIXELS * (indexBits === 16 ? 2 : 1)));
+}
+
+/** V154b: いまの作品の面数（**保存したときに JSON へ並ぶ数**）。
+ *
+ *  📌 全コマ共通レイヤーはメモリ上は1つの実体だが、**保存の JSON にはコマごとに書かれる**
+ *  （`encodeProject` は `Object.entries(f.layers)` を毎コマ回す）。壁に効くのはそちらなので、
+ *  ここは実体ではなく**エントリの数**を数える（`projectBytes` とは数え方が違う。意図的）。 */
+export function projectFaces(p: Project): number {
+  let n = 0;
+  for (const f of p.frames) n += Object.keys(f.layers).length;
+  return n;
+}

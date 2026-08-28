@@ -1,6 +1,6 @@
 [package]
 name = "animemo"
-version = "1.5.2"
+version = "1.5.4"
 description = "メモアニマ (MemoAnima) — 3DSのお絵かきアニメ作品をPCで編集・書き出しできる非公式・非営利のファンツール"
 authors = ["arcana"]
 edition = "2021"

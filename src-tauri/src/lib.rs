@@ -106,6 +106,19 @@ fn library_stamp(lib_root: String) -> Result<String, String> {
     pclib::library_stamp(&lib_root)
 }
 
+/// V154 (W-1): 保存の途中で終了した跡（本体が無く `<本体>.bak` だけがある作品）を集める。
+/// **読むだけ**。復元するかどうかは利用者が決める（`recover_project`）。
+#[tauri::command]
+fn list_recoverable(lib_root: String) -> Result<Vec<pclib::RecoverableView>, String> {
+    pclib::scan_recoverable(&lib_root)
+}
+
+/// V154 (W-1): 控え（`.bak`）から作品を戻す。本体が在るときは何もしない（上書きしない）。
+#[tauri::command]
+fn recover_project(lib_root: String, rel_path: String) -> Result<String, String> {
+    pclib::recover_project(&lib_root, &rel_path)
+}
+
 /// アルバム一覧。
 #[tauri::command]
 fn list_albums(lib_root: String) -> Result<Vec<String>, String> {
@@ -257,26 +270,14 @@ fn atomic_replace(dir: &std::path::Path, dest: &std::path::Path, bytes: &[u8]) -
         .unwrap_or("autosave");
     let tmp = dir.join(format!("{name}.{}.tmp", N.fetch_add(1, Ordering::SeqCst)));
     fs::write(&tmp, bytes).map_err(|e| format!("書き込み失敗: {e}"))?;
-    if dest.exists() {
-        let bak = dir.join(format!("{name}.bak"));
-        let _ = fs::remove_file(&bak);
-        if let Err(e) = fs::rename(dest, &bak) {
-            let _ = fs::remove_file(&tmp);
-            return Err(format!("退避失敗: {e}"));
-        }
-        if let Err(e) = fs::rename(&tmp, dest) {
-            let _ = fs::rename(&bak, dest);
-            let _ = fs::remove_file(&tmp);
-            return Err(format!("置換失敗: {e}"));
-        }
-        let _ = fs::remove_file(&bak);
-        Ok(())
-    } else {
-        fs::rename(&tmp, dest).map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            format!("確定失敗: {e}")
-        })
-    }
+    // V154 (W-1・要件 §2-b ①): 確定の3手順は `pclib::commit_replace` に一本化した。
+    // **オートセーブはこの経路**で、15秒ごとに走る＝危険な窓が開く回数は手動保存の比ではない。
+    // 以前はここにも同じ3手順が別に書いてあり、`.bak` を消していた（＝窓で死ぬと戻せない）。
+    pclib::commit_replace(dir, dest, &tmp)?;
+    // V154 (W-6): オートセーブも**同じ扱い**。書いたものを読み戻して確かめ、違っていたら
+    // 前の版（`current.asv.bak`）へ戻す。呼び出し側（editor）は Err を受けて「保存待ち」に
+    // 戻すので、次の周期でもう一度作り直す
+    pclib::verify_or_rollback(dir, dest, bytes)
 }
 
 /// オートセーブ保存の本体（AMAS1 組み立て＋原子的置換）。
@@ -463,15 +464,81 @@ fn dir_exists(path: String) -> bool {
 
 /// M7-1 R-A: ローカルエラーログ追記（`app_config_dir/logs/animemo.log`）。
 /// 1MB 超で `.1` へローテート（最大2世代）。**送信機能はない**（オフライン完結・ローカルのみ）。
-#[tauri::command]
-fn append_log(app: tauri::AppHandle, text: String) -> Result<(), String> {
-    use std::io::Write;
+/// V154b (W-10): ログの置き場（`app_config_dir/logs`）。**新しいフォルダは作らない**——
+/// `settings.json` と `autosave/` が既にある場所の隣に置くので、
+/// 既に入れている人にも更新するだけで効く（移行の作業がいらない）。
+fn log_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()
         .app_config_dir()
         .map_err(|e| format!("設定フォルダ取得失敗: {e}"))?
         .join("logs");
     fs::create_dir_all(&dir).map_err(|e| format!("ログフォルダ作成失敗: {e}"))?;
+    Ok(dir)
+}
+
+/// V154b (W-10): **利用者を特定できるものを書かない**ための伏せ字。
+///
+/// ログは「送ってください」と頼む前提のものなので、**Windows のユーザー名**が入ると
+/// それだけで個人が分かってしまう。ホームフォルダのパスを `<user>` に置き換える。
+/// 大文字小文字と `\` / `/` の違いも拾う（Windows はどちらも通る）。
+///
+/// 作品名・アルバム名は**そもそも呼び出し側が渡さない**（W-10 の線引き）。
+/// ここは、例外メッセージのように**こちらが文面を決められないもの**への保険。
+fn redact_user(app: &tauri::AppHandle, text: &str) -> String {
+    let Ok(home) = app.path().home_dir() else {
+        return text.to_string();
+    };
+    redact_home(text, &home.to_string_lossy())
+}
+
+/// V154b (W-10): `redact_user` の中身（**引数だけで決まる**ので検査できる）。
+/// `home` が空や短すぎるときは何もしない（`C:\` を伏せても意味が無く、誤爆だけが増える）。
+pub fn redact_home(text: &str, home: &str) -> String {
+    let home = home.to_string();
+    if home.len() < 4 {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    for needle in [home.clone(), home.replace('\\', "/")] {
+        let lower_needle = needle.to_lowercase();
+        loop {
+            let Some(at) = out.to_lowercase().find(&lower_needle) else { break };
+            let end = at + needle.len();
+            // 小文字化でバイト長が変わる文字が混ざっていると位置がずれ得る。
+            // ずれていたら**触らずに諦める**（伏せ字が甘くなるより、落ちるほうが困る）
+            if end > out.len() || !out.is_char_boundary(at) || !out.is_char_boundary(end) {
+                break;
+            }
+            out.replace_range(at..end, "<user>");
+        }
+    }
+    out
+}
+
+/// V154b (W-10): ログのフォルダをエクスプローラーで開く（⚙ の「ログのフォルダを開く」）。
+/// **パスをフロントに渡さない**（渡すと画面やクリップボード経由で利用者名が漏れる）。
+#[tauri::command]
+fn open_log_folder(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = log_dir(&app)?;
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| format!("フォルダを開けません: {e}"))
+}
+
+#[tauri::command]
+fn append_log(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    let dir = log_dir(&app)?;
+    append_log_line(&dir, &redact_user(&app, &text))
+}
+
+/// V154b (W-10): 1行足す（**上限つき**）。`app` を要らない形にしてあるので検査できる。
+///
+/// 1MB を超えたら `memoanima.log.1` へ回して新しく書き始める＝**2世代まで**。
+/// 無限に育てない（送ってもらうものなので、大きすぎると送れない）。
+pub fn append_log_line(dir: &Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
     let p = dir.join("memoanima.log");
     if let Ok(md) = fs::metadata(&p) {
         if md.len() > 1_000_000 {
@@ -574,6 +641,9 @@ pub fn run() {
             import_single_file,
             scan_library,
             library_stamp,
+            list_recoverable,
+            recover_project,
+            open_log_folder,
             list_albums,
             create_album,
             rename_album,

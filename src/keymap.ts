@@ -114,6 +114,15 @@ export const COMMANDS = [
   { id: "file.export", labelKey: "keys.cmd.fileExport.label", group: "file" },
   { id: "file.image", labelKey: "keys.cmd.fileImage.label", group: "file" },
   { id: "file.audio", labelKey: "keys.cmd.fileAudio.label", group: "file" },
+  {
+    // V153: ⚙ を開くコマンド。**この回の本体は「入口を2つにすること」**——トップバーが
+    // 収まらないと ⚙ は画面外へ押し出され、設定に一切たどり着けなくなっていた（利用者報告）。
+    // ホーム画面でだけ効く（エディタ中は main.ts 側のガードで無視する）
+    id: "app.settings",
+    labelKey: "keys.cmd.appSettings.label",
+    group: "file",
+    noteKey: "keys.cmd.appSettings.hint",
+  },
   // ---- コマ ----
   { id: "frame.prev", labelKey: "keys.cmd.framePrev.label", group: "frame", repeatable: true, noteKey: "keys.cmd.framePrev.hint" },
   { id: "frame.next", labelKey: "keys.cmd.frameNext.label", group: "frame", repeatable: true, noteKey: "keys.cmd.frameNext.hint" },
@@ -396,6 +405,8 @@ const STANDARD: Bindings = {
   "play.toggle": { code: "Enter" },
   // M16 (K-4): Alt＋クリックでスポイト（クリスタ準拠）。組み込み既定にだけ入れる（ユーザー保存済みには足さない）
   "edit.pickColor": { code: "", button: 0, alt: true },
+  // V153: 設定を開く。**Ctrl+, は多くのアプリで「環境設定」の定番**で、組み込み2つとも空きだった（実測）
+  "app.settings": { code: "Comma", ctrl: true },
 };
 
 /** 組み込み「左手向け」。左手が届く範囲（QWER/ASDF/ZXCV）に道具を集約する。
@@ -428,6 +439,8 @@ const LEFTY: Bindings = {
   "play.toggle": { code: "Enter" },
   // M16 (K-4): Alt＋クリックでスポイト（クリスタ準拠）。組み込み既定にだけ入れる
   "edit.pickColor": { code: "", button: 0, alt: true },
+  // V153: 設定を開く（標準と同じ既定）
+  "app.settings": { code: "Comma", ctrl: true },
 };
 
 export const BUILTIN_PRESETS: Preset[] = [
@@ -550,6 +563,10 @@ const LEGACY_BINDINGS: { id: CommandId; b: KeyBinding }[] = [
   { id: "frame.copyPage", b: { code: "KeyC", ctrl: true, shift: true } },
   { id: "frame.pastePage", b: { code: "KeyV", ctrl: true, shift: true } },
   { id: "tool.hand", b: { code: "KeyH" } },
+  // V153: 設定を開く（Ctrl+,）。**ユーザー保存済みのプリセットにも効かせる**ために固定側へ置く——
+  // ⚙ が画面外に出て設定へ行けない状態からの復帰手段なので、「組み込みプリセットの人だけ助かる」
+  // では意味がない。プリセットが Ctrl+, を別コマンドに使っていればそちらが勝つ（従来どおり後勝ち）
+  { id: "app.settings", b: { code: "Comma", ctrl: true } },
 ];
 
 /** 「道具」グループのコマンドか（M11-15: 同キー巡回の対象）。

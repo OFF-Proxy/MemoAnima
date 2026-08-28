@@ -138,6 +138,36 @@ function preflight() {
     }
     console.log(`  ${rel} の表題が v${version} と一致`);
   }
+
+  // (4) V154: **更新のお知らせが空のまま出荷しない。**
+  //     `latest.json` の `notes` は README.txt の「■ v<version> で…」の節から作る。
+  //     見出しの版数を上げ忘れたり、節を2つに分けたりすると**黙って空になり**、
+  //     全利用者の更新ダイアログが白紙で出る（V153 で出荷寸前まで気づかなかった穴）。
+  //     ビルドの3分を待たずに、ここで止める。
+  const notes = buildNotes();
+  if (!notes.trim()) {
+    throw new Error(
+      `A-5 自己検査で止めました: release-assets/README.txt に「■ v${version} で…」の節がありません\n` +
+        "  → 更新のお知らせ（latest.json の notes）が空になります。\n" +
+        "     前の版の見出しを今の版へ**付け替えて**ください（節を2つに分けると、前の版の項目は載りません）"
+    );
+  }
+  console.log(`  README.txt に「■ v${version} で…」の節あり（notes ${[...notes].length} 文字）`);
+
+  // (5) V154: 英語版にも今の版の節があるか。**notes には使わない**が、同梱の README_en.txt に
+  //     前の版の見出ししか無いと、英語の利用者には「何が変わったのか」が届かない。
+  //     見出しの形は `== FIXED IN v1.5.4 ==` / `== NEW IN v1.5.4 ==`（語は自由・版だけ見る）
+  const enHasSection = fs
+    .readFileSync(path.join(root, "release-assets", "README_en.txt"), "utf8")
+    .split("\n")
+    .some((l) => l.startsWith("== ") && l.includes(`v${version}`));
+  if (!enHasSection) {
+    throw new Error(
+      `A-5 自己検査で止めました: release-assets/README_en.txt に v${version} の節（「== … v${version} …==」）がありません\n` +
+        "  → 日本語版と同じく、前の版の見出しを今の版へ付け替えてください"
+    );
+  }
+  console.log(`  README_en.txt に v${version} の節あり`);
 }
 
 function checkExeBytes(exe: Buffer) {
@@ -213,6 +243,57 @@ const files: Record<string, Uint8Array> = {
   "LICENSES.txt": fs.readFileSync(path.join(outDir, "LICENSES.txt")),
 };
 
+/**
+ * U-1: 更新のお知らせ（`latest.json` の `notes`）を README.txt から抜く。
+ *
+ * 変更点は `release-assets/README.txt` の「■ v<version> で…」の節をそのまま使う。
+ * 見出しの行の**次の行**から、次の「■ 」の行の**直前**まで。
+ *
+ * V153: 見出しの語を **「で」までしか固定しない**。以前は「で増えたこと」決め打ちで、
+ * 不具合修正の回に「■ v1.5.3 で**直した**こと」と書いた瞬間、**更新のお知らせの本文が
+ * 黙って空になった**。節の始まりは版で固定されているので、後ろの語は自由にしてよい。
+ *
+ * V154: ここを**行で読む**形に変えた（正規表現をやめた）。理由は2つ:
+ *   - 版数のエスケープや `(?=...)` を書き間違えても**誰も気づけない**（空になるだけ）
+ *   - 旧実装は**次に「■ 」の行があること**が条件で、その節がファイル末尾だと空になった。
+ *     いまは末尾までを本文として拾う（**白紙になる方向へは倒さない**）
+ * 改行は `\r\n` を `\n` に均してから読む（JSON に `\r` を持ち込まない）。
+ */
+function buildNotes(): string {
+  const readme = fs
+    .readFileSync(path.join(root, "release-assets", "README.txt"), "utf8")
+    .replace(/\r\n?/g, "\n");
+  const lines = readme.split("\n");
+  const head = `■ v${version} で`;
+  const start = lines.findIndex((l) => l.startsWith(head));
+  if (start < 0) return "";
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i].startsWith("■ ")) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start + 1, end).join("\n").trim();
+}
+
+/** V154: 更新ダイアログに出る本文を**そのまま見せる**。空なら理由を添えて警告する。
+ *  `--dry-run` と本番の両方から呼ぶので、**出荷のたびに必ず1回は目に入る**
+ *  （V153 では、この処理が署名済みビルドの後ろにしか無く、出荷直前まで誰も見ていなかった）。 */
+function showNotes(notes: string) {
+  console.log(
+    `== latest.json の notes（アプリの更新のお知らせに出る本文・${[...notes].length} 文字） ==`
+  );
+  if (!notes) {
+    console.log(
+      `⚠ **空です**。release-assets/README.txt に「■ v${version} で…」の節がありません` +
+        "（見出しの版数を確認してください）。このまま出すと全利用者の更新ダイアログが白紙になります。"
+    );
+    return;
+  }
+  for (const line of notes.split("\n")) console.log(`  │ ${line}`);
+}
+
 // 4) 結果の確認表示（--dry-run はここで打ち切り＝zip を書かない）
 const show = () => {
   for (const [name, data] of Object.entries(files)) {
@@ -223,6 +304,25 @@ const show = () => {
 if (dryRun) {
   console.log(`== --dry-run: ${zipName} に入る予定の中身（zip は書きません） ==`);
   show();
+  // V154: **`latest.json` を実際に組み立てて一時フォルダへ書く**（署名と URL は仮の文字列）。
+  // 本番と同じ `buildNotes()` を通すので、「見出しの版数を間違えて notes が空」を
+  // **署名済みビルドを待たずに**捕まえられる。dist-release/ には触れない（一時フォルダのみ）。
+  const previewNotes = buildNotes();
+  showNotes(previewNotes);
+  const preview = {
+    version,
+    notes: previewNotes,
+    pub_date: new Date().toISOString(),
+    platforms: {
+      "windows-x86_64": {
+        signature: "<ビルド後に .sig の中身が入ります（--dry-run では出せません）>",
+        url: `${DOWNLOAD_BASE}/${product}_${version}_x64-setup.exe`,
+      },
+    },
+  };
+  const previewPath = path.join(outDir, "latest.json");
+  fs.writeFileSync(previewPath, JSON.stringify(preview, null, 2), "utf8");
+  console.log(`（latest.json のプレビュー: ${previewPath}）`);
   console.log(`（LICENSES.txt の出力先は一時フォルダ: ${outDir}）`);
   process.exit(0);
 }
@@ -257,11 +357,10 @@ if (fs.existsSync(nsisDir)) {
 // 6) U-1: updater の feed（`latest.json`）。**tauri は作ってくれない**ので、ここで組み立てる。
 //    これを GitHub Releases に置き、memoanima.com の Worker がそのまま返す（プロキシ）
 if (setupName && sigText) {
-  // 変更点は README.txt の「■ v<version> で増えたこと」の節をそのまま使う
-  //（更新ダイアログに出る本文。無ければ空でよい＝ダイアログ側が畳む）
-  const readme = fs.readFileSync(path.join(root, "release-assets", "README.txt"), "utf8");
-  const m = readme.match(new RegExp(`^■ v${version.replace(/\./g, "\\.")} で増えたこと[^\\n]*\\n([\\s\\S]*?)(?=\\n■ )`, "m"));
-  const notes = (m?.[1] ?? "").trim();
+  // 節の始まりは版で固定されているので、後ろの語（増えたこと／直したこと）は自由でよい。
+  // V153: 空のまま出すと**全利用者の更新ダイアログが白紙**になる。黙って進まない
+  const notes = buildNotes();
+  showNotes(notes);
   const feed = {
     version,
     notes,

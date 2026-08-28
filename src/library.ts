@@ -9,10 +9,11 @@ import { Player, parse } from "flipnote.js";
 import { Project, FPS_TABLE } from "./editor/model";
 import { compositeFrame, presentToCanvas, frameToPngBlob } from "./editor/render";
 import { projectFromBytes } from "./editor/serialize";
-import { FrameSource, ExportAudioSource, noteSource, projectSource } from "./editor/exporter";
+import { FrameSource, ExportAudioSource, noteSource, projectSource, formatSize } from "./editor/exporter";
 import { AudioPreview, pcmS16ToWav, bgmPlaybackRate, renderExportMix } from "./editor/audio";
 import type { BgmTrack } from "./editor/model";
 import { t, getLang } from "./i18n";
+import { errText } from "./ui/errText";
 import { collabAlbumName, defaultAlbumName, newAlbumName } from "./i18n/defaults";
 
 export type LibraryView = {
@@ -29,6 +30,17 @@ export type LibraryView = {
   sorted_at: number;
 };
 
+/** V154 (W-1): 保存の途中で終了した跡（`<作品>.bak` だけが残っている状態）。
+ *  Rust の `pclib::RecoverableView` と同じ形（serde 既定＝snake_case のまま） */
+export type RecoverableView = {
+  album: string;
+  name: string;
+  rel_path: string;
+  bak_size: number;
+  bak_at: number;
+  tmp_files: [string, number][];
+};
+
 type ImportProgress = {
   done: number;
   total: number;
@@ -43,9 +55,13 @@ export interface LibraryCallbacks {
   newNote: (album: string) => void;
   /** M6-1/2: エクスポートダイアログを開く（M5-1: ミックス生成つき音声ソース） */
   openExport: (source: FrameSource, baseName: string, audio?: ExportAudioSource | null) => void;
-  confirm: (msg: string) => Promise<boolean>;
+  /** V154: ボタンの語を指定できる（`main.ts` の `confirmDialog` は元から対応している）。
+   *  復元の提案は「はい/いいえ」だと**押した結果が想像できない**（Codex レビュー指摘・優先度 高） */
+  confirm: (msg: string, labels?: { yes: string; no: string }) => Promise<boolean>;
   prompt: (msg: string, def: string) => Promise<string | null>;
   toast: (msg: string) => void;
+  /** V154b (W-10): 節目のログ（`memoanima.log`）。**作品名・パスは書かない** */
+  appendLog?: (text: string) => void;
   /** M10-20: 並び順の変更を設定へ保存する（文字設定と同じ「変えた瞬間に保存」の流儀） */
   onShelfSortChange?: (v: "manual" | "name" | "date") => void;
   /** M11-3: アルバム選択ダイアログ（「📁 移動」の代替導線）。null=キャンセル */
@@ -146,6 +162,63 @@ export class LibraryScreen {
       });
     }
     await this.refresh();
+    // V154 (W-1): 一覧を出したあとで「保存の途中で止まった作品」を拾って尋ねる
+    //（一覧より先に出すと、何の画面か分からないまま質問される）
+    await this.checkRecoverable();
+  }
+
+  /** V154 (W-1): 保存の窓（本体→控え→書き込み確定）で終了した跡を拾い、**戻すかどうか尋ねる**。
+   *
+   *  - 勝手には戻さない・**「あとで」を選んでも控えは消さない**（次に開いたらまた尋ねる＝取り逃がさない）
+   *  - 本体が在るものは Rust 側が候補に入れない（上書きの危険がそもそも無い）
+   *  - 尋ねるのは**1セッションに1回**（refresh のたびに出すと、断ったのに何度も出て邪魔になる） */
+  private recoverAsked = false;
+  private async checkRecoverable() {
+    if (this.recoverAsked || !this.libRoot) return;
+    this.recoverAsked = true;
+    let list: RecoverableView[] = [];
+    try {
+      list = await invoke<RecoverableView[]>("list_recoverable", { libRoot: this.libRoot });
+    } catch {
+      return; // 拾えなくてもライブラリは普通に使える（提案が出ないだけ）
+    }
+    if (list.length === 0) return;
+    const shown = list.slice(0, 5);
+    const lines = shown.map((r) =>
+      t("lib.recover.item.msg", {
+        name: r.name,
+        album: r.album || t("lib.recover.rootAlbum.label"),
+        size: formatSize(r.bak_size),
+      })
+    );
+    if (list.length > shown.length)
+      lines.push(t("lib.recover.more.msg", { count: list.length - shown.length }));
+    // 保存途中の `.tmp` が残っているものがあれば一言添える。**中身が欠けている可能性がある**ので
+    // 自動では戻さない（Codex レビュー指摘: 画面に出ないと「新しいほうがあるのに」を見落とす）
+    if (list.some((r) => r.tmp_files.length > 0)) lines.push(t("lib.recover.tmp.msg"));
+    const ok = await this.cb.confirm(
+      t("lib.recover.ask.msg", { count: list.length }) + "\n\n" + lines.join("\n"),
+      { yes: t("lib.recover.yes.btn"), no: t("lib.recover.no.btn") }
+    );
+    if (!ok) return; // 控えはそのまま残す（消さない）
+    let done = 0;
+    const failed: string[] = [];
+    for (const r of list) {
+      try {
+        await invoke<string>("recover_project", { libRoot: this.libRoot, relPath: r.rel_path });
+        done++;
+      } catch {
+        failed.push(r.name);
+      }
+    }
+    await this.refresh();
+    // V154b (W-10): 復元は「何が起きたか」を追うときの節目。**件数だけ**書く（名前は書かない）
+    this.cb.appendLog?.(`[V154b] recover done=${done} failed=${failed.length}`);
+    this.cb.toast(
+      failed.length === 0
+        ? t("lib.recover.done.toast", { count: done })
+        : t("lib.recover.partial.toast", { count: done, failed: failed.join(" / ") })
+    );
   }
 
   suspend() {
@@ -184,7 +257,7 @@ export class LibraryScreen {
       );
       return true;
     } catch (e) {
-      this.cb.toast(t("lib.loadError.toast", { err: String(e) }));
+      this.cb.toast(t("lib.loadError.toast", { err: errText(e) })); // V154b: Error: を出さない
       return false;
     }
   }
@@ -1011,8 +1084,21 @@ export class LibraryScreen {
         this.startPreview();
       }
     } catch (e) {
-      this.renderMeta([t("lib.meta.loadError.label", { err: String(e) })]);
+      // V154b: `Error: ` を出さない（中身だけ）。文言は serialize が決めている
+      this.showLoadError(errText(e));
     }
+  }
+
+  /** V154b: 開けなかった理由を**プレビューの帯に出す**（消えないので読み返せる）。
+   *
+   *  以前は同じ文言が「帯」と「トースト」の2か所に出ていた。トーストは 3.2 秒で消えるうえ、
+   *  長い文だと省略記号で切られるので、**残るほうの帯に一本化**する。
+   *  ここは選択したときのプレビュー失敗と、開こうとして失敗したとき（`main.ts`）の共通の出口。 */
+  showLoadError(msg: string) {
+    this.renderMeta([t("lib.meta.loadError.label", { err: msg })]);
+    // 失敗の文は長い（「…ファイルは壊れていません（中身: 約2.1GB／…）」）。
+    // チップは既定で縮まない（flex の min-width:auto）ので、**この1つだけ折り返せる**ようにする
+    ($("#stage-meta").firstElementChild as HTMLElement | null)?.classList.add("wrap");
   }
 
   private renderMeta(chips: string[]) {

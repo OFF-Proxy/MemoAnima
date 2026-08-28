@@ -17,6 +17,7 @@ import { sanitizeCursor } from "./editor/cursor";
 import { newProject, UGO_COLORS, W, H, type Project } from "./editor/model";
 import { importFlipnote } from "./editor/kwzImport";
 import { projectFromBytes, projectToBytes } from "./editor/serialize";
+import { errText } from "./ui/errText";
 import { frameToPngBlob, frameToImageBlob } from "./editor/render";
 import {
   DEFAULT_CONVERT,
@@ -70,6 +71,8 @@ import {
   defaultKeysSettings,
   findConflict,
   keyLabel,
+  buildLookup,
+  eventKey,
   newPresetId,
   nextPresetName,
   presetName,
@@ -206,9 +209,16 @@ let editorOpen = false;
 /** M11-10: ショートカットの割り当て（settings.keys を正規化したもの） */
 let keys: KeysSettings = defaultKeysSettings();
 
+/** V153: **ホーム画面（ライブラリ）で効くショートカットの引き当て表。**
+ *  エディタ側は `editor.applyKeyPreset()` が自前で持っているので、ここはホーム専用の写し。
+ *  いまホームで拾うのは `app.settings`（設定を開く）だけ——**⚙ が画面外に出ても設定へ行ける**ようにする
+ *  のがこの回の目的なので、入口を増やすのは1つで足りる。増やすときはこの表を引くだけで済む。 */
+let homeLookup = new Map<string, CommandId[]>();
+
 /** M11-10: いま有効な割り当てをエディタへ渡す（起動時・プリセット切替・変更のたび） */
 function applyKeys() {
   editor.applyKeyPreset(activePreset(keys));
+  homeLookup = buildLookup(activePreset(keys)); // V153: ホーム側も同じプリセットから作り直す
 }
 
 /** M11-10: 割り当てを settings.json へ保存する（失敗しても操作は続行できる） */
@@ -292,6 +302,31 @@ const hiddenAutosaveHandler = () => {
   if (now - lastGuardAutosaveAt < GUARD_AUTOSAVE_MIN_INTERVAL) return;
   lastGuardAutosaveAt = now;
   void editor.autosaveNow();
+};
+
+/** V153: **ホーム画面のショートカット**（いまは「設定を開く」＝ `app.settings` だけ）。
+ *
+ *  この回の不具合は「トップバーが収まらず ⚙ が画面外へ出ると、設定に**一切**たどり着けない」
+ *  というものだった。CSS と `minWidth` で押し出しは止めたが、**入口が1つしかない状態そのもの**を
+ *  残すと同じ形の詰みがまた起きる。だからキーからも開けるようにする。
+ *
+ *  判定の順番はどれも「効かせない」側に倒してある:
+ *    - エディタ中は無視（`editor.ts` の既存のキー処理に任せる。あちらは自前の引き当て表を持つ）
+ *    - モーダルが出ているときは無視（設定の上に設定を重ねない・確認ダイアログの操作を奪わない）
+ *    - 入力欄にフォーカスがあるときは無視（検索バーで Ctrl+, を打っても開かない）
+ *  引き当ては `keymap.ts` の表をそのまま使うので、**利用者が割り当てを変えればそれで開く**。 */
+const homeKeyHandler = (e: KeyboardEvent) => {
+  if (editorOpen) return;
+  if (document.querySelector(".modal-back")) return;
+  // IME の変換中は横取りしない（`library.ts` の既存のキー処理と同じ門番に揃える）
+  if (e.isComposing || e.keyCode === 229) return;
+  const el = e.target as HTMLElement | null;
+  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable))
+    return;
+  const ids = homeLookup.get(eventKey(e));
+  if (!ids || !ids.includes("app.settings")) return;
+  e.preventDefault();
+  void openSettingsMenu();
 };
 
 // 開発用: ブラウザ検証からエディタ内部状態へアクセスするためのフック（本番ビルドでは無効）
@@ -447,6 +482,81 @@ function confirmDialog(msg: string, labels?: { yes: string; no: string }): Promi
     );
     return box;
   }).then((v) => !!v);
+}
+
+/** V154 (W-3): 読んで閉じるだけの知らせ（ボタン1つ）。confirmDialog と同じ骨格だが
+ *  **選ばせない**＝「はい/いいえ」を出すと、押した結果で何かが変わると誤解させる
+ *  （16bit 昇格はもう済んでいて、取り消せない）。 */
+function noticeDialog(msg: string): Promise<void> {
+  return modal((close) => {
+    const box = document.createElement("div");
+    box.innerHTML = `<p class="modal-msg"></p>
+      <div class="modal-actions">
+        <button class="btn primary" data-v="1"></button>
+      </div>`;
+    (box.querySelector('[data-v="1"]') as HTMLElement).textContent = t("common.close.btn");
+    const msgEl = box.querySelector(".modal-msg") as HTMLElement;
+    if (msg.includes("\n")) msgEl.style.whiteSpace = "pre-line";
+    msgEl.textContent = msg;
+    box.querySelector("button")?.addEventListener("click", () => close(true));
+    return box;
+  }).then(() => undefined);
+}
+
+/** V154b (W-8): 「◯◯中です」を画面中央に出す。**戻り値を呼ぶと畳む**。
+ *
+ *  取り込みの進捗（`openImportProgressModal`）と同じ骨格を使う——新しい仕組みは作らない。
+ *  違うのは3点だけ:
+ *   - **数字を出さない**（％も回数も）。動かない数字は、かえって固まって見える（要件 W-8）
+ *   - **中断ボタンを置かない**（保存を途中でやめさせない。やめられるほうが危ない）
+ *   - バーは**行ったり来たりするだけ**（進み具合ではなく「動いている」ことを見せる）
+ *
+ *  `.modal-back` ができるので、この間はエディタのショートカットも止まる
+ *  （`editor.dialogOpen()` が見る）。 */
+function busyOverlay(msg: string): () => void {
+  let closeFn: ((v: unknown) => void) | null = null;
+  let closed = false;
+  void modal((close, onClose) => {
+    closeFn = close;
+    if (closed) {
+      // 出す前に終わっていた（一瞬で終わる保存）。作らずに畳む
+      setTimeout(() => close(null), 0);
+    }
+    const box = document.createElement("div");
+    box.className = "busy-box";
+    box.innerHTML = `<p class="modal-msg"><b class="busy-msg"></b></p>
+      <div class="bar indet"><i></i></div>
+      <p class="hintline busy-hint"></p>`;
+    (box.querySelector(".busy-msg") as HTMLElement).textContent = msg;
+    const hint = box.querySelector(".busy-hint") as HTMLElement;
+    hint.textContent = t("ed.busy.hint");
+    // Codex レビュー（優先度 中）: 900コマ級で数十秒待たされると、「少しお待ちください」だけでは
+    // **重いのか壊れたのか**が分からない。10秒を超えたら**経過を秒で出す**。
+    // 「％が動かないと固まって見える」（要件 W-8）の逆で、**経過は必ず動く**ので生きている証拠になる。
+    // 動きを減らす設定（prefers-reduced-motion）で帯が静止する人にも、これが効く
+    const started = Date.now();
+    const tick = window.setInterval(() => {
+      const sec = Math.round((Date.now() - started) / 1000);
+      if (sec >= 10) hint.textContent = t("ed.busy.long.hint", { sec });
+    }, 1000);
+    onClose(() => clearInterval(tick));
+    // 背面クリックで閉じない（取り込みの進捗と同じ作法）
+    setTimeout(() => {
+      const back = box.parentElement;
+      back?.addEventListener(
+        "pointerdown",
+        (e) => {
+          if (e.target === back) e.stopImmediatePropagation();
+        },
+        { capture: true }
+      );
+    }, 0);
+    return box;
+  });
+  return () => {
+    closed = true;
+    closeFn?.(null);
+  };
 }
 
 /** V151 (E-8): 「☐ 次回から表示しない」チェックつき確認（confirmDialog と同じ骨格＋1行）。
@@ -848,6 +958,9 @@ function openExportDialog(
     (box.querySelector("#ex-go") as HTMLButtonElement).addEventListener("click", async () => {
       if (running) return;
       running = true;
+      // V154 (W-5): ここから先はエンコードが走る＝オートセーブを止める。
+      // ダイアログを開いただけでは止めない（設定を見ているだけの間は普段どおり保存する）
+      editor.setExporting(true);
       const goBtn = box.querySelector("#ex-go") as HTMLButtonElement;
       goBtn.disabled = true;
       closeBtn.textContent = t("export.close.cancel.btn");
@@ -938,6 +1051,7 @@ function openExportDialog(
           if (!go) {
             // 「やめる」= 何も起きない。押す前の状態へ戻すだけ（書き出しは始めない）
             running = false;
+            editor.setExporting(false); // V154 (W-5)
             goBtn.disabled = false;
             closeBtn.disabled = false;
             closeBtn.textContent = t("export.close.btn");
@@ -989,6 +1103,7 @@ function openExportDialog(
       } catch (e) {
         toast(t("err.export.failed.toast", { err: e }));
         running = false;
+        editor.setExporting(false); // V154 (W-5)
         goBtn.disabled = false;
         closeBtn.disabled = false;
         closeBtn.textContent = t("export.close.btn");
@@ -996,7 +1111,10 @@ function openExportDialog(
       }
     });
     return box;
-  });
+  })
+    // V154 (W-5): どの閉じ方（完了・中止・背景クリック・失敗）でも必ず解除する。
+    // ここを漏らすとオートセーブが二度と走らない＝**この回で直している事故より重い**
+    .finally(() => editor.setExporting(false));
 }
 
 /** M11-11: いま見ているコマ1枚を画像で保存する。
@@ -1862,8 +1980,20 @@ function showEditor(
         void openImageExportDialog(proj, frameIndex, baseName),
       pickAudioFile,
       confirm: confirmDialog,
+      notice: noticeDialog, // V154 (W-3)
       prompt: promptDialog,
       toast,
+      busy: busyOverlay, // V154b (W-8)
+      // V154 (W-6): 保存したファイルを読み戻す（確定の前に中身を確かめるため）。
+      // 読めなければ null を返す＝**検査を省くだけ**で、保存は失敗にしない
+      //（`readProjectRaw` は 512MB を超えるものを Rust 側で弾く。そのときも null）
+      readSavedFile: async (path: string) => {
+        try {
+          return await readProjectRaw(path);
+        } catch {
+          return null;
+        }
+      },
       // M10-21: 入力診断ログ（editor がフラグ時のみ呼ぶ。ローカルの memoanima.log へ）
       appendLog: (text: string) =>
         invoke("append_log", { text: `[${new Date().toISOString()}]\n${text}` }).catch(() => {}),
@@ -1892,7 +2022,7 @@ async function openEditorWithNote(item: LibraryView) {
       baseName: stripExt(item.name),
     });
   } catch (e) {
-    toast(t("err.open.toast", { err: e }));
+    library.showLoadError(errText(e)); // V154b: 帯に1か所だけ（下の openEditorWithProject と同じ）
   }
 }
 
@@ -1906,7 +2036,18 @@ async function openEditorWithProject(item: LibraryView) {
       baseName: stripExt(item.name),
     });
   } catch (e) {
-    toast(t("err.open.toast", { err: e }));
+    // V154b (W-10): 開けなかったことをログに残す。**大きさ（バイト数）と理由だけ**——
+    // 作品名もパスも書かない。「開けません」と言われた人から送ってもらったとき、
+    // 「大きすぎた」のか「本当に壊れていた」のかがこの1行で分かる
+    invoke("append_log", {
+      text: `[${new Date().toISOString()}] [V154b] open failed size=${item.size} ${String(e)}`,
+    }).catch(() => {});
+    // V154b: **帯（プレビューの meta）に1か所だけ出す。**
+    // 以前は同じ文言を帯とトーストの両方に出していて、しかもトーストは 3.2 秒で消える。
+    // 残るほうへ寄せる（開けなかったのだからライブラリ画面のままで、帯は必ず見える）。
+    // `Error: ` は付けない——「読み込みエラー: Error: …」だと「エラー」が2回続いて、
+    // 肝心の「ファイルは壊れていません」が埋もれる
+    library.showLoadError(errText(e));
   }
 }
 
@@ -2028,7 +2169,11 @@ async function applyDisplaySettings(d?: DisplaySettings, notify = false): Promis
       }
     }
     // ボーダーレス中は枠が無くドラッグ移動できないため、ヘッダーを掴めるようにする
-    // （ボタン類は子要素なのでクリックはそのまま効く）。⚙も常に開ける＝詰みなし。
+    // （ボタン類は子要素なのでクリックはそのまま効く）。
+    // V153 訂正: 以前ここに「⚙ も常に開ける＝詰みなし」と書いてあったが**それは誤り**だった。
+    // 幅が足りないと ⚙ はトップバーから押し出されて押せなくなる（実際に利用者が詰んだ）。
+    // いまは S-1/S-2（styles.css）と `minWidth`（tauri.conf.json）で押し出しを止め、
+    // さらに `app.settings`（既定 Ctrl+,）で**キーからも開ける**ようにしてある。
     // M7-2d: 権限が整った今は「API成功後のみ」切り替えるのが正（無言のUI先行を廃止）
     document.querySelectorAll(".topbar, .edbar").forEach((el) => {
       if (mode === "borderless") el.setAttribute("data-tauri-drag-region", "");
@@ -2272,9 +2417,17 @@ async function openSettingsMenu() {
         <p class="hintline">${t("set.lang.hint")}</p>
       </div>
       <div class="set-sec">
+        <b>${t("set.log.label")}</b>
+        <button class="minibtn" id="set-log-open">${t("set.log.open.btn")}</button>
+        <p class="hintline">${t("set.log.hint")}</p>
+      </div>
+      <div class="set-sec">
         <b>${t("set.libdir.label")}</b>
         <p class="modal-path" id="set-dir-path"></p>
         <button class="minibtn" id="set-dir">${t("set.libdir.btn")}</button>
+        <!-- V154（穴⑥）: 上書き保存のたびに1つ前を控えとして残す＝**同じ作品の分だけ場所を使う**。
+             黙って倍にすると「なぜか容量が減る」になるので、置き場所のすぐ下で一言だけ言う -->
+        <p class="hintline">${t("set.libdir.backup.hint")}</p>
       </div>
       <!-- U-1: 起動時の更新確認。**畳まれた下ではなく上のほう**に置く——初回案内が
            「⚙ でオフにできます」と言うので、スクロールしないと見つからない位置だと嘘になる -->
@@ -2532,6 +2685,11 @@ async function openSettingsMenu() {
         void openSettingsMenu(); // 同じ場所を開き直す（スクロールは先頭でよい）
       })
     );
+    // V154b (W-10): ログのフォルダを開く。**パスは Rust 側だけが知っている**
+    //（画面に出すと利用者名が見えてしまう。開くだけならその必要が無い）
+    (box.querySelector("#set-log-open") as HTMLElement).addEventListener("click", () => {
+      invoke("open_log_folder").catch((e) => toast(t("set.log.failed.toast", { err: e })));
+    });
     (box.querySelector("#set-dir") as HTMLElement).addEventListener("click", async () => {
       close(null);
       if (await chooseLibraryDir()) {
@@ -4638,6 +4796,11 @@ window.addEventListener("DOMContentLoaded", async () => {
       "app_info"
     );
     appInfoCache = info;
+    // V154b (W-10): **常時オンのログ**の1行目。何が起きたかを追うには、まず
+    // 「どの版が、いつ起動したか」が要る（利用者名・作品名は書かない）
+    invoke("append_log", {
+      text: `[${new Date().toISOString()}] [app] start v${info.version}`,
+    }).catch(() => {});
     // ヘッダーはバージョンのみ（非公式・非営利の表明は設定→バージョン情報と README.txt に集約）
     $("#app-meta").textContent = `v${info.version}`;
   } catch {
@@ -4688,6 +4851,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   // （エディタの mount/unmount には紐づけない。中の判定は `editorOpen` で行う）。
   // keydown は **capture** ＝ 既存の bubble のハンドラとは別の口。順序は変えない。
   window.addEventListener("keydown", reloadGuardHandler, true);
+  // V153: ホーム画面のショートカット（いまは「設定を開く」1つ）。**アプリの生存中ずっと**張り、
+  // 中の判定で「ホームのときだけ」に絞る（reloadGuardHandler と同じ流儀）
+  window.addEventListener("keydown", homeKeyHandler);
   document.addEventListener("visibilitychange", hiddenAutosaveHandler);
   // M7-2b: ディスプレイ設定の復元（破損値は既定へ）
   await applyDisplaySettings(settings.display);
@@ -4762,6 +4928,9 @@ const libraryCallbacks = {
   confirm: confirmDialog,
   prompt: promptDialog,
   toast,
+  // V154b (W-10): 節目のログ（復元の件数など）。エディタと同じ流し先
+  appendLog: (text: string) =>
+    invoke("append_log", { text: `[${new Date().toISOString()}] ${text}` }).catch(() => {}),
   // M10-20: 並び順は変えた瞬間に保存（文字設定と同じ流儀）
   onShelfSortChange: (v: "manual" | "name" | "date") => {
     settings.shelfSort = v;
