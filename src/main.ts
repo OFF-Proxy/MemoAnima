@@ -513,6 +513,15 @@ function noticeDialog(msg: string): Promise<void> {
  *
  *  `.modal-back` ができるので、この間はエディタのショートカットも止まる
  *  （`editor.dialogOpen()` が見る）。 */
+/** V155 (L-2): W-8 の中央表示の**文言だけ**を差し替える。
+ *  箱・帯・経過秒の仕組みには手を入れない（要件「新しい仕組みは作らない」）。
+ *  読み込みは「あと何コマか」が分からないので、％ではなく**読めた数**を出す
+ *  ——動く数字であれば「固まっていない」ことは伝わる。 */
+function setBusyMsg(text: string): void {
+  const el = document.querySelector(".busy-box .busy-msg");
+  if (el) el.textContent = text;
+}
+
 function busyOverlay(msg: string): () => void {
   let closeFn: ((v: unknown) => void) | null = null;
   let closed = false;
@@ -702,7 +711,7 @@ async function pickAudioFile(): Promise<{ bytes: Uint8Array; mime: string; name:
         return null;
       }
       logError("audio", t("err.log.videoRead.msg", { err: e }));
-      toast(t("ed.audio.readFailed.toast", { err: e }));
+      toast(t("ed.audio.readFailed.toast", { err: errText(e) }));
       return null;
     }
     toast(t("ed.audio.extracting.toast"));
@@ -1101,7 +1110,7 @@ function openExportDialog(
         toast(t("export.done.toast", { path }));
         close(true);
       } catch (e) {
-        toast(t("err.export.failed.toast", { err: e }));
+        toast(t("err.export.failed.toast", { err: errText(e) }));
         running = false;
         editor.setExporting(false); // V154 (W-5)
         goBtn.disabled = false;
@@ -1225,7 +1234,7 @@ function openImageExportDialog(p: Project, frameIndex: number, baseName: string)
         toast(t("export.image.saved.toast", { path }));
         close(true);
       } catch (e) {
-        toast(t("err.image.save.toast", { err: e }));
+        toast(t("err.image.save.toast", { err: errText(e) }));
         goBtn.disabled = false;
         sync();
       }
@@ -1357,7 +1366,7 @@ async function pickSaveTarget(
         sel.value = created;
         updatePath();
       } catch (e) {
-        toast(String(e));
+        toast(errText(e)); // V155 (A-33)
       }
     });
     (box.querySelector("#ps-ok") as HTMLElement).addEventListener("click", () => {
@@ -1417,7 +1426,7 @@ async function openImageImportFlow(paths?: string[]) {
     try {
       images.push(await decodeImageFile(f));
     } catch (e) {
-      toast(t("img.decodeFail.toast", { name: f.split(/[\\/]/).pop(), err: e }));
+      toast(t("img.decodeFail.toast", { name: f.split(/[\\/]/).pop(), err: errText(e) }));
     }
   }
   if (!images.length) return;
@@ -1468,7 +1477,7 @@ async function openImageImportFlowForEditor(path?: string | string[]) {
       try {
         images.push(await decodeImageFile(files[i]));
       } catch (e) {
-        toast(t("img.decodeFail.toast", { name: base(files[i]), err: e }));
+        toast(t("img.decodeFail.toast", { name: base(files[i]), err: errText(e) }));
       }
     }
   } finally {
@@ -1769,7 +1778,7 @@ function openImageImportDialog(
             editorCtx.onPlace(proj, transparentPaper);
           }
         } catch (e) {
-          toast(t("img.placeFail.toast", { err: e }));
+          toast(t("img.placeFail.toast", { err: errText(e) }));
           busy = false;
           const okBtn = q<HTMLButtonElement>("#ii-ok");
           okBtn.disabled = false;
@@ -1807,7 +1816,7 @@ function openImageImportDialog(
         close(true);
         library.refresh();
       } catch (e) {
-        toast(t("img.importFail.toast", { err: e }));
+        toast(t("img.importFail.toast", { err: errText(e) }));
         busy = false;
         (q("#ii-ok") as HTMLButtonElement).disabled = false;
       }
@@ -2009,8 +2018,13 @@ function stripExt(name: string): string {
 }
 
 async function openEditorWithNote(item: LibraryView) {
+  // V155 (L-2): .kwz/.ppm の解析も作品によっては待たされる。同じ中央表示に乗せる
+  //（従来の「読み込み中…」トーストは 3.2 秒で消えてしまい、待つ側の助けにならない）
+  const busyN: { hide: (() => void) | null } = { hide: null };
+  const busyTimerN = window.setTimeout(() => {
+    busyN.hide = busyOverlay(t("ed.busy.loading.label"));
+  }, 450);
   try {
-    toast(t("common.loading.toast"));
     const bytes = await invoke<number[]>("read_file_bytes", { path: item.path });
     const { project } = await importFlipnote(
       new Uint8Array(bytes).buffer,
@@ -2023,13 +2037,34 @@ async function openEditorWithNote(item: LibraryView) {
     });
   } catch (e) {
     library.showLoadError(errText(e)); // V154b: 帯に1か所だけ（下の openEditorWithProject と同じ）
+  } finally {
+    clearTimeout(busyTimerN);
+    busyN.hide?.();
   }
 }
 
 async function openEditorWithProject(item: LibraryView) {
+  // V155 (L-2): 大きい作品は読み込みに何十秒もかかる（再現データで約10秒＋IPC）。
+  // **何も出さないと固まって見える**ので、保存中と同じ中央表示に乗せる（新しい仕組みは作らない）。
+  // 一瞬で終わる作品でチラつかないよう、W-8 と同じ 450ms の遅延を置く。
+  const busy: { hide: (() => void) | null } = { hide: null };
+  const busyTimer = window.setTimeout(() => {
+    busy.hide = busyOverlay(t("ed.busy.loading.label"));
+  }, 450);
+  const t0 = performance.now();
   try {
     const bytes = await invoke<number[]>("read_file_bytes", { path: item.path });
-    const project = await projectFromBytes(new Uint8Array(bytes));
+    const project = await projectFromBytes(new Uint8Array(bytes), {
+      // 1コマごとに書き換えると描き直しが増えるので、32コマに1回だけ
+      onFrame: (n) => {
+        if (n % 32 === 0) setBusyMsg(t("ed.busy.loading.frames.label", { n }));
+      },
+    });
+    invoke("append_log", {
+      text:
+        `[${new Date().toISOString()}] [V155] open ok size=${item.size} ` +
+        `frames=${project.frames.length} ms=${Math.round(performance.now() - t0)}`,
+    }).catch(() => {});
     showEditor(project, {
       libRoot: settings.libraryDir!,
       album: item.album,
@@ -2048,6 +2083,10 @@ async function openEditorWithProject(item: LibraryView) {
     // `Error: ` は付けない——「読み込みエラー: Error: …」だと「エラー」が2回続いて、
     // 肝心の「ファイルは壊れていません」が埋もれる
     library.showLoadError(errText(e));
+  } finally {
+    // どの抜け方でも必ず畳む（出す前に終わっていればタイマーを消すだけ）
+    clearTimeout(busyTimer);
+    busy.hide?.();
   }
 }
 
@@ -2129,7 +2168,7 @@ async function checkAutosave() {
     });
     editor.dirty = true; // 復元直後から未保存扱い（オートセーブ継続）
   } catch (e) {
-    toast(t("err.autosaveRestore.toast", { err: e }));
+    toast(t("err.autosaveRestore.toast", { err: errText(e) }));
   }
 }
 
@@ -2181,8 +2220,8 @@ async function applyDisplaySettings(d?: DisplaySettings, notify = false): Promis
     });
     return true;
   } catch (e) {
-    logError("display", t("err.display.apply.toast", { err: e }));
-    if (notify) toast(t("err.display.apply.toast", { err: e }));
+    logError("display", t("err.display.apply.toast", { err: errText(e) }));
+    if (notify) toast(t("err.display.apply.toast", { err: errText(e) }));
     return false;
   }
 }
@@ -2688,7 +2727,7 @@ async function openSettingsMenu() {
     // V154b (W-10): ログのフォルダを開く。**パスは Rust 側だけが知っている**
     //（画面に出すと利用者名が見えてしまう。開くだけならその必要が無い）
     (box.querySelector("#set-log-open") as HTMLElement).addEventListener("click", () => {
-      invoke("open_log_folder").catch((e) => toast(t("set.log.failed.toast", { err: e })));
+      invoke("open_log_folder").catch((e) => toast(t("set.log.failed.toast", { err: errText(e) })));
     });
     (box.querySelector("#set-dir") as HTMLElement).addEventListener("click", async () => {
       close(null);
@@ -3163,7 +3202,7 @@ async function chooseLibraryDir(): Promise<boolean> {
     });
   } catch (e) {
     logError("library", t("err.log.chooseDir.msg", { err: e }));
-    toast(t("err.library.chooseDir.toast", { err: e }));
+    toast(t("err.library.chooseDir.toast", { err: errText(e) }));
     return false;
   }
   if (!dir || typeof dir !== "string") return false;
@@ -3175,7 +3214,7 @@ async function chooseLibraryDir(): Promise<boolean> {
     // 戻すとようこそ画面から先に進めなくなる（＝詰む）。
     // このセッションは動くが次回起動時に選び直しになる、と伝えるだけにする。
     logError("library", t("err.log.settingsSave.msg", { err: e }));
-    toast(t("err.settings.save.toast", { err: e }));
+    toast(t("err.settings.save.toast", { err: errText(e) }));
   }
   return true;
 }
@@ -3435,7 +3474,7 @@ async function handleDroppedPaths(paths: string[]) {
       }
       showEditor(project, null);
     } catch (e) {
-      toast(t("err.file.open.detail.toast", { err: e }));
+      toast(t("err.file.open.detail.toast", { err: errText(e) }));
     }
   }
 }

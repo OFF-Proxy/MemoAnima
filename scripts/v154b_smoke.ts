@@ -15,7 +15,7 @@
 // 7. 別の gzip（作品ファイルではない）は通らない
 // 8. コマ数の数え方が、作品名やレイヤー名に "paper" が入っていても狂わない
 // 9. 大きめの作品（300コマ）でも、展開したものを抱えずに数えられる
-// 10. 読み込み失敗の文言が**嘘をつかない**（大きすぎる／本当に壊れている／非圧縮の保険）
+// 10. 読み込みの分岐（V155: 巨大でも開ける／壊れていれば壊れていると言う／非圧縮の保険）
 import { gzipSync } from "fflate";
 import { newProject, makeEmptyFrame, allocIndexBuf, type Project } from "../src/editor/model";
 import { projectToBytes, projectFromBytes, verifySavedBytes } from "../src/editor/serialize";
@@ -150,25 +150,28 @@ const main = async () => {
     const back = await projectFromBytes(ok);
     check("10: 正常な読み込みは変わらない", back.frames.length === 3);
 
-    // (b) **大きすぎる**とき: 展開する前に ISIZE で気づき、「壊れていません」と言う
+    // (b) gzip の末尾（ISIZE）を書き換えたものは、**展開そのものが失敗する**
+    //     ＝「壊れている」と言う。V154b ではここで「大きすぎて」と言っていたが、
+    //     それは当時 ISIZE で門番をしていたから。V155 で門番を外したので、
+    //     ISIZE の不一致は**素直に gzip の検査に落ちる**（そちらのほうが正しい）。
+    //     ★「壁を越える作品が開けること」の検査は scripts/v155_smoke.ts（本物の大きさで作る）
     const huge = ok.slice();
     const n = huge.length;
-    const isize = MAX_JSON_CHARS + 1000; // 末尾4バイト（ISIZE）を書き換えて「巨大」に見せる
+    const isize = MAX_JSON_CHARS + 1000;
     huge[n - 4] = isize & 0xff;
     huge[n - 3] = (isize >>> 8) & 0xff;
     huge[n - 2] = (isize >>> 16) & 0xff;
     huge[n - 1] = (isize >>> 24) & 0xff;
-    let msg = "";
+    let msgH = "";
     try {
       await projectFromBytes(huge);
     } catch (e) {
-      msg = String((e as Error).message);
+      msgH = String((e as Error).message);
     }
-    check("10: 大きすぎるときは「大きすぎて開けません」", msg.includes("大きすぎて"), msg);
-    check("10: **壊れていないと明言する**", msg.includes("壊れていません"), msg);
-    check("10: JSON の話（is not valid JSON）を出さない", !/valid JSON|Unexpected token/.test(msg), msg);
+    check("10: ISIZE を壊したら「壊れている」と言う", msgH.includes("壊れて"), msgH);
+    check("10: **メッセージが空にならない**（型で見分ける・V155）", msgH.length > 10, `"${msgH}"`);
 
-    // (c) **本当に壊れている**とき: そちらは「壊れているかもしれません」と言う（混ぜない）
+    // (c) **本当に壊れている**とき: 「壊れている」と言い、「大きすぎて」とは言わない
     const broken = ok.slice();
     broken[Math.floor(broken.length / 2)] ^= 0xff; // CRC が合わなくなる
     let msg2 = "";
@@ -177,9 +180,9 @@ const main = async () => {
     } catch (e) {
       msg2 = String((e as Error).message);
     }
-    check("10: 壊れているときは「壊れているかもしれません」", msg2.includes("壊れているかもしれません"), msg2);
+    check("10: 壊れているときは「壊れている」と言う", msg2.includes("壊れて"), msg2);
     check("10: 大きすぎるときの文言と混ざらない", !msg2.includes("大きすぎて"), msg2);
-    check("10: ここでも JSON の話を出さない", !/valid JSON|Unexpected token/.test(msg2), msg2);
+    check("10: JSON の話（is not valid JSON）を出さない", !/valid JSON|Unexpected token/.test(msg2), msg2);
 
     // (d) gzip のマジックが無いときだけ、旧・非圧縮の保険が効く（前方互換を壊さない）
     const plain = new TextEncoder().encode(JSON.stringify({ magic: "ANIMEMO", version: 999 }));

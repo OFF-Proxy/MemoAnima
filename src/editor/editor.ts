@@ -72,6 +72,7 @@ import type { BgmTrack, SeTrack, ProjectAudio, Frame } from "./model";
 import { newSeId, sanitizeAudio } from "./model";
 import { createSlider, SliderHandle } from "../ui/slider";
 import { t } from "../i18n";
+import { errText } from "../ui/errText"; // V155 (A-33): 画面に `Error:` を出さない
 // M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
 import { folderBaseName, layerBaseName, untitledTitle } from "../i18n/defaults";
 import {
@@ -1931,9 +1932,13 @@ export class Editor {
     host.className = "szmeter lv-" + level;
     const row = (label: string, n: number, cls = "") =>
       `<div class="szrow ${cls}"><span>${label}</span><b>${formatSize(n)}</b></div>`;
-    // V154b: **面数（レイヤー×コマ）と、開ける上限**。
-    // バイト数より壁に直結していて分かりやすい（作者の指示）。上限はビット幅で変わる
-    //（8bit 5,242 / 16bit 2,621）ので、いまの幅で出す
+    // V154b: **面数（レイヤー×コマ）**。バイト数より分かりやすい（作者の指示）。
+    //
+    // V155（Codex レビュー §1・優先度 高）: 出す数字は同じだが、**言葉を変えた**。
+    // V154b では「開ける上限 約5,242面」「保存できても開き直せません」と書いていた。
+    // 分割読み込みにした今、それは**嘘**になる（21,960面の再現データが実際に開く）。
+    // 「画面が示すことと実際に起きることが食い違う」＝要件が名指しで避けろと言っている形。
+    // いまは同じ数字を**重くなる目安**として出し、「分けると軽い」で終える（脅さない）
     const faces = projectFaces(this.project);
     const faceMax = loadWallFaces(this.project.indexBits === 16 ? 16 : 8);
     const overWall = faces > faceMax;
@@ -1945,7 +1950,7 @@ export class Editor {
         n: faces.toLocaleString(),
         max: faceMax.toLocaleString(),
       })}</p>` +
-      // 上限を超えている＝**保存できても開き直せない**。いちばん強い知らせを出す
+      // 目安を超えている＝開くのも保存も重い。**開けなくなるとは言わない**（V155）
       (overWall ? `<p class="sznote adv">${t("ed.size.overWall.msg")}</p>` : "") +
       // 「統合したのに『元に戻す』が減らない」を**説明なしで**分かるようにする1行（要件 §2-W-2）
       `<p class="sznote">${t("ed.size.history.msg")}</p>` +
@@ -6264,7 +6269,7 @@ export class Editor {
     // そこにも同じ知らせを出す（文面だけ「読み戻したら壊れていた」と分ける）
     const head = err === undefined
       ? t("ed.file.saveBroken.msg")
-      : t("ed.file.saveFailed.msg", { err: String(err) });
+      : t("ed.file.saveFailed.msg", { err: errText(err) });
     const msg = head + "\n" + t("ed.log.sendHint.msg");
     if (this.cb.notice) void this.cb.notice(msg);
     else this.cb.toast(msg);

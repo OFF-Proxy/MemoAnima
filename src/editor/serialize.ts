@@ -29,7 +29,6 @@ import {
   H,
   sanitizeFolders,
   sanitizeAudio,
-  MAX_JSON_CHARS,
 } from "./model";
 
 const MAGIC = "ANIMEMO";
@@ -76,12 +75,10 @@ function base64ToBytes(b64: string): Uint8Array {
 // M10-23: 圧縮側は encodeProject が CompressionStream へ直接チャンク供給する形になった
 //（旧 gzip(data) ヘルパは撤去。出力バイト列は同一 — encodeProject のコメント参照）
 
-async function gunzip(data: Uint8Array): Promise<Uint8Array> {
-  const ds = new DecompressionStream("gzip");
-  const blob = new Blob([data as BlobPart]);
-  const stream = blob.stream().pipeThrough(ds);
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
+// V155 (L-1): 一括展開（`gunzip`）は**撤去した**。
+// `new Response(stream).arrayBuffer()` は展開後の全体を1つの ArrayBuffer に確保するので、
+// 2.1 GiB の作品では確保に失敗する（そこが「保存はできるのに開けない」の入口だった）。
+// いまは `streamProjectDoc` が流しながら読む。
 
 interface SerializedFrame {
   paper: number;
@@ -278,18 +275,306 @@ function isSizeFailure(e: unknown): boolean {
   return /allocation|Invalid string length|out of memory|too large/i.test(m);
 }
 
-export async function projectFromBytes(bytes: Uint8Array): Promise<Project> {
+// ---------------- V155 (L-1): 読み込みを分割にする ----------------
+
+/** V155: コマ1つの JSON は必ずこの9文字で始まる（`encodeProject` が
+ *  `JSON.stringify({paper, layers, order, se})` の順で書く）。
+ *
+ *  **この並びがコマの先頭以外に現れないことは、JSON の仕様が保証する**——
+ *  文字列の中の `"` は必ず `\"` に escape されるので、レイヤー名を `{"paper":` にしても
+ *  ファイルには `{\"paper\":` と書かれ、この9文字にはならない。素朴な `indexOf` でよい。 */
+const FRAME_HEAD = '{"paper":';
+
+/** V155: **こちらが文言を決めて投げた**読み込みエラー。
+ *
+ *  展開そのものの失敗（`DecompressionStream` の例外）と区別するために印を付ける。
+ *  以前はメッセージの正規表現で見分けようとしていたが、**メッセージが空の例外**
+ *  （ISIZE を書き換えた gzip で実際に出る）を素通しして、画面に空の理由が出た。
+ *  型で見分ければ、相手が何を投げてきても取り違えない。 */
+class LoadError extends Error {}
+
+/** V155: 読み込み中の doc は**未知の形**（旧版・手で壊されたもの）も通すので、
+ *  従来の `JSON.parse` の戻り（`any`）と同じ緩さで受けて、下の分岐で1つずつ確かめる。 */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type LoadedDoc = Record<string, any>;
+
+/** V155: コマの並びの始まり。`encodeProject` は `…,"frames":[` まで書いてからコマを並べる。
+ *  ここも上と同じ理由（`"` は必ず escape される）で、ヘッダの途中には現れない。
+ *
+ *  **`frames` が最後のキーだとは仮定しない。**歴代の書き手はどれも最後に置いているが、
+ *  そこに寄りかかると、キーの並びが違うだけのファイルを「壊れている」と言ってしまう
+ *  （＝この回が直しているのと同じ種類の事故）。`]` の後ろに続きがあれば拾って繋ぐ。 */
+const FRAMES_KEY = '"frames":[';
+
+/** V155 (L-1): gzip を**流しながら**読み、ヘッダと Frame を1つずつ組み立てる。
+ *
+ *  ★これが V155 の本体。以前は
+ *
+ *      gunzip 全体 → TextDecoder で**1本の文字列**（2.1 GiB）→ JSON.parse
+ *
+ *  としていたので、V8 の文字列上限（536,870,888 文字＝512 MiB）に当たり、
+ *  **保存はできるのに二度と開けない**作品ができていた。保存側は最初から分割で
+ *  書いているのに、読み込み側だけが一括だった——その非対称が原因。
+ *
+ *  抱えるのは「ヘッダ ＋ いま処理中のコマ1つ」だけ（20レイヤーで約2MB）。
+ *  1コマぶんの JSON が確定するたびに `Frame` へ変換し、**元のテキストは捨てる**。 */
+async function streamProjectDoc(
+  bytes: Uint8Array,
+  onFrame?: (done: number) => void
+): Promise<{ doc: LoadedDoc; frames: Frame[] }> {
+  const ds = new DecompressionStream("gzip");
+  const reader = new Blob([bytes as BlobPart]).stream().pipeThrough(ds).getReader();
+  const dec = new TextDecoder();
+  const frames: Frame[] = [];
+
+  // ★ここではビット幅を決めない。`indexBits` が frames より後ろに書かれていても
+  //   正しく読めるように、**base64 を解いた生バイトのまま**積んでおき、
+  //   doc が揃ってから 8/16 の解釈と長さの検査をする（`finalizeFrames`）。
+  //   生バイトはどのみち必要な実体なので、これで余分なメモリは増えない。
+  const sp = createDocSplitter(
+    (text) => {
+      frames.push(frameFromSerialized(JSON.parse(text) as SerializedFrame));
+      onFrame?.(frames.length);
+    },
+    // **中身を読む前に**分かることは先に見る（2 GiB 流したあとで「別のファイルでした」
+    // と言わないため）。`frames` より後ろのキーはまだ見えていないので、
+    // **見えているものだけ**を判定する。そろった判定は最後の `validateDoc`
+    (head) => earlyCheck(head)
+  );
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    sp.push(dec.decode(value, { stream: true }));
+  }
+  sp.push(dec.decode()); // 末尾（マルチバイトの繰り越しを吐き出す）
+
+  // ヘッダ（`…"frames":[`）＋ `]` 以降 ＝ **コマ抜きの、キーが全部そろった JSON**
+  const { head, tail } = sp.end();
+  let doc: LoadedDoc;
+  try {
+    doc = JSON.parse(head + tail) as LoadedDoc;
+  } catch {
+    throw new LoadError(t("ed.load.notProject.msg"));
+  }
+  const bits = validateDoc(doc);
+  finalizeFrames(frames, bits);
+  return { doc, frames };
+}
+
+/** V155: 流れてくるテキストを「ヘッダ」「コマ1つぶんの JSON」「残り」に切り分ける。
+ *
+ *  ★**チャンクの切れ目がどこに来ても結果が変わらないこと**が、この関数のすべて。
+ *   最初の実装は「コマの頭がチャンクの末尾 8 文字以内に来る」と同じ頭を二度数え、
+ *   コマを途中でぶつ切りにしていた（実測: 音声つき作品の 1 つで再現。
+ *   起きる確率は 1 コマあたり 1 万分の 1 程度で、**運が良ければ通ってしまう**種類の
+ *   壊れ方だった）。切れ目を作るのは `DecompressionStream` なので、こちらからは
+ *   選べない——だから切り分けだけを関数にして、`v155_smoke` が
+ *   **あらゆる切れ方**（1文字ずつ／頭をまたぐ位置／境界ぴったり）を総当たりで当てる。
+ *
+ *  `onFrame` にはコマ1つぶんの JSON をそのまま渡す（呼び出し側が parse して捨てる）。 */
+export function createDocSplitter(
+  onFrame: (text: string) => void,
+  onHead?: (head: string) => void
+) {
+  // 区切りが切れ目をまたいでも拾えるよう、末尾この文字数だけを次へ持ち越す
+  const KEEP = Math.max(FRAME_HEAD.length, FRAMES_KEY.length) - 1;
+  let phase: "head" | "frames" = "head";
+  let headParts: string[] = []; // ヘッダの断片（音声つきだと数十MBになる）
+  let head = ""; // `…,"frames":[` まで
+  let pre: string[] = []; // 最初のコマより前（普通は空。コマ0個なら残り全部）
+  let parts: string[] = []; // 組み立て中のコマの断片
+  let open = false; // コマの途中か
+  let carry = ""; // まだ確定させていない末尾
+
+  // ★速さの要: **貯めた文字列を何度も走査しない。**
+  //  素直に `pending += chunk; pending.indexOf(…)` と書くと、チャンクが来るたびに
+  //  貯まっている 2MB を頭から走査し直す（しかも `+=` で作ったロープを毎回平坦化する）。
+  //  1コマ 2MB ／ チャンク 64KB なら 1コマあたり 32 回 × 2MB＝64MB を走査することになり、
+  //  1,098 コマで 70 GB を舐める計算になる。**実測 78 秒**だった。
+  //  なので「新しく来たぶんだけを走査し、断片は `parts` に置いて最後に1回 `join`」。
+  const scanFrames = (hay: string) => {
+    let pos = 0; // hay のうち、まだ断片に移していない先頭
+    let from = 0;
+    for (;;) {
+      const at = hay.indexOf(FRAME_HEAD, from);
+      if (at < 0) break;
+      if (open) {
+        // 直前のコマの終わりは `at - 1`（区切りの `,` の手前）
+        parts.push(hay.slice(pos, Math.max(pos, at - 1)));
+        onFrame(parts.join(""));
+        parts = [];
+      } else {
+        pre.push(hay.slice(pos, at));
+      }
+      open = true;
+      // ★見つけた頭は**その場で断片に移す**。持ち越しに残すと、次の走査で
+      //   同じ頭をもう一度見つけて、コマを途中で切ってしまう（上の注記の事故）
+      parts.push(FRAME_HEAD);
+      pos = at + FRAME_HEAD.length;
+      from = pos;
+    }
+    // 末尾 KEEP 文字は「区切りの途中かもしれない」ので次へ持ち越す。
+    // ただし**確定済みの位置より前には戻さない**
+    const safeEnd = Math.max(pos, hay.length - KEEP);
+    (open ? parts : pre).push(hay.slice(pos, safeEnd));
+    carry = hay.slice(safeEnd);
+  };
+
+  return {
+    push(chunk: string): void {
+      if (phase === "frames") {
+        scanFrames(carry + chunk);
+        return;
+      }
+      // 音声を埋め込んだ作品ではヘッダ自体が数十MBになるので、ここも同じ流儀で走査する
+      const hay = carry + chunk;
+      const at = hay.indexOf(FRAMES_KEY);
+      if (at < 0) {
+        const safeEnd = Math.max(0, hay.length - KEEP);
+        headParts.push(hay.slice(0, safeEnd));
+        carry = hay.slice(safeEnd);
+        return;
+      }
+      const headEnd = at + FRAMES_KEY.length;
+      headParts.push(hay.slice(0, headEnd));
+      head = headParts.join("");
+      headParts = [];
+      phase = "frames";
+      carry = "";
+      onHead?.(head);
+      scanFrames(hay.slice(headEnd)); // 同じチャンクの残りは、もうコマの並び
+    },
+
+    /** 最後のコマを吐き出して、`head`（`…"frames":[`）と `tail`（`]…}`）を返す。
+     *  `head + tail` が「コマ抜きの、キーが全部そろった JSON」になる。 */
+    end(): { head: string; tail: string } {
+      if (phase === "head") throw new LoadError(t("ed.load.notProject.msg"));
+      const rest = (open ? parts.join("") : pre.join("")) + carry;
+      let after: string;
+      if (open) {
+        // 「`]}` で終わっているはず」と決め打たない（`frames` が最後のキーとは限らない）。
+        // 最後のコマの `}` がどこで閉じるかを数えて、そこから先を残りのヘッダとして扱う
+        const at = objectEnd(rest);
+        if (at < 0) throw new LoadError(t("ed.load.notProject.msg"));
+        onFrame(rest.slice(0, at));
+        after = rest.slice(at);
+      } else {
+        after = rest;
+      }
+      // `after` は空白のあと必ず `]`（frames 配列の閉じ）で始まる
+      const close = after.indexOf("]");
+      if (close < 0 || after.slice(0, close).trim() !== "")
+        throw new LoadError(t("ed.load.notProject.msg"));
+      return { head, tail: after.slice(close) };
+    },
+  };
+}
+
+/** V155: `text[0]` から始まる JSON オブジェクトが閉じる位置（`}` の次）を返す。無ければ -1。
+ *  文字列の中の `{}` と escape された `"` を数えないためだけの、小さな状態機械。
+ *  当てるのは**最後のコマ1つぶん**だけなので、速さは問題にならない。 */
+function objectEnd(text: string): number {
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
+/** V155: `frames` より前に見えているキーだけで「明らかに違うもの」を先に落とす。
+ *  ヘッダは `…,"frames":[` で終わっているので、`]}` を足せばコマ抜きの JSON になる。
+ *  ここを通っても正しいとは限らない（本判定は最後の `validateDoc`）。 */
+function earlyCheck(head: string): void {
+  let doc: LoadedDoc;
+  try {
+    doc = JSON.parse(head + "]}") as LoadedDoc;
+  } catch {
+    throw new LoadError(t("ed.load.notProject.msg"));
+  }
+  if (doc.magic !== undefined && doc.magic !== MAGIC)
+    throw new LoadError(t("ed.load.notProject.msg"));
+  if (typeof doc.version === "number" && doc.version > PROJECT_VERSION)
+    throw new LoadError(t("ed.load.newerVersion.msg", { version: doc.version }));
+  if (doc.width !== undefined && doc.height !== undefined && (doc.width !== W || doc.height !== H))
+    throw new LoadError(t("ed.load.badSize.msg"));
+}
+
+/** V155: 生バイトのまま積んだレイヤーを、確定したビット幅で解釈し直す。
+ *  16bit のときは**同じバッファを見る**ビューを作るだけ（複製しない）。 */
+function finalizeFrames(frames: Frame[], bits: 8 | 16): void {
+  const expected = PIXELS * (bits / 8);
+  for (const f of frames) {
+    for (const [id, buf] of Object.entries(f.layers)) {
+      const raw = buf as Uint8Array;
+      if (raw.length !== expected) throw new LoadError(t("ed.load.badLayer.msg"));
+      // base64ToBytes はオフセット0の自前バッファ（LE）なので、そのまま覗ける
+      if (bits === 16) f.layers[id] = new Uint16Array(raw.buffer, 0, PIXELS);
+    }
+  }
+}
+
+/** V155: doc の形を確かめて、索引のビット幅を返す（従来の判定をそのまま関数にしただけ）。 */
+function validateDoc(doc: LoadedDoc): 8 | 16 {
+  if (doc.magic !== MAGIC) throw new LoadError(t("ed.load.notProject.msg"));
+  if (typeof doc.version !== "number" || doc.version > PROJECT_VERSION) {
+    throw new LoadError(t("ed.load.newerVersion.msg", { version: doc.version }));
+  }
+  if (doc.width !== W || doc.height !== H) {
+    throw new LoadError(t("ed.load.badSize.msg"));
+  }
+  // v1 は indexBits 無し → 8bit（従来と同一の可逆ロード）
+  return doc.indexBits === 16 ? 16 : 8;
+}
+
+/** V155: 直列化された1コマ → `Frame`（従来の `map` の中身をそのまま関数にしただけ）。
+ *  **ビット幅の解釈と長さの検査はここでは行わない**（`finalizeFrames` が最後にまとめて行う）。 */
+function frameFromSerialized(sf: SerializedFrame): Frame {
+  const layers: Record<string, IndexBuf> = {};
+  for (const [id, b64] of Object.entries(sf.layers)) layers[id] = base64ToBytes(b64);
+  return {
+    paper: sf.paper,
+    layers,
+    order: sf.order,
+    // v5: SE配置（未知idの除去は最後の sanitizeAudio が行う）
+    se: Array.isArray(sf.se) ? sf.se.filter((x) => typeof x === "string") : undefined,
+  };
+}
+
+/** V155 (L-2): 読み込みの進み具合を知らせる口（コマを1つ組み立てるたびに呼ぶ）。
+ *  **数字は画面に出さない**（要件 W-8 の流儀）が、呼び出し側が
+ *  「動いている」ことを見せるために使う。 */
+export interface LoadOpts {
+  onFrame?: (done: number) => void;
+}
+
+export async function projectFromBytes(
+  bytes: Uint8Array,
+  opts?: LoadOpts
+): Promise<Project> {
   // V154b: 大きさの上限を**利用者向けの言葉**にするための材料（MiB は概数でよい）
   const mib = (n: number) => {
     const m = n / 1024 / 1024;
     return m >= 1024 ? `${Math.round((m / 1024) * 10) / 10}GB` : `${Math.round(m * 10) / 10}MB`;
   };
+  // V155（Codex レビュー §2・優先度 高）: **「この版が開ける上限」はもう出さない。**
+  // V154b では固定の門番（512MB）で断っていたので上限を出すのが正しかったが、
+  // 分割読み込みにした今、ここへ来るのは**本当にメモリが足りなかったとき**だけ。
+  // 固定の数字を出すと「直ったはずなのに、やっぱり版の上限で無理なのか」と読まれる
   const tooLarge = (rawBytes: number) =>
     new Error(
-      t("ed.load.tooLarge.msg", {
-        size: rawBytes > 0 ? mib(rawBytes) : mib(bytes.length),
-        max: mib(MAX_JSON_CHARS),
-      })
+      t("ed.load.tooLarge.msg", { size: rawBytes > 0 ? mib(rawBytes) : mib(bytes.length) })
     );
 
   // V154b: **gzip のマジック（1f 8b）があれば、それは gzip。**
@@ -300,61 +585,56 @@ export async function projectFromBytes(bytes: Uint8Array): Promise<Project> {
   // ファイルなのに「あなたのデータは壊れています」としか読めない**。これが嘘の正体。
   // 「非圧縮かもしれない」の保険は、**マジックが無いときだけ**に限る。
   const isGzip = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
-  let json: Uint8Array;
+  let doc: LoadedDoc;
+  let frames: Frame[];
   if (isGzip) {
-    // 展開する前に、末尾の ISIZE で「そもそも文字列にできない大きさか」を見る
-    const isize = gzipIsize(bytes);
-    if (isize > MAX_JSON_CHARS) throw tooLarge(isize);
+    // ★V155 (L-1): **流しながら読む。**巨大な1本の文字列は作らない。
+    //
+    // V154b では、ここに `if (isize > MAX_JSON_CHARS) throw tooLarge(isize)` という門番が
+    // 立っていた。当時は「どうせ文字列にできないのだから、掴めないメモリを掴みに
+    // いかせない」ための正しい門番だったが、**分割で読める今は、この門番こそが
+    // 再現データを追い返す張本人**になる（ISIZE 2.10 GiB > 512 MiB）。だから外す。
+    //
+    // 代わりの上限は**置かない**。理由は要件 §L-1 の「推測で数字を置かない」で、
+    // ここで効く本当の限界は「索引バッファをメモリに置けるか」＝機械ごとに違うため。
+    // 置けなかったときは確保が `RangeError` で落ちるので、`isSizeFailure` で拾って
+    // **「大きすぎて開けません／ファイルは壊れていません」**を出す（嘘をつかない）。
     try {
-      json = await gunzip(bytes);
+      const r = await streamProjectDoc(bytes, opts?.onFrame);
+      doc = r.doc;
+      frames = r.frames;
     } catch (e) {
-      // 大きすぎて確保できなかったのか、中身が合わないのかを分ける（混ぜない）
-      if (isSizeFailure(e)) throw tooLarge(isize);
+      // ①こちらが文言を決めて投げたもの（形が違う・版が新しい・レイヤーが壊れている）はそのまま
+      if (e instanceof LoadError) throw e;
+      // ②大きすぎて確保できなかった（`RangeError` 等）＝**壊れてはいない**
+      if (isSizeFailure(e)) throw tooLarge(gzipIsize(bytes));
+      // ③それ以外は展開そのものの失敗（CRC・ISIZE 不一致・途中切れ）＝壊れている
+      //   ここへ**メッセージが空の例外**も落ちる（素通しさせない）
       throw new Error(t("ed.load.decompressFailed.msg"));
     }
   } else {
-    // 旧・非圧縮の可能性に備える（前方互換の保険）。**マジックが無いときだけ**
-    json = bytes;
-  }
-  let text: string;
-  try {
-    text = new TextDecoder().decode(json);
-  } catch (e) {
-    // 展開はできたが、1本の文字列にできなかった（V8 の上限）。これも「壊れている」ではない
-    if (isSizeFailure(e)) throw tooLarge(json.length);
-    throw e;
-  }
-  const doc = JSON.parse(text);
-  if (doc.magic !== MAGIC) throw new Error(t("ed.load.notProject.msg"));
-  if (typeof doc.version !== "number" || doc.version > PROJECT_VERSION) {
-    throw new Error(
-      t("ed.load.newerVersion.msg", { version: doc.version })
-    );
-  }
-  if (doc.width !== W || doc.height !== H) {
-    throw new Error(t("ed.load.badSize.msg"));
-  }
-  // v1 は indexBits 無し → 8bit（従来と同一の可逆ロード）
-  const bits: 8 | 16 = doc.indexBits === 16 ? 16 : 8;
-  const expected = PIXELS * (bits / 8);
-  const frames: Frame[] = (doc.frames as SerializedFrame[]).map((sf) => {
-    const layers: Record<string, IndexBuf> = {};
-    for (const [id, b64] of Object.entries(sf.layers)) {
-      const raw = base64ToBytes(b64);
-      if (raw.length !== expected) throw new Error(t("ed.load.badLayer.msg"));
-      layers[id] =
-        bits === 16
-          ? new Uint16Array(raw.buffer, 0, PIXELS) // base64ToBytes はオフセット0の自前バッファ（LE）
-          : raw;
+    // 旧・非圧縮の可能性に備える（前方互換の保険）。**マジックが無いときだけ**。
+    // こちらは「gzip すら通していない古いもの＝小さい」ので、従来の一括で読む
+    let text: string;
+    try {
+      text = new TextDecoder().decode(bytes);
+    } catch (e) {
+      if (isSizeFailure(e)) throw tooLarge(bytes.length);
+      throw e;
     }
-    return {
-      paper: sf.paper,
-      layers,
-      order: sf.order,
-      // v5: SE配置（未知idの除去は最後の sanitizeAudio が行う）
-      se: Array.isArray(sf.se) ? sf.se.filter((x) => typeof x === "string") : undefined,
-    };
-  });
+    // V155: ここも**生の SyntaxError を利用者に見せない**（「Unexpected token 'h'…」が
+    // 帯に出ていた。gzip 側は V154b で直したが、こちらが残っていた）
+    try {
+      doc = JSON.parse(text) as LoadedDoc;
+    } catch {
+      throw new LoadError(t("ed.load.notProject.msg"));
+    }
+    const bits = validateDoc(doc);
+    frames = (doc.frames as SerializedFrame[]).map((sf) => frameFromSerialized(sf));
+    finalizeFrames(frames, bits);
+  }
+  // 保存し直すときのビット幅（`Project.indexBits`）。上の2経路とも `validateDoc` で確かめ済み
+  const bits: 8 | 16 = doc.indexBits === 16 ? 16 : 8;
   // 音声の復元。破損していても絵は開けるよう、失敗は隔離する（従来方針）
   // - v5: { bgm, se[] } をそのまま復元
   // - v3/v4: 旧 audio（単一トラック）→ bgm へ可逆マイグレーション

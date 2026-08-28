@@ -405,7 +405,7 @@ export class LibraryScreen {
         await invoke("create_album", { libRoot: this.libRoot, name });
         await this.refresh();
       } catch (e) {
-        this.cb.toast(String(e));
+        this.cb.toast(errText(e)); // V155 (A-33)
       }
     };
     $("#album-rename").onclick = async () => {
@@ -421,7 +421,7 @@ export class LibraryScreen {
         this.currentAlbum = name;
         await this.refresh();
       } catch (e) {
-        this.cb.toast(String(e));
+        this.cb.toast(errText(e)); // V155 (A-33)
       }
     };
     $("#album-delete").onclick = async () => {
@@ -438,7 +438,7 @@ export class LibraryScreen {
         this.currentAlbum = "";
         await this.refresh();
       } catch (e) {
-        this.cb.toast(String(e));
+        this.cb.toast(errText(e)); // V155 (A-33)
       }
     };
   }
@@ -472,7 +472,7 @@ export class LibraryScreen {
           : t("lib.import.done.toast", { imported: res.imported, skipped: res.skipped });
       this.cb.toast(msg);
     } catch (e) {
-      this.cb.toast(t("lib.import.error.toast", { err: String(e) }));
+      this.cb.toast(t("lib.import.error.toast", { err: errText(e) }));
     } finally {
       footer.hidden = true;
       await this.refresh();
@@ -520,7 +520,7 @@ export class LibraryScreen {
       if (item) await this.select(item);
       else this.cb.toast(t("lib.openFile.imported.toast", { path: destPath }));
     } catch (e) {
-      this.cb.toast(t("lib.import.error.toast", { err: String(e) }));
+      this.cb.toast(t("lib.import.error.toast", { err: errText(e) }));
     }
   }
 
@@ -644,7 +644,7 @@ export class LibraryScreen {
       await invoke("set_note_order", { libRoot: this.libRoot, hashes: keys });
       await this.refresh();
     } catch (e) {
-      this.cb.toast(String(e));
+      this.cb.toast(errText(e)); // V155 (A-33)
     }
   }
 
