@@ -1137,6 +1137,13 @@ button:disabled {
   display: none;
 }
 
+/* V156: コマの準備待ちの札。変形の札（橙）と区別できるよう落ち着いた色にする
+   （警告ではなく「いま用意しています」なので、強い色にしない） */
+.wait-badge {
+  background: var(--panel);
+  color: var(--ink);
+}
+
 .drawguide {
   position: absolute;
   left: calc(5 / 320 * 100%);

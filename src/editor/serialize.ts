@@ -14,6 +14,9 @@
 // - .kwz は入力専用（この形式でのみ保存する）
 
 import { t } from "../i18n";
+// V156 (P-1・条件3): 眠っているレイヤーを**その場で1枚だけ**展開して流すための口。
+// 起こさない＝`f.layers` には入れないので、保存中に実メモリの山が立たない
+import { borrowLayerBytes } from "./sleep";
 import { folderBaseName, untitledTitle } from "../i18n/defaults";
 import {
   Project,
@@ -89,6 +92,24 @@ interface SerializedFrame {
 
 /** 索引バッファ → バイト列（LE）。indexBits=16 なのに 8bit バッファが混在していた場合は
  *  値保存で widening してから直列化する（truncate 経路を作らない防御）。 */
+/** V156 (P-1): 1コマぶんのレイヤー id を**決まった順序で**返す。
+ *
+ *  `layerDefs` の並びを先に、そこに無い id（壊れたファイル・将来の拡張）は後ろに付ける。
+ *  眠り→起きるで `f.layers` の挿入順が変わっても、**保存バイト列が揺れない**ようにするため。 */
+function orderedLayerIds(p: Project, f: Frame): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const ld of p.layerDefs) {
+    if (f.layers[ld.id] || f.sleep?.[ld.id]) {
+      out.push(ld.id);
+      seen.add(ld.id);
+    }
+  }
+  for (const id of Object.keys(f.layers)) if (!seen.has(id)) { out.push(id); seen.add(id); }
+  if (f.sleep) for (const id of Object.keys(f.sleep)) if (!seen.has(id)) { out.push(id); seen.add(id); }
+  return out;
+}
+
 function indexBufToBytes(buf: IndexBuf, bits: 8 | 16): Uint8Array {
   if (bits === 16 && buf instanceof Uint8Array) {
     const wide = new Uint16Array(PIXELS);
@@ -127,6 +148,16 @@ async function encodeProject(
         if (b instanceof Uint16Array) {
           bits = 16;
           break outer;
+        }
+      }
+      // V156 (P-1): 眠っているぶんは**起こさずに**幅を答える（控えが自分の幅を覚えている）。
+      // ここで起こしてしまうと、保存のたびに全コマが生に戻って P-1 の意味が消える
+      if (f.sleep) {
+        for (const [id, e] of Object.entries(f.sleep)) {
+          if (!f.layers[id] && e.bits === 16) {
+            bits = 16;
+            break outer;
+          }
         }
       }
     }
@@ -217,8 +248,22 @@ async function encodeProject(
     if (opts?.aborted?.()) return abort();
     const f = frames[i];
     const layers: Record<string, string> = {};
-    for (const [id, buf] of Object.entries(f.layers)) {
-      layers[id] = bytesToBase64(indexBufToBytes(buf, bits));
+    // V156 (P-1・条件3): 起きているものと眠っているものを**同じ順序で**書く。
+    // 順序は `layerDefs` 基準に決め打つ——眠って起きるとキーの挿入順が変わるので、
+    // `Object.keys(f.layers)` のままだと**同じ絵でも保存バイト列が変わる**（差分が読めなくなる）。
+    // 眠っているぶんは `borrowLayerBytes` で1枚だけ展開して base64 にし、**すぐ捨てる**
+    //（`f.layers` には入れない＝保存中に実メモリの山が立たない）
+    for (const id of orderedLayerIds(p, f)) {
+      const buf = f.layers[id];
+      if (buf) {
+        layers[id] = bytesToBase64(indexBufToBytes(buf, bits));
+        continue;
+      }
+      const lent = await borrowLayerBytes(p, f, id);
+      if (!lent) continue; // 起きても眠ってもいない＝そのレイヤーは無い
+      const view: IndexBuf =
+        lent.bits === 16 ? new Uint16Array(lent.raw.buffer, lent.raw.byteOffset, PIXELS) : lent.raw;
+      layers[id] = bytesToBase64(indexBufToBytes(view, bits));
     }
     const sf: SerializedFrame = {
       paper: f.paper,
@@ -342,12 +387,27 @@ async function streamProjectDoc(
     (head) => earlyCheck(head)
   );
 
+  // V156 (P-3 / A-35): **切り分けとは別の数え方**で、コマの頭 `{"paper":` を数える。
+  //
+  //  V155 で見つかった「チャンクの切れ目で同じ頭を二度数える」バグは、
+  //  **コマ数だけが静かに増えて**通ってしまう種類だった（絵は途中で切れているのに例外は出ない）。
+  //  切り分け（`createDocSplitter`）が吐いた数と、ここで素朴に数えた数を最後に突き合わせれば、
+  //  同じ種類の事故が**次に起きたとき必ず止まる**。数え方は `verifySavedBytes`（保存の検証）と
+  //  同じ素朴な `indexOf` ＋ 持ち越し——**わざと別実装**にしてある（同じ関数を共有すると
+  //  同じバグで両方とも間違えるので、突き合わせの意味が消える）。
+  const counter = createFrameHeadCounter();
+  const countHeads = counter.push;
+
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
-    sp.push(dec.decode(value, { stream: true }));
+    const chunk = dec.decode(value, { stream: true });
+    countHeads(chunk);
+    sp.push(chunk);
   }
-  sp.push(dec.decode()); // 末尾（マルチバイトの繰り越しを吐き出す）
+  const lastChunk = dec.decode(); // 末尾（マルチバイトの繰り越しを吐き出す）
+  countHeads(lastChunk);
+  sp.push(lastChunk);
 
   // ヘッダ（`…"frames":[`）＋ `]` 以降 ＝ **コマ抜きの、キーが全部そろった JSON**
   const { head, tail } = sp.end();
@@ -358,6 +418,13 @@ async function streamProjectDoc(
     throw new LoadError(t("ed.load.notProject.msg"));
   }
   const bits = validateDoc(doc);
+  // ★A-35: 突き合わせ。合わなければ**うるさく失敗する**（静かに1コマ減って開かない）
+  const headCount = counter.count();
+  if (frames.length !== headCount) {
+    throw new LoadError(
+      t("ed.load.frameCountMismatch.msg", { got: frames.length, want: headCount })
+    );
+  }
   finalizeFrames(frames, bits);
   return { doc, frames };
 }
@@ -373,6 +440,31 @@ async function streamProjectDoc(
  *   **あらゆる切れ方**（1文字ずつ／頭をまたぐ位置／境界ぴったり）を総当たりで当てる。
  *
  *  `onFrame` にはコマ1つぶんの JSON をそのまま渡す（呼び出し側が parse して捨てる）。 */
+/** V156 (P-3 / A-35): コマの頭 `{"paper":` を数えるだけの、**切り分けとは別実装**の数え上げ。
+ *
+ *  同じ関数を共有すると同じバグで両方とも間違えるので、突き合わせの意味が消える。
+ *  こちらは `verifySavedBytes`（保存の検証）と同じ素朴な `indexOf` ＋ 持ち越しにしてある。
+ *  チャンクの切れ目に左右されないこと（V155 で実際に踏んだ穴）は `v156_smoke` が総当たりで見る。 */
+export function createFrameHeadCounter() {
+  const KEEP = FRAME_HEAD.length - 1;
+  let n = 0;
+  let carry = "";
+  return {
+    push(chunk: string): void {
+      const hay = carry + chunk;
+      let at = hay.indexOf(FRAME_HEAD);
+      while (at >= 0) {
+        n++;
+        at = hay.indexOf(FRAME_HEAD, at + FRAME_HEAD.length);
+      }
+      carry = hay.slice(Math.max(0, hay.length - KEEP));
+    },
+    count(): number {
+      return n;
+    },
+  };
+}
+
 export function createDocSplitter(
   onFrame: (text: string) => void,
   onHead?: (head: string) => void

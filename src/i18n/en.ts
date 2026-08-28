@@ -619,6 +619,7 @@ const en: Record<keyof typeof ja, string> = {
 
   // ---------------- エディタ: 変形（ed.xform.） ----------------
   "ed.xform.badge.label": "🔀 Transforming (Enter apply / Esc cancel)",
+  "ed.frameWait.label": "Getting the frame ready",
   "ed.xform.angle.label": "Rotate",
   "ed.xform.corner.reset.toast": "Corners reset",
   "ed.xform.flipH.btn": "↔ Flip across",
@@ -801,13 +802,17 @@ const en: Record<keyof typeof ja, string> = {
   // ---------------- エディタ: 図形・文字 ----------------
   "ed.shape.fill.label": "Filled",
   "ed.size.head.label": "Memory in use",
-  "ed.size.head.title": "How much memory this animation is using right now. This is not the size of the saved file.",
+  "ed.size.head.title": "How big this animation is. What is on memory now is the \"Actually in use\" row.",
   "ed.size.project.label": "Animation",
-  "ed.size.history.label": "Undo",
+  "ed.size.history.steps.label": "Undo ({n} steps left)",
   "ed.size.total.label": "Total",
+  "ed.size.real.label": "Actually in use",
+  "ed.size.real.busy.label": "Actually in use (tidying up)",
   "ed.size.faces.msg": "{n} faces (layers x frames). Around {max} is where it gets heavy.",
-  "ed.size.overWall.msg": "This is a very large animation. Opening and saving take a while and use a lot of memory (it will still open). Splitting it in two makes it lighter.",
+  "ed.size.overWall.msg": "This is a very large animation. Opening and saving take a while and use a lot of memory. Passing this mark does not by itself make it unopenable. Splitting it in two makes it lighter.",
   "ed.size.history.msg": "Merging layers or deleting frames doesn't shrink Undo — it keeps what it needs to take you back.",
+  "ed.size.undo.msg": "Undo goes back up to 200 steps. On a large animation the oldest steps are dropped automatically to protect memory - the most recent step can always be undone.",
+  "ed.size.twoNumbers.msg": "The \"Animation\" and \"Total\" rows show how big the animation is. What is on memory right now is the \"Actually in use\" row - frames you are not looking at are folded away.",
   "ed.size.caution.msg": "Getting large. Save from time to time — saving and reopening empties the Undo history and frees that memory. You can keep working.",
   "ed.size.warn.msg": "Very large. Save now and reopen the animation to empty the Undo history. Splitting it into two animations is also worth considering. Nothing is blocked.",
   "ed.shape.ellipse.btn": "○Circle",
@@ -1002,6 +1007,7 @@ const en: Record<keyof typeof ja, string> = {
   "ed.load.newerVersion.msg": "This file was made with a newer version (v{version}). Please update MemoAnima.",
   "ed.load.badSize.msg": "The canvas size is invalid (only 320×240 is supported)",
   "ed.load.badLayer.msg": "The layer data is damaged",
+  "ed.load.frameCountMismatch.msg": "Two ways of counting the frames disagreed ({got} / {want}). It was not opened, to be safe. Your file is untouched. If it keeps happening, send us the log.",
 };
 
 export default en;

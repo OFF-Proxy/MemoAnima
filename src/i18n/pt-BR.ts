@@ -619,6 +619,7 @@ const ptBR: Record<keyof typeof ja, string> = {
 
   // ---------------- エディタ: 変形（ed.xform.） ----------------
   "ed.xform.badge.label": "🔀 Transformando (Enter aplica / Esc cancela)",
+  "ed.frameWait.label": "Preparando o quadro",
   "ed.xform.angle.label": "Girar",
   "ed.xform.corner.reset.toast": "Cantos redefinidos",
   "ed.xform.flipH.btn": "↔ Espelhar",
@@ -804,13 +805,17 @@ const ptBR: Record<keyof typeof ja, string> = {
   // ---------------- エディタ: 図形・文字（ed.shape. / ed.text.） ----------------
   "ed.shape.fill.label": "Preenchida",
   "ed.size.head.label": "Memória em uso",
-  "ed.size.head.title": "Quanta memória esta animação está usando agora. Não é o tamanho do arquivo salvo.",
+  "ed.size.head.title": "O tamanho da animacao. O que esta na memoria agora e a linha \"Em uso real\".",
   "ed.size.project.label": "Animação",
-  "ed.size.history.label": "Desfazer",
+  "ed.size.history.steps.label": "Desfazer ({n} passos)",
   "ed.size.total.label": "Total",
+  "ed.size.real.label": "Em uso real",
+  "ed.size.real.busy.label": "Em uso real (organizando)",
   "ed.size.faces.msg": "{n} faces (camadas x quadros). Perto de {max} ja fica pesado.",
-  "ed.size.overWall.msg": "Esta animacao e muito grande. Abrir e salvar demora e usa bastante memoria (ela continua abrindo). Dividir em duas partes deixa tudo mais leve.",
+  "ed.size.overWall.msg": "Esta animacao e muito grande. Abrir e salvar demora e usa bastante memoria. Passar desta marca nao a torna impossivel de abrir. Dividir em duas partes deixa tudo mais leve.",
   "ed.size.history.msg": "Juntar camadas ou excluir quadros não reduz «Desfazer»: ele guarda o que precisa para voltar.",
+  "ed.size.undo.msg": "Desfazer vai ate 200 passos. Em animacoes grandes os mais antigos sao descartados automaticamente para poupar memoria - o ultimo passo sempre pode ser desfeito.",
+  "ed.size.twoNumbers.msg": "As linhas \"Animacao\" e \"Total\" mostram o tamanho da animacao. O que esta na memoria agora e a linha \"Em uso real\" - os quadros que voce nao esta vendo ficam dobrados.",
   "ed.size.caution.msg": "Está ficando grande. Salve de vez em quando: ao salvar e reabrir, «Desfazer» se esvazia e libera essa memória. Você pode continuar trabalhando.",
   "ed.size.warn.msg": "Muito grande. Salve agora e reabra a animação para esvaziar «Desfazer». Dividir em duas animações também é uma boa ideia. Nada é bloqueado.",
   "ed.shape.ellipse.btn": "○Círculo",
@@ -1011,6 +1016,7 @@ const ptBR: Record<keyof typeof ja, string> = {
   "ed.load.newerVersion.msg": "Este arquivo foi feito com uma versão mais nova (v{version}). Atualize o MemoAnima.",
   "ed.load.badSize.msg": "O tamanho da tela não é válido (só 320×240 é aceito)",
   "ed.load.badLayer.msg": "Os dados da camada estão danificados",
+  "ed.load.frameCountMismatch.msg": "Duas formas de contar os quadros discordaram ({got} / {want}). Nao foi aberta, por seguranca. Seu arquivo esta intacto. Se continuar, envie o registro.",
 };
 
 export default ptBR;

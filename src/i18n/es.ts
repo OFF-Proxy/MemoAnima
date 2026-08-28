@@ -619,6 +619,7 @@ const es: Record<keyof typeof ja, string> = {
 
   // ---------------- エディタ: 変形（ed.xform.） ----------------
   "ed.xform.badge.label": "🔀 Transformando (Enter aplica / Esc cancela)",
+  "ed.frameWait.label": "Preparando el fotograma",
   "ed.xform.angle.label": "Girar",
   "ed.xform.corner.reset.toast": "Esquinas restablecidas",
   "ed.xform.flipH.btn": "↔ Voltear",
@@ -804,13 +805,17 @@ const es: Record<keyof typeof ja, string> = {
   // ---------------- エディタ: 図形・文字（ed.shape. / ed.text.） ----------------
   "ed.shape.fill.label": "Relleno",
   "ed.size.head.label": "Memoria en uso",
-  "ed.size.head.title": "Cuánta memoria usa ahora esta animación. No es el tamaño del archivo guardado.",
+  "ed.size.head.title": "El tamano de la animacion. Lo que hay en memoria ahora es la fila \"En uso real\".",
   "ed.size.project.label": "Animación",
-  "ed.size.history.label": "Deshacer",
+  "ed.size.history.steps.label": "Deshacer ({n} pasos)",
   "ed.size.total.label": "Total",
+  "ed.size.real.label": "En uso real",
+  "ed.size.real.busy.label": "En uso real (ordenando)",
   "ed.size.faces.msg": "{n} caras (capas x fotogramas). A partir de unas {max} se vuelve pesado.",
-  "ed.size.overWall.msg": "Esta animacion es muy grande. Abrirla y guardarla tarda y usa mucha memoria (se seguira abriendo). Dividirla en dos la aligera.",
+  "ed.size.overWall.msg": "Esta animacion es muy grande. Abrirla y guardarla tarda y usa mucha memoria. Pasar esta marca no la hace imposible de abrir por si solo. Dividirla en dos la aligera.",
   "ed.size.history.msg": "Combinar capas o borrar fotogramas no reduce «Deshacer»: guarda lo necesario para volver atrás.",
+  "ed.size.undo.msg": "Deshacer llega hasta 200 pasos. En una animacion grande los mas antiguos se descartan automaticamente para cuidar la memoria; el ultimo paso siempre se puede deshacer.",
+  "ed.size.twoNumbers.msg": "Las filas \"Animacion\" y \"Total\" indican el tamano de la animacion. Lo que hay en memoria ahora es la fila \"En uso real\": los fotogramas que no miras estan plegados.",
   "ed.size.caution.msg": "Se está haciendo grande. Guarde de vez en cuando: al guardar y volver a abrir, «Deshacer» se vacía y libera esa memoria. Puede seguir trabajando.",
   "ed.size.warn.msg": "Muy grande. Guarde ahora y vuelva a abrir la animación para vaciar «Deshacer». También conviene dividirla en dos animaciones. Nada se bloquea.",
   "ed.shape.ellipse.btn": "○Círculo",
@@ -1011,6 +1016,7 @@ const es: Record<keyof typeof ja, string> = {
   "ed.load.newerVersion.msg": "Este archivo se hizo con una versión más nueva (v{version}). Actualice MemoAnima.",
   "ed.load.badSize.msg": "El tamaño del lienzo no es válido (solo se admite 320×240)",
   "ed.load.badLayer.msg": "Los datos de la capa están dañados",
+  "ed.load.frameCountMismatch.msg": "Dos formas de contar los fotogramas no coincidieron ({got} / {want}). No se abrio, por seguridad. Tu archivo sigue intacto. Si continua, envianos el registro.",
 };
 
 export default es;

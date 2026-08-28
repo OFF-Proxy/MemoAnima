@@ -59,7 +59,26 @@ import {
 import * as R from "./raster";
 // M17: マイ柄（カスタムトーン）。登録・解決・塗り込みの純関数はここ（settings にだけ保存・保存形式には触れない）
 import * as CT from "./customTone";
-import { FrameClip, makeClip, buildFramesFromClip } from "./frameClip";
+import {
+  FrameClip,
+  makeClip,
+  buildFramesFromClip,
+  packClip,
+  unpackClip,
+  clipBytes,
+} from "./frameClip";
+// V156 (P-1): 見えていないコマを圧縮して眠らせる（仕組みの全文は sleep.ts の冒頭）
+import {
+  wakeFrame,
+  sleepFrame,
+  invalidateFrame,
+  awakeBytes,
+  sleepBytes,
+  dropLayer,
+  wakeLayersAllFrames,
+  frameHasAsleep,
+  setStaleSleepLogger,
+} from "./sleep";
 import { FrameSource, projectSource, ExportAudioSource, formatBytes, formatSize } from "./exporter";
 import {
   AudioPreview,
@@ -653,6 +672,150 @@ export class Editor {
   set dirty(v: boolean) {
     this._dirty = v;
     if (v) this.autosavePending = true;
+    // ★V156 (P-1・条件5): 何かが変わった＝**いま見ているコマの圧縮控えは古い**。捨てる。
+    //
+    //  条件5「書きで起こしたコマの控えは必ず捨てる」を、**書いた経路を数え上げずに**満たすための要。
+    //  `dirty` はこのアプリの「何か変わった」の合図で、代入は 41 箇所あるが**すべてこの1か所を通る**
+    //  （`pointerDown` と同じ、既にあるこのファイルの作法）。絵を変えない変更（題名・速度・音）でも
+    //  控えを捨てるが、いま見ているコマは窓の中で当分眠らないので、無駄はほぼゼロ。
+    //
+    //  窓の**外**を書き換える操作（全コマ一括）はこれでは足りないので、そちらは
+    //  `wakeAllForWrite()` で明示的に起こす。さらに漏れても `sleep.ts` の指紋の網が拾う。
+    if (v && this.sleepOn) {
+      const f = this.project.frames[this.frameIndex];
+      if (f) invalidateFrame(f);
+    }
+  }
+
+  // ---------------- V156 (P-1): 眠り ----------------
+  /** 眠りを効かせるしきい値。**これ未満の作品はいままでと完全に同じ経路**を通る
+   *  （スパイク実測: 50コマ×3レイヤーで減らせるのは 11 MiB しかなく、遅くなる理由だけが残る）。 */
+  private static readonly SLEEP_MIN_BYTES = 32 * 1024 * 1024;
+  /** 窓の半径。オニオンは UI が 切/1/2/3 の4択で最大3（`compositeFrame` が frameIndex±k を読む）。
+   *  **常に ±3 を起こしておく**——オニオンを 0→3 に切り替えた瞬間に6コマ起こすと引っかかるので、
+   *  段数に追従させない。20レイヤーでも 7コマ＝10.3 MiB で、効き目にはまったく影響しない。 */
+  private static readonly SLEEP_WINDOW = 3;
+  /** この作品で眠りを効かせるか（mount のときに大きさで決める） */
+  private sleepOn = false;
+  /** 裏で眠らせる作業が走っているか */
+  private sweeping = false;
+  /** 次に見にいくコマ（掃除の巡回位置） */
+  private sweepCursor = 0;
+  /** 起こし直しの世代（追い越しで古い結果を描かないための番号） */
+  private wakeGen = 0;
+  /** 掃除中にメーターを更新した時刻（走査が重いので 0.5 秒に1回まで） */
+  private lastSweepMeterAt = 0;
+
+  /** V156: 📌 全コマ共通レイヤーの id（眠らせない＝全コマで見えていて実体は1つ） */
+  private sharedLayerIds(): Set<string> {
+    const s = new Set<string>();
+    for (const ld of this.project.layerDefs) if (ld.shared === true) s.add(ld.id);
+    return s;
+  }
+
+  /** V156: そのコマは窓の中か（表示中＋オニオンが読む前後） */
+  private inSleepWindow(i: number): boolean {
+    return Math.abs(i - this.frameIndex) <= Editor.SLEEP_WINDOW;
+  }
+
+  /** V156: 描くのに要るコマ（表示中＋前後3）が全部起きているか。 */
+  private frameReady(): boolean {
+    if (!this.sleepOn) return true;
+    const lo = Math.max(0, this.frameIndex - Editor.SLEEP_WINDOW);
+    const hi = Math.min(this.project.frames.length - 1, this.frameIndex + Editor.SLEEP_WINDOW);
+    for (let i = lo; i <= hi; i++) {
+      const f = this.project.frames[i];
+      if (!f?.sleep) continue;
+      for (const id of Object.keys(f.sleep)) if (!f.layers[id]) return false;
+    }
+    return true;
+  }
+
+  /** V156: 窓（表示中＋前後3）を起こす。**書きで起こす**——ここは利用者が描く場所なので、
+   *  控えを残すと「描いた絵が次に眠るとき古い控えで上書きされる」（条件5）。 */
+  private async ensureSleepWindow(): Promise<void> {
+    if (!this.sleepOn) return;
+    // 再生中は**読みで**起こす（条件2）。控えを残しておけば、窓から出るときの片付けが只になり、
+    // 1周の再生で 25 秒ぶんの再圧縮が走るのを防げる。再生中はキャンバスに触れると
+    // 再生が止まる（`stopPlayback`）ので、読みで起こしたコマに描かれることはない。
+    // 止まったあとに描けば `dirty` のセッターが控えを捨てる（条件5）。
+    const mode = this.playing ? "read" : "write";
+    const lo = Math.max(0, this.frameIndex - Editor.SLEEP_WINDOW);
+    const hi = Math.min(this.project.frames.length - 1, this.frameIndex + Editor.SLEEP_WINDOW);
+    const jobs: Promise<void>[] = [];
+    for (let i = lo; i <= hi; i++) {
+      const f = this.project.frames[i];
+      if (f) jobs.push(wakeFrame(this.project, f, mode));
+    }
+    await Promise.all(jobs);
+  }
+
+  /** V156: 窓の外を少しずつ眠らせる（条件1: 先に全部圧縮しない）。
+   *
+   *  スパイク実測で 1,091 コマの圧縮は **25.6 秒**。読み込みと直列にすると
+   *  V155 で 11 秒にした「開く速さ」が 36 秒に戻ってしまう。だから**開いたあと**、
+   *  1コマずつ・合間にメインスレッドを譲りながら片付ける。
+   *  描いている間・再生中は**触らない**（体感に漏らさない）。 */
+  private async sweepSleep(): Promise<void> {
+    if (this.sweeping || !this.sleepOn) return;
+    this.sweeping = true;
+    const keep = this.sharedLayerIds();
+    try {
+      let scanned = 0;
+      const total = this.project.frames.length;
+      while (this.mounted && this.sleepOn && scanned < total) {
+        // 描いている間・再生中・変形中は「**只で片付くもの**」しか触らない。
+        // 圧縮は 1コマ 20 レイヤーで数十 ms かかるので、ここで走らせると描き味に出る。
+        // 逆に「控えが生きている生を手放すだけ」は費用ゼロなので、再生中でも進めてよい
+        //（進めないと、1周の再生で全コマが生に戻ってしまう）。
+        const freeOnly = this.pointerDown || this.playing || this.xformActive;
+        const i = this.sweepCursor % Math.max(1, this.project.frames.length);
+        this.sweepCursor = i + 1;
+        scanned++;
+        const f = this.project.frames[i];
+        if (!f || this.inSleepWindow(i)) continue;
+        if (Object.keys(f.layers).length === 0) continue; // もう眠っている
+        if ((await sleepFrame(this.project, f, keep, freeOnly)) > 0 && !freeOnly) {
+          // 1コマ圧縮したらメインスレッドを譲る（描き味に出さない）
+          await new Promise((r) => setTimeout(r, 0));
+          // V156（Codex レビュー）: **メーターの「実際に使っている量」を追従させる。**
+          // 片付けは 27 秒かけて進むのに、メーターは再描画や履歴の動きがあるまで
+          // 更新されない＝**画面が古い数字を出したまま**になっていた。
+          // 数える処理は全コマを走査するので、0.5 秒に1回までに絞る
+          //（この行が動くこと自体が「いま片付けている」の合図にもなる）
+          const now = performance.now();
+          if (now - this.lastSweepMeterAt > 500) {
+            this.lastSweepMeterAt = now;
+            this.updateSizeMeter();
+          }
+        }
+      }
+    } finally {
+      this.sweeping = false;
+      // 終わったところで必ず1回そろえる（途中の間引きで最後の数字が古いまま残らないように）
+      if (this.mounted) this.updateSizeMeter();
+    }
+  }
+
+  /** V156: 窓の後ろに出ていったコマを只で片付ける（再生中の1コマぶん）。 */
+  private async evictBehind(center: number): Promise<void> {
+    if (!this.sleepOn) return;
+    const i = center - Editor.SLEEP_WINDOW - 1;
+    const f = this.project.frames[i];
+    if (!f) return;
+    await sleepFrame(this.project, f, this.sharedLayerIds(), true /* 只で片付くものだけ */);
+  }
+
+  /** V156: コマの準備待ちの札。出しっぱなしにならないよう、隠すのは必ず同じ1か所を通す。 */
+  private showWaitBadge(on: boolean): void {
+    const el = document.querySelector("#ed-wait-badge") as HTMLElement | null;
+    if (el) el.hidden = !on;
+  }
+
+  /** V156: 掃除をうながす（コマ移動・編集・時間経過のたびに軽く呼ぶ）。 */
+  private nudgeSweep(): void {
+    if (!this.sleepOn || this.sweeping) return;
+    void this.sweepSleep();
   }
 
   // ストローク中
@@ -871,6 +1034,18 @@ export class Editor {
     // M15 (K-1): 共通レイヤーの不変条件（全コマが同一バッファを参照）を読み込み直後に確立する。
     // serialize は「差があれば shared を外す」までを済ませているので、残った shared は張り直すだけ
     relinkShared(project);
+    // ★V156 (P-1): この作品で眠りを効かせるか。**小さい作品はいままでと完全に同じ経路**
+    //（スパイク実測: 50コマ×3レイヤーで減らせるのは 11 MiB しかなく、遅くなる理由だけが残る）。
+    // 開いた直後は全部起きている——条件1「先に全部圧縮しない」ので、
+    // 片付けは `nudgeSweep()` が背景で少しずつ進める
+    this.sleepOn = projectBytes(project) >= Editor.SLEEP_MIN_BYTES;
+    this.sweepCursor = 0;
+    // 数え漏れを拾ったときの記録（W-10 の常時ログへ。名前もパスも出さない）
+    setStaleSleepLogger(
+      this.sleepOn
+        ? (detail) => this.cb.appendLog?.(`[V156] ${detail}`)
+        : null
+    );
     this.saveCtx = saveCtx;
     this.askSaveTarget = opts.askSaveTarget ?? saveCtx == null;
     this.cb = cb;
@@ -1017,6 +1192,10 @@ export class Editor {
     this._dirty = false;
     this.autosavePending = false;
     this.autosaveTimer = window.setInterval(() => void this.runAutosave(), 15000);
+    // V156 (P-1・条件1): **開いたあと**に少しずつ眠らせる。読み込みには一切足さない
+    //（全部圧縮すると 25.6 秒かかる＝V155 で 11 秒にした「開く速さ」が台無しになる）。
+    // 少し待ってから始める＝開いた直後の描き出しに重なりにくくする
+    if (this.sleepOn) window.setTimeout(() => this.nudgeSweep(), 600);
   }
 
   unmount() {
@@ -1024,6 +1203,16 @@ export class Editor {
     // 呼ばれ得るため）。mount していない状態での後始末は何もしない
     if (!this.mounted) return;
     this.stopPlayback();
+    // ★V156 (P-5): 履歴を捨てる。**いままで捨てていなかった**——`history.clear()` は
+    // `mount` の中にしか無く、ライブラリ画面へ戻っても直前の作品の履歴が抱える生 IndexBuf
+    //（予算いっぱいなら数十〜百 MiB）が次に開くまで居座っていた。
+    // すぐ下で warpField を「1.5MB を保持し続けないように」と null にしているのに、
+    // その 100 倍を放置していた（V156 スパイクの副産物）。mount 側の clear はそのまま残す
+    this.history.clear();
+    // V156 (P-1): 裏の片付けを止める。ログの口も外す（別の作品に持ち越さない）
+    this.sleepOn = false;
+    this.showWaitBadge(false); // 出しっぱなしで画面を離れない
+    setStaleSleepLogger(null);
     window.removeEventListener("keydown", this.keydownHandler);
     window.removeEventListener("keyup", this.keyupHandler);
     window.removeEventListener("resize", this.resizeHandler);
@@ -1848,7 +2037,7 @@ export class Editor {
     $("#ed-lw-thicken").addEventListener("click", () => this.morphActiveLayer("thicken"));
     $("#ed-lw-thin").addEventListener("click", () => this.morphActiveLayer("thin"));
     // M3.8: ▲▼はDnD（挿入線）で代替・撤去
-    $("#ed-layer-merge").addEventListener("click", () => this.mergeLayerDown());
+    $("#ed-layer-merge").addEventListener("click", () => void this.mergeLayerDown());
     this.rebuildLayers();
     // オニオン
     const oni = $("#ed-onion");
@@ -1900,8 +2089,14 @@ export class Editor {
   private static readonly SIZE_CAUTION = 192 * 1024 * 1024; // 384 MiB の 50%
   private static readonly SIZE_WARN = 288 * 1024 * 1024; // 384 MiB の 75%
   /** 履歴に許すバイト数の下限・上限（W-4） */
-  private static readonly HIST_BUDGET_MIN = 16 * 1024 * 1024;
-  private static readonly HIST_BUDGET_MAX = 256 * 1024 * 1024;
+  /** V156 (P-2): 下限を 16 → **64 MiB**。
+   *  ペン1手は before/after 2枚＝**153,600 B（8bit）／307,200 B（16bit）**なので、
+   *  64 MiB あれば 16bit でも 218 手・8bit なら 437 手が確実に残る（要件の 200 手を下限だけで賄う）。
+   *  16 MiB だった頃は、大きい作品でここに張り付いて **8bit 109 手・16bit 54 手**しか戻れなかった。 */
+  private static readonly HIST_BUDGET_MIN = 64 * 1024 * 1024;
+  /** V156 (P-2): 上限。**下の式では `SIZE_CAUTION`(192 MiB) を超えられない**ので、
+   *  256 MiB は一度も効かない死に定数だった（V156 スパイクの指摘）。実際の天井に合わせる。 */
+  private static readonly HIST_BUDGET_MAX = 192 * 1024 * 1024;
   /** 注意/警告のときに足す助言。**動的キーは `*Key` のプロパティで持つ**
    *  （`m1201_i18n_check` の検査4 がこの形だけを拾える。文字列を組み立てると検査が沈黙する） */
   private static readonly SIZE_ADVICE = {
@@ -1920,9 +2115,22 @@ export class Editor {
     // W-4: 作品が大きいほど履歴に許す量を減らす（＝戻せる回数が自動で減る）。
     // 小さい作品では上限に張り付く＝64件の従来どおり（体感を変えない）
     const proj = projectBytes(this.project);
+    // V156 (P-1): 実メモリ（起きている生バッファ＋眠っている圧縮控え）。
+    // **表示の数字（proj）は論理サイズのまま**——あちらは門番の入力なので変えない（条件4）。
+    // V156 (P-1): **育った作品にも効かせる。**開いたときは小さくても、コマを足していけば
+    // しきい値を越える（連番挿入・ページ挿入・ゆらゆら）。ここは絵の量が変わった直後に
+    // 呼ばれる場所なので、越えた時点で眠りを始める（一度 true にしたら下げない＝往復しない）
+    if (!this.sleepOn && proj >= Editor.SLEEP_MIN_BYTES) {
+      this.sleepOn = true;
+      setStaleSleepLogger((detail) => this.cb.appendLog?.(`[V156] ${detail}`));
+      this.nudgeSweep();
+    }
+    const real = this.sleepOn ? awakeBytes(this.project) + sleepBytes(this.project) : proj;
+    // V156 (P-2): 予算の基準を**実サイズ**にする。論理サイズのままだと、大きい作品は
+    // 眠って実際は軽くなっているのに永遠に下限へ張り付く（再現データで 115 MiB＝785手が出せない）
     this.history.budgetBytes = Math.max(
       Editor.HIST_BUDGET_MIN,
-      Math.min(Editor.HIST_BUDGET_MAX, Editor.SIZE_CAUTION - proj)
+      Math.min(Editor.HIST_BUDGET_MAX, Editor.SIZE_CAUTION - real)
     );
     if (!host) return;
     const hist = this.history.totalBytes();
@@ -1944,8 +2152,17 @@ export class Editor {
     const overWall = faces > faceMax;
     host.innerHTML =
       row(t("ed.size.project.label"), proj) +
-      row(t("ed.size.history.label"), hist) +
+      // V156（Codex レビュー §5・優先度 高）: 「200回戻れる」と読んで危ない操作を試した人が、
+      // 実際には減っていることにボタンが灰色になるまで気づけなかった。**いま何回戻れるか**を出す
+      row(t("ed.size.history.steps.label", { n: this.history.undoDepth }), hist) +
       row(t("ed.size.total.label"), total, "tot") +
+      // V156 (P-1): 眠りが効いている作品だけ、**実際に使っている量**をもう1行出す。
+      // 上の3行は論理サイズ（＝作品の大きさの目安）のままで、意味は変えていない。
+      // V156（Codex レビュー §2）: 片付けの最中はそれが分かるようにする（27 秒かかるので、
+      // 数字が動いていること自体が「壊れていない」の合図になる）
+      (this.sleepOn
+        ? row(this.sweeping ? t("ed.size.real.busy.label") : t("ed.size.real.label"), real)
+        : "") +
       `<p class="sznote${overWall ? " adv" : ""}">${t("ed.size.faces.msg", {
         n: faces.toLocaleString(),
         max: faceMax.toLocaleString(),
@@ -1954,6 +2171,11 @@ export class Editor {
       (overWall ? `<p class="sznote adv">${t("ed.size.overWall.msg")}</p>` : "") +
       // 「統合したのに『元に戻す』が減らない」を**説明なしで**分かるようにする1行（要件 §2-W-2）
       `<p class="sznote">${t("ed.size.history.msg")}</p>` +
+      // V156（Codex レビュー §5）: 200 回という約束と「自動で減る」の関係を、**約束のそばに**書く
+      `<p class="sznote">${t("ed.size.undo.msg")}</p>` +
+      // V156（Codex レビュー §1・優先度 高）: 同じ箱に**論理サイズ**と**実メモリ**が並ぶので、
+      // 「どっちが本当のメモリなのか」が分からなくなる。眠りが効いているときだけ1行で分ける
+      (this.sleepOn ? `<p class="sznote">${t("ed.size.twoNumbers.msg")}</p>` : "") +
       (level === "ok" ? "" : `<p class="sznote adv">${t(Editor.SIZE_ADVICE[level].msgKey)}</p>`);
     // 右パネルは縦に長い＝**下端のメーターは画面の高さによっては見えない**（900×540 で実測: 内容 943px /
     // 見える高さ 458px）。色が付いても気づかない人がいるので、**帯が上がったときだけ一度知らせる**。
@@ -2146,6 +2368,17 @@ export class Editor {
     const drawTrialFrame = () => {
       const cv = box.querySelector("#ap-mini") as HTMLCanvasElement | null;
       if (!cv) return;
+      // V156 (P-1): 試し再生は音声パネル独自のループで、**エディタ本体と同じ Project 実体**の
+      // 全コマを順に合成する。眠っているコマをそのまま渡すと `render.ts` の
+      // `if (!lb) continue` で**エラーも出さずに白紙**が出る。起こしてから描き直す
+      //（読みで起こすので、掃除が拾い直すときの費用はゼロ）
+      const tf = proj.frames[trialFrame];
+      if (self.sleepOn && tf && frameHasAsleep(tf)) {
+        void wakeFrame(proj, tf, "read").then(() => {
+          if (self.mounted && proj.frames[trialFrame] === tf) drawTrialFrame();
+        });
+        return;
+      }
       presentToCanvas(compositeFrame(proj, trialFrame), cv);
       // M11-19: 透明の紙は薄い市松（M11-16 のミニ・フィルムと同じ・データには触れない）
       cv.classList.toggle("paper-clear", proj.frames[trialFrame]?.paper === 0);
@@ -3636,6 +3869,8 @@ export class Editor {
     }
     const structBefore = this.captureStructure();
     const removedIds = memberIdx.map((i) => this.project.layerDefs[i].id);
+    // ★V156 (P-1): 全コマの画素を控えるので、消す対象のレイヤーだけ先に起こす
+    await wakeLayersAllFrames(this.project, removedIds, "write");
     const savedBuffers = this.project.frames.map((f) => {
       const m: Record<string, IndexBuf> = {};
       for (const lid of removedIds)
@@ -3655,7 +3890,7 @@ export class Editor {
         (f) => !removeFolderIds.has(f.id)
       );
       for (const f of this.project.frames) {
-        for (const lid of removedIds) delete f.layers[lid];
+        for (const lid of removedIds) dropLayer(f, lid); // V156: 眠りぶんも
         if (f.order) f.order = f.order.filter((x) => !removeSet.has(x));
       }
       if (removeSet.has(this.activeLayerId))
@@ -3668,6 +3903,8 @@ export class Editor {
     const self = this;
     this.history.push({
       label: "フォルダごと削除",
+      // V156 (P-1): 巻き戻しは全コマへバッファを配り直す。眠っていると取りこぼすので先に起こす
+      prepare: () => wakeLayersAllFrames(self.project, removedIds, "write"),
       bytes: entryBytes(savedBuffers), // V154 (W-2): 中身のレイヤーを全コマぶん抱える
       undo() {
         self.restoreStructure(structBefore);
@@ -4896,8 +5133,8 @@ export class Editor {
     $("#ed-addframe").addEventListener("click", () => this.addFrame(false));
     $("#ed-dupframe").addEventListener("click", () => this.addFrame(true));
     $("#ed-wobble").addEventListener("click", () => void this.onWobbleClick());
-    $("#ed-copypage").addEventListener("click", () => this.copySelectedFrames());
-    $("#ed-pastepage").addEventListener("click", () => this.pasteFrames());
+    $("#ed-copypage").addEventListener("click", () => void this.copySelectedFrames());
+    $("#ed-pastepage").addEventListener("click", () => void this.pasteFrames());
     $("#ed-delframe").addEventListener("click", () => this.deleteFrame());
     this.updatePasteButton();
     this.rebuildFilm();
@@ -5466,12 +5703,30 @@ export class Editor {
     this.frameDrag = null;
   }
 
+  /** V156 (P-1): 眠っているコマのサムネを、起こして描いて**また眠らせる**。
+   *  読みで起こすので、片付けは只（圧縮し直しは起きない）。 */
+  private async paintFilmThumbAwake(i: number, el: HTMLCanvasElement): Promise<void> {
+    const fr = this.project.frames[i];
+    if (!fr) return;
+    await wakeFrame(this.project, fr, "read");
+    if (!this.mounted || this.project.frames[i] !== fr) return; // 間にコマが動いた
+    this.paintFilmThumb(i, el);
+    if (!this.inSleepWindow(i)) await sleepFrame(this.project, fr, this.sharedLayerIds(), true);
+  }
+
   private paintFilmThumb(i: number, cv?: HTMLCanvasElement) {
     const film = $("#ed-film");
     const el =
       cv ??
       (film.querySelector(`.fr[data-idx="${i}"] canvas`) as HTMLCanvasElement | null);
     if (!el) return;
+    // V156 (P-1): 眠っているコマのサムネは、そのまま合成すると**エラーも出さずに白紙**になる
+    //（`render.ts` の `if (!lb) continue`）。起こしてから描き、窓の外なら**すぐ片付ける**
+    const fr = this.project.frames[i];
+    if (this.sleepOn && fr && frameHasAsleep(fr)) {
+      void this.paintFilmThumbAwake(i, el);
+      return;
+    }
     // 共有スクラッチ（320×240）に合成 → 縮小して転写（nearest-neighbor）
     if (!this.filmScratch) {
       this.filmScratch = document.createElement("canvas");
@@ -6377,7 +6632,7 @@ export class Editor {
   // ---------------- ページ／複数ページ・クリップボード（M3.3-B） ----------------
 
   /** 選択中のコマ（単一 or Shift範囲）をアプリ全体クリップボードへ（非破壊・履歴なし） */
-  copySelectedFrames() {
+  async copySelectedFrames() {
     // 変形/選択移動の浮動中は、切り出されたピクセルが本体に無く欠損コピーになる
     // M10-2c: 四隅変形中は未確定のプレビューをそのままコピーしてしまうので同様に止める
     if (this.xformActive || this.floatBuf || this.cornerActive) {
@@ -6394,12 +6649,22 @@ export class Editor {
     } else {
       idxs.push(Math.max(0, Math.min(this.frameIndex, last)));
     }
+    // ★V156 (P-1): 選ばれたコマが眠っていると `makeClip` の `?? allocIndexBuf(p)` が
+    // **空バッファを写し取る**（＝真っ白なコマがコピーされる）。読みで起こしてから写す
+    if (this.sleepOn) {
+      for (const i of idxs) {
+        const f = this.project.frames[i];
+        if (f) await wakeFrame(this.project, f, "read");
+      }
+    }
     Editor.frameClip = makeClip(this.project, idxs);
+    // V156 (P-5): 畳んで持つ。**捨てない**（メモをまたぐ貼り付けは仕様）——
+    // 圧縮するだけなので機能はそのまま、抱える量が 20〜30 分の1 になる
+    await packClip(Editor.frameClip);
     this.updatePasteButton();
+    if (this.sleepOn) this.nudgeSweep(); // 起こしたぶんを片付け直す
     // 大きな範囲は保持サイズも明示（静的保持のため）
-    let bytes = 0;
-    for (const f of Editor.frameClip.frames)
-      for (const lay of f.layers) bytes += lay.byteLength;
+    const bytes = clipBytes(Editor.frameClip);
     const mb = Math.round(bytes / 1024 / 1024);
     const large = bytes > 20 * 1024 * 1024;
     this.cb.toast(
@@ -6412,13 +6677,14 @@ export class Editor {
   }
 
   /** はりつけ: 1枚=現在ページに上書き（うごメモ準拠）／複数=現在コマの後ろに挿入（総集編） */
-  pasteFrames() {
+  async pasteFrames() {
     const clip = Editor.frameClip;
     if (!clip || clip.frames.length === 0) {
       this.cb.toast(t("ed.tl.clipEmpty.toast"));
       return;
     }
     if (this.xformGuard()) return; // E-4: copy側と統一（暗黙キャンセルしない）
+    await unpackClip(clip); // V156 (P-5): 畳んであるので開いてから使う
     const self = this;
     const bitsBefore = this.project.indexBits;
 
@@ -6473,6 +6739,7 @@ export class Editor {
         this.noticePromote16(); // V154 (W-3)
       }
       this.cb.toast(t("ed.frameclip.pastedOne.toast"));
+      void packClip(clip); // V156 (P-5): 使い終わったらまた畳む（static なので抱えっぱなしにしない）
       return;
     }
 
@@ -6508,6 +6775,7 @@ export class Editor {
       this.noticePromote16(); // V154 (W-3)
     }
     this.cb.toast(t("ed.tl.insertedMulti.toast", { count: n }));
+    void packClip(clip); // V156 (P-5): 使い終わったらまた畳む
   }
 
   // ---------------- キャンバス表示 ----------------
@@ -6765,6 +7033,31 @@ export class Editor {
   }
 
   renderCanvas() {
+    // ★V156 (P-1): 描くのに要るコマ（表示中＋オニオンが読む前後3）がまだ眠っていたら、
+    //   **前の絵を消さずに**起こしてから描き直す。
+    //
+    //   ここを入口の1か所にしてあるので、`frameIndex` を直に動かす経路（コマの挿入・削除・
+    //   並べ替え・undo の中の12箇所）を1つも書き換えずに済む。白い一瞬も作らない——
+    //   起きるまでの十数 ms は前のコマが出たままで、揃ったら差し替わる。
+    //   `wakeGen` は追い越し対策（速く連打したとき、古い起こし結果で描き戻さない）。
+    if (this.sleepOn && !this.frameReady()) {
+      const gen = ++this.wakeGen;
+      // V156（Codex レビュー §4・優先度 中）: 前の絵を残すので白紙にはならないが、
+      // タイムラインの選択だけ先に進むので「押せていない」「違うコマを見ている」に見える余地がある。
+      // **目に見える長さ（150ms）を超えたときだけ**小さな札を出す。
+      // 中央の重い表示（W-8）も操作ロックもしない——ふつうは 30ms 台で終わるので、出ないのが既定
+      const badgeTimer = window.setTimeout(() => {
+        if (gen === this.wakeGen) this.showWaitBadge(true);
+      }, 150);
+      void this.ensureSleepWindow().then(() => {
+        clearTimeout(badgeTimer);
+        if (this.mounted && gen === this.wakeGen) {
+          this.showWaitBadge(false);
+          this.renderCanvas();
+        }
+      });
+      return;
+    }
     compositeFrame(this.project, this.frameIndex, this.composite, {
       onion: this.playing ? 0 : this.onionLevel,
     });
@@ -9294,7 +9587,7 @@ export class Editor {
       const i = self.project.layerDefs.findIndex((l) => l.id === id);
       if (i >= 0) self.project.layerDefs.splice(i, 1);
       for (const f of self.project.frames) {
-        delete f.layers[id];
+        dropLayer(f, id); // V156: 眠っているぶん（f.sleep）も一緒に消す
         if (f.order) f.order = f.order.filter((x) => x !== id);
       }
       const s = self.project.frames[frameIdx]?.layers[srcLayerId];
@@ -9378,7 +9671,7 @@ export class Editor {
       this.cancelSelectionMove();
       return;
     }
-    this.applyHistory(() => this.history.undo());
+    void this.applyHistory(() => this.history.undo(), this.history.peekUndo());
   }
 
   /** M3.8 L-B: Ctrl+Y / ↷。変形・浮動中は無効 */
@@ -9387,13 +9680,17 @@ export class Editor {
       this.cb.toast(t("ed.xform.noRedo.toast"));
       return;
     }
-    this.applyHistory(() => this.history.redo());
+    void this.applyHistory(() => this.history.redo(), this.history.peekRedo());
   }
 
   /** M11-8: 履歴の適用中は「コマ構造の変更＝選択解除」を働かせない
    *（undo/redo が復元したマスクを afterFrameStructureChange が消してしまわないように） */
   private applyingHistory = false;
-  private applyHistory(run: () => void) {
+  private async applyHistory(run: () => void, entry?: HistoryEntry | null) {
+    // V156 (P-1): 全コマの画素を触るエントリは、眠っているコマを**起こしてから**動かす。
+    // 起こさずに走らせると `f.layers[id] ?? allocIndexBuf(p)` が空バッファを掴んで、
+    // 元に戻したはずの絵が白紙になる（＝静かな喪失）。`prepare` を持たないエントリは素通り
+    if (entry?.prepare) await entry.prepare();
     this.applyingHistory = true;
     try {
       run();
@@ -9816,6 +10113,14 @@ export class Editor {
     const selAfter = sel.after;
     this.history.push({
       label: base.label,
+      // ★V156 (P-2): **申告漏れその1**。ここは `base` を包んだ**新しいエントリ**を作るので、
+      //  `base.bytes`（ストロークの before/after ＝ 8bit で 153,600 B）が**運ばれずに落ちていた**。
+      //  範囲選択を伴う操作は全部ここを通るので、いちばん重い操作だけが予算をすり抜けていた。
+      //  選択マスク（`Uint8Array(PIXELS)` ×2）もこのクロージャが抱えるので一緒に数える
+      bytes: (base.bytes ?? 0) + entryBytes(selBefore, selAfter),
+      bytesIfUndone: base.bytesIfUndone,
+      bytesIfApplied: base.bytesIfApplied,
+      prepare: base.prepare,
       undo() {
         base.undo();
         if (onFrame()) {
@@ -10400,7 +10705,7 @@ export class Editor {
       const i = self.project.layerDefs.findIndex((l) => l.id === id);
       if (i >= 0) self.project.layerDefs.splice(i, 1);
       for (const f of self.project.frames) {
-        delete f.layers[id];
+        dropLayer(f, id); // V156: 眠っているぶん（f.sleep）も一緒に消す
         if (f.order) f.order = f.order.filter((x) => x !== id);
       }
       self.activeLayerId = self.project.layerDefs.some((l) => l.id === prevActive)
@@ -10434,6 +10739,9 @@ export class Editor {
       );
       if (!ok) return;
     }
+    // ★V156 (P-1): 全コマの画素を読み書きするので、**このレイヤーだけ**全コマで起こす。
+    // 起こさないと `f.layers[id] ?? allocIndexBuf(p)` が空バッファを掴んで絵が静かに消える
+    await wakeLayersAllFrames(this.project, [layerId], "write");
     const t0 = performance.now();
     const clipCopy = copyIndexBuf(clip);
     // 変化のあるコマだけ before を取る（Frame オブジェクトで持つ＝並べ替え/挿入があっても正しい実体へ戻す）
@@ -10473,6 +10781,8 @@ export class Editor {
     // V154 (W-2): 全コマぶんの before スナップショットを抱える（コマ数ぶん効く）
     this.history.push({
       label: "全コマへレイヤー貼り付け",
+      // V156 (P-1): undo/redo が全コマの画素を書き戻すので、先にそのレイヤーだけ起こす
+      prepare: () => wakeLayersAllFrames(self.project, [layerId], "write"),
       bytes: entryBytes(touched.map((x) => x.before), clipCopy),
       undo: revert,
       redo: apply,
@@ -10526,7 +10836,7 @@ export class Editor {
       const i = self.project.layerDefs.findIndex((l) => l.id === id);
       if (i >= 0) self.project.layerDefs.splice(i, 1);
       for (const f of self.project.frames) {
-        delete f.layers[id];
+        dropLayer(f, id); // V156: 眠っているぶん（f.sleep）も一緒に消す
         if (f.order) f.order = f.order.filter((x) => x !== id);
       }
       if (self.activeLayerId === id)
@@ -10549,6 +10859,8 @@ export class Editor {
     // V151 (E-8): 「次回から表示しない」対象の1つ（id: layerDelete）
     const ok = await this.confirmWithSkip("layerDelete", t("ed.layer.delete.msg", { layer: def.name }));
     if (!ok) return;
+    // ★V156 (P-1): 下の `saved` が全コマの画素を控えるので、先に起こす（このレイヤーだけ）
+    await wakeLayersAllFrames(this.project, [def.id], "write");
     const saved: IndexBuf[] = this.project.frames.map((f) =>
       copyIndexBuf(f.layers[def.id] ?? allocIndexBuf(this.project))
     );
@@ -10558,7 +10870,7 @@ export class Editor {
       const i = self.project.layerDefs.findIndex((l) => l.id === def.id);
       if (i >= 0) self.project.layerDefs.splice(i, 1);
       for (const f of self.project.frames) {
-        delete f.layers[def.id];
+        dropLayer(f, def.id); // V156: 眠りぶんも
         if (f.order) f.order = f.order.filter((x) => x !== def.id);
       }
       self.activeLayerId = self.project.layerDefs[Math.max(0, i - 1)]?.id ?? "";
@@ -10578,7 +10890,14 @@ export class Editor {
     };
     // V154 (W-2 ②): 消したレイヤーの実体は**履歴が抱えたまま**なので申告する
     //（「削除したのに減らない」の正体。ここを黙っているとメーターが嘘をつく）
-    this.history.push({ label: "レイヤー削除", bytes: entryBytes(saved), undo: revert, redo: apply });
+    this.history.push({
+      label: "レイヤー削除",
+      bytes: entryBytes(saved),
+      // V156 (P-1): 巻き戻しは全コマへバッファを配り直す（起こしてからでないと取りこぼす）
+      prepare: () => wakeLayersAllFrames(self.project, [def.id], "write"),
+      undo: revert,
+      redo: apply,
+    });
     apply();
   }
 
@@ -10594,6 +10913,9 @@ export class Editor {
     if (this.xformGuard()) return;
     const ld = this.project.layerDefs.find((l) => l.id === id);
     if (!ld) return;
+    // ★V156 (P-1): ON は全コマの画素を現在コマと比べ、OFF は全コマへコピーを配る。
+    // どちらも全コマの中身が要るので、**このレイヤーだけ**先に起こす
+    await wakeLayersAllFrames(this.project, [id], "write");
     const frames = this.project.frames;
     const turningOn = ld.shared !== true;
     if (turningOn) {
@@ -10660,7 +10982,16 @@ export class Editor {
       self.afterLayerChange();
       self.rebuildFilm();
     };
-    this.history.push({ label: turningOn ? "全コマ共通ON" : "全コマ共通OFF", undo: revert, redo: apply });
+    this.history.push({
+      label: turningOn ? "全コマ共通ON" : "全コマ共通OFF",
+      // V156 (P-2): **申告漏れその2**。`revert` は 全コマぶんの `copyIndexBuf`（beforeBufs）を
+      // クロージャで抱えているのに `bytes` が無く、1,098コマなら **80 MiB** が予算から見えていなかった
+      bytes: entryBytes(beforeBufs),
+      // V156 (P-1): apply/revert とも全コマの画素を読み書きする
+      prepare: () => wakeLayersAllFrames(self.project, [id], "write"),
+      undo: revert,
+      redo: apply,
+    });
     apply();
   }
 
@@ -10701,7 +11032,7 @@ export class Editor {
     this.rebuildFilm();
   }
 
-  private mergeLayerDown() {
+  private async mergeLayerDown() {
     if (this.xformGuard()) return; // E-4
     const idx = this.project.layerDefs.findIndex((l) => l.id === this.activeLayerId);
     if (idx <= 0) {
@@ -10716,6 +11047,9 @@ export class Editor {
       this.cb.toast(t("ed.layer.mergeSharedBlocked.toast"));
       return;
     }
+    // ★V156 (P-1): 下の2つの控えが全コマの画素を読むので、関わる2枚だけ先に起こす
+    // （起こさないと `?? allocIndexBuf(p)` が空バッファを掴んで、統合で絵が消える）
+    await wakeLayersAllFrames(this.project, [top.id, bottom.id], "write");
     const savedBottom: IndexBuf[] = this.project.frames.map((f) =>
       copyIndexBuf(f.layers[bottom.id] ?? allocIndexBuf(this.project))
     );
@@ -10731,7 +11065,7 @@ export class Editor {
         if (tb && bb) {
           for (let i = 0; i < PIXELS; i++) if (tb[i] !== 0) bb[i] = tb[i];
         }
-        delete f.layers[top.id];
+        dropLayer(f, top.id); // V156: 眠りぶんも
         if (f.order) f.order = f.order.filter((x) => x !== top.id);
       }
       const i = self.project.layerDefs.findIndex((l) => l.id === top.id);
@@ -10756,6 +11090,9 @@ export class Editor {
     // ここを申告することで「作品」は減っても「元に戻す」が減らないことが数字に出る
     this.history.push({
       label: "レイヤー統合",
+      // V156 (P-1): apply（＝redo）は全コマで top を bottom へ焼き込み、revert は全コマへ
+      // 書き戻す。どちらも中身が要るので、関わる2枚だけ全コマで起こしてから動かす
+      prepare: () => wakeLayersAllFrames(self.project, [top.id, bottom.id], "write"),
       bytes: entryBytes(savedTop, savedBottom),
       undo: revert,
       redo: apply,
@@ -10912,6 +11249,8 @@ export class Editor {
     this.redrawOverlay();
     this.updateFilmSelection();
     this.seSectionRefresh?.(); // M5-1: 音声パネルの「配置先」表示を追従
+    // V156 (P-1): 動いた先で窓が変わった＝窓から出たコマを片付ける（軽く促すだけ）
+    this.nudgeSweep();
   }
 
   // ---------------- 再生 ----------------
@@ -10982,6 +11321,10 @@ export class Editor {
       this.fireFrameSe(next); // M5-1: SEはコマ進行で発火（ループ毎周も自然に発火）
       this.renderCanvas();
       this.updateFilmSelection();
+      // V156 (P-1): 再生は窓が全コマを通り抜ける。**出ていったコマをその場で片付ける**
+      //（読みで起こしてあるので只＝生を手放すだけ）。ここを掃除の巡回に任せると、
+      // 1周するころには全コマが生に戻ってしまう
+      void this.evictBehind(next);
     }, 1000 / fps);
   }
 
@@ -11081,6 +11424,9 @@ export class Editor {
     const onFrame = () => self.project.frames[self.frameIndex] === frame;
     this.history.push({
       label,
+      // ★V156 (P-2): **申告漏れその3**。before/after の選択マスク（`Uint8Array(PIXELS)` ×2＝
+      //  最大 153,600 B）をクロージャが抱えているのに `bytes` が無かった
+      bytes: entryBytes(before, after),
       undo() {
         if (!onFrame()) return;
         self.selMask = before ? before.slice() : null;
@@ -11323,10 +11669,10 @@ export class Editor {
         void this.deleteFrame();
         break;
       case "frame.copyPage":
-        this.copySelectedFrames();
+        void this.copySelectedFrames();
         break;
       case "frame.pastePage":
-        this.pasteFrames();
+        void this.pasteFrames();
         break;
       case "frame.wobble":
         void this.onWobbleClick();

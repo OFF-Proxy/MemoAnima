@@ -27,9 +27,24 @@ export interface HistoryEntry {
   bytesIfApplied?: number;
   undo(): void;
   redo(): void;
+  /** V156 (P-1): `undo` / `redo` を走らせる**前に**済ませておくこと。
+   *
+   *  全コマの画素を触るエントリ（レイヤー削除・統合・全コマへ貼り付け・📌 ON/OFF・
+   *  フォルダごと削除）は、眠っているコマを起こしてからでないと
+   *  `f.layers[id] ?? allocIndexBuf(p)` が**空バッファに差し替わって絵を消す**。
+   *  `undo`/`redo` は同期なので待てない——そこで「待つのは呼び出し側」に分けた。
+   *  `History` 自身は同期のまま（`undo()`/`redo()` の契約は変えていない）。 */
+  prepare?: () => Promise<void>;
 }
 
-const MAX_ENTRIES = 64;
+/** V156 (P-2 / A-32 段1): 64 → **200**。
+ *
+ *  件数だけで打ち切っていた頃の 64 は「大きい作品でメモリを使い切らないため」の保険だったが、
+ *  V154 でバイト予算（`budgetBytes`）が入ったので、**重さは予算が見る**。件数はもう
+ *  「軽い操作をどれだけ遡れるか」だけを決める数字なので、素直に増やしてよい。
+ *  ペン1手は 153,600 B（8bit）なので 200 手＝29.3 MiB、16bit でも 58.6 MiB。
+ *  予算の下限（64 MiB）でどちらも収まる。 */
+const MAX_ENTRIES = 200;
 
 /** V154: 履歴エントリが抱えるバイト数を数える小道具。
  *
@@ -111,6 +126,23 @@ export class History {
   }
   get canRedo() {
     return this.pos < this.stack.length;
+  }
+
+  /** V156 (P-2): **いま何手戻れるか。**
+   *  200 手と言いながら、大きい作品では予算で自動的に減る。減った結果を
+   *  メーターに出すために、外から読めるようにする（数えるだけ・状態は変えない）。 */
+  get undoDepth(): number {
+    return this.pos;
+  }
+
+  /** V156: 次に `undo()` が動かすエントリ（`prepare` を先に走らせるため）。 */
+  peekUndo(): HistoryEntry | null {
+    return this.canUndo ? this.stack[this.pos - 1] : null;
+  }
+
+  /** V156: 次に `redo()` が動かすエントリ。 */
+  peekRedo(): HistoryEntry | null {
+    return this.canRedo ? this.stack[this.pos] : null;
   }
 
   undo() {

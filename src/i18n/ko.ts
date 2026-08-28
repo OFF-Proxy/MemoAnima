@@ -621,6 +621,7 @@ const ko: Record<keyof typeof ja, string> = {
 
   // ---------------- エディタ: 変形（ed.xform.） ----------------
   "ed.xform.badge.label": "🔀 변형 중(Enter 적용 / Esc 취소)",
+  "ed.frameWait.label": "컷을 준비하는 중",
   "ed.xform.angle.label": "회전",
   "ed.xform.corner.reset.toast": "모서리를 초기화했어요",
   "ed.xform.flipH.btn": "↔ 좌우",
@@ -806,13 +807,17 @@ const ko: Record<keyof typeof ja, string> = {
   // ---------------- エディタ: 図形・文字（ed.shape. / ed.text.） ----------------
   "ed.shape.fill.label": "채우기",
   "ed.size.head.label": "메모리 사용량",
-  "ed.size.head.title": "지금 열려 있는 작품이 쓰는 메모리의 대략적인 양이에요. 저장 파일 크기와는 달라요.",
+  "ed.size.head.title": "작품의 크기예요. 지금 메모리에 올라와 있는 양은 「실제 사용량」 줄을 보세요.",
   "ed.size.project.label": "작품",
-  "ed.size.history.label": "실행 취소",
+  "ed.size.history.steps.label": "되돌리기（{n} 회 남음）",
   "ed.size.total.label": "합계",
+  "ed.size.real.label": "실제 사용량",
+  "ed.size.real.busy.label": "실제 사용량（정리 중）",
   "ed.size.faces.msg": "레이어×컷 {n}면（무거워지는 기준 약 {max}면）",
-  "ed.size.overWall.msg": "꽤 큰 작품이에요. 여는 것도 저장도 시간이 걸리고 메모리를 많이 써요（열 수 없게 되지는 않아요）. 앞뒤로 나누면 가벼워져요.",
+  "ed.size.overWall.msg": "꽤 큰 작품이에요. 여는 것도 저장도 시간이 걸리고 메모리를 많이 써요（이 기준을 넘었다고 해서 열 수 없게 되는 건 아니에요）. 앞뒤로 나누면 가벼워져요.",
   "ed.size.history.msg": "레이어를 합치거나 프레임을 지워도 '실행 취소'는 줄지 않아요. 되돌릴 수 있는 만큼 남겨 두거든요.",
+  "ed.size.undo.msg": "「되돌리기」는 최대 200 회예요. 작품이 클 때는 메모리를 지키기 위해 오래된 것부터 자동으로 줄어요（직전 조작은 반드시 되돌릴 수 있어요）.",
+  "ed.size.twoNumbers.msg": "위의 「작품」「합계」는 작품의 크기예요. 지금 메모리에 올라와 있는 양은 「실제 사용량」 줄을 보세요（보고 있지 않은 컷은 접어 두었어요）.",
   "ed.size.caution.msg": "커지고 있어요. 가끔 저장해 주세요. 저장하고 다시 열면 '실행 취소' 몫이 비워져서 가벼워져요. 그대로 계속 작업할 수 있어요.",
   "ed.size.warn.msg": "꽤 커졌어요. 지금 저장하고 다시 열면 '실행 취소' 몫이 비워져요. 작품을 앞뒤로 나누는 것도 생각해 보세요. 막지는 않아요.",
   "ed.shape.ellipse.btn": "○원",
@@ -1013,6 +1018,7 @@ const ko: Record<keyof typeof ja, string> = {
   "ed.load.newerVersion.msg": "더 새로운 버전(v{version})으로 만든 파일이에요. MemoAnima를 업데이트하세요.",
   "ed.load.badSize.msg": "캔버스 크기가 올바르지 않아요(320×240만 지원해요)",
   "ed.load.badLayer.msg": "레이어 데이터가 손상됐어요",
+  "ed.load.frameCountMismatch.msg": "컷 수를 세는 두 방법이 어긋났어요（{got} / {want}）. 안전을 위해 열지 않았어요. 파일은 그대로 남아 있어요. 계속되면 로그를 보내 주세요.",
 };
 
 export default ko;

@@ -4,6 +4,9 @@
 // インポートした .kwz は3層・各層2色・紙色の構造を色indexレベルで忠実に保持する。
 
 import { layerBaseName } from "../i18n/defaults";
+// V156 (P-1): 眠り（圧縮控え）の型だけを借りる。実体は sleep.ts（あちらが model を使うので
+// **型だけの import**にして循環を作らない）
+import type { SleepEntry } from "./sleep";
 export const W = 320;
 export const H = 240;
 export const PIXELS = W * H;
@@ -108,6 +111,18 @@ export function promoteTo16(p: Project): void {
       }
       f.layers[id] = dst;
     }
+    // V156 (P-1): **眠っているぶんは起こさない。**控えは 8bit のまま持っておき、
+    // 起こすときに広げる（`bytesToIndexBuf` が from=8/to=16 で値を保存して広げる）。
+    // これで 1,098コマ×20レイヤーの昇格が「起きているぶんだけ」で済む
+    //（起こすと 1.57 GiB → 3.14 GiB の山が立つ。そこが P-1 と正面衝突する所だった）。
+    //
+    // ただし「起きていて控えもある」ものは、控えが 8bit・中身が 16bit になって
+    // 指紋が合わなくなる。**控えを捨てる**（次に眠るとき 16bit で圧縮し直す）。
+    // 昇格は一方向で一度きりなので、この作り直しは背景で1回起きるだけ
+    if (f.sleep) {
+      for (const id of Object.keys(f.sleep)) if (f.layers[id]) delete f.sleep[id];
+      if (Object.keys(f.sleep).length === 0) delete f.sleep;
+    }
   }
   p.indexBits = 16;
 }
@@ -126,7 +141,15 @@ export function relinkShared(p: Project): void {
       canonical = allocIndexBuf(p);
       p.frames[0].layers[ld.id] = canonical;
     }
-    for (const f of p.frames) f.layers[ld.id] = canonical;
+    for (const f of p.frames) {
+      f.layers[ld.id] = canonical;
+      // V156 (P-1): 📌 は**眠らせない**（全コマで見えていて実体は1つ＝眠らせる意味が無い）。
+      // 万一この id の控えが残っていたら、実体を張り直した今それは古い。捨てる
+      if (f.sleep?.[ld.id]) {
+        delete f.sleep[ld.id];
+        if (Object.keys(f.sleep).length === 0) delete f.sleep;
+      }
+    }
   }
 }
 
@@ -181,6 +204,13 @@ export interface Frame {
   order?: string[];
   /** M5-1: このコマで鳴らす SeTrack id 群（コマ側に持つ＝複製/削除/並べ替え/クリップに自然追従） */
   se?: string[];
+  /** V156 (P-1): 眠っているレイヤーの gzip 控え。**メモリ上の持ち方だけの話で、保存形式は変わらない**
+   *  （`PROJECT_VERSION = 5` のまま。`encodeProject` は起きていても眠っていても同じ JSON を書く）。
+   *
+   *  不変条件（`sleep.ts` の冒頭に全文）:
+   *    `layers[id]` がある ⟺ 起きている ／ `sleep[id]` がある ⟺ 圧縮控えを持っている
+   *  両方あるのは「起きていて控えも生きている」＝眠らせるのが只、という状態。 */
+  sleep?: Record<string, SleepEntry>;
 }
 
 /** M5-1: BGMトラック（旧 AudioTrack の後継。保存形式 v5・速度連動基準つき） */
@@ -552,8 +582,14 @@ export function conformFrameWidth(p: Project, f: Frame): void {
       const wide = new Uint16Array(PIXELS);
       wide.set(buf);
       f.layers[id] = wide;
+      // V156: 幅を変えた＝控えは古い（`promoteTo16` と同じ理由）
+      if (f.sleep?.[id]) {
+        delete f.sleep[id];
+        if (Object.keys(f.sleep).length === 0) delete f.sleep;
+      }
     }
   }
+  // 眠っているぶんは触らない（控えは自分の幅を覚えていて、起こすときに広がる）
 }
 
 /** フレームの複製（バッファもコピー・幅維持。M5-1: SE配置も複製） */
@@ -586,7 +622,17 @@ export function projectBytes(p: Project): number {
     seen.add(b);
     total += b.byteLength;
   };
-  for (const f of p.frames) for (const b of Object.values(f.layers)) add(b);
+  // V156 (P-1・条件4): **論理サイズのまま**返す。眠っているレイヤーも「生なら何バイトか」で数える。
+  //
+  // ここは表示だけの数字ではない。`editor.ts` の**フルカラー切替の警告**と
+  // **16bit 昇格の知らせ**が、この値をしきい値と比べて出す/出さないを決めている（＝門番）。
+  // 圧縮後の小さい数字を返すと、大きい作品でその警告2つが**黙る**——メーターの見た目より重い。
+  const unit = PIXELS * ((p.indexBits === 16 ? 16 : 8) / 8);
+  for (const f of p.frames) {
+    for (const b of Object.values(f.layers)) add(b);
+    // 眠っているぶん（起きている同名レイヤーがあれば上で数え済み）
+    if (f.sleep) for (const id of Object.keys(f.sleep)) if (!f.layers[id]) total += unit;
+  }
   add(p.audio?.bgm?.data);
   for (const s of p.audio?.se ?? []) add(s.data);
   return total;
@@ -628,6 +674,10 @@ export function loadWallFaces(indexBits: 8 | 16): number {
  *  ここは実体ではなく**エントリの数**を数える（`projectBytes` とは数え方が違う。意図的）。 */
 export function projectFaces(p: Project): number {
   let n = 0;
-  for (const f of p.frames) n += Object.keys(f.layers).length;
+  // V156 (P-1): 眠っているレイヤーも数える（面数は保存の JSON に並ぶ数＝眠りとは無関係）
+  for (const f of p.frames) {
+    n += Object.keys(f.layers).length;
+    if (f.sleep) for (const id of Object.keys(f.sleep)) if (!f.layers[id]) n++;
+  }
   return n;
 }

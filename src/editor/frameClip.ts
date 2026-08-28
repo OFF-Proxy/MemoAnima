@@ -20,12 +20,74 @@ export interface FrameClipEntry {
   layers: IndexBuf[];
   /** M5-1: SE配置（SeTrack id 群）。貼り付け先に同 id が存在するものだけ残す（REQ確定規則） */
   se?: string[];
+  /** V156 (P-5): 畳んであるときの gzip 列（`layers` と入れ替わりで入る） */
+  layersZ?: Uint8Array[];
+  /** V156 (P-5): 畳んだ中身が 16bit 索引だったか（開くとき同じ幅に戻す） */
+  wide?: boolean;
 }
 
 export interface FrameClip {
   /** 元プロジェクトの colorTable（index→hex。色再マップ用） */
   palette: string[];
   frames: FrameClipEntry[];
+  /** V156 (P-5): 圧縮して畳んであるか（`layers` は空・`layersZ` に入っている）。 */
+  packed?: boolean;
+}
+
+/** V156 (P-5): クリップを畳む（gzip）。
+ *
+ *  ★このクリップボードは **static で、メモをまたいで残るのが仕様**
+ *  （`SPEC_M3_editor_ui.md` の「アプリ全体・クロスメモ保持」、M3.3 の受け入れ AC-B-5
+ *   「別メモの編集に入っても残り、貼り付けできる」）。だから**解放してはいけない**。
+ *  代わりに P-1 と同じ圧縮で持つ——機能はそのまま、抱える量が 20〜30 分の1 になる。
+ *  全コマ選択でコピーすると、V156 が眠らせて減らしたぶんをこれ1回で打ち消せてしまうので、
+ *  ここを畳むのは効き目の要でもある。 */
+export async function packClip(clip: FrameClip): Promise<void> {
+  if (clip.packed) return;
+  for (const e of clip.frames) {
+    e.layersZ = [];
+    for (const lay of e.layers) {
+      const raw = new Uint8Array(lay.buffer, lay.byteOffset, lay.byteLength);
+      e.layersZ.push(
+        new Uint8Array(
+          await new Response(
+            new Blob([raw as BlobPart]).stream().pipeThrough(new CompressionStream("gzip"))
+          ).arrayBuffer()
+        )
+      );
+      e.wide = lay instanceof Uint16Array;
+    }
+    e.layers = [];
+  }
+  clip.packed = true;
+}
+
+/** V156 (P-5): 畳んだクリップを開く（貼り付けの直前に呼ぶ）。 */
+export async function unpackClip(clip: FrameClip): Promise<void> {
+  if (!clip.packed) return;
+  for (const e of clip.frames) {
+    e.layers = [];
+    for (const z of e.layersZ ?? []) {
+      const raw = new Uint8Array(
+        await new Response(
+          new Blob([z as BlobPart]).stream().pipeThrough(new DecompressionStream("gzip"))
+        ).arrayBuffer()
+      );
+      e.layers.push(e.wide ? new Uint16Array(raw.buffer, raw.byteOffset, PIXELS) : raw);
+    }
+    e.layersZ = undefined;
+  }
+  clip.packed = false;
+}
+
+/** V156 (P-5): 畳んだ状態で抱えているバイト数（コピー直後のトースト用）。 */
+export function clipBytes(clip: FrameClip): number {
+  let n = 0;
+  for (const e of clip.frames) {
+    for (const lay of e.layers) n += lay.byteLength;
+    for (const z of e.layersZ ?? []) n += z.byteLength;
+  }
+  return n;
 }
 
 /** コマの実効描画順（下→上）の layerId 列。render.ts と同じ正規化
