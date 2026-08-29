@@ -14,6 +14,8 @@ import { AudioPreview, pcmS16ToWav, bgmPlaybackRate, renderExportMix } from "./e
 import type { BgmTrack } from "./editor/model";
 import { t, getLang } from "./i18n";
 import { errText } from "./ui/errText";
+// V159 (G-3): 長くかかりうる処理の共通入口（読み込み中の表示・遅延・計測はここに1つ）
+import { runWithBusy } from "./ui/busy";
 import { collabAlbumName, defaultAlbumName, newAlbumName } from "./i18n/defaults";
 
 export type LibraryView = {
@@ -222,6 +224,10 @@ export class LibraryScreen {
   }
 
   suspend() {
+    // V159（Codex 指摘①）: ライブラリ画面を離れる（エディタを開く・削除する等）ときは、
+    // **走っている読み込みを全部「古い」にする**。これが無いと、エディタへ移ったあとに
+    // 読み終わった前のプレビューが `p.play()` まで進み、**エディタの裏で音が鳴り出す**
+    this.selectSeq++;
     this.stopPreview();
     try {
       this.player?.pause();
@@ -1039,54 +1045,81 @@ export class LibraryScreen {
     });
   }
 
+  /** V159（Codex 指摘①）: 選択の世代。**古い読み込みが後から画面を乗っ取らない**ための番号。
+   *
+   *  棚のクリックは `void this.select(it)` で投げっぱなし＝**前の読み込みが終わる前に次が始まる**。
+   *  重い作品ほど読み込みが長いので、A（重い）→ B（軽い）の順に押すと、
+   *  **B が出たあとに A が終わって B を上書きする**。ダブルクリックでエディタへ移ったあとに
+   *  A の `p.play()` が走れば、エディタの裏でライブラリの音が鳴り出す。
+   *  各 `await` のあとで自分がまだ最新か確かめ、古ければ**何も描かずに降りる**。 */
+  private selectSeq = 0;
+
   async select(it: LibraryView) {
+    const seq = ++this.selectSeq;
+    const stale = () => seq !== this.selectSeq;
     this.selected = it;
     this.updateShelfSelection();
     $("#stage-title").textContent = it.name;
     $("#stage-author").textContent = it.album;
     this.stopPreview();
     const previewHost = $("#preview-host") as unknown as HTMLCanvasElement;
-    try {
-      if (it.kind === "note") {
-        this.stageMode = "note";
-        previewHost.hidden = false;
-        const bytes = await invoke<number[]>("read_file_bytes", { path: it.path });
-        const p = this.ensurePlayer();
-        await p.load(new Uint8Array(bytes).buffer);
-        const note: any = (p as any).note;
-        this.renderMeta([
-          `${(note?.format ?? it.ext).toString().toUpperCase()}`,
-          `${note?.imageWidth ?? "?"} × ${note?.imageHeight ?? "?"}`,
-          t("lib.meta.frames.label", { count: note?.frameCount ?? "?" }),
-          `${note?.framerate ?? "?"} fps`,
-        ]);
-        this.drawNoteFrame();
-        p.play();
-        this.updatePlayButton(); // M11-18: 再生中なのに ▶ のままだった（M11-17 取りこぼし#1）
-      } else {
-        this.stageMode = "project";
-        previewHost.hidden = false;
-        try {
-          this.player?.pause();
-        } catch {
-          /* noop */
+    // V159 (G-3): **ここが「クリックしてから何も出ない」の正体だった。**
+    // 棚のメモを選ぶと、その場でファイルを丸ごと読んで解析する（再現データで十数秒）。
+    // V155 で塞いだのはエディタを開く側だけで、**この手前が空白のまま**残っていた。
+    // 個別に塞がず、長い処理の共通入口（`runWithBusy`）を通す＝遅延も後片付けも計測も1か所。
+    await runWithBusy("open.preview", t("ed.busy.loading.label"), async () => {
+      try {
+        if (it.kind === "note") {
+          this.stageMode = "note";
+          previewHost.hidden = false;
+          const bytes = await invoke<number[]>("read_file_bytes", { path: it.path });
+          if (stale()) return; // 読んでいる間に別のメモが選ばれた
+          const p = this.ensurePlayer();
+          await p.load(new Uint8Array(bytes).buffer);
+          // ★ここを抜けると `p.play()` で**音が鳴り出す**。エディタへ移ったあとに
+          //  古い読み込みが鳴り始めないよう、鳴らす直前でもう一度確かめる
+          if (stale()) return;
+          const note: any = (p as any).note;
+          this.renderMeta([
+            `${(note?.format ?? it.ext).toString().toUpperCase()}`,
+            `${note?.imageWidth ?? "?"} × ${note?.imageHeight ?? "?"}`,
+            t("lib.meta.frames.label", { count: note?.frameCount ?? "?" }),
+            `${note?.framerate ?? "?"} fps`,
+          ]);
+          this.drawNoteFrame();
+          p.play();
+          this.updatePlayButton(); // M11-18: 再生中なのに ▶ のままだった（M11-17 取りこぼし#1）
+        } else {
+          this.stageMode = "project";
+          previewHost.hidden = false;
+          try {
+            this.player?.pause();
+          } catch {
+            /* noop */
+          }
+          const bytes = await invoke<number[]>("read_file_bytes", { path: it.path });
+          if (stale()) return; // 読んでいる間に別のメモが選ばれた
+          const proj = await projectFromBytes(new Uint8Array(bytes));
+          // 解析は重い（再現データで十数秒）。**ここで初めて `previewProject` に入れる**——
+          // 先に入れてしまうと、古い読み込みが新しい選択のプレビューを上書きする
+          if (stale()) return;
+          this.previewProject = proj;
+          this.previewFrame = 0;
+          this.renderMeta([
+            t("app.name.label"),
+            "320 × 240",
+            t("lib.meta.frames.label", { count: this.previewProject.frames.length }),
+            `${FPS_TABLE[this.previewProject.speedIndex]} fps`,
+          ]);
+          this.drawPreview();
+          void this.startPreview();
         }
-        const bytes = await invoke<number[]>("read_file_bytes", { path: it.path });
-        this.previewProject = await projectFromBytes(new Uint8Array(bytes));
-        this.previewFrame = 0;
-        this.renderMeta([
-          t("app.name.label"),
-          "320 × 240",
-          t("lib.meta.frames.label", { count: this.previewProject.frames.length }),
-          `${FPS_TABLE[this.previewProject.speedIndex]} fps`,
-        ]);
-        this.drawPreview();
-        void this.startPreview();
+      } catch (e) {
+        // V154b: `Error: ` を出さない（中身だけ）。文言は serialize が決めている
+        // V159: 古い読み込みの失敗は出さない（新しく選んだメモの帯に前のメモのエラーが出る）
+        if (!stale()) this.showLoadError(errText(e));
       }
-    } catch (e) {
-      // V154b: `Error: ` を出さない（中身だけ）。文言は serialize が決めている
-      this.showLoadError(errText(e));
-    }
+    });
   }
 
   /** V154b: 開けなかった理由を**プレビューの帯に出す**（消えないので読み返せる）。

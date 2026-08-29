@@ -94,7 +94,9 @@ import { createSlider, SliderHandle } from "../ui/slider";
 import { t } from "../i18n";
 import { errText } from "../ui/errText";
 // V158 (C-2): canvas に描く UI の色は**配色から読む**（各所が色を持たない）
-import { uiColor, uiColorA } from "../ui/theme"; // V155 (A-33): 画面に `Error:` を出さない
+import { uiColor, uiColorA } from "../ui/theme";
+// V159 (G-1): 性能ログ。**操作名は列挙されたものだけ**（作品名は書けない作り）
+import { perfNow, perfDone, setPerfContext } from "../perf"; // V155 (A-33): 画面に `Error:` を出さない
 // M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
 import { folderBaseName, layerBaseName, untitledTitle } from "../i18n/defaults";
 import {
@@ -813,7 +815,9 @@ export class Editor {
       undo: () => set(before),
       redo: () => set(!before),
     });
+    const _t0 = perfNow();
     set(!before);
+    perfDone("layer.lock", _t0);
   }
 
   /** V157 (D-1): フォルダの 🔒 を切り替える（中身すべてが実効ロックになる）。 */
@@ -862,6 +866,8 @@ export class Editor {
   private wakeGen = 0;
   /** 掃除中にメーターを更新した時刻（走査が重いので 0.5 秒に1回まで） */
   private lastSweepMeterAt = 0;
+  /** V159 (G-1): 直近にメーターが数えた面数。性能ログの文脈にだけ使う（表示には使わない）。 */
+  private lastFaces = 0;
 
   /** V156: 📌 全コマ共通レイヤーの id（眠らせない＝全コマで見えていて実体は1つ） */
   private sharedLayerIds(): Set<string> {
@@ -1213,6 +1219,14 @@ export class Editor {
     this.history.clear();
     this.dirty = false;
     this.mounted = true;
+    // V159 (G-1): ログの1行ごとに添える「作品の大きさ」を教える口をつなぐ。
+    // **ここで数え直さない**——面数は全コマ走査なので、メーターが数えた値（`lastFaces`）を返すだけ。
+    // 少し古い値でも「大きい作品なのか」を読むには十分で、測るために遅くするほうが害が大きい
+    setPerfContext(() => ({
+      f: this.project.frames.length,
+      l: this.project.layerDefs.length,
+      s: this.lastFaces,
+    }));
     // V154: 知らせは「作品につき1回」＝別の作品を開いたら出し直す（Editor は使い回される）
     this.promoteNoticed = false;
     this.sizeNoticedLevel = "";
@@ -1368,6 +1382,8 @@ export class Editor {
     // すぐ下で warpField を「1.5MB を保持し続けないように」と null にしているのに、
     // その 100 倍を放置していた（V156 スパイクの副産物）。mount 側の clear はそのまま残す
     this.history.clear();
+    // V159 (G-1): 作品の大きさを教える口も外す（閉じたあとの行に前の作品の数字を残さない）
+    setPerfContext(null);
     // V156 (P-1): 裏の片付けを止める。ログの口も外す（別の作品に持ち越さない）
     this.sleepOn = false;
     this.showWaitBadge(false); // 出しっぱなしで画面を離れない
@@ -2011,6 +2027,7 @@ export class Editor {
   }
 
   private setTool(t: Tool) {
+    const _t0 = perfNow();
     // M11-12: 文字ツールから抜けるときは浮動テキストを**確定**する（変形の「取り消し」とは逆。
     // 打った文字が黙って消えないように＝REQ「別のツールへ切り替える＝確定」）
     if (this.textDraft && t !== "text") this.commitTextDraft();
@@ -2049,6 +2066,7 @@ export class Editor {
     this.cursorPainted = "";
     this.paintCursorLayer();
     this.revealToolOptions();
+    perfDone("tool.switch", _t0);
   }
 
   /** M11-11: ツールオプション（確定/キャンセル等）が画面外だと気づけないので、はみ出していれば見せる。
@@ -2311,6 +2329,7 @@ export class Editor {
   /** V154: メーターの3行を書き、履歴の予算（W-4）を作品の大きさに合わせる。
    *  呼ぶ場所は「絵の量が変わり得た直後」だけ（ストローク中は呼ばない）。 */
   private updateSizeMeter() {
+    const _t0 = perfNow();
     const host = document.querySelector("#ed-szmeter") as HTMLElement | null;
     // W-4: 作品が大きいほど履歴に許す量を減らす（＝戻せる回数が自動で減る）。
     // 小さい作品では上限に張り付く＝64件の従来どおり（体感を変えない）
@@ -2348,6 +2367,7 @@ export class Editor {
     // 「画面が示すことと実際に起きることが食い違う」＝要件が名指しで避けろと言っている形。
     // いまは同じ数字を**重くなる目安**として出し、「分けると軽い」で終える（脅さない）
     const faces = projectFaces(this.project);
+    this.lastFaces = faces; // V159 (G-1): 性能ログの文脈に使う（ここでしか数えない）
     const faceMax = loadWallFaces(this.project.indexBits === 16 ? 16 : 8);
     const overWall = faces > faceMax;
     host.innerHTML =
@@ -2395,6 +2415,9 @@ export class Editor {
       const head = `${t("ed.size.total.label")} ${formatSize(total)}`;
       void this.cb.notice?.(head + "\n\n" + t(Editor.SIZE_ADVICE[level].msgKey));
     }
+    // V159 (G-1): メーターは全コマを走査する（面数・実メモリ）。**呼ばれる回数が多い場所**なので、
+    // ここが 50ms を超えて何度も出るなら、それ自体が「操作が重い」の一因
+    perfDone("meter.update", _t0);
   }
 
   /** V154 (W-3): 16bit 昇格＝**メモリの使用量が倍**になり、色を減らしても戻らない一方通行
@@ -4261,10 +4284,13 @@ export class Editor {
       undo: () => self.restoreStructure(before),
       redo: () => self.restoreStructure(after),
     });
+    const _t0 = perfNow();
     this.afterLayerChange();
+    perfDone("layer.move", _t0);
   }
 
   private rebuildLayers() {
+    const _t0 = perfNow();
     const host = $("#ed-layers");
     host.innerHTML = "";
     this.displayRows = [];
@@ -4579,6 +4605,7 @@ export class Editor {
     // M11-19: 貼り付けボタンの「貼り先」表示をアクティブレイヤーに追従させる（レイヤー選択・改名・追加削除は
     // すべてここを通る。例外は行ドラッグ確定時の updateRowDrag＝あちらでも呼ぶ）
     this.updateLayerClipButtons();
+    perfDone("layers.rebuild", _t0);
   }
 
   // ================= M14 (S-1): ツール形式の単一ソース =================
@@ -5676,6 +5703,7 @@ export class Editor {
   }
 
   private rebuildFilm() {
+    const _t0 = perfNow();
     const film = $("#ed-film");
     film.innerHTML = "";
     // F-0対策: サムネは 80×60 の縮小 canvas＋可視分のみ遅延描画。
@@ -5753,6 +5781,7 @@ export class Editor {
     film.appendChild(add);
     this.updateBadge();
     this.updateFilmSeMarks(); // M5-1: SE配置マーク
+    perfDone("film.rebuild", _t0);
   }
 
   // ---------------- M11-7: フィルムのコマ並べ替え（Pointer Events 自前ドラッグ） ----------------
@@ -6924,6 +6953,9 @@ export class Editor {
       return this.reportSaveBroken("exception", String(e), e);
     } finally {
       this.endBusy();
+      // V159 (G-1): 保存にかかった時間（保存先ピッカーを待った時間は `t0` の位置ゆえ入らない）。
+      // 失敗しても測る——「失敗するまでに何秒待たされたか」も知りたい
+      perfDone("save", t0);
     }
   }
 
@@ -7812,7 +7844,21 @@ export class Editor {
     this.releaseCapture();
   }
 
+  /** V159 (G-1): 「描き始め」の計測だけを受け持つ薄い皮。中身は下の `onPointerDownInner`。
+   *
+   *  測るのは**ストロークが実際に始まったときだけ**（`pointerDown` が立ったとき）。
+   *  道具の割り当てコマンドや「再生中に触れて止めた」は描き始めではないので数えない。
+   *  1ストロークに1回しか通らない＝**描画ループの中では測っていない**（要件の壊すなリスト）。 */
   private onPointerDown(e: PointerEvent) {
+    const _t0 = perfNow();
+    try {
+      this.onPointerDownInner(e);
+    } finally {
+      if (this.pointerDown) perfDone("draw.first", _t0);
+    }
+  }
+
+  private onPointerDownInner(e: PointerEvent) {
     // V154b (W-9): 重い処理の最中は描かない。`#screen-editor.ed-busy` の
     // `pointer-events:none` で普通は届かないが、**ポインタ捕捉中は届いてしまう**
     // （捕捉はヒットテストを上書きする）ので、ここでも止める
@@ -11170,7 +11216,9 @@ export class Editor {
       self.afterLayerChange();
     };
     this.history.push({ label: "レイヤー追加", undo: revert, redo: apply });
+    const _t0 = perfNow();
     apply();
+    perfDone("layer.add", _t0);
   }
 
   private async deleteLayer() {
@@ -11225,7 +11273,9 @@ export class Editor {
       undo: revert,
       redo: apply,
     });
+    const _t0 = perfNow();
     apply();
+    perfDone("layer.del", _t0);
   }
 
   /**
@@ -11551,7 +11601,9 @@ export class Editor {
       undo: revert,
       redo: apply,
     });
+    const _t0 = perfNow();
     apply();
+    perfDone("frame.add", _t0);
   }
 
   private async deleteFrame() {
@@ -11614,7 +11666,9 @@ export class Editor {
       undo: revert,
       redo: apply,
     });
+    const _t0 = perfNow();
     apply();
+    perfDone("frame.del", _t0);
   }
 
   private reorderFrame(from: number, to: number) {
@@ -11634,7 +11688,9 @@ export class Editor {
       self.afterFrameStructureChange();
     };
     this.history.push({ label: "コマ並べ替え", undo: revert, redo: apply });
+    const _t0 = perfNow();
     apply();
+    perfDone("frame.reorder", _t0);
   }
 
   /** M11-8 P-4（REQ 表E）: 「コマが移動した」ときの選択解除。解除の入口をここ1つに集約する
@@ -11654,6 +11710,7 @@ export class Editor {
     if (this.xformGuard()) return; // E-4: 変形中はコマ移動をブロック
     // M11-8: ドラッグ中にコマが変わると、掴んだコマ以外の絵を壊す/選択が宙に浮く
     if (this.pointerDown || this.layerDrag || this.selMaskDrag) return;
+    const _t0 = perfNow();
     this.clearSelectionOnFrameMove();
     // M11-1: 別の位置へ飛んだら、前の位置で鳴り始めたSEは止める（BGMには触れない。
     // 再生ループはここを通らず frameIndex を直接進めるので、通常再生のSEは切れない）
@@ -11665,6 +11722,7 @@ export class Editor {
     this.seSectionRefresh?.(); // M5-1: 音声パネルの「配置先」表示を追従
     // V156 (P-1): 動いた先で窓が変わった＝窓から出たコマを片付ける（軽く促すだけ）
     this.nudgeSweep();
+    perfDone("frame.goto", _t0);
   }
 
   // ---------------- 再生 ----------------
@@ -11696,6 +11754,7 @@ export class Editor {
 
   private async startPlayback() {
     if (this.playing) return;
+    const _t0 = perfNow();
     this.playing = true;
     // M11-8 P-4（REQ 表E）: 再生はコマを進めるので選択を解除する
     //（再生ループは gotoFrame を通らず frameIndex を直接進めるため、ここで1回だけ）
@@ -11755,6 +11814,9 @@ export class Editor {
       // 1周するころには全コマが生に戻ってしまう
       void this.evictBehind(next);
     }, 1000 / fps);
+    // V159 (G-1): ▶ を押してから**最初のコマが動き出すまで**。V157 (D-4) で音の用意を
+    // 待つようにしたので、ここが伸びていれば「押しても始まらない」の正体はデコード
+    perfDone("play.start", _t0);
   }
 
   /** pause=true は ⏸（あとで ▶ で続きから）。それ以外の停止経路（画面を離れる・書き出し・

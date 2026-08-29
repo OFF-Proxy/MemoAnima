@@ -20,6 +20,9 @@ import { projectFromBytes, projectToBytes } from "./editor/serialize";
 import { errText } from "./ui/errText";
 // V158 (C-3): 配色（明るい／夜の紙）。`<html>` の data-theme を付け替えるだけ
 import { applyTheme, sanitizeTheme } from "./ui/theme";
+// V159 (G-1/G-3): 性能ログと「長い処理の共通入口」。**ログには操作名と数値しか書かない**
+import { setPerfSink, startLongTaskWatch, flush as perfFlush } from "./perf";
+import { runWithBusy, setBusyImpl } from "./ui/busy";
 import { frameToPngBlob, frameToImageBlob } from "./editor/render";
 import {
   DEFAULT_CONVERT,
@@ -2065,55 +2068,42 @@ function stripExt(name: string): string {
 async function openEditorWithNote(item: LibraryView) {
   // V155 (L-2): .kwz/.ppm の解析も作品によっては待たされる。同じ中央表示に乗せる
   //（従来の「読み込み中…」トーストは 3.2 秒で消えてしまい、待つ側の助けにならない）
-  const busyN: { hide: (() => void) | null } = { hide: null };
-  const busyTimerN = window.setTimeout(() => {
-    busyN.hide = busyOverlay(t("ed.busy.loading.label"));
-  }, 450);
+  // V159 (G-3): ここも共通入口を通す（自前のタイマーは持たない）
   try {
-    const bytes = await invoke<number[]>("read_file_bytes", { path: item.path });
-    const { project } = await importFlipnote(
-      new Uint8Array(bytes).buffer,
-      item.name
-    );
-    showEditor(project, {
-      libRoot: settings.libraryDir!,
-      album: item.album,
-      baseName: stripExt(item.name),
+    await runWithBusy("open.note", t("ed.busy.loading.label"), async () => {
+      const bytes = await invoke<number[]>("read_file_bytes", { path: item.path });
+      const { project } = await importFlipnote(new Uint8Array(bytes).buffer, item.name);
+      showEditor(project, {
+        libRoot: settings.libraryDir!,
+        album: item.album,
+        baseName: stripExt(item.name),
+      });
     });
   } catch (e) {
     library.showLoadError(errText(e)); // V154b: 帯に1か所だけ（下の openEditorWithProject と同じ）
-  } finally {
-    clearTimeout(busyTimerN);
-    busyN.hide?.();
   }
 }
 
 async function openEditorWithProject(item: LibraryView) {
-  // V155 (L-2): 大きい作品は読み込みに何十秒もかかる（再現データで約10秒＋IPC）。
-  // **何も出さないと固まって見える**ので、保存中と同じ中央表示に乗せる（新しい仕組みは作らない）。
-  // 一瞬で終わる作品でチラつかないよう、W-8 と同じ 450ms の遅延を置く。
-  const busy: { hide: (() => void) | null } = { hide: null };
-  const busyTimer = window.setTimeout(() => {
-    busy.hide = busyOverlay(t("ed.busy.loading.label"));
-  }, 450);
-  const t0 = performance.now();
+  // V155 (L-2) → V159 (G-3): 大きい作品は読み込みに何十秒もかかる（再現データで約10秒＋IPC）。
+  // **何も出さないと固まって見える**ので中央表示に乗せる。
+  // V159: 自前でタイマーを持たず、**共通入口 `runWithBusy` を通す**（遅延・後片付け・計測はあちらに1つ）。
+  // 中の `showEditor`（フィルムの組み立て等）も**表示を出したまま**通るのが要点——
+  // ここを try の外に出すと、読み終わってから画面が出るまでがまた空白になる
   try {
-    const bytes = await invoke<number[]>("read_file_bytes", { path: item.path });
-    const project = await projectFromBytes(new Uint8Array(bytes), {
-      // 1コマごとに書き換えると描き直しが増えるので、32コマに1回だけ
-      onFrame: (n) => {
-        if (n % 32 === 0) setBusyMsg(t("ed.busy.loading.frames.label", { n }));
-      },
-    });
-    invoke("append_log", {
-      text:
-        `[${new Date().toISOString()}] [V155] open ok size=${item.size} ` +
-        `frames=${project.frames.length} ms=${Math.round(performance.now() - t0)}`,
-    }).catch(() => {});
-    showEditor(project, {
-      libRoot: settings.libraryDir!,
-      album: item.album,
-      baseName: stripExt(item.name),
+    await runWithBusy("open.project", t("ed.busy.loading.label"), async () => {
+      const bytes = await invoke<number[]>("read_file_bytes", { path: item.path });
+      const project = await projectFromBytes(new Uint8Array(bytes), {
+        // 1コマごとに書き換えると描き直しが増えるので、32コマに1回だけ
+        onFrame: (n) => {
+          if (n % 32 === 0) setBusyMsg(t("ed.busy.loading.frames.label", { n }));
+        },
+      });
+      showEditor(project, {
+        libRoot: settings.libraryDir!,
+        album: item.album,
+        baseName: stripExt(item.name),
+      });
     });
   } catch (e) {
     // V154b (W-10): 開けなかったことをログに残す。**大きさ（バイト数）と理由だけ**——
@@ -2128,10 +2118,6 @@ async function openEditorWithProject(item: LibraryView) {
     // `Error: ` は付けない——「読み込みエラー: Error: …」だと「エラー」が2回続いて、
     // 肝心の「ファイルは壊れていません」が埋もれる
     library.showLoadError(errText(e));
-  } finally {
-    // どの抜け方でも必ず畳む（出す前に終わっていればタイマーを消すだけ）
-    clearTimeout(busyTimer);
-    busy.hide?.();
   }
 }
 
@@ -4927,6 +4913,19 @@ window.addEventListener("DOMContentLoaded", async () => {
   } catch {
     settings = {};
   }
+  // V159 (G-1/G-3): 性能ログの配線。**設定を読んだ直後・画面を組む前**に済ませる——
+  // ライブラリ画面の重さも測りたいので、エディタを開くより先に生きている必要がある。
+  //
+  // 書くのは `perf.ts` が組み立てた行だけ（操作名＋数値）。ここでは時刻を頭に足して
+  // 既存の `memoanima.log` へ流すだけ＝**新しいファイルは作らない**（W-10 の枠に相乗り）。
+  setPerfSink((text) =>
+    invoke("append_log", { text: `[${new Date().toISOString()}] ${text}` }).catch(() => {})
+  );
+  setBusyImpl(busyOverlay);
+  startLongTaskWatch();
+  // 閉じるときに溜まっている行を落とさない（最後の1秒ぶんが消えると、
+  // 「重かった操作のあとアプリを閉じた」という一番知りたい場面が丸ごと欠ける）
+  window.addEventListener("pagehide", () => perfFlush());
   // M12-1a: 表示言語を決めて静的 DOM へ流し込む（settings.lang → navigator.language → 既定 en）。
   // 切替 UI は M12-2。ここでは「読む・不正値を弾く・判定する」までを配線する
   setLang(detectLang(settings.lang));
