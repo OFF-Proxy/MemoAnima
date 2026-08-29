@@ -171,6 +171,14 @@ export interface LayerDef {
    *  （clip の前例）。旧ビルドは未知キーとして無視し、「全コマに同じ絵があるレイヤー」として開ける。
    *  フォルダには付けない。取り込み（kwz/ppm）レイヤーには付かない。 */
   shared?: true;
+  /** V157 (D-1): レイヤーロック 🔒。true のとき**絵のデータを変える操作**を受け付けない
+   *  （描画・塗り・変形・統合・削除・範囲の消去/塗り）。**通す**のは 👁表示切替・名前・並べ替え・
+   *  不透明度・レイヤーカラー・ロック解除——クリスタと同じ「絵は変わらない操作」の線引き。
+   *
+   *  保存形式は `PROJECT_VERSION = 5` のまま任意キー（`clip` / `shared` / `displayColor` の前例）。
+   *  **旧ビルドは未知キーとして素通しし、ロックの無い作品として開ける**（絵は完全に同じ）。
+   *  実効ロック（自分 OR 祖先フォルダ）は `effectiveLayerStates` が解決する。 */
+  locked?: true;
   /** M15 (K-2): レイヤーカラー（表示色）。"#RRGGBB"。設定中は、このレイヤーの**不透明ピクセル全部**が
    *  この色で合成される（画面・サムネ・書き出し）。**索引データは1ドットも変えない**＝解除で元に戻る。
    *  塗り・✨自動選択の境界判定（flattenIndexFrame）には効かせない（表示だけ）。任意キー。 */
@@ -189,6 +197,9 @@ export interface LayerFolder {
   collapsed: boolean;
   /** 親フォルダ id（ネスト・未指定=ルート） */
   parent?: string;
+  /** V157 (D-1): フォルダのロック 🔒。中身すべてが**実効ロック**になる（子の個別 `locked` は書き換えない）。
+   *  親を解除すると、自分に `locked` が付いている子だけロックが残る。任意キー・旧ビルドは素通し。 */
+  locked?: true;
 }
 
 export interface Frame {
@@ -204,6 +215,16 @@ export interface Frame {
   order?: string[];
   /** M5-1: このコマで鳴らす SeTrack id 群（コマ側に持つ＝複製/削除/並べ替え/クリップに自然追従） */
   se?: string[];
+  /** V157 (D-2): **このコマだけ**のレイヤー表示色（layerId → "#RRGGBB"）。
+   *
+   *  `LayerDef.displayColor`（レイヤー全体の既定）より**こちらが優先**の2段構え。
+   *  `se` と同じ「コマ側に任意キーを持つ」作法で、`PROJECT_VERSION = 5` のまま。
+   *  **索引（`IndexBuf`）は1ビットも変わらない**——表示のときに色を差し替えるだけなので、
+   *  解除すればレイヤー既定へ完全に戻る（M15 K-2 の原則をそのまま引き継ぐ）。
+   *
+   *  ★ここは**画素ではない**ので、V156 の圧縮控え（`sleep`）には入らない。
+   *  眠っているコマにも普通に付けられるし、眠らせ直しても消えない（`v157_smoke` §5 が検査）。 */
+  layerColors?: Record<string, string>;
   /** V156 (P-1): 眠っているレイヤーの gzip 控え。**メモリ上の持ち方だけの話で、保存形式は変わらない**
    *  （`PROJECT_VERSION = 5` のまま。`encodeProject` は起きていても眠っていても同じ JSON を書く）。
    *
@@ -362,7 +383,7 @@ export function newSeId(p: Project): string {
  */
 export function effectiveLayerStates(
   p: Project
-): Map<string, { visible: boolean; opacity: number }> {
+): Map<string, { visible: boolean; opacity: number; locked: boolean }> {
   const folders = p.folders ?? [];
   const byId = new Map(folders.map((f) => [f.id, f]));
   // 先に親参照を健全化した写しを作る（存在しない親・循環に関与するフォルダは
@@ -388,29 +409,54 @@ export function effectiveLayerStates(
     safeParent.set(f.id, parent);
   }
   // フォルダ自身の実効値（健全化済み親のみ辿る）
-  const folderEff = new Map<string, { visible: boolean; opacity: number }>();
-  const resolve = (id: string): { visible: boolean; opacity: number } => {
+  // V157 (D-1): `locked` も同じ流儀で祖先まで OR する（実効可視が AND なのと対になる）
+  const folderEff = new Map<string, { visible: boolean; opacity: number; locked: boolean }>();
+  const ROOT = { visible: true, opacity: 1, locked: false };
+  const resolve = (id: string): { visible: boolean; opacity: number; locked: boolean } => {
     const cached = folderEff.get(id);
     if (cached) return cached;
     const f = byId.get(id);
-    if (!f) return { visible: true, opacity: 1 };
+    if (!f) return ROOT;
     const parId = safeParent.get(id);
-    const par = parId ? resolve(parId) : { visible: true, opacity: 1 };
-    const eff = { visible: f.visible && par.visible, opacity: f.opacity * par.opacity };
+    const par = parId ? resolve(parId) : ROOT;
+    const eff = {
+      visible: f.visible && par.visible,
+      opacity: f.opacity * par.opacity,
+      locked: f.locked === true || par.locked,
+    };
     folderEff.set(id, eff);
     return eff;
   };
-  const out = new Map<string, { visible: boolean; opacity: number }>();
+  const out = new Map<string, { visible: boolean; opacity: number; locked: boolean }>();
   for (const ld of p.layerDefs) {
-    const par =
-      ld.parent && byId.has(ld.parent) ? resolve(ld.parent) : { visible: true, opacity: 1 };
+    const par = ld.parent && byId.has(ld.parent) ? resolve(ld.parent) : ROOT;
     out.set(ld.id, {
       visible: ld.visible && par.visible,
       opacity: ld.opacity * par.opacity,
+      locked: ld.locked === true || par.locked,
     });
   }
   return out;
 }
+
+/** V157 (D-1): その親チェーンに🔒が1つでもあるか（**自分の `locked` は含めない**）。
+ *
+ *  UI で「親が🔒のとき、子の🔒トグルをグレーにする」判定に使う。
+ *  自分を含めてしまうと「自分で掛けたロックを自分で外せない」になる。
+ *  存在しない親・循環は `effectiveLayerStates` と同じくそこで打ち切る（ルート扱い）。 */
+export function ancestorLocked(p: Project, parentId: string | undefined): boolean {
+  const byId = new Map((p.folders ?? []).map((f) => [f.id, f]));
+  const seen = new Set<string>();
+  let cur = parentId;
+  while (cur && byId.has(cur) && !seen.has(cur)) {
+    seen.add(cur);
+    const f = byId.get(cur)!;
+    if (f.locked === true) return true;
+    cur = f.parent;
+  }
+  return false;
+}
+
 
 /** M11-20: クリッピングのあるレイヤーが 1 枚でもあるか（無ければ合成側は clip の処理を丸ごと飛ばす＝
  *  clip なし作品のホットパスを 1 命令も変えないための門番） */
@@ -450,6 +496,13 @@ export function clipBaseMap(p: Project): Map<string, string | null> {
  */
 export function sanitizeFolders(p: Project): void {
   const folders = p.folders ?? [];
+  // V157 (D-1): フォルダの `locked` も true のみ有効（`LayerDef.locked` と同じ作法）。
+  // 壊れた値で「解除できないロック」が生まれないようにキーごと落とす
+  for (const f of folders as unknown[]) {
+    if (f && typeof f === "object" && "locked" in f && (f as LayerFolder).locked !== true) {
+      delete (f as { locked?: unknown }).locked;
+    }
+  }
   const ids = new Set(folders.map((f) => f.id));
   // 存在しない親を除去
   for (const f of folders) if (f.parent && !ids.has(f.parent)) f.parent = undefined;

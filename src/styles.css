@@ -15,23 +15,107 @@
 @font-face { font-family: "MA Pop";     src: url("../assets/fonts/pop.woff2") format("woff2"); font-weight: 400; font-display: block; }
 @font-face { font-family: "MA Mincho";  src: url("../assets/fonts/mincho.woff2") format("woff2"); font-weight: 400; font-display: block; }
 
+/* ★V158 (C-1): 色は**すべてここ（変数）に集める**。個別セレクタに色を直書きしない。
+   `:root[data-theme="dark"]`（下）は**変数だけ**を上書きするので、配色を足しても
+   セレクタは1つも増えない。新しい直書きが混ざったら `scripts/v158_color_check.ts` が落とす。
+
+   例外は3つだけ:
+     - 透明の市松（`repeating-conic-gradient`）… どんな背景でも「透明」と読めることが仕事
+     - カーソルの SVG … 同上
+     - `UGO_COLORS` などの**作品データの色**（紙色・パレット）… 配色とは無関係 */
 :root {
   --paper: #fbefd6;
   --paper2: #f3e3c2;
+  /* 紙まわりの斜線（ステージの地） */
+  --paper3: #efe4c8;
+  --paper4: #f3e9d2;
   --panel: #ffffff;
+  /* パネルより一段沈んだ面（詳細の折りたたみ等） */
+  --surface-2: #f6f1e4;
   --ink: #2c2621;
   --ink-soft: #7a6f60;
+  /* 枠線。**明るい配色では `--ink` と同じ色**＝これまでと1ピクセルも変わらない。
+     夜の紙では文字（クリーム）と枠を分けたいので別トークンにしてある */
+  --line: #2c2621;
+  /* タイムラインの帯（フィルムの見立て）。明るい配色では `--ink` と同じ色＝従来どおり */
+  --film-bg: #2c2621;
   --red: #ff4b4b;
   --blue: #1fa2ff;
   --tangerine: #ff9f1c;
   --orange: #f07a1a;
   --orange-l: #fff0e2;
+  /* 明るい橙（進捗バーの縞・アクセントの既定） */
+  --orange-2: #ff8c1a;
   --yellow: #ffd23f;
   --green: #22b573;
+  /* 帯の地色（うまくいった／気をつけて） */
+  --ok-bg: #eafff3;
+  --warn-bg: #ffecec;
+  /* 音声の再生位置（どの地色の上でも目立つ強い色。パレットの6色とは別物） */
+  --playhead: #e0218a;
+  /* rgba() を組み立てるための成分。`rgba(var(--ink-rgb), .3)` の形で使う */
+  --ink-rgb: 44, 38, 33;
+  /* V158 (C-1): **影**と**暗幕**は文字色とは別に持つ。夜の紙で `--ink-rgb`（クリーム）を
+     使い回すと、影がクリーム色に光り、モーダルの暗幕が画面全体を白っぽくしてしまう。
+     明るい配色では `--ink-rgb` と同じ値＝これまでと1ピクセルも変わらない */
+  --shadow-rgb: 44, 38, 33;
+  --scrim-rgb: 44, 38, 33;
+  --ink-soft-rgb: 122, 111, 96;
+  --panel-rgb: 255, 255, 255;
+  --blue-rgb: 31, 162, 255;
+  --orange-rgb: 240, 122, 26;
   --shadow: 0 3px 0 rgba(44, 38, 33, 0.18);
+  /* 浮いているもの（ポップアップ）の落ち影 */
+  --shadow-float: 0 6px 20px rgba(0, 0, 0, 0.28);
   font-family: "Hiragino Maru Gothic ProN", "Yu Gothic UI", "Quicksand", system-ui, sans-serif;
   font-size: 14px;
   color: var(--ink);
+}
+
+/* V158 (C-1): 配色「夜の紙」。**変数だけ**を上書きする（セレクタは1つも足さない）。
+   温かい暗色（こげ茶＋クリーム文字）。`data-theme` は main.ts が `<html>` に付ける。
+   ★キャンバスの紙の色・作品の色はここに含まれない（作品データなので配色では変わらない）。 */
+:root[data-theme="dark"] {
+  --paper: #2a2320;
+  --paper2: #221c1a;
+  --paper3: #241e1b;
+  --paper4: #2e2724;
+  --panel: #352d29;
+  --surface-2: #2b2421;
+  --ink: #f2e6d2;
+  --ink-soft: #a89684;
+  /* 枠線。明るい配色では文字と同じ色（＝紙に対して 13.1:1）なので、夜の紙でも
+     枠がちゃんと枠に見える濃さが要る。#5a4a40 だと紙に対して 1.83:1 で、
+     3px の枠が背景に溶けて「箱」が読めなくなった。どの面（紙・パネル・
+     一段沈んだ面）に対しても 3:1 を超える #8a7466 にしてある（実測 3.06〜3.82） */
+  --line: #8a7466;
+  /* 帯は夜の紙でも**帯のまま**（さらに一段沈める）。`--ink` を使い回していると
+     ここだけクリーム色に反転して、画面の下半分が光る */
+  --film-bg: #1b1613;
+  --red: #ff6b6b;
+  --blue: #4db8ff;
+  --tangerine: #ffb35c;
+  --orange: #ff9f4a;
+  /* 明るい配色の `--orange-l`（ごく薄い橙）に当たる「選ばれている行の地」。
+     暗い側では**明るくするのではなく、橙に寄せた濃い茶**にする（白飛びさせない） */
+  --orange-l: #4a382c;
+  --orange-2: #ffb45c;
+  --yellow: #ffd66b;
+  --green: #3ecf90;
+  --ok-bg: #26382f;
+  --warn-bg: #3d2626;
+  --playhead: #ff5fb0;
+  --ink-rgb: 242, 230, 210;
+  /* 影と暗幕は暗い側でも**黒**。クリームで影を描くと縁が光って浮いて見える */
+  --shadow-rgb: 0, 0, 0;
+  --scrim-rgb: 0, 0, 0;
+  --ink-soft-rgb: 168, 150, 132;
+  --panel-rgb: 53, 45, 41;
+  --blue-rgb: 77, 184, 255;
+  --orange-rgb: 255, 159, 74;
+  /* 暗い地の上では「下に落ちる影」より「締まる縁」のほうが効く */
+  --shadow: 0 3px 0 rgba(0, 0, 0, 0.45);
+  --shadow-float: 0 6px 22px rgba(0, 0, 0, 0.6);
 }
 
 * {
@@ -46,7 +130,7 @@ body {
 
 body {
   background:
-    radial-gradient(circle at 12px 12px, rgba(44, 38, 33, 0.05) 2px, transparent 2px) 0 0/24px 24px,
+    radial-gradient(circle at 12px 12px, rgba(var(--ink-rgb), 0.05) 2px, transparent 2px) 0 0/24px 24px,
     var(--paper);
   overflow: hidden;
   user-select: none;
@@ -64,7 +148,7 @@ body {
 
 .card {
   background: var(--panel);
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 16px;
   box-shadow: var(--shadow);
 }
@@ -87,10 +171,10 @@ body {
   font: inherit;
   font-weight: 800;
   cursor: pointer;
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 12px;
   padding: 7px 14px;
-  background: #fff;
+  background: var(--panel);
   color: var(--ink);
   box-shadow: 0 4px 0 var(--ink);
   transition: 0.05s;
@@ -104,21 +188,21 @@ body {
 
 .btn.primary {
   background: var(--red);
-  color: #fff;
+  color: var(--panel);
 }
 
 .btn.blue {
   background: var(--blue);
-  color: #fff;
+  color: var(--panel);
 }
 
 .minibtn {
   font: inherit;
   font-size: 11px;
   font-weight: 800;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 8px;
-  background: #fff;
+  background: var(--panel);
   color: var(--ink);
   cursor: pointer;
   padding: 2px 8px;
@@ -132,15 +216,15 @@ body {
 
 .minibtn.ok {
   background: var(--green);
-  color: #fff;
+  color: var(--panel);
 }
 
 .ic {
   width: 38px;
   height: 38px;
   border-radius: 9px;
-  border: 3px solid var(--ink);
-  background: #fff;
+  border: 3px solid var(--line);
+  background: var(--panel);
   color: var(--ink);
   box-shadow: 0 3px 0 var(--ink);
   display: flex;
@@ -156,6 +240,19 @@ body {
   box-shadow: 0 0 0 var(--ink);
 }
 
+/* V158（Codex 指摘②）: 「このコマの絵を消す」。もどす／やりなおす と**同じ見た目で真隣**だと、
+   確認を「次回から表示しない」にした人が、やり直しのつもりで押して1コマぶんの絵を消す。
+   （Undo で戻せるが、気づかず描き続けると実害になる）
+   ・左に区切りの余白を空けて「別のグループ」にする
+   ・地を淡い赤にして、消す道具だと**押す前に**分かるようにする
+   実装は 🌀 と同じ `clearFrame()` のまま——変えたのは見た目と位置関係だけ */
+#ed-clearframe {
+  margin-left: 10px;
+  background: var(--warn-bg);
+  border-color: var(--red);
+  box-shadow: 0 3px 0 var(--red);
+}
+
 .ic.onb,
 .rbtn.onb {
   background: var(--yellow);
@@ -165,10 +262,10 @@ body {
   font: inherit;
   font-weight: 800;
   cursor: pointer;
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 10px;
   padding: 6px 12px;
-  background: #fff;
+  background: var(--panel);
   color: var(--ink);
   box-shadow: 0 3px 0 var(--ink);
   font-size: 13px;
@@ -181,12 +278,12 @@ body {
 
 .hb.green {
   background: var(--green);
-  color: #fff;
+  color: var(--panel);
 }
 
 .hb.danger {
   background: var(--red);
-  color: #fff;
+  color: var(--panel);
 }
 
 button:disabled {
@@ -202,7 +299,7 @@ button:disabled {
   gap: 12px;
   padding: 10px 18px;
   background: var(--tangerine);
-  border-bottom: 4px solid var(--ink);
+  border-bottom: 4px solid var(--line);
 }
 
 .logo {
@@ -211,8 +308,8 @@ button:disabled {
   gap: 10px;
   font-weight: 800;
   font-size: 21px;
-  color: #fff;
-  text-shadow: 0 2px 0 rgba(44, 38, 33, 0.35);
+  color: var(--panel);
+  text-shadow: 0 2px 0 rgba(var(--shadow-rgb), 0.35);
   /* V153: 幅が足りないとき、ロゴの中の文字が折り返して**トップバーの高さが伸びていた**
    *（日本語 960px で 63px → 108px の3行。S-1 で 80px の2行まで減ったが、まだ伸びる）。
    *  高さは「壊すな」の対象なので、**折り返さずに末尾を切る**形に固定する。
@@ -225,8 +322,8 @@ button:disabled {
 .logo .mark {
   width: 32px;
   height: 32px;
-  background: #fff;
-  border: 3px solid var(--ink);
+  background: var(--panel);
+  border: 3px solid var(--line);
   border-radius: 9px;
   position: relative;
   box-shadow: var(--shadow);
@@ -278,8 +375,8 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: #fff;
-  border: 3px solid var(--ink);
+  background: var(--panel);
+  border: 3px solid var(--line);
   border-radius: 999px;
   padding: 6px 14px;
   box-shadow: var(--shadow);
@@ -362,19 +459,19 @@ button:disabled {
 }
 
 .album.active {
-  background: #fff;
+  background: var(--panel);
   border-color: var(--ink);
   box-shadow: var(--shadow);
 }
 
 .album.drop {
   border-color: var(--green);
-  background: #eafff3;
+  background: var(--ok-bg);
 }
 
 .album .n {
   font-size: 11px;
-  color: #fff;
+  color: var(--panel);
   background: var(--ink);
   border-radius: 999px;
   padding: 1px 8px;
@@ -423,16 +520,16 @@ button:disabled {
 .screen-view {
   flex: 1;
   min-height: 0;
-  background: #fff;
-  border: 4px solid var(--ink);
+  background: var(--panel);
+  border: 4px solid var(--line);
   border-radius: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
   position: relative;
   overflow: hidden;
-  background-image: linear-gradient(rgba(31, 162, 255, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(31, 162, 255, 0.05) 1px, transparent 1px);
+  background-image: linear-gradient(rgba(var(--blue-rgb), 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(var(--blue-rgb), 0.05) 1px, transparent 1px);
   background-size: 16px 16px;
 }
 
@@ -469,8 +566,8 @@ button:disabled {
   width: 44px;
   height: 44px;
   border-radius: 50%;
-  border: 3px solid var(--ink);
-  background: #fff;
+  border: 3px solid var(--line);
+  background: var(--panel);
   color: var(--ink);
   display: flex;
   align-items: center;
@@ -488,7 +585,7 @@ button:disabled {
 
 .rbtn.play {
   background: var(--green);
-  color: #fff;
+  color: var(--panel);
   width: 54px;
   height: 54px;
   font-size: 21px;
@@ -504,22 +601,22 @@ button:disabled {
 .chip {
   font-size: 11px;
   font-weight: 800;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 999px;
   padding: 3px 10px;
-  background: #fff;
+  background: var(--panel);
   font-family: inherit;
   color: var(--ink);
 }
 
 .chip.red {
   background: var(--red);
-  color: #fff;
+  color: var(--panel);
 }
 
 .chip.edit {
   background: var(--blue);
-  color: #fff;
+  color: var(--panel);
   cursor: pointer;
   box-shadow: 0 2px 0 var(--ink);
 }
@@ -531,7 +628,7 @@ button:disabled {
 
 .chip.export {
   background: var(--green);
-  color: #fff;
+  color: var(--panel);
   cursor: pointer;
   box-shadow: 0 2px 0 var(--ink);
 }
@@ -543,7 +640,7 @@ button:disabled {
 
 .chip.danger {
   background: var(--red);
-  color: #fff;
+  color: var(--panel);
   cursor: pointer;
   box-shadow: 0 2px 0 var(--ink);
 }
@@ -593,9 +690,9 @@ button:disabled {
 }
 
 .thumb {
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 12px;
-  background: #fff;
+  background: var(--panel);
   overflow: hidden;
   cursor: pointer;
   box-shadow: var(--shadow);
@@ -611,8 +708,8 @@ button:disabled {
    （画像未生成・読み込み失敗・エンジン差でも線状に潰れない） */
 .thumb .pic {
   position: relative;
-  background-image: linear-gradient(rgba(31, 162, 255, 0.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(31, 162, 255, 0.06) 1px, transparent 1px);
+  background-image: linear-gradient(rgba(var(--blue-rgb), 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(var(--blue-rgb), 0.06) 1px, transparent 1px);
   background-size: 10px 10px;
   overflow: hidden;
 }
@@ -635,7 +732,7 @@ button:disabled {
 .thumb .cap {
   font-size: 10px;
   padding: 4px 6px;
-  border-top: 2px solid var(--ink);
+  border-top: 2px solid var(--line);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -644,8 +741,8 @@ button:disabled {
 
 /* 下: 取り込み進捗 */
 #import-footer {
-  border-top: 4px solid var(--ink);
-  background: #fff;
+  border-top: 4px solid var(--line);
+  background: var(--panel);
   padding: 8px 18px;
   display: flex;
   align-items: center;
@@ -669,7 +766,7 @@ button:disabled {
   flex: 1;
   height: 16px;
   background: var(--paper2);
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 999px;
   overflow: hidden;
 }
@@ -678,7 +775,7 @@ button:disabled {
   display: block;
   height: 100%;
   width: 0%;
-  background: repeating-linear-gradient(45deg, var(--tangerine) 0 10px, #ffb84d 10px 20px);
+  background: repeating-linear-gradient(45deg, var(--tangerine) 0 10px, var(--orange-2) 10px 20px);
   transition: width 0.15s;
 }
 
@@ -694,14 +791,14 @@ button:disabled {
   gap: 8px;
   padding: 7px 12px;
   background: var(--orange);
-  border-bottom: 4px solid var(--ink);
+  border-bottom: 4px solid var(--line);
 }
 
 .edbar .h-title {
   font-weight: 800;
-  color: #fff;
+  color: var(--panel);
   font-size: 15px;
-  text-shadow: 0 2px 0 rgba(44, 38, 33, 0.3);
+  text-shadow: 0 2px 0 rgba(var(--shadow-rgb), 0.3);
   max-width: 30%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -709,10 +806,10 @@ button:disabled {
 }
 
 .edbar .h-spec {
-  color: #fff;
+  color: var(--panel);
   font-weight: 800;
   font-size: 11px;
-  background: rgba(0, 0, 0, 0.18);
+  background: rgba(var(--ink-rgb), 0.18);
   padding: 3px 10px;
   border-radius: 999px;
 }
@@ -808,7 +905,7 @@ button:disabled {
 }
 
 .ed-split.on::before {
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.8);
+  box-shadow: 0 0 0 2px rgba(var(--panel-rgb), 0.8);
 }
 
 /* M11-18: 畳んでいるパネルのスプリッターは掴めない（つまみは見えているが境界は動かせない） */
@@ -979,8 +1076,8 @@ button:disabled {
   width: 66px;
   height: 54px;
   border-radius: 12px;
-  border: 3px solid var(--ink);
-  background: #fff;
+  border: 3px solid var(--line);
+  background: var(--panel);
   color: var(--ink);
   display: flex;
   flex-direction: column;
@@ -1022,7 +1119,7 @@ button:disabled {
   display: flex;
   padding: 10px;
   overflow: hidden;
-  background: repeating-linear-gradient(45deg, #efe4c8 0 8px, #f3e9d2 8px 16px);
+  background: repeating-linear-gradient(45deg, var(--paper3) 0 8px, var(--paper4) 8px 16px);
 }
 
 .stage-scroll {
@@ -1054,7 +1151,7 @@ button:disabled {
 }
 
 #ed-canvas {
-  background: #fff;
+  background: var(--panel);
   border: 0;
   cursor: crosshair;
 }
@@ -1071,8 +1168,8 @@ button:disabled {
 }
 
 .cvwrap {
-  background: #fff;
-  border: 4px solid var(--ink);
+  background: var(--panel);
+  border: 4px solid var(--line);
   border-radius: 4px;
 }
 
@@ -1123,8 +1220,8 @@ button:disabled {
   left: 50%;
   transform: translateX(-50%);
   background: var(--orange);
-  color: #fff;
-  border: 3px solid var(--ink);
+  color: var(--panel);
+  border: 3px solid var(--line);
   border-radius: 999px;
   font-size: 12px;
   font-weight: 800;
@@ -1150,7 +1247,7 @@ button:disabled {
   right: calc(5 / 320 * 100%);
   top: calc(5 / 240 * 100%);
   bottom: calc(5 / 240 * 100%);
-  border: 1px dashed rgba(240, 122, 26, 0.45);
+  border: 1px dashed rgba(var(--orange-rgb), 0.45);
   border-radius: 3px;
   pointer-events: none;
 }
@@ -1160,7 +1257,7 @@ button:disabled {
   top: 16px;
   left: 18px;
   background: var(--ink);
-  color: #fff;
+  color: var(--panel);
   font-size: 11px;
   font-weight: 800;
   padding: 3px 10px;
@@ -1187,8 +1284,8 @@ button:disabled {
   position: absolute;
   bottom: 14px;
   left: 18px;
-  background: #fff;
-  border: 3px solid var(--ink);
+  background: var(--panel);
+  border: 3px solid var(--line);
   border-radius: 999px;
   font-size: 11px;
   font-weight: 800;
@@ -1202,8 +1299,8 @@ button:disabled {
   bottom: 14px;
   width: 150px;
   aspect-ratio: 320/240;
-  background: #fff;
-  border: 3px solid var(--ink);
+  background: var(--panel);
+  border: 3px solid var(--line);
   border-radius: 8px;
   box-shadow: var(--shadow);
   overflow: hidden;
@@ -1250,7 +1347,7 @@ button:disabled {
   font-size: 9px;
   font-weight: 800;
   background: var(--green);
-  color: #fff;
+  color: var(--panel);
   padding: 1px 7px;
   border-radius: 999px;
   z-index: 2;
@@ -1294,8 +1391,134 @@ button:disabled {
   flex-direction: column;
   gap: 8px;
   padding: 10px;
+  /* V158 (L-1): **カード自身はスクロールしない**。上下の段がそれぞれ中でスクロールする
+     （1本の縦スクロールに縦積みしていたのが「レイヤーが押し出されて消える」の原因だった） */
+  overflow: hidden;
+}
+
+/* V158 (L-1): 右パネルの2段。上段は比率ぶん・下段は残りぜんぶ（＝**常に見える**）。
+   `--ed-side-top` は applyLayout が入れる（既定 60%）。 */
+.side-sec {
+  display: flex;
+  flex-direction: column;
+  min-height: 0; /* flex の子が内容で膨らんでスクロールしなくなるのを防ぐ定石 */
+  gap: 6px;
+}
+
+.side-top {
+  flex: 0 0 var(--ed-side-top, 60%);
+}
+
+.side-bot {
+  flex: 1 1 auto;
+  /* レイヤー3行（1行 34px）＋見出し＋控えボタン列。狭い画面ではここを守り、上段を先に縮める */
+  min-height: 168px;
+}
+
+.side-secbody {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden; /* M6-6 R-1: 横スクロールもはみ出しも出さない保険 */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.side-sechead {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--ink-soft);
+  padding: 0 2px;
+}
+
+.side-sechead > span:first-child {
+  margin-right: auto;
+  white-space: nowrap;
+}
+
+/* 段を畳んだとき: 見出しだけ残して相手が伸びる（見出しが残るので戻し方が分かる） */
+.side.fold-top .side-top,
+.side.fold-bot .side-bot {
+  flex: 0 0 auto;
+}
+
+.side.fold-top .side-top .side-secbody,
+.side.fold-bot .side-bot .side-secbody {
+  display: none;
+}
+
+.side.fold-top .side-bot,
+.side.fold-bot .side-top {
+  flex: 1 1 auto;
+}
+
+/* 上下の境界。横の境界（.ed-split）と同じ手ざわり・同じ太さにする */
+.ed-vsplit {
+  flex: 0 0 10px;
+  position: relative;
+  cursor: row-resize;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ed-vsplit::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 4px;
+  border-radius: 999px;
+  background: var(--ink-soft);
+  opacity: 0.45;
+}
+
+/* V158（Codex 指摘④）: 掴めることが**触る前に**分かるように、線の真ん中へ短い刻みを1つ。
+   hover の色変化はマウスにしか効かない（ペン・タッチでは title も出ない）ので、
+   「ただの仕切り線」に見えたままだと高さを変えられることに気づけない */
+.ed-vsplit::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 26px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--ink-soft);
+  opacity: 0.55;
+}
+
+.ed-vsplit:hover::before,
+.ed-vsplit.on::before,
+.ed-vsplit:hover::after,
+.ed-vsplit.on::after {
+  opacity: 1;
+  background: var(--orange);
+}
+
+.ed-vsplit.disabled {
+  pointer-events: none;
+  opacity: 0.3;
+}
+
+.side-sechead .sfold {
+  margin-left: 2px;
+}
+
+/* V158 (L-4): ツール設定の下に添える1行ヒント（機能そのものは前からある操作の説明） */
+.opt-hint {
+  margin: 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-soft);
 }
 
 .side h3 {
@@ -1324,9 +1547,9 @@ button:disabled {
 .sz {
   flex: 1;
   height: 32px;
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 9px;
-  background: #fff;
+  background: var(--panel);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1352,9 +1575,9 @@ button:disabled {
 
 .tx {
   aspect-ratio: 1;
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 9px;
-  background: #fff;
+  background: var(--panel);
   color: var(--ink);
   cursor: pointer;
   display: flex;
@@ -1375,9 +1598,9 @@ button:disabled {
 }
 
 .tone-btn {
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 9px;
-  background: #fff;
+  background: var(--panel);
   cursor: pointer;
   padding: 4px;
   display: flex;
@@ -1386,8 +1609,10 @@ button:disabled {
 }
 
 .tone-btn canvas {
-  width: 64px; /* 32×32バッキング → ×2 整数拡大（ドット感維持） */
-  height: 64px;
+  /* V158 (L-3): 48×16 バッキング → ×2 整数拡大（ドット感維持）。
+     正方形 64×64 から横長 96×32 にして、1つあたりの高さを 78px → 46px に */
+  width: 96px;
+  height: 32px;
   image-rendering: pixelated;
 }
 
@@ -1447,7 +1672,7 @@ button:disabled {
   color: var(--ink-soft);
   margin: 6px 0 0;
   padding-top: 4px;
-  border-top: 1px solid rgba(122, 111, 96, 0.25);
+  border-top: 1px solid rgba(var(--ink-soft-rgb), 0.25);
 }
 .tex.collapsed .tone-custom-head {
   display: none;
@@ -1485,9 +1710,9 @@ button:disabled {
   gap: 5px;
   padding: 6px;
   background: var(--panel);
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 10px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--shadow-float);
 }
 .toolstrip .oni {
   gap: 5px;
@@ -1514,10 +1739,10 @@ button:disabled {
 
 .sw {
   aspect-ratio: 1;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 7px;
   cursor: pointer;
-  box-shadow: 0 2px 0 rgba(44, 38, 33, 0.25);
+  box-shadow: 0 2px 0 rgba(var(--shadow-rgb), 0.25);
   padding: 0;
 }
 
@@ -1538,11 +1763,11 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 6px;
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 10px;
   padding: 4px 7px;
   margin-bottom: 4px;
-  background: #fff;
+  background: var(--panel);
   cursor: pointer;
 }
 
@@ -1585,6 +1810,24 @@ button:disabled {
 .lay .lay-clipmask.on.nobase {
   opacity: 0.55;
 }
+/* V157 (D-1): ロック中の行。**👁オフ（アイコンが薄くなるだけ）と取り違えない**ように、
+   行の左に太い帯を出して斜めの地を敷く。「押せない」ではなく「守られている」の見た目にする
+   （Codex レビューの観点）。ロックしていない作品では1行も効かない */
+.lay.locked,
+.lay-folder.locked {
+  border-left-width: 10px;
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(var(--ink-rgb), 0.055) 0 5px,
+    transparent 5px 10px
+  );
+}
+
+/* 🔒 トグル本体。親フォルダのロックで押せないときは、押せないことが分かる形にする */
+.lay-lock.byparent {
+  cursor: not-allowed;
+}
+
 .lay.clipped {
   border-left: 8px solid var(--red);
 }
@@ -1603,7 +1846,7 @@ button:disabled {
   flex: 0 0 auto;
   width: 16px;
   height: 16px;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 4px;
   cursor: pointer;
   /* 未設定は市松で「透明（＝元の色のまま）」を示す */
@@ -1636,6 +1879,19 @@ button:disabled {
   outline-offset: -1px;
 }
 
+/* V157 (D-2 / U-4): このコマだけの表示色が付いていることを示す細い帯。
+   フィルムのコマは番号とサムネだけなので、下端に 4px 足すだけで混雑させない */
+.fc-mark {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  bottom: 2px;
+  height: 4px;
+  border-radius: 2px;
+  border: 1px solid var(--line);
+  pointer-events: none;
+}
+
 .lay.droptarget {
   outline: 3px dashed var(--green);
   outline-offset: -1px;
@@ -1657,7 +1913,7 @@ button:disabled {
   z-index: 120;
   pointer-events: none;
   background: var(--ink);
-  color: #fff;
+  color: var(--panel);
   font-size: 11px;
   font-weight: 800;
   padding: 3px 10px;
@@ -1709,7 +1965,7 @@ button:disabled {
   width: 44px;
   height: 24px;
   background: var(--paper2);
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 999px;
   position: relative;
   cursor: pointer;
@@ -1725,8 +1981,8 @@ button:disabled {
   left: 2px;
   width: 12px;
   height: 12px;
-  background: #fff;
-  border: 2px solid var(--ink);
+  background: var(--panel);
+  border: 2px solid var(--line);
   border-radius: 50%;
   transition: 0.1s;
 }
@@ -1758,7 +2014,7 @@ button:disabled {
   transform: translateY(-50%);
   height: 12px;
   background: var(--paper2);
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 999px;
   pointer-events: none;
 }
@@ -1770,10 +2026,10 @@ button:disabled {
   left: calc(var(--f) * (100% - 20px)); /* 20px = SLIDER_THUMB_W */
   width: 20px;
   height: 20px;
-  background: #fff;
-  border: 3px solid var(--ink);
+  background: var(--panel);
+  border: 3px solid var(--line);
   border-radius: 50%;
-  box-shadow: 0 2px 0 rgba(44, 38, 33, 0.25);
+  box-shadow: 0 2px 0 rgba(var(--shadow-rgb), 0.25);
   pointer-events: none;
 }
 
@@ -1803,18 +2059,24 @@ button:disabled {
 }
 
 /* L-2: 表示言語だけは横に並べきれない（6言語目で1行に入らない・BACKLOG §E「余り 28px」）。
-   `.oni .lv` の `flex: 1` は flex-basis 0 だが、flex 行の折り返しは
-   **min-width: auto（＝文字の min-content 幅）で決まる**ので、これだけで2行に折り返る。 */
+   V157 (A-14-2): `flex-wrap` のままだと `.oni .lv { flex: 1 }` が効いて
+   **2行目に余った1つが横幅いっぱいに伸びる**（7言語ある今は「繁體中文」が1つだけ残る）。
+   grid にすると列幅が決まるので伸びない。Cowork の推奨は「3列」だったが、
+   **列数を幅から決める**形にした——言語が7つになった今 3列だと 3+3+1、
+   幅の狭い窓では3列すら入らない（V152「狭い幅は開発機で再現しない」の教訓）。
+   `auto-fit` なら入るだけ並び、余った1つも**1列ぶんの幅のまま**で伸びない。 */
 #set-lang {
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
+  gap: 5px;
 }
 
 .oni .lv {
   flex: 1;
   height: 30px;
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 8px;
-  background: #fff;
+  background: var(--panel);
   color: var(--ink);
   display: flex;
   align-items: center;
@@ -1839,7 +2101,7 @@ button:disabled {
   padding: 2px 6px;
   border-radius: 999px;
   background: var(--orange);
-  color: #fff;
+  color: var(--panel);
 }
 /* 注意だけを赤くする（本文は通常色のまま）。M11-22 は注記行の中に <span class="warn"> を足す */
 .modal-path .warn {
@@ -1868,10 +2130,10 @@ button:disabled {
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 8px;
   padding: 4px 6px;
-  background: #fff;
+  background: var(--panel);
   resize: vertical;
   touch-action: none;
 }
@@ -1884,19 +2146,19 @@ button:disabled {
 select {
   font: inherit;
   font-weight: 700;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 8px;
   padding: 2px 6px;
-  background: #fff;
+  background: var(--panel);
 }
 
 input[type="number"],
 input[type="text"] {
   font: inherit;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 8px;
   padding: 2px 6px;
-  background: #fff;
+  background: var(--panel);
 }
 
 /* 下: タイムライン */
@@ -1952,7 +2214,7 @@ input[type="text"] {
   gap: 6px;
   padding: 8px;
   background: var(--panel);
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 12px;
   box-shadow: var(--shadow);
   min-width: 150px;
@@ -2006,7 +2268,7 @@ input[type="text"] {
   height: 100%;
   max-height: 240px;
   aspect-ratio: 320/240;
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 10px;
   box-shadow: none;
   z-index: auto;
@@ -2019,7 +2281,7 @@ input[type="text"] {
 
 .tl-head .play {
   background: var(--green);
-  color: #fff;
+  color: var(--panel);
 }
 
 .speed {
@@ -2037,7 +2299,10 @@ input[type="text"] {
   overflow-x: auto;
   align-items: center;
   padding: 4px;
-  background: var(--ink);
+  /* V158 (C-1): フィルムの帯は「暗い帯にコマが並ぶ」＝フィルムの見立てなので、
+     文字色（--ink）ではなく**帯の色**として持つ。明るい配色では従来と同じ #2c2621。
+     --ink をそのまま使っていると、夜の紙で帯だけクリーム色に反転してしまう */
+  background: var(--film-bg);
   border-radius: 10px;
   min-height: 0;
   min-width: 0; /* M11-18: 横並び（tl-body）の中でも F-0（帯が親を押し広げない） */
@@ -2065,9 +2330,9 @@ input[type="text"] {
     117px
   );
   aspect-ratio: 320/240;
-  border: 3px solid #fff;
+  border: 3px solid var(--panel);
   border-radius: 6px;
-  background: #fff;
+  background: var(--panel);
   position: relative;
   cursor: pointer;
   overflow: hidden;
@@ -2096,7 +2361,7 @@ input[type="text"] {
   font-size: 9px;
   font-weight: 800;
   color: var(--ink-soft);
-  background: rgba(255, 255, 255, 0.75);
+  background: rgba(var(--panel-rgb), 0.75);
   padding: 0 3px;
   border-radius: 4px;
   z-index: 2;
@@ -2121,10 +2386,10 @@ input[type="text"] {
     78px
   );
   aspect-ratio: 320/240;
-  border: 3px dashed #fff;
+  border: 3px dashed var(--panel);
   border-radius: 6px;
   background: transparent;
-  color: #fff;
+  color: var(--panel);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2147,7 +2412,7 @@ input[type="text"] {
 .modal-back {
   position: fixed;
   inset: 0;
-  background: rgba(44, 38, 33, 0.45);
+  background: rgba(var(--scrim-rgb), 0.45);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2156,9 +2421,9 @@ input[type="text"] {
 
 .modal-box {
   background: var(--panel);
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 16px;
-  box-shadow: 0 6px 0 rgba(44, 38, 33, 0.3);
+  box-shadow: 0 6px 0 rgba(var(--shadow-rgb), 0.3);
   padding: 20px;
   max-width: calc(100vw - 32px); /* M6-6 R-1: 画面からはみ出さない保険 */
   min-width: 340px;
@@ -2174,7 +2439,7 @@ input[type="text"] {
 .modal-input {
   width: 100%;
   font: inherit;
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 10px;
   padding: 8px 10px;
   margin-bottom: 14px;
@@ -2184,6 +2449,12 @@ input[type="text"] {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
+}
+
+/* V157 (D-2): 3つ以上の選択肢を並べるとき。狭い窓でも押せるように折り返す
+   （V152 の「狭い幅は開発機で再現しない」の教訓） */
+.modal-actions.modal-choose {
+  flex-wrap: wrap;
 }
 
 /* V151 E-8: 確認ダイアログの「次回から表示しない」行 */
@@ -2224,7 +2495,7 @@ input[type="text"] {
 .modal-field input {
   flex: 1;
   font: inherit;
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 10px;
   padding: 6px 8px;
   min-width: 0;
@@ -2242,7 +2513,7 @@ input[type="text"] {
   position: absolute;
   z-index: 9;
   background: var(--ink);
-  color: #fff;
+  color: var(--panel);
   font-size: 11px;
   font-weight: 800;
   padding: 2px 9px;
@@ -2344,7 +2615,7 @@ input[type="text"] {
   font-size: 12px;
   font-weight: 800;
   padding: 2px 6px;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 7px;
   background: var(--panel);
 }
@@ -2434,8 +2705,8 @@ input[type="text"] {
   width: 62%;
   aspect-ratio: 4 / 3;
   margin: 0 auto 12px;
-  background: #fff;
-  border: 3px solid var(--ink);
+  background: var(--panel);
+  border: 3px solid var(--line);
   border-radius: 10px;
   image-rendering: pixelated;
   cursor: pointer;
@@ -2445,8 +2716,8 @@ input[type="text"] {
   display: block;
   width: 100%;
   height: 170px;
-  background: #fff;
-  border: 3px solid var(--ink);
+  background: var(--panel);
+  border: 3px solid var(--line);
   border-radius: 10px;
   margin-bottom: 10px;
   cursor: ew-resize;
@@ -2471,13 +2742,13 @@ input[type="text"] {
 
 .ap-scroll::-webkit-scrollbar-track {
   background: var(--paper2);
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 999px;
 }
 
 .ap-scroll::-webkit-scrollbar-thumb {
-  background: #fff;
-  border: 2px solid var(--ink);
+  background: var(--panel);
+  border: 2px solid var(--line);
   border-radius: 999px;
 }
 
@@ -2494,11 +2765,11 @@ input[type="text"] {
   display: flex;
   align-items: center;
   gap: 7px;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 9px;
   padding: 3px 8px;
   margin-bottom: 5px;
-  background: #fff;
+  background: var(--panel);
   min-width: 0;
 }
 
@@ -2535,7 +2806,7 @@ input[type="text"] {
   font-size: 10px;
   font-weight: 800;
   color: var(--blue);
-  text-shadow: 0 0 2px #fff, 0 0 2px #fff;
+  text-shadow: 0 0 2px var(--panel), 0 0 2px var(--panel);
   pointer-events: none;
 }
 
@@ -2544,8 +2815,8 @@ input[type="text"] {
   max-width: 640px;
   max-height: 240px;
   overflow: auto;
-  background: #f6f1e4;
-  border: 2px solid var(--ink);
+  background: var(--surface-2);
+  border: 2px solid var(--line);
   border-radius: 8px;
   padding: 8px 10px;
   font-size: 11px;
@@ -2577,23 +2848,23 @@ input[type="text"] {
 }
 
 .guide-root.nofocus {
-  background: rgba(44, 38, 33, 0.6);
+  background: rgba(var(--scrim-rgb), 0.6);
 }
 
 .guide-hl {
   position: fixed;
   border: 3px solid var(--yellow);
   border-radius: 12px;
-  box-shadow: 0 0 0 9999px rgba(44, 38, 33, 0.6);
+  box-shadow: 0 0 0 9999px rgba(var(--scrim-rgb), 0.6);
   pointer-events: none;
 }
 
 .guide-bubble {
   position: fixed;
   background: var(--panel);
-  border: 3px solid var(--ink);
+  border: 3px solid var(--line);
   border-radius: 14px;
-  box-shadow: 0 5px 0 rgba(44, 38, 33, 0.35);
+  box-shadow: 0 5px 0 rgba(var(--shadow-rgb), 0.35);
   padding: 14px 16px;
 }
 
@@ -2634,7 +2905,7 @@ input[type="text"] {
 .legal-note {
   max-height: 176px;
   overflow-y: auto;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 8px;
   padding: 8px 10px;
   margin: 0 0 8px;
@@ -2653,11 +2924,11 @@ input[type="text"] {
 }
 
 .set-sec {
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 10px;
   padding: 10px 12px;
   margin-bottom: 10px;
-  background: #fff;
+  background: var(--panel);
 }
 
 .set-sec > b {
@@ -2696,7 +2967,7 @@ input[type="text"] {
 
 .toast {
   background: var(--ink);
-  color: #fff;
+  color: var(--panel);
   font-weight: 700;
   font-size: 13px;
   border-radius: 999px;
@@ -2736,8 +3007,8 @@ input[type="text"] {
   height: 480px;
   max-width: 100%;
   image-rendering: pixelated;
-  background: #fff;
-  border: 3px solid var(--ink);
+  background: var(--panel);
+  border: 3px solid var(--line);
   border-radius: 8px;
 }
 .imgimp-pager {
@@ -2772,27 +3043,27 @@ input[type="text"] {
 .ii-sw {
   width: 26px;
   height: 26px;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 6px;
   cursor: pointer;
   padding: 0;
 }
 .ii-sw.on {
-  outline: 3px solid var(--accent, #ff8c1a);
+  outline: 3px solid var(--accent, var(--orange-2));
   outline-offset: 1px;
 }
 .ii-swatches input[type="color"] {
   width: 34px;
   height: 28px;
   padding: 0;
-  border: 2px solid var(--ink);
+  border: 2px solid var(--line);
   border-radius: 6px;
   background: none;
   cursor: pointer;
 }
 #ii-invert.on {
   background: var(--ink);
-  color: #fff;
+  color: var(--panel);
 }
 @media (max-width: 1000px) {
   .imgimp {
@@ -2828,7 +3099,7 @@ input[type="text"] {
   white-space: nowrap;
 }
 .szmeter .szrow.tot {
-  border-top: 2px solid var(--ink);
+  border-top: 2px solid var(--line);
   margin-top: 2px;
   padding-top: 2px;
 }
@@ -2853,7 +3124,7 @@ input[type="text"] {
 }
 .szmeter.lv-warn .sznote.adv {
   border-color: var(--red);
-  background: #ffecec;
+  background: var(--warn-bg);
 }
 
 /* ---------------- V154b (W-8/W-9): 重い処理のあいだの表示 ---------------- */

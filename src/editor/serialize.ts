@@ -88,6 +88,10 @@ interface SerializedFrame {
   layers: Record<string, string>; // layerId -> base64(索引バイト列。幅は indexBits に従う)
   order?: string[]; // コマ固有の描画順（下→上）
   se?: string[]; // v5: このコマで鳴らす SeTrack id 群（空なら省略）
+  /** V157 (D-2): このコマだけのレイヤー表示色（layerId -> "#RRGGBB"）。空なら省略。
+   *  任意キー＝`PROJECT_VERSION = 5` のまま。旧ビルドは知らないキーとして読み飛ばし、
+   *  **色の無い作品として開く**（絵は完全に一致）。 */
+  layerColors?: Record<string, string>;
 }
 
 /** 索引バッファ → バイト列（LE）。indexBits=16 なのに 8bit バッファが混在していた場合は
@@ -270,6 +274,9 @@ async function encodeProject(
       layers,
       order: f.order,
       se: f.se && f.se.length > 0 ? f.se : undefined,
+      // V157 (D-2): 空のときは**キーごと省く**（色を使っていない作品の保存バイト列を1バイトも変えない）
+      layerColors:
+        f.layerColors && Object.keys(f.layerColors).length > 0 ? f.layerColors : undefined,
     };
     await writer.write(enc.encode((i > 0 ? "," : "") + JSON.stringify(sf)));
     // 約8msごとにメインスレッドを譲る（占有をチャンク1個ぶんに抑える）
@@ -630,6 +637,22 @@ function validateDoc(doc: LoadedDoc): 8 | 16 {
   return doc.indexBits === 16 ? 16 : 8;
 }
 
+/** V157 (D-2): コマ単位の表示色を健全化する。
+ *  `"#RRGGBB"` のものだけ残し、1つも残らなければ `undefined`（キーごと消える）。
+ *  `LayerDef.displayColor` の検証（`serialize.ts` の下の方）と**同じ規則**にしてある。
+ *  存在しないレイヤー id が混ざっていても害は無い（描画時に引かれないだけ）ので落とさない
+ *  ——落とすと「レイヤーを消して undo した」ときに色まで消える。 */
+function sanitizeFrameColors(
+  v: unknown
+): Record<string, string> | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [id, c] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c)) out[id] = c;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** V155: 直列化された1コマ → `Frame`（従来の `map` の中身をそのまま関数にしただけ）。
  *  **ビット幅の解釈と長さの検査はここでは行わない**（`finalizeFrames` が最後にまとめて行う）。 */
 function frameFromSerialized(sf: SerializedFrame): Frame {
@@ -641,6 +664,9 @@ function frameFromSerialized(sf: SerializedFrame): Frame {
     order: sf.order,
     // v5: SE配置（未知idの除去は最後の sanitizeAudio が行う）
     se: Array.isArray(sf.se) ? sf.se.filter((x) => typeof x === "string") : undefined,
+    // V157 (D-2): コマ単位の表示色。**"#RRGGBB" のものだけ**通す（`displayColor` と同じ作法。
+    // 手で壊された値・数値・null はキーごと落として、絵は必ず開ける）
+    layerColors: sanitizeFrameColors(sf.layerColors),
   };
 }
 
@@ -805,6 +831,10 @@ export async function projectFromBytes(
             typeof f.opacity === "number" ? Math.max(0, Math.min(1, f.opacity)) : 1,
           collapsed: f.collapsed === true,
           parent: typeof f.parent === "string" ? f.parent : undefined,
+          // V157 (D-1): フォルダの 🔒。**ここは `layerDefs` と違ってキーを明示列挙して
+          // 作り直している**ので、書かないと読み込みで消える（実際に検査で捕まえた）。
+          // true のときだけ足す＝壊れた値は自然に落ちる（`sanitizeFolders` と同じ結論）
+          ...(f.locked === true ? { locked: true as const } : {}),
         }))
     : [];
   const p: Project = {
@@ -847,6 +877,11 @@ export async function projectFromBytes(
       // M15 (K-1): shared は true のみ有効。それ以外はキーを落とす
       if (ld && typeof ld === "object" && "shared" in ld && (ld as LayerDef).shared !== true) {
         delete (ld as { shared?: unknown }).shared;
+      }
+      // V157 (D-1): locked も true のみ有効（shared と同じ作法）。
+      // 壊れた値で「解除できないロック」が生まれないようにキーごと落とす
+      if (ld && typeof ld === "object" && "locked" in ld && (ld as LayerDef).locked !== true) {
+        delete (ld as { locked?: unknown }).locked;
       }
     }
     // M15 (K-1): 旧版で共通レイヤーのコマ間に差が生まれた場合の裁定（REQ §4）。

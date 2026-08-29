@@ -26,6 +26,7 @@ import {
   UGO3D_BLUE,
   clipBaseMap,
   effectiveLayerStates,
+  ancestorLocked,
   relinkShared,
   projectBytes,
   projectFaces,
@@ -91,7 +92,9 @@ import type { BgmTrack, SeTrack, ProjectAudio, Frame } from "./model";
 import { newSeId, sanitizeAudio } from "./model";
 import { createSlider, SliderHandle } from "../ui/slider";
 import { t } from "../i18n";
-import { errText } from "../ui/errText"; // V155 (A-33): 画面に `Error:` を出さない
+import { errText } from "../ui/errText";
+// V158 (C-2): canvas に描く UI の色は**配色から読む**（各所が色を持たない）
+import { uiColor, uiColorA } from "../ui/theme"; // V155 (A-33): 画面に `Error:` を出さない
 // M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
 import { folderBaseName, layerBaseName, untitledTitle } from "../i18n/defaults";
 import {
@@ -239,11 +242,38 @@ export interface EditorLayout {
   sideW: number;
   /** タイムラインの高さ */
   tlH: number;
+  /** V158 (L-1): 右パネルの**上段（道具）が占める割合**（%）。下段（レイヤー）は残り。
+   *  他の3つが px なのに対しここだけ % なのは、右パネルの高さが窓の高さで変わるため
+   *  ——px で覚えると、小さい窓で開いたときに下段が消える。 */
+  sideTop: number;
 }
 export type LayoutKey = keyof EditorLayout;
 
+/** V158 (L-1): 右パネルの**段ごとの畳み**（true = 畳んでいる＝相手が伸びる）。
+ *  両方 true は作らない（畳むときに相手を必ず開く）。settings へ**追加キーのみ**で保存する。 */
+export interface SideFold {
+  top: boolean;
+  bot: boolean;
+}
+export const SIDE_FOLD_DEFAULT: Readonly<SideFold> = { top: false, bot: false };
+
+/** 壊れた値・両方 true は既定（どちらも開いている）へ倒す。 */
+export function sanitizeSideFold(v: unknown): SideFold {
+  const o = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  const top = o.top === true;
+  const bot = o.bot === true;
+  if (top && bot) return { ...SIDE_FOLD_DEFAULT };
+  return { top, bot };
+}
+
 /** 既定値＝M11-16 までの固定値（styles.css の `--ed-*` 初期値と一致させる） */
-export const LAYOUT_DEFAULT: Readonly<EditorLayout> = { toolsW: 88, sideW: 268, tlH: 148 };
+export const LAYOUT_DEFAULT: Readonly<EditorLayout> = {
+  toolsW: 88,
+  sideW: 268,
+  tlH: 148,
+  // V158 (L-1): 既定は上6:下4（要件 U-1 の仮置き）。実画面で確かめて、この値のまま出荷する
+  sideTop: 60,
+};
 
 /** 上下限（px）。根拠は M11_17_report §2:
  *  - toolsW 88..176: 88 はボタン66＋バー8＋padding4＋枠6 の一列ぶん（これ未満はボタンが欠ける）。
@@ -261,6 +291,10 @@ export const LAYOUT_RANGE: Readonly<Record<LayoutKey, readonly [number, number]>
   toolsW: [88, 176],
   sideW: [220, 420],
   tlH: [148, 400],
+  // V158 (L-1): 上段は 25%〜80%。上限 80 は**下段にレイヤー3行を残す**ため
+  //（下段の実効最低高は CSS の min-height でも守る＝二重の防御）。
+  // 下限 25 は上段に「いま選んでいる道具の形式＋太さ」が入る最小
+  sideTop: [25, 80],
 };
 
 /** ドラッグ用: 値を静的な上下限へ丸める（整数化）。数でなければ既定 */
@@ -307,6 +341,7 @@ export function sanitizeLayout(v: unknown): EditorLayout {
     toolsW: sanitizeLayoutValue("toolsW", o.toolsW),
     sideW: sanitizeLayoutValue("sideW", o.sideW),
     tlH: sanitizeLayoutValue("tlH", o.tlH),
+    sideTop: sanitizeLayoutValue("sideTop", o.sideTop),
   };
 }
 
@@ -327,6 +362,8 @@ export interface EditorCallbacks {
   /** M11-18: 個別の畳み状態が変わったら settings.json へ保存する（つまみ・畳むボタンの瞬間だけ。
    *  集中トグルは一時的な見方なので呼ばない） */
   onCollapsedChange?: (collapsed: CollapsedState) => void;
+  /** V158 (L-1): 右パネルの段ごとの畳みが変わったら settings.json へ保存する（同じ流儀） */
+  onSideFoldChange?: (fold: SideFold) => void;
   /** M13-2a (A-2): 選択範囲の色付け表示のトグルが変わったら settings.json へ保存する（同じ流儀） */
   onSelMaskShowChange?: (show: boolean) => void;
   /** M14 (S-3): 右パネルの「種類/トーン」一覧の開閉が変わったら settings.json へ保存する（同じ流儀） */
@@ -375,6 +412,9 @@ export interface EditorCallbacks {
    *  音声だけ MP3 192kbps に抽出されてから、外部音声と同じ形で返ってくる。 */
   pickAudioFile: () => Promise<{ bytes: Uint8Array; mime: string; name: string } | null>;
   confirm: (msg: string) => Promise<boolean>;
+  /** V157 (D-2): 選択肢から1つ選ばせる（`null` = やめる）。レイヤーカラーの適用先など、
+   *  「はい/いいえ」では足りない場面用。未実装なら呼び出し側が従来の動きへ落ちる */
+  choose?: (msg: string, options: string[]) => Promise<number | null>;
   /** V154 (W-3): 「読んで閉じるだけ」の知らせ（ボタンは1つ）。選ばせる場面ではないので confirm と分ける。
    *  未実装の呼び出し側ではトーストに落ちる（editor 側で `?.` して分岐する） */
   notice?: (msg: string) => Promise<void>;
@@ -685,6 +725,123 @@ export class Editor {
       const f = this.project.frames[this.frameIndex];
       if (f) invalidateFrame(f);
     }
+  }
+
+  // ---------------- V157 (D-1): レイヤーロック 🔒 ----------------
+  /** 絵のデータを**自分で**書き換える道具（＝ロック中は入口で弾く）。
+   *
+   *  `transform` と `move` は入っていない——あちらは対象を `moveTargetLayerIds()` で解決し、
+   *  そこで実効ロックを除外済み（🔒を1枚混ぜて掴んでも、その1枚だけ動かない）。
+   *  ここで弾くと「ロックしていない他のレイヤーまで動かせない」になってしまう。 */
+  private static readonly PIXEL_TOOLS = new Set<Tool>([
+    "pen",
+    "eraser",
+    "brush",
+    "fill",
+    "shape",
+    "text",
+    "warp",
+  ]);
+  /** 最後にロックのトーストを出した時刻（連打で溢れさせないための間引き） */
+  private lastLockToastAt = 0;
+  /** V157: ロックの知らせ。**動的キーは `*Key` のプロパティで持つ**
+   *  （`SIZE_ADVICE` と同じ作法。`t(cond ? "a" : "b")` と書くと `m1201_i18n_check` の
+   *   使用検査が**沈黙して未使用キー扱い**になる——実際にこの回で1度踏んだ） */
+  private static readonly LOCK_TOAST = {
+    self: { msgKey: "ed.layer.locked.toast" },
+    byFolder: { msgKey: "ed.layer.lockedByFolder.toast" },
+  } as const;
+  /** V157 (D-2): レイヤーカラーの適用先ボタン。上と同じ理由で `*Key` に置く */
+  private static readonly COLOR_SCOPE = {
+    applyOne: { msgKey: "ed.layer.color.applyOne.btn" },
+    applyFrames: { msgKey: "ed.layer.color.applyFrames.btn" },
+    clearOne: { msgKey: "ed.layer.color.clearOne.btn" },
+    clearFrames: { msgKey: "ed.layer.color.clearFrames.btn" },
+  } as const;
+
+  /** V157 (D-1): 実効ロック（自分の 🔒 OR 祖先フォルダの 🔒）。 */
+  private isLayerLocked(id: string): boolean {
+    return effectiveLayerStates(this.project).get(id)?.locked === true;
+  }
+
+  /** V157 (D-1): これから絵を変える操作の入口で呼ぶ。
+   *  ロック中なら**トーストを出して** true を返す（＝呼び出し側は何もせず戻る）。
+   *
+   *  作者決定「黙って弾かない」。ただし描こうとするたびに出すと**うるさい**ので、
+   *  1.5 秒に1回までに間引く（ペンを何度も当てる／線を引き続ける場面で溢れない）。 */
+  private lockGuard(id = this.activeLayerId): boolean {
+    if (!this.isLayerLocked(id)) return false;
+    const now = performance.now();
+    // V157（Codex レビュー §4）: 間引きは**トーストが消えるまで**（3.2秒）。
+    // 1.5 秒だと、消える前に次が積み上がって同じ知らせが重なって見える
+    if (now - this.lastLockToastAt >= 3400) {
+      this.lastLockToastAt = now;
+      // V157（Codex レビュー §3・優先度 中）: **どちらの🔒で止まっているかを言う。**
+      // 親フォルダのロックなのに「このレイヤーはロック中です」と言われると、
+      // 子の🔒は薄くて押せない＝「外せないのに描けない」と迷子になる
+      const ld = this.project.layerDefs.find((l) => l.id === id);
+      const byParent = !!ld && ld.locked !== true && ancestorLocked(this.project, ld.parent);
+      this.cb.toast(t(Editor.LOCK_TOAST[byParent ? "byFolder" : "self"].msgKey));
+    }
+    return true;
+  }
+
+  /** V157 (D-1): レイヤーの 🔒 を切り替える（履歴に積む）。
+   *  親フォルダが🔒のときは切り替えさせない——切り替えられると
+   *  「解除したのに描けない」が起きる（要件の継承ルール）。 */
+  private toggleLayerLock(id: string) {
+    if (this.xformGuard()) return;
+    const ld = this.project.layerDefs.find((l) => l.id === id);
+    if (!ld) return;
+    if (ancestorLocked(this.project, ld.parent)) {
+      this.cb.toast(t("ed.layer.lockedByFolder.toast"));
+      return;
+    }
+    const before = ld.locked === true;
+    const self = this;
+    const set = (v: boolean) => {
+      const l = self.project.layerDefs.find((x) => x.id === id);
+      if (!l) return;
+      if (v) l.locked = true;
+      else delete l.locked;
+      self.dirty = true;
+      self.rebuildLayers();
+    };
+    this.history.push({
+      label: before ? "ロック解除" : "ロック",
+      bytes: 64, // クロージャが持つのは id と真偽値だけ（画素は1バイトも抱えない）
+      undo: () => set(before),
+      redo: () => set(!before),
+    });
+    set(!before);
+  }
+
+  /** V157 (D-1): フォルダの 🔒 を切り替える（中身すべてが実効ロックになる）。 */
+  private toggleFolderLock(fid: string) {
+    if (this.xformGuard()) return;
+    const f = this.folderById(fid);
+    if (!f) return;
+    if (ancestorLocked(this.project, f.parent)) {
+      this.cb.toast(t("ed.layer.lockedByFolder.toast"));
+      return;
+    }
+    const before = f.locked === true;
+    const self = this;
+    const set = (v: boolean) => {
+      const cur = self.folderById(fid);
+      if (!cur) return;
+      if (v) cur.locked = true;
+      else delete cur.locked;
+      self.dirty = true;
+      self.rebuildLayers();
+    };
+    this.history.push({
+      label: before ? "フォルダのロック解除" : "フォルダのロック",
+      bytes: 64,
+      undo: () => set(before),
+      redo: () => set(!before),
+    });
+    set(!before);
   }
 
   // ---------------- V156 (P-1): 眠り ----------------
@@ -1028,8 +1185,10 @@ export class Editor {
     project: Project,
     saveCtx: EditorSaveContext | null,
     cb: EditorCallbacks,
-    opts: { askSaveTarget?: boolean } = {}
+    opts: { askSaveTarget?: boolean; sideFold?: SideFold } = {}
   ) {
+    // V158 (L-1): 右パネルの段の畳み（settings から。壊れた値・両方畳みは既定へ）
+    this.sideFold = sanitizeSideFold(this.sideFoldPending ?? opts.sideFold);
     this.project = project;
     // M15 (K-1): 共通レイヤーの不変条件（全コマが同一バッファを参照）を読み込み直後に確立する。
     // serialize は「差があれば shared を外す」までを済ませているので、残った shared は張り直すだけ
@@ -1609,15 +1768,19 @@ export class Editor {
         d.className =
           "tone-btn" + (wide ? " tone-wide" : "") + (tone.id === getId() ? " on" : "");
         d.title = t(tone.nameKey);
-        // スウォッチ: 32×32 バッキング（8×8タイル×4リピート・等倍描画）→ CSS ×2 pixelated。
-        // 2列ぶちぬきの柄は 72×16（横長・同じ ×2 でドット感を保つ）
+        // スウォッチ: **横長**（8×8タイル × 横6 × 縦2 リピート）→ CSS ×2 pixelated。
+        // V158 (L-3): 32×32 の正方形から **48×16** へ。柄は 8×8 の繰り返しなので、
+        // 横 6 回・縦 2 回も見えれば十分に見分けられる（正方形は縦に 4 回ぶん無駄に高かった）。
+        // チップの高さが 78px → 46px になり、22種＋マイ柄のスクロール量がほぼ半分になる。
+        // 2列ぶちぬきの柄は従来どおり 72×16（高さがそろって行が乱れない）
         const cv = document.createElement("canvas");
-        cv.width = wide ? 72 : 32;
-        cv.height = wide ? 16 : 32;
+        cv.width = wide ? 72 : 48;
+        cv.height = 16;
         const ctx = cv.getContext("2d")!;
-        ctx.fillStyle = "#fff";
+        // V158 (C-2): 配色から読む（夜の紙では地が暗く・柄が明るくなって、そのまま見分けられる）
+        ctx.fillStyle = uiColor("--panel", "#ffffff");
         ctx.fillRect(0, 0, cv.width, cv.height);
-        ctx.fillStyle = "#2c2621";
+        ctx.fillStyle = uiColor("--ink", "#2c2621");
         for (let y = 0; y < cv.height; y++)
           for (let x = 0; x < cv.width; x++)
             if (!tone.tile || R.toneAt(tone.tile, x, y)) ctx.fillRect(x, y, 1, 1);
@@ -1912,7 +2075,24 @@ export class Editor {
     const host = $("#ed-side");
     // M14 (S-3): 並びを刷新。①ツールの形式・オプション（最上部）→②サイズ→③種類/トーン（折りたたみ）
     // →④色→⑤レイヤー→⑥線の太さ→⑦オニオン→⑧描き心地。各ブロックの中身のロジックは触らず DOM 順序だけ変更
+    // ★V158 (L-1): 右パネルを**上下2段**にする。
+    //
+    //  これまでは1本の縦スクロールに全部を縦積みしていたので、ツール設定が長い道具
+    //  （変形・範囲選択・トーン・文字）を選ぶと**レイヤーが下へ押し出されて画面から消えて**いた。
+    //  「ごちゃつく」「レイヤーが遠い」「常に表示しておきたい」は全部この1つの症状。
+    //
+    //  上段＝道具まわり（中でスクロール）／下段＝レイヤー（**常に見えている**）。
+    //  **中身のロジックと id は1つも変えていない**——動かすのは入れ物と並びだけ。
     host.innerHTML = `
+      <div class="side-sec side-top" id="ed-side-top">
+      <div class="side-sechead">
+        <!-- V158（Codex 指摘③）: ここは**上段の中身の名前**。ed.panel.foldTools.title
+             （＝「道具列を畳む」・左の道具列を畳むボタンの説明）を借りていたので、
+             畳んだあとに「道具列を畳む」だけが残って別の操作に見えていた -->
+        <span>${t("ed.side.tools.label")}</span>
+        <button class="minibtn sfold" id="ed-sfold-top" type="button">▲</button>
+      </div>
+      <div class="side-secbody" id="ed-side-topbody">
       <div id="ed-toolopts"></div>
       <h3>${t("ed.pen.size.label")}</h3><div class="sizes" id="ed-sizes"></div>
       <h3 id="ed-texhead" class="foldhead">${t("ed.pen.kind.label")}</h3><div class="tex" id="ed-tex"></div>
@@ -1923,26 +2103,13 @@ export class Editor {
         <input type="color" id="ed-colorpick" value="#141414" style="width:40px;height:28px;border:3px solid var(--ink);border-radius:8px;padding:0;background:#fff" hidden />
       </div>
       <div class="row"><span class="tog">${t("ed.color.paper.label")}</span><div id="ed-paperpal" class="pal" style="flex:1"></div></div>
-      <h3>${t("ed.layer.head.label")} <button class="minibtn" id="ed-layer-add">＋</button>
-        <button class="minibtn" id="ed-folder-add">📁</button>
-        <button class="minibtn" id="ed-layer-del">🗑</button>
-        <button class="minibtn" id="ed-layer-merge">${t("ed.layer.mergeDown.btn")}</button></h3>
-      <div id="ed-layers"></div>
-      <!-- M11-15: レイヤーのコピー＆ペースト（コマ1枚ぶん・レイヤー専用の控え） -->
-      <div class="selacts" id="ed-layerclip">
-        <button class="minibtn" id="ed-lc-copy">${t("ed.layerclip.copy.btn")}</button>
-        <button class="minibtn" id="ed-lc-paste">${t("ed.layerclip.paste.btn")}</button>
-        <button class="minibtn" id="ed-lc-paste-new">${t("ed.layerclip.pasteNew.btn")}</button>
-        <button class="minibtn" id="ed-lc-paste-all">${t("ed.layerclip.pasteAll.btn")}</button>
-      </div>
-      <!-- M11-19: 線を太らせる／細らせる（選択中レイヤーのこのコマ・選択範囲があれば範囲内だけ） -->
+      <!-- ここまでが上段（道具）。以降が下段（レイヤー）。
+           U-2: 「線の太さ」は道具段・「レイヤーの控え」はレイヤー段（要件の推奨どおり） -->
       <h3>${t("ed.linew.head.label")}</h3>
       <div class="selacts" id="ed-linew">
         <button class="minibtn" id="ed-lw-thicken">${t("ed.linew.thicken.btn")}</button>
         <button class="minibtn" id="ed-lw-thin">${t("ed.linew.thin.btn")}</button>
       </div>
-      <!-- M11-24: 「1回で1ドット。選択範囲があれば範囲内だけ・Ctrl+Z で戻せます」は削除。
-           ボタンの title に同じことが書いてあり、Ctrl+Z はアプリ全体の常識（UI_TEXT_guide 2・6） -->
       <h3>${t("ed.onion.head.label")}</h3><div class="oni" id="ed-onion"></div>
       <h3>${t("ed.feel.head.label")}</h3>
       <div class="row"><span class="tog">${t("ed.feel.stabilizer.label")}</span><div class="sw2 on" id="ed-tog-stab"></div></div>
@@ -1951,7 +2118,38 @@ export class Editor {
       <!-- V154 (W-2): 作品の大きさ。**実体を数える**（掛け算ではない）・履歴は別行 -->
       <h3 id="ed-szhead">${t("ed.size.head.label")}</h3>
       <div class="szmeter" id="ed-szmeter"></div>
+      </div>
+      </div>
+      <div class="ed-vsplit" id="ed-side-vsplit"></div>
+      <div class="side-sec side-bot" id="ed-side-bot">
+      <!-- 見出しにレイヤーの操作ボタンを寄せる（旧 h3 と二重に持たない＝**1行ぶん節約**して、
+           狭い画面でもレイヤーが3行見えるようにする） -->
+      <div class="side-sechead">
+        <span>${t("ed.layer.head.label")}</span>
+        <button class="minibtn" id="ed-layer-add">＋</button>
+        <button class="minibtn" id="ed-folder-add">📁</button>
+        <button class="minibtn" id="ed-layer-del">🗑</button>
+        <button class="minibtn" id="ed-layer-merge">${t("ed.layer.mergeDown.btn")}</button>
+        <button class="minibtn sfold" id="ed-sfold-bot" type="button">▼</button>
+      </div>
+      <div class="side-secbody" id="ed-side-botbody">
+      <div id="ed-layers"></div>
+      <!-- M11-15: レイヤーのコピー＆ペースト（コマ1枚ぶん・レイヤー専用の控え） -->
+      <div class="selacts" id="ed-layerclip">
+        <button class="minibtn" id="ed-lc-copy">${t("ed.layerclip.copy.btn")}</button>
+        <button class="minibtn" id="ed-lc-paste">${t("ed.layerclip.paste.btn")}</button>
+        <button class="minibtn" id="ed-lc-paste-new">${t("ed.layerclip.pasteNew.btn")}</button>
+        <button class="minibtn" id="ed-lc-paste-all">${t("ed.layerclip.pasteAll.btn")}</button>
+      </div>
+      </div>
+      </div>
     `;
+    // V158 (L-1): 段の畳みボタン（見出しは畳んでも残るので、そこから戻せる）
+    for (const which of ["top", "bot"] as const) {
+      const b = document.getElementById(`ed-sfold-${which}`);
+      if (b) b.onclick = () => this.setSideFold(which, !this.sideFold[which]);
+    }
+    this.refreshSideFoldButtons();
     $("#ed-szhead").title = t("ed.size.head.title");
     // M14 (S-3): 「種類/トーン」ヘッダで一覧を開閉（閉じると現在の種類だけ1行表示）。状態は settings に記憶
     $("#ed-texhead").addEventListener("click", () => {
@@ -1962,6 +2160,8 @@ export class Editor {
     // R-2 案1: 属性はテンプレートに埋めず、組んだあとにプロパティで入れる
     //（訳文に " が入っても属性が割れない。DOM の形・表示は上のテンプレートのまま）
     for (const { sel, titleKey } of [
+      // V158 (L-1): 上下の境界の説明も**組んだあとに**入れる（訳文に " が入っても属性が割れない）
+      { sel: "#ed-side-vsplit", titleKey: "ed.side.split.title" },
       { sel: "#ed-folder-add", titleKey: "ed.layer.folderAdd.title" },
       { sel: "#ed-layer-merge", titleKey: "ed.layer.mergeDown.title" },
       { sel: "#ed-lc-copy", titleKey: "ed.layerclip.copy.title" },
@@ -2534,7 +2734,7 @@ export class Editor {
       const { ts, te } = normTrim();
       const xOf = (t: number) => ((t - v0) / vd) * W2;
       // トリム外を暗く
-      ctx2.fillStyle = "rgba(44,38,33,.12)";
+      ctx2.fillStyle = uiColorA("--ink-rgb", 0.12, "44, 38, 33");
       const tsX = Math.max(0, xOf(ts));
       const teX = Math.min(W2, xOf(te));
       if (tsX > 0) ctx2.fillRect(0, RULER_H, tsX, H2 - RULER_H);
@@ -2544,7 +2744,7 @@ export class Editor {
       const rate = buffer.sampleRate;
       const mid = RULER_H + (H2 - RULER_H) / 2;
       const amp = (H2 - RULER_H) / 2 - 2;
-      ctx2.strokeStyle = "#1fa2ff";
+      ctx2.strokeStyle = uiColor("--blue", "#1fa2ff");
       ctx2.beginPath();
       for (let x = 0; x < W2; x++) {
         let s0 = Math.floor((v0 + x * secPerPx) * rate);
@@ -2565,19 +2765,19 @@ export class Editor {
       }
       ctx2.stroke();
       // コマ目盛ルーラー（頭出し位置を起点にコマを配置）
-      ctx2.fillStyle = "#fbefd6";
+      ctx2.fillStyle = uiColor("--paper", "#fbefd6");
       ctx2.fillRect(0, 0, W2, RULER_H);
       // P-5: 試し再生中は現在コマをルーラー上でハイライト
       if (playheadT0 != null) {
         const fx0 = xOf(ts + trialFrame / fps);
         const fx1 = xOf(ts + (trialFrame + 1) / fps);
         if (fx1 > 0 && fx0 < W2) {
-          ctx2.fillStyle = "rgba(240,122,26,.4)";
+          ctx2.fillStyle = uiColorA("--orange-rgb", 0.4, "240, 122, 26");
           ctx2.fillRect(fx0, 0, fx1 - fx0, RULER_H);
         }
       }
-      ctx2.strokeStyle = "#2c2621";
-      ctx2.fillStyle = "#2c2621";
+      ctx2.strokeStyle = uiColor("--ink", "#2c2621");
+      ctx2.fillStyle = uiColor("--ink", "#2c2621");
       ctx2.font = "10px sans-serif";
       const pxPerFrame = (1 / fps) / secPerPx;
       const labelEvery = pxPerFrame >= 34 ? 1 : pxPerFrame >= 8 ? 5 : 10;
@@ -2606,10 +2806,10 @@ export class Editor {
         ctx2.fillRect(x - 5, RULER_H - 8, 10, 8);
         ctx2.lineWidth = 1;
       };
-      handle(ts, "#f07a1a");
-      if (w.trimEndMs != null || te < dur) handle(te, "#ff4b4b");
+      handle(ts, uiColor("--orange", "#f07a1a"));
+      if (w.trimEndMs != null || te < dur) handle(te, uiColor("--red", "#ff4b4b"));
       // 情報
-      ctx2.fillStyle = "#7a6f60";
+      ctx2.fillStyle = uiColor("--ink-soft", "#7a6f60");
       ctx2.fillText(
         t("ed.audio.wave.info.label", {
           src: dur.toFixed(2),
@@ -2624,7 +2824,7 @@ export class Editor {
       if (stopMarkT != null && playheadT0 == null) {
         const x = xOf(stopMarkT);
         if (x >= 0 && x <= W2) {
-          ctx2.strokeStyle = "rgba(224,33,138,.45)";
+          ctx2.strokeStyle = uiColor("--playhead", "#e0218a") + "73";
           ctx2.lineWidth = 2;
           ctx2.beginPath();
           ctx2.moveTo(x + 0.5, 0);
@@ -2645,7 +2845,7 @@ export class Editor {
         if (t > te) t = te;
         const x = xOf(t);
         if (x >= 0 && x <= W2) {
-          ctx2.strokeStyle = "#e0218a";
+          ctx2.strokeStyle = uiColor("--playhead", "#e0218a");
           ctx2.lineWidth = 2;
           ctx2.beginPath();
           ctx2.moveTo(x + 0.5, 0);
@@ -3138,10 +3338,12 @@ export class Editor {
     };
     // パネルが開いている間、SE操作（Undo含む）でセクションを再描画する
     this.seSectionRefresh = renderSeSection;
+    this.waveRedraw = drawWave; // V158 (C-3): 配色が変わったら描き直す
 
     const close = () => {
       stopTrial();
       this.seSectionRefresh = null;
+      this.waveRedraw = null;
       // M11-6: 掴んだまま閉じない（要素ごと消えるので実害は無いが、記録も残さない）
       this.audioWaveEndDrag?.();
       this.audioWaveEndDrag = null;
@@ -3214,6 +3416,9 @@ export class Editor {
 
   /** 音声パネルが開いている間だけ設定される SEセクション再描画フック */
   private seSectionRefresh: (() => void) | null = null;
+  /** V158 (C-3): 音声パネルの波形を描き直す口（配色を切り替えたとき用）。
+   *  パネルを開いていないときは null＝何もしない。 */
+  private waveRedraw: (() => void) | null = null;
 
   /** SE配置の対象コマ（フィルム範囲選択中は範囲・それ以外は現在コマ） */
   private selectedFrameIndices(): number[] {
@@ -4165,6 +4370,25 @@ export class Editor {
           opBefore = null;
         },
       });
+      // V157 (D-1): フォルダの 🔒。押すと中身すべてが実効ロックになる
+      const flk = document.createElement("span");
+      const fLockedBySelf = f.locked === true;
+      const fLockedByParent = ancestorLocked(this.project, f.parent);
+      flk.className =
+        "eye lay-lock" + (fLockedBySelf ? " on" : "") + (fLockedByParent ? " byparent" : "");
+      // V157（Codex レビュー §5）: **オフは 🔓**。閉じた鍵を薄く出すと
+      // 「全部にロックが掛かっている」と一瞬読める（👁/🚫 と同じく字を変えて分ける）
+      flk.textContent = fLockedBySelf || fLockedByParent ? "🔒" : "🔓";
+      flk.style.opacity = fLockedBySelf ? "1" : fLockedByParent ? "0.25" : "0.35";
+      flk.title = fLockedByParent
+        ? t("ed.layer.lock.byFolder.title")
+        : fLockedBySelf
+          ? t("ed.layer.folderLock.on.title")
+          : t("ed.layer.folderLock.off.title");
+      flk.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.toggleFolderLock(f.id);
+      });
       const del = document.createElement("button");
       del.className = "minibtn";
       del.textContent = "🗑";
@@ -4175,9 +4399,11 @@ export class Editor {
       });
       row.appendChild(col);
       row.appendChild(eye);
+      row.appendChild(flk);
       row.appendChild(nm);
       row.appendChild(op.root);
       row.appendChild(del);
+      if (fLockedBySelf || fLockedByParent) row.classList.add("locked");
       row.addEventListener("click", (e) => {
         if (this.xformGuard()) return;
         this.updateSelection(f.id, "folder", e);
@@ -4294,24 +4520,48 @@ export class Editor {
         if (this.xformGuard()) return;
         void this.toggleLayerShared(ld.id);
       });
+      // V157 (D-1): レイヤーの 🔒（📌 の右）。親フォルダが🔒のときは**押せない**（グレー）——
+      // 押せてしまうと「解除したのに描けない」が起きる（要件の継承ルール）
+      const lockedBySelf = ld.locked === true;
+      const lockedByParent = ancestorLocked(this.project, ld.parent);
+      const lk = document.createElement("span");
+      lk.className =
+        "eye lay-lock" + (lockedBySelf ? " on" : "") + (lockedByParent ? " byparent" : "");
+      // V157（Codex レビュー §5）: オフは 🔓（上のフォルダ行と同じ理由）
+      lk.textContent = lockedBySelf || lockedByParent ? "🔒" : "🔓";
+      lk.style.opacity = lockedBySelf ? "1" : lockedByParent ? "0.25" : "0.35";
+      lk.title = lockedByParent
+        ? t("ed.layer.lock.byFolder.title")
+        : lockedBySelf
+          ? t("ed.layer.lock.on.title")
+          : t("ed.layer.lock.off.title");
+      lk.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.toggleLayerLock(ld.id);
+      });
       // M15 (K-2): レイヤーカラーの色チップ（不透明度スライダーの右）。未設定＝枠だけ
       const chip = document.createElement("span");
       chip.className = "lay-colorchip" + (ld.displayColor ? " on" : "");
       if (ld.displayColor) chip.style.background = ld.displayColor;
+      // V157（Codex レビュー §2）: 押すと**適用先を選ぶダイアログ**が開く。
+      // 「解除」「表示」と書くと、押した瞬間に効くように読める（画面と実際の食い違い）
       chip.title = ld.displayColor
         ? t("ed.layer.displayColor.on.title", { color: ld.displayColor })
         : t("ed.layer.displayColor.off.title");
       chip.addEventListener("click", (e) => {
         e.stopPropagation();
-        if (this.xformGuard()) return;
-        this.toggleLayerDisplayColor(ld.id);
+        void this.chooseLayerColorScope(ld.id); // V157 (D-2): 適用先を選ばせる
       });
       row.appendChild(eye);
       row.appendChild(cm);
       row.appendChild(pin);
+      row.appendChild(lk);
       row.appendChild(nm);
       row.appendChild(op.root);
       row.appendChild(chip);
+      // V157 (D-1): 行そのものに印を付ける。**👁オフ（アイコンが薄くなるだけ）と見分ける**ため、
+      // ロックは行の左に帯を出す（Codex レビューの観点「👁オフと取り違えないか」）
+      if (lockedBySelf || lockedByParent) row.classList.add("locked");
       row.addEventListener("click", (e) => {
         if (this.xformGuard()) return; // E-4: 変形対象レイヤーの切替を防ぐ
         this.updateSelection(ld.id, "layer", e);
@@ -4697,6 +4947,12 @@ export class Editor {
         this.shapeFill = !this.shapeFill;
         this.buildToolOptions();
       });
+      // V158 (L-4): Shift で正円・正方形（**機能は前からある**）。使い方が画面のどこにも
+      // 書いていなかったので、形式のすぐ下に1行だけ添える
+      const hint = document.createElement("p");
+      hint.className = "opt-hint";
+      hint.textContent = t("ed.shape.shiftHint.hint");
+      host.appendChild(hint);
     } else if (this.tool === "text") {
       // M10-1c: 書体 → サイズ（書体連動）→ 太さ の順。選択肢は fonts.ts のテーブルから組む
       const def = fontDef(this.textFamily);
@@ -5449,6 +5705,18 @@ export class Editor {
       cv.height = Editor.THUMB_H;
       fr.appendChild(no);
       fr.appendChild(cv);
+      // V157 (D-2 / U-4): このコマだけの表示色が付いていたら、細い帯を出す。
+      // 「付けた本人が後から分からなくなる」を防ぐための目印（作者判断で採用）。
+      // 色は付いているうちの1つを使う（複数レイヤーに付いていても行は1本＝混雑させない）
+      const fcs = this.project.frames[i]?.layerColors;
+      const first = fcs ? Object.values(fcs)[0] : undefined;
+      if (first) {
+        const bar = document.createElement("i");
+        bar.className = "fc-mark";
+        bar.style.background = first;
+        bar.title = t("ed.frameColor.mark.title", { n: Object.keys(fcs!).length });
+        fr.appendChild(bar);
+      }
       fr.addEventListener("click", (e) => {
         // M11-7: 並べ替えで掴んだあとの click ではコマを切り替えない
         if (this.suppressFrameClick) return;
@@ -5806,6 +6074,9 @@ export class Editor {
       this.updateSizeMeter(); // V154 (W-2): 履歴が動いたら「元に戻す」の行も動く
     };
     this.history.onchange();
+    // V158 (L-2): 左上の「このコマの絵を消す」。**🌀 と同じ `clearFrame()` を呼ぶだけ**
+    //（確認の設定・選択範囲の扱い・Undo の粒度を二重に持たない＝実装を分けない）
+    $("#ed-clearframe").onclick = () => void this.clearFrame();
     // 表示操作
     $("#ed-view-rot").onclick = () => {
       this.viewRot = (this.viewRot + 90) % 360;
@@ -6065,6 +6336,16 @@ export class Editor {
     main.style.setProperty("--ed-tools-w", `${cT ? COLLAPSED_PX : this.layout.toolsW}px`);
     main.style.setProperty("--ed-side-w", `${cS ? COLLAPSED_PX : this.layout.sideW}px`);
     main.style.setProperty("--ed-tl-h", `${cL ? COLLAPSED_PX : this.layout.tlH}px`);
+    // V158 (L-1): 右パネルの上下比。段を畳んでいるときは相手を目いっぱいにする
+    const side = document.getElementById("ed-side");
+    if (side) {
+      side.style.setProperty("--ed-side-top", `${this.layout.sideTop}%`);
+      side.classList.toggle("fold-top", this.sideFold.top);
+      side.classList.toggle("fold-bot", this.sideFold.bot);
+    }
+    document
+      .getElementById("ed-side-vsplit")
+      ?.classList.toggle("disabled", cS || this.sideFold.top || this.sideFold.bot);
     main.classList.toggle("c-tools", cT);
     main.classList.toggle("c-side", cS);
     main.classList.toggle("c-tl", cL);
@@ -6288,6 +6569,20 @@ export class Editor {
     if (!main) return val;
     const SPLIT = 10;
     const PAD = 20; // .ed-main padding 10×2
+    // V158 (L-1・Codex 指摘①): `sideTop` は**％**なので、px を前提にした下の分岐へ入れてはいけない。
+    // 入れると `floor = min(minHere, startVal, …)` の「掴んだ値より下げない」規則がそのまま効いて、
+    // **境界を上へ動かせなくなる**（レイヤーを広げようとドラッグしても戻らない＝壊れて見える）。
+    // ここでの動的な上限は「下段が最低の高さ（--ed-side-bot-min ＝ 168px）を保てるところまで」。
+    if (key === "sideTop") {
+      const side = document.getElementById("ed-side");
+      const h = side?.clientHeight ?? 0;
+      if (h > 0) {
+        const BOT_MIN = 168; // .side-bot の min-height と同じ
+        const maxPct = ((h - SPLIT - BOT_MIN) / h) * 100;
+        val = Math.max(LAYOUT_RANGE[key][0], Math.min(val, maxPct));
+      }
+      return Math.round(val);
+    }
     if (key === "toolsW" || key === "sideW") {
       const w = main.clientWidth;
       if (w > 0) {
@@ -6335,6 +6630,10 @@ export class Editor {
     bind("ed-split-tools", "toolsW");
     bind("ed-split-side", "sideW");
     bind("ed-split-tl", "tlH");
+    // V158 (L-1): 右パネルの上下境界。**既存の仕組みにそのまま乗せる**ので、
+    // ドラッグ・ダブルクリックで既定へ・Esc で取り消し・blur で確定・settings への保存が
+    // 1行も書かずに付いてくる（横幅の境界とまったく同じ作法）
+    bind("ed-side-vsplit", "sideTop");
   }
 
   /** ダブルクリック: その境界だけ既定値へ（誤ドラッグからの1発復帰）。変わったときだけ保存 */
@@ -6349,6 +6648,9 @@ export class Editor {
 
   /** M11-18: そのスプリッターが担当するパネルが畳まれているか（畳み中は掴めない・dblclick も無効） */
   private splitDisabled(key: LayoutKey): boolean {
+    // V158 (L-1): 上下の境界は「右パネルが畳まれている」ときに加えて、
+    // **どちらかの段を畳んでいるとき**も掴めない（畳んだ相手を引き伸ばしている最中なので）
+    if (key === "sideTop") return this.isCollapsed("side") || this.sideFold.top || this.sideFold.bot;
     return this.isCollapsed(key === "toolsW" ? "tools" : key === "sideW" ? "side" : "tl");
   }
 
@@ -6406,7 +6708,12 @@ export class Editor {
     let raw: number;
     if (d.key === "toolsW") raw = d.startVal + (ev.clientX - d.startX);
     else if (d.key === "sideW") raw = d.startVal - (ev.clientX - d.startX);
-    else raw = d.startVal - (ev.clientY - d.startY);
+    else if (d.key === "sideTop") {
+      // V158 (L-1): % なので、動いた px を**その時のパネル高**で割って足す
+      // （下へ引くと上段が広がる＝他の縦境界と手ざわりを揃える）
+      const h = document.getElementById("ed-side")?.clientHeight || 1;
+      raw = d.startVal + ((ev.clientY - d.startY) / h) * 100;
+    } else raw = d.startVal - (ev.clientY - d.startY);
     const v = this.clampLayoutLive(d.key, raw);
     if (v === this.layout[d.key]) return;
     this.layout[d.key] = v;
@@ -7124,6 +7431,8 @@ export class Editor {
     // M11-12: 浮動テキスト（実際のドット＋外接する薄い枠。選択範囲では切らない）
     if (this.textDraft) this.drawTextDraftPreview(ctx);
     // 自由選択の軌跡
+    // V158 (C-2): ここは**作品の絵の上**に描くプレビュー。配色を変えても作品の色は変わらないので、
+    // 配色に追随させると逆に見えにくくなる（明るい絵の上で明るい線になる）。据え置きが正しい
     if (this.lassoPts.length > 1) {
       ctx.strokeStyle = "rgba(44,38,33,.8)";
       ctx.lineWidth = 1;
@@ -7539,6 +7848,11 @@ export class Editor {
     if (this.pointerDown || this.capturedPointerId !== null) this.endPointerSession("down");
     this.shiftHeld = e.shiftKey; // M10-7: pointer 側の modifier を真実として同期
     this.closeStrip(); // M14 (S-1): キャンバスへ触れたら（描き始め）形式ストリップは畳む
+    // ★V157 (D-1): ロック中のレイヤーには描かせない。**捕捉する前に**戻る（掴みっぱなしを作らない）。
+    // 変形の途中（`xformActive`）は素通し——始められた時点でロックされていないと分かっているし、
+    // ここで止めると確定できずに宙に浮く
+    if (!this.spaceHeld && !this.xformActive && Editor.PIXEL_TOOLS.has(this.tool) && this.lockGuard())
+      return;
     this.lastPointerEvent = e;
     try {
       ($("#ed-cvwrap") as HTMLElement).setPointerCapture(e.pointerId);
@@ -8268,7 +8582,7 @@ export class Editor {
       ctx.translate(X(cx), Y(cy));
       ctx.rotate(t.angle);
       ctx.scale(px, py); // 以降はドット単位で書けるが、線幅は物理 px に戻す
-      ctx.strokeStyle = "#f07a1a";
+      ctx.strokeStyle = uiColor("--orange", "#f07a1a");
       ctx.lineWidth = LINE / Math.max(px, py);
       ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
       ctx.restore();
@@ -8277,7 +8591,7 @@ export class Editor {
       const hs = this.xformHandleWorld();
       const knob = this.clampedHandle(hs[4].x, hs[4].y) ?? hs[4];
       ctx.save();
-      ctx.strokeStyle = "#f07a1a";
+      ctx.strokeStyle = uiColor("--orange", "#f07a1a");
       ctx.lineWidth = LINE;
       ctx.beginPath();
       ctx.moveTo(X(hs[5].x), Y(hs[5].y));
@@ -8287,13 +8601,19 @@ export class Editor {
       for (let i = 0; i < hs.length; i++) {
         const cl = this.clampedHandle(hs[i].x, hs[i].y);
         const p = cl ?? hs[i];
-        square(X(p.x), Y(p.y), cl ? "#f07a1a" : "#fff", "#f07a1a", t.angle);
+        // 枠と縁は配色の橙（明るい #f07a1a／夜の紙 #ff9f4a・どちらも紙の上で見える）。
+        // ただし**つまみの地は白のまま**——ここは作品の絵の上で、絵の色は配色を変えても
+        // 変わらない。地を配色に追随させると、夜の紙で「白い紙の上に濃い茶のつまみ」に
+        // なってしまう（見えなくはないが、明るい配色と別物の見え方になる）
+        square(X(p.x), Y(p.y), cl ? uiColor("--orange", "#f07a1a") : "#ffffff", uiColor("--orange", "#f07a1a"), t.angle);
       }
     }
 
     if (showCorner) {
       const p = this.cornerPts;
       ctx.save();
+      // V158 (C-2): ここは**作品の絵の上**に描くプレビュー。配色を変えても作品の色は変わらないので、
+      // 配色に追随させると逆に見えにくくなる（夜の紙のクリーム色は、白い紙の上でほぼ消える）。据え置きが正しい
       ctx.strokeStyle = "rgba(44,38,33,.85)";
       ctx.lineWidth = LINE;
       ctx.beginPath();
@@ -8302,7 +8622,7 @@ export class Editor {
       ctx.closePath();
       ctx.stroke();
       ctx.restore();
-      for (const q of this.cornerHandles()) square(X(q.x), Y(q.y), "#fff", "rgba(44,38,33,.85)");
+      for (const q of this.cornerHandles()) square(X(q.x), Y(q.y), "#ffffff", "rgba(44,38,33,.85)");
     }
   }
 
@@ -8603,6 +8923,8 @@ export class Editor {
   private previewShape(a: { x: number; y: number }, b: { x: number; y: number }) {
     const ctx = this.overlayCtx();
     ctx.clearRect(0, 0, W, H);
+    // V158 (C-2): ここは**作品の絵の上**に描くプレビュー。配色を変えても作品の色は変わらないので、
+    // 配色に追随させると逆に見えにくくなる（明るい絵の上で明るい線になる）。据え置きが正しい
     ctx.strokeStyle = "rgba(240,122,26,.9)";
     ctx.lineWidth = 1;
     if (this.shapeKind === "line") {
@@ -8856,6 +9178,7 @@ export class Editor {
   }
 
   private beginSelectionMove(pt: { x: number; y: number }) {
+    if (this.lockGuard()) return; // V157 (D-1)
     const buf = this.activeBuffer();
     if (!buf || !this.selMask) return;
     this.selMoveBefore = copyIndexBuf(buf);
@@ -8924,6 +9247,8 @@ export class Editor {
   }
 
   private copySelection(cut: boolean) {
+    // V157 (D-1): **コピーは通す**（絵は変わらない）。切り取りだけロックで弾く
+    if (cut && this.lockGuard()) return;
     const buf = this.activeBuffer();
     if (!buf || !this.selMask) {
       this.cb.toast(t("ed.sel.needSelection.toast"));
@@ -9253,6 +9578,7 @@ export class Editor {
   }
 
   private deleteSelection() {
+    if (this.lockGuard()) return; // V157 (D-1)
     const buf = this.activeBuffer();
     if (!buf || !this.selMask) return;
     // M11-9: 選択を維持するようになったので、**消すものが無ければ何もしない**。
@@ -10856,6 +11182,7 @@ export class Editor {
     const idx = this.project.layerDefs.findIndex((l) => l.id === this.activeLayerId);
     if (idx < 0) return;
     const def = this.project.layerDefs[idx];
+    if (this.lockGuard(def.id)) return; // V157 (D-1): ロック中のレイヤーは消させない
     // V151 (E-8): 「次回から表示しない」対象の1つ（id: layerDelete）
     const ok = await this.confirmWithSkip("layerDelete", t("ed.layer.delete.msg", { layer: def.name }));
     if (!ok) return;
@@ -10999,6 +11326,91 @@ export class Editor {
    * M15 (K-2): レイヤーカラー（表示色）を切り替える。未設定→いまの色を設定・設定中→解除。
    *  絵の索引は1ドットも変えない（合成時に置換するだけ）。履歴は可視トグルと同じ流儀
    *  （id で解決する軽いエントリ・afterLayerChange で即追従）。 */
+  /** V157 (D-2): レイヤーカラーの色チップを押したとき。
+   *
+   *  **適用先を押す前に選ばせる**（要件: 「全コマ」か「選択中のコマ」かを操作の時点で分かること）。
+   *  誤爆すると全コマの色が変わる操作なので、既定を勝手に決めない。
+   *  すでに色が付いている側は「外す」に文言が変わる＝これまでのチップの押し味（トグル）と同じ。 */
+  private async chooseLayerColorScope(id: string) {
+    if (this.xformGuard()) return;
+    const ld = this.project.layerDefs.find((l) => l.id === id);
+    if (!ld) return;
+    const sel = this.selectedFrameIndices();
+    const hasLayerColor = !!ld.displayColor;
+    const withColor = sel.filter((i) => this.project.frames[i]?.layerColors?.[id]).length;
+    const allSelHave = sel.length > 0 && withColor === sel.length;
+    const optAll = hasLayerColor
+      ? t("ed.layer.color.clearAll.btn")
+      : t("ed.layer.color.applyAll.btn");
+    // V157（Codex レビュー §1・優先度 高）: **どのコマなのかを文言で言い切る。**
+    // 「{n} コマに付ける」だけだと「選んでいるコマ」なのか「いまのコマ」なのか分からない。
+    // コマを選んでいないときは `selectedFrameIndices()` が現在コマ1つを返すので、
+    // そこは「このコマだけ」と**言い方を変える**（「1 コマに付ける」は読みにくい）
+    const one = sel.length === 1;
+    const scopeKey = allSelHave
+      ? one
+        ? "clearOne"
+        : "clearFrames"
+      : one
+        ? "applyOne"
+        : "applyFrames";
+    const optSel = t(Editor.COLOR_SCOPE[scopeKey].msgKey, { n: sel.length });
+    // V157（Codex レビュー §1）: **狭いほう（このコマ／選んだコマ）を先頭＝primary にする。**
+    // 先頭が推奨に見えるので、影響の大きい「全コマ」を勧める並びにしない
+    const pick = this.cb.choose
+      ? await this.cb.choose(t("ed.layer.color.scope.msg", { layer: ld.name }), [optSel, optAll])
+      : 1;
+    if (pick === null || pick === undefined) return;
+    if (pick === 1) this.toggleLayerDisplayColor(id);
+    else this.applyFrameLayerColor(id, sel, allSelHave ? undefined : this.colorHex || UGO_COLORS.black);
+  }
+
+  /** V157 (D-2): **選択中のコマだけ**にレイヤーの表示色を付ける／外す（履歴1エントリ）。
+   *
+   *  ★索引（`IndexBuf`）には1ビットも触らない。`frames[i].layerColors` という
+   *  コマ側の任意キーを足す/消すだけなので、外せばレイヤー既定へ完全に戻る。
+   *
+   *  ★V156 の眠りとの関係: ここが触るのは**画素ではない**ので、圧縮控え（`sleep`）は
+   *  古くならない（控えに入っているのは索引バイト列だけ）。眠っているコマにもそのまま付く——
+   *  `f.layers` を一切見ずに `frames[i]` を直に触るのがその要（`f.layers[id]` の有無で
+   *  絞ると、眠っているコマだけ**静かに飛ばされる**）。`v157_smoke` §5 が睡眠サイクルで確かめる。 */
+  private applyFrameLayerColor(id: string, frames: number[], color: string | undefined) {
+    if (frames.length === 0) return;
+    const self = this;
+    // 元の値を控える（undo で「元から付いていた色」まで正しく戻す）
+    const before = frames.map((i) => self.project.frames[i]?.layerColors?.[id]);
+    const set = (vals: (string | undefined)[]) => {
+      frames.forEach((fi, k) => {
+        const f = self.project.frames[fi];
+        if (!f) return;
+        const v = vals[k];
+        if (v) {
+          if (!f.layerColors) f.layerColors = {};
+          f.layerColors[id] = v;
+        } else if (f.layerColors) {
+          delete f.layerColors[id];
+          if (Object.keys(f.layerColors).length === 0) delete f.layerColors;
+        }
+      });
+      self.dirty = true;
+      self.renderCanvas();
+      self.rebuildFilm();
+    };
+    this.history.push({
+      label: color ? "コマのレイヤーカラー" : "コマのレイヤーカラー解除",
+      // 抱えているのは色の文字列だけ（画素はゼロ）。コマ数ぶんの目安を申告する
+      bytes: frames.length * 16,
+      undo: () => set(before),
+      redo: () => set(frames.map(() => color)),
+    });
+    set(frames.map(() => color));
+    this.cb.toast(
+      color
+        ? t("ed.frameColor.applied.toast", { n: frames.length })
+        : t("ed.frameColor.cleared.toast", { n: frames.length })
+    );
+  }
+
   private toggleLayerDisplayColor(id: string) {
     if (this.xformGuard()) return;
     const ld = this.project.layerDefs.find((l) => l.id === id);
@@ -11043,6 +11455,8 @@ export class Editor {
     const bottom = this.project.layerDefs[idx - 1];
     // M15 (K-1): 共通レイヤーを含む結合は禁止（片方が全コマ共通だと、統合先が
     // 「あるコマだけ違う」状態になり共有の意味が壊れる）。共通を解除してから結合する
+    // V157 (D-1): 統合は**両方の絵**を変える。どちらかがロック中なら弾く
+    if (this.lockGuard(top.id) || this.lockGuard(bottom.id)) return;
     if (top.shared === true || bottom.shared === true) {
       this.cb.toast(t("ed.layer.mergeSharedBlocked.toast"));
       return;
@@ -11263,7 +11677,7 @@ export class Editor {
     if (!this.playing && this.xformGuard()) return; // E-4
     // M11-9 P-1: ⏸ は「一時停止」＝SEは続きから鳴らせるように畳む（▶ で続きから）
     if (this.playing) this.stopPlayback(true);
-    else this.startPlayback();
+    else void this.startPlayback();
   }
 
   /** M5-1: 指定コマに配置されたSEを発火（多重可・muted/volumeはトラック別）。
@@ -11280,7 +11694,7 @@ export class Editor {
     }
   }
 
-  private startPlayback() {
+  private async startPlayback() {
     if (this.playing) return;
     this.playing = true;
     // M11-8 P-4（REQ 表E）: 再生はコマを進めるので選択を解除する
@@ -11292,7 +11706,22 @@ export class Editor {
     // M5-1: 速度連動 rate（ピッチも変わる=原作準拠）＋SEのコマ発火
     const a = this.project.audio ?? null;
     const rate = a?.bgm ? bgmPlaybackRate(this.project.speedIndex, a.bgm.baseSpeedIndex) : 1;
-    void this.audioPreview.start(a?.bgm ?? null, this.frameIndex / fps, rate);
+    // ★V157 (D-4): **音の用意を待ってからコマを進め始める**（A-28・Culoe さんの報告）。
+    //
+    //  これまでは `void audioPreview.start(...)` と投げっぱなしにして、その直後に
+    //  コマ送りのタイマーを張っていた。`start()` の中は初回だけ `decodeAudioData` を待つので、
+    //  **その間コマだけ進み、音が遅れて始まる**。2周目からはバッファがキャッシュされていて
+    //  ほぼ 0ms で鳴るので合ってくる——「最初はズレて、ループを重ねると合う」の正体。
+    //
+    //  実測（Chromium・実作品の BGM 2.1MiB / 55 秒）: 初回 decode **174.9ms**
+    //    → 8fps で 1.4 コマ・24fps で 4.2 コマ・30fps で 5.2 コマぶん絵が先行
+    //    2周目以降は 0.2ms（ズレ ほぼ 0）
+    //
+    //  待つと再生の開始が初回だけ 0.2 秒ほど遅れるが、**ズレたまま流れるより良い**
+    //  （同じ音源なら2回目からは待ちもゼロ）。
+    //  エディタの再生も同じ形（ライブラリのプレビューだけ直しても、こちらが残る）。
+    await this.audioPreview.start(a?.bgm ?? null, this.frameIndex / fps, rate);
+    if (!this.playing) return; // 待っている間に止められた
     // M11-9 P-1: 一時停止で畳んだSEを続きから鳴らす。start() は同期的に「鳴っているSE」だけを
     // 止めて畳んだ分には触れないので、この順で呼べる
     const resumedSe = this.audioPreview.resumeSe();
@@ -11533,6 +11962,71 @@ export class Editor {
   /** キー → コマンドID列の引き当て表（キー1打ごとに線形探索しない）。
    *  M11-15: 道具どうしは同じキーを共有できるので値は配列（通常は1件） */
   private keyLookup = new Map<string, CommandId[]>();
+  /** V158 (L-1): 畳みボタンの説明。**動的キーは `*Key` のプロパティで持つ**
+   *  （`t(cond ? "a" : "b")` と書くと `m1201_i18n_check` の使用検査が沈黙する・V157 で踏んだ穴） */
+  private static readonly SIDE_FOLD_TITLE = {
+    fold: { msgKey: "ed.side.fold.title" },
+    expand: { msgKey: "ed.side.expand.title" },
+  } as const;
+
+  /** V158 (L-1): 右パネルの段を畳む／開く。**両方は畳まない**（畳むとき相手を必ず開く）ので、
+   *  「全部畳んで何も出せない」が起きない。畳んだ段の見出しは残るので、そこを押せば戻せる。 */
+  private setSideFold(which: "top" | "bot", v: boolean) {
+    if (this.sideFold[which] === v) return;
+    this.sideFold[which] = v;
+    if (v) this.sideFold[which === "top" ? "bot" : "top"] = false;
+    this.finishSplitDrag(false);
+    this.applyLayout();
+    this.refreshSideFoldButtons();
+    this.cb.onSideFoldChange?.({ ...this.sideFold });
+  }
+
+  /** 畳みボタンの見た目（矢印と説明）を状態に合わせる。 */
+  private refreshSideFoldButtons() {
+    for (const which of ["top", "bot"] as const) {
+      const b = document.getElementById(`ed-sfold-${which}`);
+      if (!b) continue;
+      const folded = this.sideFold[which];
+      b.textContent = folded ? (which === "top" ? "▼" : "▲") : which === "top" ? "▲" : "▼";
+      b.title = t(Editor.SIDE_FOLD_TITLE[folded ? "expand" : "fold"].msgKey);
+      b.classList.toggle("onb", folded);
+    }
+  }
+
+  /** V158 (L-1): 右パネルの段ごとの畳み状態（mount で settings から復元） */
+  private sideFold: SideFold = { ...SIDE_FOLD_DEFAULT };
+  /** mount 前に settings から渡された値（`restoreSideFold`。⚙ はライブラリ画面からしか
+   *  開けないので、他の復元と同じく mount 前で足りる） */
+  private sideFoldPending: SideFold | null = null;
+
+  /** V158 (C-3): 配色が切り替わったとき、**canvas に描いている UI**を描き直す。
+   *  CSS 変数はブラウザが勝手に反映するが、canvas は一度描いた絵がそのまま残るので、
+   *  こちらから描き直させる必要がある（波形・変形の枠・トーンのスウォッチ）。
+   *  エディタを開いていなければ何もしない。 */
+  refreshThemeColors() {
+    if (!this.mounted) return;
+    this.rebuildTexPicker(); // トーンのスウォッチは作り直しで塗り直る
+    this.renderCanvas();
+    this.redrawOverlay();
+    this.waveRedraw?.();
+  }
+
+  /** V158 (L-1): settings.json の `sideFold` から復元（追加のみ・壊れた値は既定へ）。 */
+  restoreSideFold(v: unknown) {
+    this.sideFoldPending = sanitizeSideFold(v);
+    if (this.mounted) {
+      this.sideFold = { ...this.sideFoldPending };
+      this.applyLayout();
+      this.refreshSideFoldButtons();
+    }
+  }
+
+  /** V157 (D-3): コマンドごとの「最後に走った時刻」。同一コマンドの二重発火を捨てるために持つ。
+   *  コマンド数は数十なので、増え続けることはない（`clear` も要らない） */
+  private lastCommandAt = new Map<CommandId, number>();
+  /** V157 (D-3): 同じコマンドがこの時間内に2回来たら2回目を捨てる。
+   *  人間の押し直しは 50ms では届かず、ドライバの二重送信は 1〜2ms で来る（A-27 の報告） */
+  private static readonly DOUBLE_FIRE_MS = 50;
   private static readonly REPEATABLE = new Set<string>(
     COMMANDS.filter((c) => (c as { repeatable?: boolean }).repeatable).map((c) => c.id)
   );
@@ -11988,6 +12482,17 @@ export class Editor {
     // ツール切替などはキーリピートで連続実行しない（Undo/Redo・コマ移動・ズームは従来どおり連続）
     if (e.repeat && !Editor.REPEATABLE.has(id)) return;
     e.preventDefault();
+    // ★V157 (D-3): 二重発火の防御（A-27）。**押しっぱなしのリピートではない**イベントに限り、
+    // 同じコマンドが 50ms 以内にもう一度来たら2回目を捨てる。
+    // ドライバやペンのユーティリティがキーを2回送ってくることがあり、Undo が2手戻る等が起きる。
+    // `e.repeat === true` は対象外＝巻き戻し連打・ズーム連打は従来どおり効く。
+    // 人間が同じキーを 50ms 以内に押し直すのは実質不可能なので、正当な操作は落ちない
+    if (!e.repeat) {
+      const now = performance.now();
+      const prev = this.lastCommandAt.get(id);
+      if (prev !== undefined && now - prev < Editor.DOUBLE_FIRE_MS) return;
+      this.lastCommandAt.set(id, now);
+    }
     // M11-11: 「押している間だけ」のコマンド用に、いま押されている物理キーを渡す
     this.peekPendingCode = e.code;
     // M11-10: 別の操作を始めたら、矢印キーの移動セッションは確定する

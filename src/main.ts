@@ -18,6 +18,8 @@ import { newProject, UGO_COLORS, W, H, type Project } from "./editor/model";
 import { importFlipnote } from "./editor/kwzImport";
 import { projectFromBytes, projectToBytes } from "./editor/serialize";
 import { errText } from "./ui/errText";
+// V158 (C-3): 配色（明るい／夜の紙）。`<html>` の data-theme を付け替えるだけ
+import { applyTheme, sanitizeTheme } from "./ui/theme";
 import { frameToPngBlob, frameToImageBlob } from "./editor/render";
 import {
   DEFAULT_CONVERT,
@@ -119,6 +121,11 @@ type Settings = {
   miniDock?: "timeline" | "float" | "off";
   /** M11-18: 個別の畳み状態（true 以外は開いている）。キャンバス集中は保存しない */
   collapsed?: { tools?: boolean; side?: boolean; tl?: boolean };
+  /** V158 (L-1): 右パネルの**段ごと**の畳み（道具段／レイヤー段）。追加のみ・両方 true は既定へ。
+   *  上下の比率そのものは `layout.sideTop`（他のスプリッターと同じ場所） */
+  sideFold?: { top?: boolean; bot?: boolean };
+  /** V158 (C-3): 配色。無い・不正値は "light"（＝これまでの明るい配色）。**追加のみ** */
+  theme?: "light" | "dark";
   /** M11-22: アニメ書き出し（MP4/GIF/APNG/PNG連番）の倍率（1|2|4|8）。無い・不正・3 などは既定 ×4（`sanitizeExportScale`） */
   exportScale?: number;
   /** M11-22: 「🖼 画像で保存」の倍率。アニメとは別に記憶（同じ正規化・既定 ×4） */
@@ -482,6 +489,35 @@ function confirmDialog(msg: string, labels?: { yes: string; no: string }): Promi
     );
     return box;
   }).then((v) => !!v);
+}
+
+/** V157 (D-2): 選択肢を並べて1つ選ばせる（`confirmDialog` の「はい/いいえ」では足りない場面用）。
+ *
+ *  レイヤーカラーの適用先（全コマ／選択中のコマだけ）のように、**押す前にどちらに効くか**を
+ *  読ませたいときに使う。戻り値は選ばれた添字（`null` = やめる）。
+ *  ボタンの並びは渡された順（先頭が primary）。 */
+function chooseDialog(msg: string, options: string[]): Promise<number | null> {
+  return modal((close) => {
+    const box = document.createElement("div");
+    box.innerHTML = `<p class="modal-msg"></p><div class="modal-actions modal-choose"></div>`;
+    const msgEl = box.querySelector(".modal-msg") as HTMLElement;
+    if (msg.includes("\n")) msgEl.style.whiteSpace = "pre-line";
+    msgEl.textContent = msg;
+    const acts = box.querySelector(".modal-actions") as HTMLElement;
+    options.forEach((label, i) => {
+      const b = document.createElement("button");
+      b.className = "btn" + (i === 0 ? " primary" : "");
+      b.textContent = label;
+      b.addEventListener("click", () => close(i));
+      acts.appendChild(b);
+    });
+    const cancel = document.createElement("button");
+    cancel.className = "btn";
+    cancel.textContent = t("common.cancel.btn");
+    cancel.addEventListener("click", () => close(null));
+    acts.appendChild(cancel);
+    return box;
+  }).then((v) => (typeof v === "number" ? v : null));
 }
 
 /** V154 (W-3): 読んで閉じるだけの知らせ（ボタン1つ）。confirmDialog と同じ骨格だが
@@ -1886,6 +1922,9 @@ function showEditor(
   // M11-18: ミニの置き場（"float" 以外は収納）・個別の畳み（true 以外は開く）。集中は復元しない
   editor.restoreMiniDock(settings.miniDock);
   editor.restoreCollapsed(settings.collapsed);
+  // V158 (C-3): 配色は**設定を読み終えた直後**に当てる（起動時の一瞬だけ明るい、を作らない）
+  applyTheme(sanitizeTheme(settings.theme));
+  editor.restoreSideFold(settings.sideFold); // V158 (L-1): 右パネルの段ごとの畳み
   // M12-C: カーソル（点/十字/矢印・輪・ドット枠）。無い・不正値は既定（点＋輪 ON・枠 OFF）
   editor.restoreCursor(settings.cursor);
   // M13-2a: 選択範囲の色付け（false 以外はオン）／コマ削除の確認（false 以外はオン＝従来どおり）
@@ -1928,6 +1967,11 @@ function showEditor(
       // M11-18: 個別の畳み状態も同じ流儀（つまみ・畳むボタンの瞬間だけ。集中トグルは保存しない）
       onCollapsedChange: (collapsed) => {
         settings.collapsed = collapsed;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      // V158 (L-1): 右パネルの段ごとの畳みも同じ流儀
+      onSideFoldChange: (fold) => {
+        settings.sideFold = fold;
         invoke("save_settings", { settings }).catch(() => {});
       },
       // M13-2a: 選択範囲の色付け表示も同じ流儀（トグルを押した瞬間に保存）
@@ -1989,6 +2033,7 @@ function showEditor(
         void openImageExportDialog(proj, frameIndex, baseName),
       pickAudioFile,
       confirm: confirmDialog,
+      choose: chooseDialog, // V157 (D-2): レイヤーカラーの適用先を選ばせる
       notice: noticeDialog, // V154 (W-3)
       prompt: promptDialog,
       toast,
@@ -2497,6 +2542,16 @@ async function openSettingsMenu() {
         </div>
         <p class="hintline" id="set-size-hint">${t("set.size.hint")}</p>
       </div>
+      <!-- V158 (C-3): 配色。🖥ディスプレイ設定の隣（2択・即時反映・再起動なし） -->
+      <div class="set-sec">
+        <b>${t("set.theme.label")}</b>
+        <!-- 見出しが「配色」なので、行のラベルで同じ語を繰り返さない（表示言語の節と同じ作り） -->
+        <div class="oni" id="set-theme">
+          <button type="button" class="lv" data-theme="light">${t("set.theme.light.btn")}</button>
+          <button type="button" class="lv" data-theme="dark">${t("set.theme.dark.btn")}</button>
+        </div>
+        <p class="hintline">${t("set.theme.hint")}</p>
+      </div>
       <div class="set-sec">
         <b>${t("set.minidock.label")}</b>
         <div class="modal-field"><span>${t("set.minidock.place.label")}</span>
@@ -2702,6 +2757,28 @@ async function openSettingsMenu() {
       }
       (b as HTMLElement).textContent = LANG_NAMES[l] ?? l;
     });
+    // V158 (C-3): 配色の切り替え。**押した瞬間に効く**（再起動しない）。
+    // 画面を作り直す必要も無い——`<html>` の data-theme を替えると CSS 変数がまとめて入れ替わる
+    const syncTheme = () => {
+      const cur = sanitizeTheme(settings.theme);
+      box.querySelectorAll("#set-theme .lv").forEach((b) =>
+        b.classList.toggle("on", (b as HTMLElement).dataset.theme === cur)
+      );
+    };
+    syncTheme();
+    box.querySelectorAll("#set-theme .lv").forEach((b) =>
+      b.addEventListener("click", () => {
+        const v = sanitizeTheme((b as HTMLElement).dataset.theme);
+        if (v === sanitizeTheme(settings.theme)) return;
+        settings.theme = v;
+        applyTheme(v);
+        syncTheme();
+        invoke("save_settings", { settings }).catch(() => {});
+        // canvas に描いている UI（波形・変形の枠・トーンのスウォッチ）は
+        // 覚えた色で描かれているので、開いていれば描き直させる
+        editor.refreshThemeColors();
+      })
+    );
     const syncLang = () => {
       const cur = getLang();
       box.querySelectorAll("#set-lang .lv").forEach((b) =>

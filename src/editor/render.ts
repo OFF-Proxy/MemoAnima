@@ -282,7 +282,16 @@ export function compositeFrame(
     const mask = clipMaskFor(ld, frame, eff, bases);
     if (mask === null) continue;
     // M15 (K-2): レイヤーカラー。undefined なら従来どおり lut で描く（displayColor 無しは完全に元の経路）
-    blendLayer(buf, lb, lut, e.opacity, mask ?? null, displayColorRgba(ld.displayColor));
+    // V157 (D-2): **このコマだけの指定があればそちらが勝つ**（レイヤー既定は `ld.displayColor`）。
+    // 索引には一切触れない——描くときに色を差し替えるだけなので、外せば完全に元へ戻る
+    blendLayer(
+      buf,
+      lb,
+      lut,
+      e.opacity,
+      mask ?? null,
+      displayColorRgba(frame.layerColors?.[ld.id] ?? ld.displayColor)
+    );
   }
   return buf;
 }

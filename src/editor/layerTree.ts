@@ -111,7 +111,13 @@ export function moveTargetLayerIds(
   // 5・6
   const eff = effectiveLayerStates(p);
   const frame = p.frames[frameIndex];
-  return out.filter((id) => eff.get(id)?.visible === true && !!frame?.layers[id]);
+  // V157 (D-1): **実効ロックも同じ場所で除外**する（実効可視の除外に1条件足しただけ）。
+  // ロックを使っていない作品では `locked` が全部 false なので、挙動は1ミリも変わらない。
+  // ここを通るのは複数レイヤーの移動・変形——🔒を1枚混ぜて掴んでも、その1枚は動かない
+  return out.filter(
+    (id) =>
+      eff.get(id)?.visible === true && eff.get(id)?.locked !== true && !!frame?.layers[id]
+  );
 }
 
 /** ドロップ先 parent（gap の親 or intoフォルダ）に対する循環チェック。true=循環で不可 */

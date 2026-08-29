@@ -1081,7 +1081,7 @@ export class LibraryScreen {
           `${FPS_TABLE[this.previewProject.speedIndex]} fps`,
         ]);
         this.drawPreview();
-        this.startPreview();
+        void this.startPreview();
       }
     } catch (e) {
       // V154b: `Error: ` を出さない（中身だけ）。文言は serialize が決めている
@@ -1347,7 +1347,7 @@ export class LibraryScreen {
   togglePreviewPlayback() {
     if (this.selected?.kind === "project") {
       if (this.previewPlaying) this.stopPreview();
-      else this.startPreview();
+      else void this.startPreview();
     } else if (this.player) {
       this.player.paused ? this.player.play() : this.player.pause();
     }
@@ -1448,16 +1448,32 @@ export class LibraryScreen {
     }
   }
 
-  private startPreview() {
+  private async startPreview() {
     if (!this.previewProject || this.previewPlaying) return;
     this.previewPlaying = true;
+    this.updatePlayButton(); // 押した合図はすぐ返す（音の用意を待つ前に）
     const pp = this.previewProject;
     const fps = FPS_TABLE[pp.speedIndex] || 8;
     // M6-2/3: .animemo プレビューの音声同期（アニメのループ毎に頭出しリセット）
     // M5-1: BGM=速度連動rate・SE=コマ発火
     const bgm = pp.audio?.bgm ?? null;
     const rate = bgm ? bgmPlaybackRate(pp.speedIndex, bgm.baseSpeedIndex) : 1;
-    void this.audioPreview.start(bgm, this.previewFrame / fps, rate);
+    // ★V157 (D-4): **音の用意を待ってからコマを進め始める**（A-28・Culoe さんの報告）。
+    //
+    //  これまでは `void audioPreview.start(...)` と投げっぱなしにして、その直後に
+    //  コマ送りのタイマーを張っていた。`start()` の中は初回だけ `decodeAudioData` を待つので、
+    //  **その間コマだけ進み、音が遅れて始まる**。2周目からはバッファがキャッシュされていて
+    //  ほぼ 0ms で鳴るので合ってくる——「最初はズレて、ループを重ねると合う」の正体。
+    //
+    //  実測（Chromium・実作品の BGM 2.1MiB / 55 秒）: 初回 decode **174.9ms**
+    //    → 8fps で 1.4 コマ・24fps で 4.2 コマ・30fps で 5.2 コマぶん絵が先行
+    //    2周目以降は 0.2ms（ズレ ほぼ 0）
+    //
+    //  待つと再生の開始が初回だけ 0.2 秒ほど遅れるが、**ズレたまま流れるより良い**
+    //  （同じ音源なら2回目からは待ちもゼロ）。
+    await this.audioPreview.start(bgm, this.previewFrame / fps, rate);
+    // 待っている間に止められた／別の作品に移った
+    if (!this.previewPlaying || this.previewProject !== pp) return;
     // Codex指摘#3: デコードは「配置済みかつ非ミュート」のSEだけ
     if (pp.audio && pp.audio.se.length > 0) {
       const used = new Set<string>();
