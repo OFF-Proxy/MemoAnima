@@ -1,0 +1,4 @@
+# HK1 (A-11): 改行の扱いを環境まかせにしない（索引は LF・checkout も LF）。
+# 入れる前に一時クローンで git add --renormalize . を実測し、差分0を確認済み（2026-09-01）。
+# core.autocrlf を持たない環境（CI・Linux マウント・他人の clone）で全ファイルが M に見える雑音を消す
+* text=auto eol=lf
