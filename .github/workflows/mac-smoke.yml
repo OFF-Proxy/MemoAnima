@@ -9,7 +9,8 @@
 #   鍵の中身はビルドのステップ内 export だけに載せ、**ログには一切表示しない**。
 #   使い捨て鍵で作られた .sig は成果物に含めない
 # - 使う action は GitHub 公式（actions/*）のみ
-# - HK1 (A-36): checkout/setup-node/upload-artifact を v4 → v5 へ（Node 20 非推奨警告の解消・Node 24 対応版）
+# - HK1 (A-36): checkout/setup-node を v5・upload-artifact を v7 へ（Node 20 非推奨警告の解消・Node 24 対応版。
+#   upload-artifact は v5 でもまだ Node 20 対象だったため v7 まで上げた——1回目の run で警告が残って判明）
 name: Mac smoke build
 
 on:
@@ -81,7 +82,7 @@ jobs:
       # 緑の run では直前の Verify が両方の存在を保証している。保持期間は既定（90日）
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: MemoAnima-mac-universal-smoke
           path: |
