@@ -1,6 +1,6 @@
 [package]
 name = "animemo"
-version = "1.5.9"
+version = "1.5.10"
 description = "メモアニマ (MemoAnima) — 3DSのお絵かきアニメ作品をPCで編集・書き出しできる非公式・非営利のファンツール"
 authors = ["arcana"]
 edition = "2021"
@@ -26,6 +26,10 @@ serde_json = "1"
 
 # ライブラリ取り込み時の内容ハッシュ（SHA-256）で重複を判定するのに使う
 sha2 = "0.10"
+
+# V161 (B): 保存の gzip 圧縮を Rust 側で行う（level 3・スパイク実測 6.7 秒 vs JS 23.6 秒）。
+# 出力はただの gzip なので読む側（JS の DecompressionStream・旧ビルド）は無改修
+flate2 = "1"
 hex = "0.4"
 
 # U-1: アプリ内アップデート。**デスクトップだけ**に入れる（モバイルはストアが更新を配るので

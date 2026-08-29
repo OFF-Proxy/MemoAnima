@@ -3139,6 +3139,52 @@ input[type="text"] {
   background: var(--warn-bg);
 }
 
+/* ---------------- V161 (A): 右下の保存ピル ---------------- */
+/* 保存は背景で走る（W-9 のロックは保存では外した）。中央の箱ではなく、
+   描いている手を止めない**視界の隅の小さな札**。色はぜんぶ配色トークン（夜の紙にも追随） */
+#ed-savepill {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 999px;
+  box-shadow: 0 3px 0 rgba(var(--shadow-rgb), 0.25);
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--ink);
+  pointer-events: none; /* 下のキャンバス操作を1ドットも遮らない */
+}
+
+#ed-savepill i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--orange);
+  animation: savepill-pulse 0.9s ease-in-out infinite alternate;
+}
+
+@keyframes savepill-pulse {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.25;
+  }
+}
+
+/* 動きを減らす設定の人には点滅させない（札が出ていること自体が情報） */
+@media (prefers-reduced-motion: reduce) {
+  #ed-savepill i {
+    animation: none;
+  }
+}
+
 /* ---------------- V154b (W-8/W-9): 重い処理のあいだの表示 ---------------- */
 
 /* W-9: 重い処理の最中は、エディタの中身に触れない。

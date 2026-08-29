@@ -139,10 +139,10 @@ export interface EncodeInterruptOpts {
  *  - UTF-8: チャンク境界は常に JSON トークン境界＝文字境界なので分割エンコードでも同一
  *  - gzip: 従来経路も Blob.stream() が内部で分割供給しており、CompressionStream は
  *    途中フラッシュしない（分割粒度は出力に影響しない） */
-async function encodeProject(
-  p: Project,
-  opts?: EncodeInterruptOpts
-): Promise<Uint8Array | null> {
+/** V161: エンコードの前半（ビット幅の決定＋frames 抜きのヘッダ JSON）。
+ *  `encodeProject`（gzip）と `encodeProjectRawChunks`（Rust 圧縮用）の**両方がこれを通る**——
+ *  片方だけ直して保存バイト列が割れる事故を、構造で防ぐ。中身は従来の encodeProject 前半の移設で無変更。 */
+function encodeProjectHead(p: Project): { bits: 8 | 16; headPart: string } {
   // 防御: 16bitバッファが1枚でもあれば indexBits=16 として書く
   // （8bit宣言のまま16bit値を truncate して書く経路を残さない）
   let bits: 8 | 16 = p.indexBits ?? 8;
@@ -225,13 +225,20 @@ async function encodeProject(
     throw new Error(t("ed.save.internalOrder.msg"));
   }
   const headPart = headJson.slice(0, -2); // 末尾の `]}` を除去 → `...,"frames":[`
+  return { bits, headPart };
+}
+
+async function encodeProject(
+  p: Project,
+  opts?: EncodeInterruptOpts
+): Promise<Uint8Array | null> {
+  const { bits, headPart } = encodeProjectHead(p);
   const cs = new CompressionStream("gzip");
   const collected = new Response(cs.readable).arrayBuffer(); // 先に排出を開始（デッドロック防止）
   // write/close が例外で脱出した場合に collected の拒否が unhandledrejection に
   // ならないよう観測だけしておく（実際の失敗は末尾の await collected が伝える）
   void collected.catch(() => {});
   const writer = cs.writable.getWriter();
-  const enc = new TextEncoder();
   const abort = async () => {
     try {
       await writer.abort();
@@ -245,11 +252,35 @@ async function encodeProject(
     }
     return null;
   };
+  // V161: JSON バイト列を作る核は encodeProjectJson に分離した。ここは gzip の皮だけ。
+  // 核が write へ渡すバイト列の**並びは分離の前後で1バイトも変わらない**（＝gzip 出力も同一。
+  // scripts/v161_smoke.ts 検査1 が「核の出力を gzip したもの ＝ この関数の出力」を突き合わせる）
+  const wasAborted = await encodeProjectJson(p, bits, headPart, (b) => writer.write(b), opts);
+  if (wasAborted) return abort();
+  await writer.close();
+  return new Uint8Array(await collected);
+}
+
+/** V161 (A/B): プロジェクトの **JSON バイト列**（gzip 前の姿）を `write` に流す核。
+ *
+ *  戻り値 true = 中断された（部分データを書いた状態で止まっている。呼び出し側が破棄する）。
+ *  保存の直列化実体は**ここ1か所**で、皮が2枚これを使う:
+ *   - `encodeProject`（従来の gzip。オートセーブと、Rust が使えない環境の保存）
+ *   - `encodeProjectRawChunks`（V161-B: Rust 側で gzip するときのチャンク供給）
+ *  皮を増やしても書く並びは1か所なので、経路ごとに保存バイト列がズレることはない。 */
+async function encodeProjectJson(
+  p: Project,
+  bits: 8 | 16,
+  headPart: string,
+  write: (b: Uint8Array) => Promise<void> | void,
+  opts?: EncodeInterruptOpts
+): Promise<boolean> {
+  const enc = new TextEncoder();
   let sliceStart = typeof performance !== "undefined" ? performance.now() : 0;
-  await writer.write(enc.encode(headPart));
+  await write(enc.encode(headPart));
   const frames = p.frames;
   for (let i = 0; i < frames.length; i++) {
-    if (opts?.aborted?.()) return abort();
+    if (opts?.aborted?.()) return true;
     const f = frames[i];
     const layers: Record<string, string> = {};
     // V156 (P-1・条件3): 起きているものと眠っているものを**同じ順序で**書く。
@@ -278,17 +309,49 @@ async function encodeProject(
       layerColors:
         f.layerColors && Object.keys(f.layerColors).length > 0 ? f.layerColors : undefined,
     };
-    await writer.write(enc.encode((i > 0 ? "," : "") + JSON.stringify(sf)));
+    await write(enc.encode((i > 0 ? "," : "") + JSON.stringify(sf)));
     // 約8msごとにメインスレッドを譲る（占有をチャンク1個ぶんに抑える）
     if (opts?.yieldNow && performance.now() - sliceStart > 8) {
       await opts.yieldNow();
       sliceStart = performance.now();
     }
   }
-  if (opts?.aborted?.()) return abort();
-  await writer.write(enc.encode("]}"));
-  await writer.close();
-  return new Uint8Array(await collected);
+  if (opts?.aborted?.()) return true;
+  await write(enc.encode("]}"));
+  return false;
+}
+
+/** V161 (B): JSON バイト列を**まとめ書きのチャンク**で受け取る（Rust 側 gzip 用）。
+ *
+ *  1コマの JSON は 2MB 前後なので、細切れのまま IPC へ流すと呼び出しが数千回になる。
+ *  `chunkBytes`（既定 16MB）まで貯めてから `onChunk` を1回呼ぶ＝2.1GB でも 130 回ほど。
+ *  `onChunk` の完了を待ってから次を作る（受け側の背圧がそのまま効く＝先に作り溜めない）。 */
+export async function encodeProjectRawChunks(
+  p: Project,
+  onChunk: (chunk: Uint8Array) => Promise<void>,
+  chunkBytes = 16 * 1024 * 1024
+): Promise<void> {
+  const { bits, headPart } = encodeProjectHead(p);
+  let parts: Uint8Array[] = [];
+  let size = 0;
+  const flush = async () => {
+    if (size === 0) return;
+    const out = new Uint8Array(size);
+    let o = 0;
+    for (const b of parts) {
+      out.set(b, o);
+      o += b.length;
+    }
+    parts = [];
+    size = 0;
+    await onChunk(out);
+  };
+  await encodeProjectJson(p, bits, headPart, async (b) => {
+    parts.push(b);
+    size += b.length;
+    if (size >= chunkBytes) await flush();
+  });
+  await flush();
 }
 
 export async function projectToBytes(p: Project): Promise<Uint8Array> {

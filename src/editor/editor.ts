@@ -382,6 +382,16 @@ export interface EditorCallbacks {
   /** M17: 「🎨 登録した色で塗る」トグルが変わったら settings.json へ保存する */
   onCustomToneColorChange?: (on: boolean) => void;
   /** ライブラリ保存（Rust呼び出し）を委譲 */
+  /** V161 (B): Rust 側 gzip（gz_begin → gz_chunk × n → save_project_gz）。
+   *  無い環境（vite 単体・古いバックエンド）では未定義 or 失敗＝Worker 内 gzip へ fallback。 */
+  gzBegin?: (level: number) => Promise<number>;
+  gzChunk?: (id: number, chunk: Uint8Array) => Promise<void>;
+  gzAbort?: (id: number) => Promise<void>;
+  saveProjectGz?: (
+    id: number,
+    ctx: { libRoot: string; album: string; baseName: string },
+    thumbPng: Uint8Array
+  ) => Promise<string>;
   saveProject: (
     ctx: EditorSaveContext,
     data: Uint8Array,
@@ -708,12 +718,32 @@ export class Editor {
   /** 保存時に必ず保存先ピッカーを出すか（新規メモ・合作・保存先未定） */
   askSaveTarget = false;
 
+  // ---------------- V161 (A): 背景保存 ----------------
+  /** 飛行中の背景保存（null=保存していない）。**編集ロックはしない**（W-9 は保存では外した）。
+   *  閉じる・別メモ・書き出しは `waitForSave()` でこれの完了を待つ。 */
+  private saveInFlight: Promise<boolean> | null = null;
+  /** V154b (W-7) の進化: 飛行中に来た保存要求を**1件だけ**予約（連打しても1件）。 */
+  private saveQueued = false;
+  /** dirty 漏斗を通った回数。スナップショット時点と比べて「保存中に編集があったか」を
+   *  判定する（あれば dirty を残す＝「保存しました」がすべてを含むとは限らない）。 */
+  private editEpoch = 0;
+  /** エンコードと圧縮を追い出す先（遅延生成・unmount で破棄）。 */
+  private saveWorker: Worker | null = null;
+  /** Worker への往復に付ける連番（古い保存の返事を新しい保存が拾わないため）。 */
+  private saveSeq = 0;
+  /** 右下の保存ピルを出すまでの遅延タイマー（0=予約なし）。一瞬で終わる保存でチラつかせない。 */
+  private savePillTimer = 0;
+
   get dirty(): boolean {
     return this._dirty;
   }
   set dirty(v: boolean) {
     this._dirty = v;
     if (v) this.autosavePending = true;
+    // V161 (A): 「何か変わった」の回数。背景保存が、スナップショットのあとに
+    // 編集があったか（＝dirty を落としてよいか）をこの数字で判定する。
+    // 経路の数え上げではなく**この漏斗1か所**（§1-g・V156 と同じ作法）
+    if (v) this.editEpoch++;
     // ★V156 (P-1・条件5): 何かが変わった＝**いま見ているコマの圧縮控えは古い**。捨てる。
     //
     //  条件5「書きで起こしたコマの控えは必ず捨てる」を、**書いた経路を数え上げずに**満たすための要。
@@ -1382,6 +1412,14 @@ export class Editor {
     // すぐ下で warpField を「1.5MB を保持し続けないように」と null にしているのに、
     // その 100 倍を放置していた（V156 スパイクの副産物）。mount 側の clear はそのまま残す
     this.history.clear();
+    // V161 (A): 保存 Worker を畳む（leave は waitForSave を通るので、ここに来る時点で
+    // 飛行中の保存は無い。次の作品で必要になれば作り直す）
+    this.saveWorker?.terminate();
+    this.saveWorker = null;
+    if (this.savePillTimer) {
+      clearTimeout(this.savePillTimer);
+      this.savePillTimer = 0;
+    }
     // V159 (G-1): 作品の大きさを教える口も外す（閉じたあとの行に前の作品の数字を残さない）
     setPerfContext(null);
     // V156 (P-1): 裏の片付けを止める。ログの口も外す（別の作品に持ち越さない）
@@ -1472,6 +1510,9 @@ export class Editor {
       // 重なり得る。多重併走すると invalidateAutosave が後発の飛行中書き込みを待てない
       //（レビュー検出）。前の便が飛行中なら見送る（pending は残るので次の機会に走る）
       this.autosaveInFlight != null ||
+      // V161 (A): 背景保存の飛行中も見送る（同じ作品を2本同時に直列化しない。
+      // pending は残るので、保存が終わった次の周期に走る）
+      this.saveInFlight != null ||
       // V154b (W-7): **手動保存・音声の読み込み・書き出しの最中は見送る。**
       // 手動保存が譲るようになった（W-8）ので、15秒タイマーがそのすき間に割り込み得る。
       // 割り込むと本体2つぶんのメモリを同時に積む＝この回で潰している事故そのもの
@@ -1584,6 +1625,8 @@ export class Editor {
     message = t("ed.leave.discard.msg")
   ): Promise<boolean> {
     if (!this.mounted) return true;
+    // V161 (A): 画面を離れる前に、飛行中の保存を待つ（要件: 閉じる・別メモは保存完了を待つ）
+    await this.waitForSave();
     if (this.xformGuard()) return false; // E-4: 変形中は確定/取消が先
     if (this.dirty) {
       const ok = await this.cb.confirm(message);
@@ -6068,9 +6111,11 @@ export class Editor {
     $("#ed-redo").onclick = () => this.handleRedo();
     $("#ed-save").onclick = () => this.save();
     $("#ed-saveas").onclick = () => this.saveAs();
-    $("#ed-export").onclick = () => {
+    $("#ed-export").onclick = async () => {
       if (this.busyKind) return; // V154b (W-7): 重い処理の最中は開かない
       if (this.xformGuard()) return; // E-4
+      // V161 (A): 書き出しは保存完了を待つ（同じ作品を書き出しと保存が同時に読まない）
+      await this.waitForSave();
       if (this.playing) this.stopPlayback();
       this.cb.openExport(
         projectSource(this.project),
@@ -6088,8 +6133,9 @@ export class Editor {
       );
     };
     // M11-11: いま見ているコマ1枚を画像で保存（アニメの書き出しとは別の導線）
-    $("#ed-imgexport").onclick = () => {
+    $("#ed-imgexport").onclick = async () => {
       if (this.xformGuard()) return; // 変形/歪みの未確定があるときは先に確定させる
+      await this.waitForSave(); // V161（Codex 指摘④）: 書き出し系はどれも保存完了を待つ
       if (this.playing) this.stopPlayback();
       this.cb.openImageExport?.(
         this.project,
@@ -6868,10 +6914,16 @@ export class Editor {
   }
 
   async save(): Promise<boolean> {
-    // V154b (W-7): **飛行中の呼び出しは黙って捨てる。**キューに積まない——積むと
-    // 同じことが遅れて起きるだけで、900コマ×20レイヤーでは1回ぶんが 3〜6 GiB の山になる。
-    // 連打（＝重いから押したくなる）がそのまま倍々でメモリを食っていた
-    if (this.busyKind) return false;
+    // V154b (W-7) → V161 (A): 飛行中の保存要求は、捨てずに**1件だけ予約**する。
+    // 保存中も描けるようになった＝「描いてからもう一度 Ctrl+S」が普通に起きる。
+    // 捨てると「押したのに最新の絵が保存されていない」になる。連打しても予約は1件
+    //（完了後に**そのときの最新の姿**で1回だけ走り直す）。W-7 が恐れたメモリの山は
+    // 立たない——予約は「あとでもう一度」であって、二本目のエンコードを並走させない
+    if (this.saveInFlight) {
+      this.saveQueued = true;
+      return this.saveInFlight;
+    }
+    if (this.busyKind) return false; // 音声読み込み・書き出しの最中は従来どおり弾く
     if (this.xformGuard()) return false; // E-4
     if (this.askSaveTarget || !this.saveCtx) {
       // F-4: 既存アルバムのピッカー（＋新規フォルダ作成）で保存先を選ぶ
@@ -6889,79 +6941,222 @@ export class Editor {
         baseName: picked.baseName,
       };
     }
-    // V154b (W-7): ここから先が重い処理。**入口を閉じる**（進捗は下で別に出す——
-    // 保存先ピッカーは「利用者を待つ時間」なので、そこに「保存中です」を出さない）
-    this.beginBusy("save");
-    const t0 = performance.now();
+    // V161 (A): ここから先は**背景**で走る。編集ロックはかけない（W-9 は保存では外した・要件）。
+    // 中央の「保存中です」も出さない——右下の控えめなピルに変えた（描いている手を止めない）
+    const job = this.runBackgroundSave();
+    this.saveInFlight = job;
     try {
-      // V154b (W-8): 少し待ってから「保存中です」を出す（一瞬で終わる保存ではチラつかない）
-      this.showBusyAfterDelay(t("ed.busy.saving.label"));
-      // M10-14: 手動保存（Ctrl+S・保存ボタン・別名保存）のときだけサムネコマを更新。
-      // 15秒オートセーブは projectToBytes を直接呼ぶだけなので既存値のまま
-      //（オートセーブでサムネが揺れない＝作者明示仕様）
+      return await job;
+    } finally {
+      this.saveInFlight = null;
+      this.updateSavePill(false);
+      // W-7 の進化: 予約が入っていれば、**そのときの最新の姿**でもう一度（1件だけ）。
+      // setTimeout で1拍置くのは、この finally の中から save() を再入させないため
+      if (this.saveQueued && this.mounted) {
+        this.saveQueued = false;
+        setTimeout(() => void this.save(), 0);
+      }
+    }
+  }
+
+  /** V161 (A/B): 背景保存の本体。
+   *
+   *  ★スナップショットは `worker.postMessage` の structured clone がその場で取る——
+   *   postMessage は**同期的に**全体を写し取るので、それ以後の編集はこの保存に混ざらない
+   *  （V160 S-2 で実証: 眠り控えの z は生成後不変・破棄は参照の付け替えなので clone は安全。
+   *   起きている生バッファと音声データは clone がコピーする）。
+   *
+   *  ★圧縮は2経路（B）:
+   *   - Rust が使えれば: Worker は gzip **前**の JSON チャンクを返し、ここから
+   *     `gzChunk` で Rust へ流す → `saveProjectGz`（flate2 level 3・実測 6.7 秒）
+   *   - 使えなければ: Worker 内 CompressionStream（v1.5.9 と同一出力）→ 従来の `saveProject`
+   *   どちらも書き込みは Rust の同じ `pclib::save_project`（tmp→.bak→rename→照合＝W-1 不変）。
+   *
+   *  ★検証（C・Cowork 裁定）: 書く前の重複検証は落とし、**ディスクから読み戻す側だけ**残す
+   *  （W-6 の魂＝「書けたものが読めるか」。Rust 側の byte 照合はその手前で従来どおり効いている） */
+  private async runBackgroundSave(): Promise<boolean> {
+    const t0 = performance.now();
+    const ctx = this.saveCtx!;
+    let gzId: number | null = null;
+    try {
+      // B: Rust の圧縮が使えるか先に確かめる（vite 単体などでは失敗→ Worker 内 gzip へ）。
+      // ★スナップショットの基準点より**前**にやる（Codex 指摘⑤: この await の間に描いた線が
+      //  「保存に入るのに dirty は残る」ズレを作らないため。基準点から postMessage までは同期）
+      if (this.cb.gzBegin && this.cb.gzChunk && this.cb.saveProjectGz) {
+        try {
+          gzId = await this.cb.gzBegin(3); // level 3 ＝ +9% と引き換えに 3.5 倍速（V160 実測）
+        } catch {
+          gzId = null;
+        }
+      }
+      const worker = this.ensureSaveWorker();
+      const seq = ++this.saveSeq;
+      // M10-14: 手動保存のときだけサムネコマを更新（従来どおり）
       this.project.thumbFrame = Math.max(
         0,
         Math.min(this.project.frames.length - 1, this.frameIndex)
       );
-      const { projectToBytesInterruptible, verifySavedBytes } = await import("./serialize");
-      // V154 (W-6): 期待するコマ数は**直列化の直前**の値。以降の検査はこれと突き合わせる
+      // ★スナップショットの基準点。「保存に入るのはこの瞬間まで」の3点セットを同時に取る。
+      // ここから下の postMessage まで **await は1つも無い**（v161_smoke 検査5 が固定）
       const expectFrames = this.project.frames.length;
-      // V154b (W-8/W-9): 手動保存も**チャンクごとにメインスレッドを手放す**。
-      //
-      // 従来は `projectToBytes`（一気呵成）で、300コマでも 2 秒近くメインスレッドを握ったまま。
-      // その間はタイマーもペイントも走らないので、**「保存中です」を出しても誰にも見えない**
-      // （実測: 出す予約はされるが、画面に出る前に保存が終わる／出ても描かれない）。
-      // 譲れるようにしたのは W-9 で**編集を受け付けなくした**からで、
-      // 「譲るとエンコード中の変更が混ざる」という危険はロックで消してある。
-      // 出力バイト列は一気呵成の経路と**同一**（`encodeProject` のコメントの機械検証済みの前提）。
-      const data = await projectToBytesInterruptible(this.project, {
-        yieldNow: yieldToInput,
-        // 手動保存は**中断しない**（利用者が押した保存を勝手にやめない）。
-        // 例外はエディタを離れたとき——書く先が無いので捨てる
-        aborted: () => !this.mounted,
+      const epoch0 = this.editEpoch;
+      // ★リスナーは **postMessage より先に**張る。あとから張ると、小さい作品では
+      //  Worker のエンコードが下の `frameToPngBlob` の await より先に終わり、
+      //  `done` が**誰も聞いていないうちに**発火して保存が永遠に待ち続ける
+      // （ハーネスの故意破損テストで実際に踏んだ——大きい作品では出ない競合）。
+      // chunks モードでは届いたチャンクをその場で Rust へ流し、
+      // 流し終えてから ack を返す（＝Worker 側が作り溜めない・背圧）
+      const encodedPromise = new Promise<Uint8Array | null>((resolve, reject) => {
+        const onMsg = (ev: MessageEvent) => {
+          const d = ev.data as
+            | { kind: "chunk"; seq: number; bytes: Uint8Array }
+            | { kind: "done"; seq: number; bytes?: Uint8Array }
+            | { kind: "error"; seq: number; message: string };
+          if (!d || d.seq !== seq) return;
+          if (d.kind === "chunk") {
+            void (async () => {
+              try {
+                await this.cb.gzChunk!(gzId!, d.bytes);
+                worker.postMessage({ kind: "ack", seq });
+              } catch (err) {
+                cleanup();
+                reject(err instanceof Error ? err : new Error(String(err)));
+              }
+            })();
+          } else if (d.kind === "done") {
+            cleanup();
+            resolve(d.bytes ?? null);
+          } else {
+            cleanup();
+            reject(new Error(d.message));
+          }
+        };
+        const onErr = (ev: ErrorEvent) => {
+          cleanup();
+          reject(new Error(`worker error: ${ev.message}`));
+        };
+        const cleanup = () => {
+          worker.removeEventListener("message", onMsg);
+          worker.removeEventListener("error", onErr);
+        };
+        worker.addEventListener("message", onMsg);
+        worker.addEventListener("error", onErr);
       });
-      if (!data) return this.reportSaveBroken("encode", "aborted (unmounted)");
-      // V154 (W-6) ①: **書く前に**中身を確かめる。
-      // 壊れたものを、いま在る正しいファイルに上書きしない（上書きしてしまうと、
-      // 控えを残していても「良い版が1つ減る」ことに変わりはない）
-      const pre = await verifySavedBytes(data, expectFrames);
-      if (!pre.ok) return this.reportSaveBroken("pre-write", pre.reason);
+      // 拒否が thumb の await 中に起きても unhandledrejection にしない（実際の失敗は下の await が伝える）
+      void encodedPromise.catch(() => {});
+      worker.postMessage({
+        kind: "encode",
+        seq,
+        mode: gzId != null ? "chunks" : "gzip",
+        project: this.project,
+      });
+      // ---- ここから編集は自由（この await の間、メインスレッドは空いている） ----
+      this.updateSavePill(true);
+      // サムネは postMessage の直後に読む（1コマの合成。スナップショットとほぼ同時点＝
+      // その一瞬に描かれた線がサムネだけに写る理屈上の窓はあるが、絵のデータには影響しない）
       const blob = await frameToPngBlob(this.project, this.project.thumbFrame);
       const thumb = blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
-      const path = await this.cb.saveProject(this.saveCtx, data, thumb);
-      // V154 (W-6) ②: **書いたものを読み戻して**確かめる。
-      // Rust 側でも書き戻し照合をしているが、こちらは IPC を跨いだ経路ごと確かめる
-      //（アプリから見て「ディスクにあるファイルが開ける」ことの確認）
+      const encoded = await encodedPromise;
+      let path: string;
+      const gzWasUsed = gzId != null;
+      if (gzId != null) {
+        path = await this.cb.saveProjectGz!(gzId, ctx, thumb);
+        gzId = null; // 確定した＝もう abort しない
+      } else {
+        if (!encoded) return this.reportSaveBroken("encode", "worker returned no bytes");
+        path = await this.cb.saveProject(ctx, encoded, thumb);
+      }
+      // V154 (W-6) → V161 (C): 検証は**ディスクから読み戻す側だけ**（書く前の重複は落とした）。
+      // 壊れたものを書いてしまう危険は Rust の byte 照合（verify_or_rollback・W-1）が塞いでいて、
+      // ここは「書けたものがアプリで開けるか」を確かめる最後の門
       const post = await this.verifySavedFile(path, expectFrames);
       if (!post.ok) return this.reportSaveBroken("read-back", post.reason);
-      // V154 (W-6) ③: **ここまで通ってはじめて確定する。**
-      // 順序が要: dirty=false とオートセーブの破棄は、検査が通ったあとでしか行わない
-      //（以前はここが保存の直後にあり、壊れたものを保存すると控えを2つとも自分で捨てていた）
-      this.dirty = false;
       this.askSaveTarget = false;
-      // 進行中の古いオートセーブが保存後に復活しないよう世代を進めてから消す
-      await this.invalidateAutosave();
+      if (this.editEpoch === epoch0) {
+        // 保存中に編集が無かった＝ファイルは最新。従来どおり確定する
+        this.dirty = false;
+        // 進行中の古いオートセーブが保存後に復活しないよう世代を進めてから消す
+        await this.invalidateAutosave();
+      }
+      // else: 保存中に描いた＝ファイルはスナップショット時点の姿。dirty は残し、
+      // オートセーブにも触らない（あちらのほうが新しい状態を守っている。
+      // 次の15秒周期が最新の姿で上書きする）
       this.cb.appendLog?.(
-        `[V154b] save ok frames=${expectFrames} bytes=${data.length} ms=${Math.round(
+        `[V161] save ok frames=${expectFrames} rust=${gzWasUsed ? "y" : "n"} ms=${Math.round(
           performance.now() - t0
         )}`
       );
-      this.cb.toast(t("ed.file.saved.toast", { path }));
+      // Codex 指摘③: 保存中に描いた人が「いまの絵まで保存された」と誤解しないよう、文言を分ける
+      this.cb.toast(
+        this.editEpoch === epoch0
+          ? t("ed.file.saved.toast", { path })
+          : t("ed.file.savedPartial.toast", { path })
+      );
       this.cb.onSaved(path);
       return true;
     } catch (e) {
+      // Rust 側に食べかけのジョブを残さない（次の保存は新しい begin をするので実害は無いが、
+      // 2.1GB 級の圧縮途中バッファを持ち続けさせない）
+      if (gzId != null) void this.cb.gzAbort?.(gzId).catch(() => {});
       return this.reportSaveBroken("exception", String(e), e);
     } finally {
-      this.endBusy();
       // V159 (G-1): 保存にかかった時間（保存先ピッカーを待った時間は `t0` の位置ゆえ入らない）。
       // 失敗しても測る——「失敗するまでに何秒待たされたか」も知りたい
       perfDone("save", t0);
     }
   }
 
+  /** V161 (A): 保存が終わるまで待つ（その間だけ中央表示）。
+   *  **閉じる・別のメモへ移る・書き出しを始める前に必ず呼ぶ**（要件 A）。
+   *  予約（saveQueued）は取り消す——ここから先は画面を離れる操作で、予約の中身
+   * （保存中に描いた分）が未保存でも dirty が残っているので、離脱確認が必ず拾う。 */
+  async waitForSave(): Promise<void> {
+    if (!this.saveInFlight) return;
+    this.saveQueued = false;
+    const hide = this.cb.busy?.(t("ed.save.wait.label"));
+    try {
+      await this.saveInFlight.catch(() => {});
+    } finally {
+      hide?.();
+    }
+  }
+
+  /** V161 (A): 保存 Worker（遅延生成）。 */
+  private ensureSaveWorker(): Worker {
+    if (!this.saveWorker) {
+      this.saveWorker = new Worker(new URL("./saveWorker.ts", import.meta.url), {
+        type: "module",
+      });
+    }
+    return this.saveWorker;
+  }
+
+  /** V161 (A): 右下の保存ピル。300ms 遅れて出す（一瞬で終わる小さい作品でチラつかせない）。 */
+  private updateSavePill(on: boolean) {
+    const el = document.getElementById("ed-savepill");
+    if (!el) return;
+    if (on) {
+      if (this.savePillTimer) return;
+      this.savePillTimer = window.setTimeout(() => {
+        this.savePillTimer = 0;
+        if (this.saveInFlight) el.hidden = false;
+      }, 300);
+    } else {
+      if (this.savePillTimer) {
+        clearTimeout(this.savePillTimer);
+        this.savePillTimer = 0;
+      }
+      el.hidden = true;
+    }
+  }
+
   /** 別名保存（M3.3-A）: ピッカーを強制して save() へ。以降の保存は新ファイルへ向く。
    *  ピッカーをキャンセルした場合は元のフラグへ戻す（次の Ctrl+S が別名扱いにならないように） */
   async saveAs() {
+    // V161（Codex 指摘①）: 飛行中に押すと `save()` が予約へ回し、**ピッカーを出さないまま
+    // いつもの保存先に保存**されてしまう（利用者は「別名で保存した」と思っている）。
+    // 先に飛行中の保存を待つ（そのときだけ中央表示が出る＝閉じるときと同じ見え方）
+    await this.waitForSave();
     const prev = this.askSaveTarget;
     this.askSaveTarget = true;
     const ok = await this.save();

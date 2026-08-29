@@ -375,6 +375,97 @@ fn save_project_raw(request: tauri::ipc::Request<'_>) -> Result<String, String> 
     pclib::save_project(&s("libRoot")?, &s("album")?, &s("name")?, parts[0], parts[1])
 }
 
+// ---- V161 (B): 保存の gzip を Rust で行う（チャンク集積） ----
+//
+// JS（Worker）が組んだ **gzip 前の JSON バイト列**（再現データで 2.1GB）は、
+// 一括では IPC に載らない（V8 の文字列上限）。そこで:
+//   gz_begin(level) → gz_chunk（raw ボディ・16MB 級 × n 回）→ save_project_gz
+// と分けて受け取り、flate2 の GzEncoder に**流れてきた順に**食わせる。
+// 圧縮が終わったら **既存の pclib::save_project にそのまま渡す**＝
+// tmp→.bak→rename→読み戻し照合（W-1/W-6 の Rust 側）は従来の保存と1手も変わらない。
+//
+// ジョブは**同時に1つだけ**（JS 側が保存を1本に直列化している。2つ目の begin は
+// 前のジョブを黙って捨てる＝クラッシュした保存の食べ残しがメモリに残り続けない）。
+// id はすり替わり検出用（古い保存のチャンクが新しいジョブへ混ざったらエラーで止める）。
+
+struct GzJob {
+    id: u32,
+    enc: flate2::write::GzEncoder<Vec<u8>>,
+}
+
+static GZ_JOB: std::sync::Mutex<Option<GzJob>> = std::sync::Mutex::new(None);
+static GZ_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// 圧縮ジョブを開始する。戻り値はジョブ id。
+/// level は 1..=9 に丸める（既定は 3 ＝スパイクで選んだ「+9% で 3.5 倍速」の点）。
+#[tauri::command]
+fn gz_begin(level: u32) -> Result<u32, String> {
+    let lv = level.clamp(1, 9);
+    let id = GZ_NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let enc = flate2::write::GzEncoder::new(
+        Vec::with_capacity(32 * 1024 * 1024),
+        flate2::Compression::new(lv),
+    );
+    *GZ_JOB.lock().map_err(|e| format!("gzジョブのロック失敗: {e}"))? = Some(GzJob { id, enc });
+    Ok(id)
+}
+
+/// JSON バイト列のチャンクを1つ食わせる。封筒 = [meta JSON{id}][chunk]（raw ボディ）。
+#[tauri::command]
+fn gz_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    use std::io::Write;
+    let body = raw_body(&request)?;
+    let (meta, parts) = parse_save_envelope(body, 1)?;
+    let id = meta.get("id").and_then(|v| v.as_u64()).ok_or("meta.id がありません")? as u32;
+    let mut slot = GZ_JOB.lock().map_err(|e| format!("gzジョブのロック失敗: {e}"))?;
+    let job = slot.as_mut().ok_or("圧縮ジョブがありません（begin を先に）")?;
+    if job.id != id {
+        return Err("圧縮ジョブが入れ替わっています（古い保存のチャンク）".into());
+    }
+    job.enc
+        .write_all(parts[0])
+        .map_err(|e| format!("圧縮失敗: {e}"))
+}
+
+/// 圧縮ジョブを破棄する（保存が途中で失敗したとき用。id 不一致は何もしない）。
+#[tauri::command]
+fn gz_abort(id: u32) -> Result<(), String> {
+    let mut slot = GZ_JOB.lock().map_err(|e| format!("gzジョブのロック失敗: {e}"))?;
+    if slot.as_ref().is_some_and(|j| j.id == id) {
+        *slot = None;
+    }
+    Ok(())
+}
+
+/// 圧縮を確定し、**既存の保存経路**（pclib::save_project ＝ tmp→.bak→rename→照合）で書く。
+/// 封筒 = [meta JSON{id,libRoot,album,name}][thumbPng]（raw ボディ）。戻り値は保存パス。
+#[tauri::command]
+fn save_project_gz(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let body = raw_body(&request)?;
+    let (meta, parts) = parse_save_envelope(body, 1)?;
+    let id = meta.get("id").and_then(|v| v.as_u64()).ok_or("meta.id がありません")? as u32;
+    let s = |k: &str| -> Result<String, String> {
+        meta.get(k)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| format!("meta.{k} がありません"))
+    };
+    let job = {
+        let mut slot = GZ_JOB.lock().map_err(|e| format!("gzジョブのロック失敗: {e}"))?;
+        match slot.take() {
+            Some(j) if j.id == id => j,
+            Some(j) => {
+                // すり替わり: 取り出してしまったジョブは戻す（触っていない）
+                *slot = Some(j);
+                return Err("圧縮ジョブが入れ替わっています".into());
+            }
+            None => return Err("圧縮ジョブがありません".into()),
+        }
+    };
+    let gz = job.enc.finish().map_err(|e| format!("圧縮の確定失敗: {e}"))?;
+    pclib::save_project(&s("libRoot")?, &s("album")?, &s("name")?, &gz, parts[0])
+}
+
 fn parse_autosave(bytes: &[u8], path: &std::path::Path) -> Option<serde_json::Value> {
     let rest = bytes.strip_prefix(AUTOSAVE_MAGIC)?;
     let nl = rest.iter().position(|&b| b == b'\n')?;
@@ -654,6 +745,10 @@ pub fn run() {
             set_note_order,
             save_project,
             save_project_raw,
+            gz_begin,
+            gz_chunk,
+            gz_abort,
+            save_project_gz,
             export_write,
             save_autosave,
             save_autosave_raw,

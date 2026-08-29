@@ -43,8 +43,9 @@ dependencies = [
 
 [[package]]
 name = "animemo"
-version = "1.5.9"
+version = "1.5.10"
 dependencies = [
+ "flate2",
  "hex",
  "serde",
  "serde_json",

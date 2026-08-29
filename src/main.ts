@@ -2007,6 +2007,25 @@ function showEditor(
         settings.customToneColor = on;
         invoke("save_settings", { settings }).catch(() => {});
       },
+      // V161 (B): Rust 側 gzip。チャンクは raw ボディ（number[] JSON を通さない＝M10-23 と同じ理由）
+      gzBegin: (level) => invoke<number>("gz_begin", { level }),
+      gzChunk: async (id, chunk) => {
+        await invoke("gz_chunk", packRawSave({ id }, [chunk]));
+      },
+      gzAbort: async (id) => {
+        await invoke("gz_abort", { id });
+      },
+      saveProjectGz: async (id, c, thumb) => {
+        const libRoot = c.libRoot || settings.libraryDir!;
+        c.libRoot = libRoot;
+        const path = await invoke<string>(
+          "save_project_gz",
+          packRawSave({ id, libRoot, album: c.album, name: c.baseName }, [thumb])
+        );
+        settings.lastAlbum = c.album;
+        invoke("save_settings", { settings }).catch(() => {});
+        return path;
+      },
       saveProject: async (c, data, thumb) => {
         const libRoot = c.libRoot || settings.libraryDir!;
         c.libRoot = libRoot;
@@ -2381,6 +2400,7 @@ async function presentUpdate(up: Update): Promise<void> {
     nowBtn.addEventListener("click", async () => {
       // 念のための最後の砦。ここへ来るときエディタは閉じている（`updatePromptBlocked`）が、
       // 「更新＝アプリが終了する」なので、万一開いていて未保存なら必ず確かめる
+      if (editorOpen) await editor.waitForSave(); // V161 (A): 飛行中の保存も必ず待つ
       if (editorOpen && editor.dirty && !(await confirmDialog(t("set.quit.dirty.msg")))) return;
       nowBtn.disabled = true;
       laterBtn.disabled = true;
@@ -2869,6 +2889,8 @@ async function openSettingsMenu() {
       void startGuideFlow(true);
     });
     (box.querySelector("#set-quit") as HTMLElement).addEventListener("click", async () => {
+      // V161 (A): 飛行中の保存があれば待つ（要件: 閉じるは保存完了を待つ。中央表示はエディタ側が出す）
+      if (editorOpen) await editor.waitForSave();
       if (editorOpen && editor.dirty) {
         const ok = await confirmDialog(
           t("set.quit.dirty.msg")
