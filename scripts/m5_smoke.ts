@@ -18,7 +18,7 @@ import {
   SeTrack,
   BgmTrack,
 } from "../src/editor/model";
-import { projectToBytes, projectFromBytes, PROJECT_VERSION } from "../src/editor/serialize";
+import { projectToBytes, projectFromBytes, PROJECT_VERSION, PV5_VERSION } from "../src/editor/serialize";
 import { computeMixPlan, ExportMixSpec, pcmS16ToWav } from "../src/editor/audio";
 import { makeClip, buildFramesFromClip } from "../src/editor/frameClip";
 import { setLang } from "../src/i18n";
@@ -104,7 +104,9 @@ const mkSe = (id: string, over: Partial<SeTrack> = {}): SeTrack => ({
       p2.frames[2].se?.join() === "S1,S2" &&
       p2.nextSeId === 3
   );
-  check("v5 version定数", PROJECT_VERSION === 5);
+  // V163: 旧形式の書き手（projectToBytes）は 5 のまま・現行形式（PV6）は 6
+  check("v5 version定数（旧形式の書き手）", PV5_VERSION === 5);
+  check("現行形式は v6", PROJECT_VERSION === 6);
 }
 
 // ---- (2) v3/v4 移行・v6拒否・壊れデータ隔離 ----

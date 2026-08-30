@@ -28,6 +28,9 @@ const ptBR: Record<keyof typeof ja, string> = {
   "common.saveTarget.fileName.label": "Nome do arquivo",
   "common.saveTarget.newFolder.btn": "＋ Nova pasta",
   "common.saveTarget.newFolder.msg": "Nome da nova pasta",
+  "common.saveTarget.legacy.msg": "Salvar em um formato que versões antigas (v1.5 e anteriores) conseguem abrir",
+  "common.saveTarget.legacyNote.msg":
+    "Normalmente não é preciso marcar. O formato padrão desta versão abre e salva mais rápido, mas não pode ser aberto no MemoAnima v1.5 ou anterior. Marque apenas quando o arquivo precisar abrir em uma versão antiga.",
   "common.saveTarget.path.hint": "Será salvo em: {dir}\\{album}\\{name}.memoanima",
   "common.yes.btn": "Sim",
 

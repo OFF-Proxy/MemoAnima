@@ -375,96 +375,11 @@ fn save_project_raw(request: tauri::ipc::Request<'_>) -> Result<String, String> 
     pclib::save_project(&s("libRoot")?, &s("album")?, &s("name")?, parts[0], parts[1])
 }
 
-// ---- V161 (B): 保存の gzip を Rust で行う（チャンク集積） ----
-//
-// JS（Worker）が組んだ **gzip 前の JSON バイト列**（再現データで 2.1GB）は、
-// 一括では IPC に載らない（V8 の文字列上限）。そこで:
-//   gz_begin(level) → gz_chunk（raw ボディ・16MB 級 × n 回）→ save_project_gz
-// と分けて受け取り、flate2 の GzEncoder に**流れてきた順に**食わせる。
-// 圧縮が終わったら **既存の pclib::save_project にそのまま渡す**＝
-// tmp→.bak→rename→読み戻し照合（W-1/W-6 の Rust 側）は従来の保存と1手も変わらない。
-//
-// ジョブは**同時に1つだけ**（JS 側が保存を1本に直列化している。2つ目の begin は
-// 前のジョブを黙って捨てる＝クラッシュした保存の食べ残しがメモリに残り続けない）。
-// id はすり替わり検出用（古い保存のチャンクが新しいジョブへ混ざったらエラーで止める）。
-
-struct GzJob {
-    id: u32,
-    enc: flate2::write::GzEncoder<Vec<u8>>,
-}
-
-static GZ_JOB: std::sync::Mutex<Option<GzJob>> = std::sync::Mutex::new(None);
-static GZ_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-
-/// 圧縮ジョブを開始する。戻り値はジョブ id。
-/// level は 1..=9 に丸める（既定は 3 ＝スパイクで選んだ「+9% で 3.5 倍速」の点）。
-#[tauri::command]
-fn gz_begin(level: u32) -> Result<u32, String> {
-    let lv = level.clamp(1, 9);
-    let id = GZ_NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let enc = flate2::write::GzEncoder::new(
-        Vec::with_capacity(32 * 1024 * 1024),
-        flate2::Compression::new(lv),
-    );
-    *GZ_JOB.lock().map_err(|e| format!("gzジョブのロック失敗: {e}"))? = Some(GzJob { id, enc });
-    Ok(id)
-}
-
-/// JSON バイト列のチャンクを1つ食わせる。封筒 = [meta JSON{id}][chunk]（raw ボディ）。
-#[tauri::command]
-fn gz_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String> {
-    use std::io::Write;
-    let body = raw_body(&request)?;
-    let (meta, parts) = parse_save_envelope(body, 1)?;
-    let id = meta.get("id").and_then(|v| v.as_u64()).ok_or("meta.id がありません")? as u32;
-    let mut slot = GZ_JOB.lock().map_err(|e| format!("gzジョブのロック失敗: {e}"))?;
-    let job = slot.as_mut().ok_or("圧縮ジョブがありません（begin を先に）")?;
-    if job.id != id {
-        return Err("圧縮ジョブが入れ替わっています（古い保存のチャンク）".into());
-    }
-    job.enc
-        .write_all(parts[0])
-        .map_err(|e| format!("圧縮失敗: {e}"))
-}
-
-/// 圧縮ジョブを破棄する（保存が途中で失敗したとき用。id 不一致は何もしない）。
-#[tauri::command]
-fn gz_abort(id: u32) -> Result<(), String> {
-    let mut slot = GZ_JOB.lock().map_err(|e| format!("gzジョブのロック失敗: {e}"))?;
-    if slot.as_ref().is_some_and(|j| j.id == id) {
-        *slot = None;
-    }
-    Ok(())
-}
-
-/// 圧縮を確定し、**既存の保存経路**（pclib::save_project ＝ tmp→.bak→rename→照合）で書く。
-/// 封筒 = [meta JSON{id,libRoot,album,name}][thumbPng]（raw ボディ）。戻り値は保存パス。
-#[tauri::command]
-fn save_project_gz(request: tauri::ipc::Request<'_>) -> Result<String, String> {
-    let body = raw_body(&request)?;
-    let (meta, parts) = parse_save_envelope(body, 1)?;
-    let id = meta.get("id").and_then(|v| v.as_u64()).ok_or("meta.id がありません")? as u32;
-    let s = |k: &str| -> Result<String, String> {
-        meta.get(k)
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| format!("meta.{k} がありません"))
-    };
-    let job = {
-        let mut slot = GZ_JOB.lock().map_err(|e| format!("gzジョブのロック失敗: {e}"))?;
-        match slot.take() {
-            Some(j) if j.id == id => j,
-            Some(j) => {
-                // すり替わり: 取り出してしまったジョブは戻す（触っていない）
-                *slot = Some(j);
-                return Err("圧縮ジョブが入れ替わっています".into());
-            }
-            None => return Err("圧縮ジョブがありません".into()),
-        }
-    };
-    let gz = job.enc.finish().map_err(|e| format!("圧縮の確定失敗: {e}"))?;
-    pclib::save_project(&s("libRoot")?, &s("album")?, &s("name")?, &gz, parts[0])
-}
+// V163: V161-B の「保存の gzip を Rust で行う」チャンク集積（gz_begin/gz_chunk/gz_abort/
+// save_project_gz と flate2 依存）は撤去した。PV6 の保存は JS（Worker）が完成品
+// （68.7MB 級）を組み、従来の save_project_raw（1回の raw ボディ）で届くため、
+// 2.1GB の JSON を分割して流し込む仕掛けそのものが要らない。
+// 書き込み側（pclib::save_project ＝ tmp→.bak→rename→照合）は従来と1手も変わらない。
 
 fn parse_autosave(bytes: &[u8], path: &std::path::Path) -> Option<serde_json::Value> {
     let rest = bytes.strip_prefix(AUTOSAVE_MAGIC)?;
@@ -523,22 +438,48 @@ fn load_settings(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         .path()
         .app_config_dir()
         .map_err(|e| format!("設定フォルダ取得失敗: {e}"))?;
+    Ok(load_settings_impl(&dir))
+}
+
+/// HK1 (A-22): 読み込みの本体（隔離ディレクトリで検査できるよう分離）。
+///
+/// 復旧の3段構え:
+///  1. `settings.json` が読めればそれ（ふつうの起動）
+///  2. 壊れていれば `.broken` へ退避し、**`.bak`（1世代前・下の save が残す）を試す**。
+///     読めれば**設定は失われていない**——静かに復旧してログに1行だけ残す
+///     （オートセーブの `load_autosave` が `.bak` を試すのと同じ作法）
+///  3. `.bak` も無い/壊れていれば既定値（`__recovered: true` でフロントが案内を出す＝従来どおり）
+///
+/// ★2 は書き込みの原子化（下の save_settings_impl）とセット。`.bak` 退避→確定 rename の
+///  **すき間でクラッシュすると dest が一瞬存在しない**——そのとき従来は「初回起動」と誤認して
+///  全設定が既定に戻っていた。dest が無くても `.bak` を見ることで、その窓も塞がる。
+pub fn load_settings_impl(dir: &std::path::Path) -> serde_json::Value {
     let p = dir.join("settings.json");
+    let bak = dir.join("settings.json.bak");
+    let try_read = |path: &std::path::Path| -> Option<serde_json::Value> {
+        let s = fs::read_to_string(path).ok()?;
+        serde_json::from_str::<serde_json::Value>(&s).ok()
+    };
     if !p.is_file() {
-        return Ok(serde_json::json!({}));
-    }
-    let parsed = fs::read_to_string(&p)
-        .map_err(|e| format!("設定読み込み失敗: {e}"))
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| format!("設定解析失敗: {e}")));
-    match parsed {
-        Ok(v) => Ok(v),
-        Err(_) => {
-            let broken = dir.join("settings.json.broken");
-            let _ = fs::remove_file(&broken);
-            let _ = fs::rename(&p, &broken);
-            Ok(serde_json::json!({ "__recovered": true }))
+        // 初回起動 or 置換のすき間でクラッシュした直後。`.bak` があればそれが直近の設定
+        if let Some(v) = try_read(&bak) {
+            let _ = append_log_line(&dir.join("logs"), "[HK1] settings restored from .bak (dest missing)");
+            return v;
         }
+        return serde_json::json!({});
     }
+    if let Some(v) = try_read(&p) {
+        return v;
+    }
+    // 壊れている: 原因調査用に退避してから `.bak` を試す
+    let broken = dir.join("settings.json.broken");
+    let _ = fs::remove_file(&broken);
+    let _ = fs::rename(&p, &broken);
+    if let Some(v) = try_read(&bak) {
+        let _ = append_log_line(&dir.join("logs"), "[HK1] settings restored from .bak (dest corrupted)");
+        return v;
+    }
+    serde_json::json!({ "__recovered": true })
 }
 
 /// M7-1 R-A: ライブラリ索引のヘルスチェック（壊れていれば退避＋ディスク再構築して true）
@@ -659,16 +600,18 @@ fn save_settings(app: tauri::AppHandle, settings: serde_json::Value) -> Result<(
         .path()
         .app_config_dir()
         .map_err(|e| format!("設定フォルダ取得失敗: {e}"))?;
-    fs::create_dir_all(&dir).map_err(|e| format!("設定フォルダ作成失敗: {e}"))?;
-    let s = serde_json::to_string_pretty(&settings).map_err(|e| format!("設定生成失敗: {e}"))?;
+    save_settings_impl(&dir, &settings)
+}
+
+/// HK1 (A-22): 書き込みの本体。従来の tmp→rename から、オートセーブと**同じ**
+/// `atomic_replace`（V154 の形＝tmp 書き→`.bak` 温存→rename→読み戻し照合）へ揃えた。
+/// 得るもの: ①1世代前が `.bak` に残る（上の load が復旧に使う）
+/// ②書けたものが渡したものと一致することを毎回確かめる（違えば `.bak` へ自動復旧＝W-6/W-1 と同じ保証）
+pub fn save_settings_impl(dir: &std::path::Path, settings: &serde_json::Value) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("設定フォルダ作成失敗: {e}"))?;
+    let s = serde_json::to_string_pretty(settings).map_err(|e| format!("設定生成失敗: {e}"))?;
     let dest = dir.join("settings.json");
-    let tmp = dir.join("settings.json.tmp");
-    fs::write(&tmp, s).map_err(|e| format!("設定保存失敗: {e}"))?;
-    if let Err(e) = fs::rename(&tmp, &dest) {
-        let _ = fs::remove_file(&tmp); // 失敗時は tmp を残さない（settings.json は旧内容のまま無傷）
-        return Err(format!("設定保存の確定失敗（旧設定は維持）: {e}"));
-    }
-    Ok(())
+    atomic_replace(dir, &dest, s.as_bytes())
 }
 
 /// M7-2c N-2: 旧identifier（com.root.animemo）の設定を新ディレクトリへ**コピー**する起動時移行。
@@ -745,10 +688,6 @@ pub fn run() {
             set_note_order,
             save_project,
             save_project_raw,
-            gz_begin,
-            gz_chunk,
-            gz_abort,
-            save_project_gz,
             export_write,
             save_autosave,
             save_autosave_raw,

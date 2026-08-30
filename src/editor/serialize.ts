@@ -16,7 +16,8 @@
 import { t } from "../i18n";
 // V156 (P-1・条件3): 眠っているレイヤーを**その場で1枚だけ**展開して流すための口。
 // 起こさない＝`f.layers` には入れないので、保存中に実メモリの山が立たない
-import { borrowLayerBytes } from "./sleep";
+import { borrowLayerBytes, wakeFrame } from "./sleep";
+import { isPV6, decodePv6, verifyPV6 } from "./pv6";
 import { folderBaseName, untitledTitle } from "../i18n/defaults";
 import {
   Project,
@@ -35,7 +36,14 @@ import {
 } from "./model";
 
 const MAGIC = "ANIMEMO";
-export const PROJECT_VERSION = 5;
+/** V163 (A-40): 現行の保存形式の版（PV6・二部構成）。書き手は `pv6.ts` の `encodePV6`。 */
+export const PROJECT_VERSION = 6;
+/** 旧形式（PV1〜5・gzip JSON 一体型）の最終版。**この形式は恒久的に読める**（互換規約）。
+ *  書き手 `projectToBytes`（旧形式書き出し・MCP）と旧経路の読み手
+ *  （earlyCheck / validateDoc / verifySavedBytes の旧分岐）はこちらを見る。
+ *  旧コンテナに version 6 以上が書かれることは無い（PV6 は必ず新コンテナ）ので、
+ *  旧経路で 6 以上を見たら「新しいバージョン」として断る。 */
+export const PV5_VERSION = 5;
 
 function legacyBytesToBase64(bytes: Uint8Array): string {
   let bin = "";
@@ -168,7 +176,8 @@ function encodeProjectHead(p: Project): { bits: 8 | 16; headPart: string } {
   }
   const doc = {
     magic: MAGIC,
-    version: PROJECT_VERSION,
+    // V163: ここは**旧形式（PV5）の書き手**。旧形式書き出しと MCP が使い続けるので 5 のまま
+    version: PV5_VERSION,
     width: p.width,
     height: p.height,
     colorTable: p.colorTable,
@@ -321,38 +330,11 @@ async function encodeProjectJson(
   return false;
 }
 
-/** V161 (B): JSON バイト列を**まとめ書きのチャンク**で受け取る（Rust 側 gzip 用）。
- *
- *  1コマの JSON は 2MB 前後なので、細切れのまま IPC へ流すと呼び出しが数千回になる。
- *  `chunkBytes`（既定 16MB）まで貯めてから `onChunk` を1回呼ぶ＝2.1GB でも 130 回ほど。
- *  `onChunk` の完了を待ってから次を作る（受け側の背圧がそのまま効く＝先に作り溜めない）。 */
-export async function encodeProjectRawChunks(
-  p: Project,
-  onChunk: (chunk: Uint8Array) => Promise<void>,
-  chunkBytes = 16 * 1024 * 1024
-): Promise<void> {
-  const { bits, headPart } = encodeProjectHead(p);
-  let parts: Uint8Array[] = [];
-  let size = 0;
-  const flush = async () => {
-    if (size === 0) return;
-    const out = new Uint8Array(size);
-    let o = 0;
-    for (const b of parts) {
-      out.set(b, o);
-      o += b.length;
-    }
-    parts = [];
-    size = 0;
-    await onChunk(out);
-  };
-  await encodeProjectJson(p, bits, headPart, async (b) => {
-    parts.push(b);
-    size += b.length;
-    if (size >= chunkBytes) await flush();
-  });
-  await flush();
-}
+// V163: `encodeProjectRawChunks`（V161-B の Rust 側 gzip 用チャンク供給）は撤去した。
+// PV6 の保存は Worker が**完成品を1回の raw ボディ**で返す（68.7MB・IPC 78MB/s で ≈0.9s）
+// ので、2.1GB の JSON を Rust へ流し込むチャンク集積そのものが要らなくなった。
+// 旧形式（PV5）の書き出しは従来どおり Worker 内 CompressionStream の一括経路（下の
+// `projectToBytes`）で、こちらは v1.5.9 以前と**同一のバイト列**を出す。
 
 export async function projectToBytes(p: Project): Promise<Uint8Array> {
   // opts なし＝中断しない・譲らない（従来と同じ一気呵成。出力バイト列も同一）
@@ -667,7 +649,8 @@ function earlyCheck(head: string): void {
   }
   if (doc.magic !== undefined && doc.magic !== MAGIC)
     throw new LoadError(t("ed.load.notProject.msg"));
-  if (typeof doc.version === "number" && doc.version > PROJECT_VERSION)
+  // V163: 旧コンテナ（gzip JSON 一体型）で 6 以上＝この経路では読めない新しいもの
+  if (typeof doc.version === "number" && doc.version > PV5_VERSION)
     throw new LoadError(t("ed.load.newerVersion.msg", { version: doc.version }));
   if (doc.width !== undefined && doc.height !== undefined && (doc.width !== W || doc.height !== H))
     throw new LoadError(t("ed.load.badSize.msg"));
@@ -690,7 +673,7 @@ function finalizeFrames(frames: Frame[], bits: 8 | 16): void {
 /** V155: doc の形を確かめて、索引のビット幅を返す（従来の判定をそのまま関数にしただけ）。 */
 function validateDoc(doc: LoadedDoc): 8 | 16 {
   if (doc.magic !== MAGIC) throw new LoadError(t("ed.load.notProject.msg"));
-  if (typeof doc.version !== "number" || doc.version > PROJECT_VERSION) {
+  if (typeof doc.version !== "number" || doc.version > PV5_VERSION) {
     throw new LoadError(t("ed.load.newerVersion.msg", { version: doc.version }));
   }
   if (doc.width !== W || doc.height !== H) {
@@ -758,6 +741,24 @@ export async function projectFromBytes(
       t("ed.load.tooLarge.msg", { size: rawBytes > 0 ? mib(rawBytes) : mib(bytes.length) })
     );
 
+  // ★V163 (A-40): PV6（二部構成）はトレーラの magic で先に振り分ける。
+  // PV6 も先頭は 1f 8b（旧ビルドが gzip として読み始め、ヘッダの version:6 で断れる形）
+  // なので、この判定は isGzip より**前**に置く。PV1〜5 は従来の経路へ（恒久的に読める）。
+  if (isPV6(bytes)) {
+    const { doc, frames, lazy } = await decodePv6(bytes, opts?.onFrame);
+    const p = buildProject(doc, frames);
+    if (lazy) {
+      // 窓（先頭±）とサムネのコマだけ起こして返す（エディタの初回描画とライブラリの
+      // サムネ生成がそのまま動く姿にする）。残りは眠り控え＝V156 の仕掛けがそのまま効く
+      const wake = new Set<number>([0, 1, 2, 3, p.thumbFrame ?? 0]);
+      for (const i of wake) {
+        const f = p.frames[i];
+        if (f) await wakeFrame(p, f, "read");
+      }
+    }
+    return p;
+  }
+
   // V154b: **gzip のマジック（1f 8b）があれば、それは gzip。**
   //
   // 以前はここが無条件の try/catch で、展開に失敗すると**gzip の生バイトをそのまま
@@ -814,7 +815,16 @@ export async function projectFromBytes(
     frames = (doc.frames as SerializedFrame[]).map((sf) => frameFromSerialized(sf));
     finalizeFrames(frames, bits);
   }
-  // 保存し直すときのビット幅（`Project.indexBits`）。上の2経路とも `validateDoc` で確かめ済み
+  return buildProject(doc, frames);
+}
+
+/** V163: doc＋frames → `Project` の組み立て（音声の復元・folders・layerDefs の掃除・
+ *  📌 shared の裁定・sanitize）。**PV5 と PV6 の両方がここを通る**——読み側の健全化が
+ *  形式ごとに割れない（片方だけ直して他方が置き去りになる事故を構造で防ぐ）。
+ *  中身は従来 projectFromBytes の後半の移設で無変更（shared 裁定に同一実体の
+ *  short-circuit だけ追加＝PV6 は全コマが同じバッファを指すのが正常形のため）。 */
+function buildProject(doc: LoadedDoc, frames: Frame[]): Project {
+  // 保存し直すときのビット幅（`Project.indexBits`）。呼び出し側の各経路で確かめ済み
   const bits: 8 | 16 = doc.indexBits === 16 ? 16 : 8;
   // 音声の復元。破損していても絵は開けるよう、失敗は隔離する（従来方針）
   // - v5: { bgm, se[] } をそのまま復元
@@ -958,6 +968,8 @@ export async function projectFromBytes(
       let differs = false;
       for (const f of frames) {
         const b = f.layers[ld.id];
+        // V163: 同一実体なら中身も同一（PV6 の遅延読みは全コマ同じバッファ＝ここで即決まる）
+        if (b && b === base) continue;
         if (!base || !b || b.length !== base.length) { differs = true; break; }
         for (let i = 0; i < b.length; i++) if (b[i] !== base[i]) { differs = true; break; }
         if (differs) break;
@@ -1024,6 +1036,10 @@ export async function verifySavedBytes(
     frames,
   });
   if (!bytes || bytes.length === 0) return fail("empty-file");
+  // V163 (A-40): PV6 はトレーラで振り分けて専用の検証へ（W-6 の後継＝tier1.5:
+  // 構造＋境界＋ISIZE＋**全塊の CRC32 走査**。現行の全展開と同じ CRC32 級の強度を約7倍速で。
+  // 故意破損3種（塊1バイト・ヘッダ1バイト・トレーラ長）で赤になることは v163_smoke が固定）
+  if (isPV6(bytes)) return verifyPV6(bytes, expectFrames, 1.5);
   if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) {
     return fail(`not-gzip: head ${bytes[0]} ${bytes[1]}`);
   }
@@ -1068,7 +1084,7 @@ export async function verifySavedBytes(
   }
   const mv = head.match(/^\{"magic":"[A-Z]+","version":(\d+)/);
   const ver = mv ? Number(mv[1]) : NaN;
-  if (!Number.isFinite(ver) || ver < 1 || ver > PROJECT_VERSION) {
+  if (!Number.isFinite(ver) || ver < 1 || ver > PV5_VERSION) {
     return fail(`bad-version: ${mv?.[1] ?? "?"}`, rawBytes, frames);
   }
   if (!head.includes(`"width":${W},"height":${H}`)) {

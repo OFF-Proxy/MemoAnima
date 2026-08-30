@@ -164,7 +164,34 @@ type Settings = {
    *  `guideDone` とは別にしている——既存利用者は `guideDone: true` を持っているので、
    *  それを流用すると**更新確認のことを一度も知らされないまま**になる */
   updateNoticeShown?: boolean;
+  /** V163: 「旧形式（v1.5系）で保存する」を選んだ保存先（`"アルバム/ファイル名"`）。追加のみ。
+   *  ★これが無いと、旧形式で渡した作品を**開き直して Ctrl+S しただけで黙って新形式に化ける**
+   *  （Codex V163 指摘②）。保存のたびにチェック状態で追加/削除し、開くとき・オートセーブ復元の
+   *  ときに `EditorSaveContext.legacy` へ復元する。メモの移動/リネームには追従しない
+   *  （その場合は新形式に戻る＝保存先ピッカーで再選択できる）。上限は設けない——1件は
+   *  数十バイトで、旧形式を選ぶ操作自体がまれ */
+  legacyTargets?: string[];
 };
+
+/** V163: 旧形式の保存先キー。アルバム名に `/` は使えない（Windows のフォルダ名）ので区切りに使う */
+function legacyTargetKey(album: string, baseName: string): string {
+  return `${album}/${baseName}`;
+}
+function isLegacyTarget(album: string | null | undefined, baseName: string | null | undefined): boolean {
+  if (!album || !baseName) return false;
+  // 壊れた値（配列でない・文字列など）は「記録なし」に倒す（設定破損で挙動を変えない）
+  if (!Array.isArray(settings.legacyTargets)) return false;
+  return settings.legacyTargets.includes(legacyTargetKey(album, baseName));
+}
+/** 保存の確定時に呼ぶ（チェック状態を保存先ごとに覚える）。settings の書き出しは
+ *  呼び出し側（saveProject の lastAlbum 記憶）に相乗りする＝ここでは触るだけ */
+function rememberLegacyTarget(album: string, baseName: string, legacy: boolean): void {
+  const key = legacyTargetKey(album, baseName);
+  const list = Array.isArray(settings.legacyTargets) ? settings.legacyTargets : [];
+  const has = list.includes(key);
+  if (legacy && !has) settings.legacyTargets = [...list, key];
+  else if (!legacy && has) settings.legacyTargets = list.filter((k) => k !== key);
+}
 
 /** M7-2b: クレジット（後で差し替えやすいよう**この定数1箇所**に集約）。
  *  ★本名不使用（厳守・M7-2b改訂）: 配布物のどこにも本名を入れない。作者表記は「アルカナ (arcana)」のみ
@@ -1344,8 +1371,10 @@ async function pickAlbum(
  *  引数を null 許容にして、**意図を型で表す**ようにした＝訳文を比較する経路がゼロになる。 */
 async function pickSaveTarget(
   album: string | null,
-  defaultName: string
-): Promise<{ album: string; baseName: string } | null> {
+  defaultName: string,
+  // V163（作者決定②）: 旧形式（PV5）チェックの初期値。保存先ごとに editor が覚えている
+  legacyDefault: boolean
+): Promise<{ album: string; baseName: string; legacy: boolean } | null> {
   let albums: string[] = [];
   try {
     albums = await invoke<string[]>("list_albums", { libRoot: settings.libraryDir });
@@ -1369,6 +1398,8 @@ async function pickSaveTarget(
         <button class="minibtn" id="ps-newalbum" type="button">${t("common.saveTarget.newFolder.btn")}</button>
       </div>
       <div class="modal-field"><span>${t("common.saveTarget.fileName.label")}</span><input id="ps-name" type="text" /></div>
+      <label class="confirm-skip"><input type="checkbox" id="ps-legacy"${legacyDefault ? " checked" : ""}> <span>${t("common.saveTarget.legacy.msg")}</span></label>
+      <p class="modal-path" id="ps-fmtnote"></p>
       <p class="modal-path" id="ps-path"></p>
       <div class="modal-actions">
         <button class="btn primary" id="ps-ok">${t("common.save.btn")}</button>
@@ -1382,6 +1413,12 @@ async function pickSaveTarget(
     });
     const nameInput = box.querySelector("#ps-name") as HTMLInputElement;
     nameInput.value = defaultName;
+    // V163: 形式の断り書き（textContent 代入＝エスケープ不要の作法）。
+    // 文言は「新形式は旧版で開けない」ことの告知を兼ねる（REQ_format_pv6 §4）
+    const legacyCheck = box.querySelector("#ps-legacy") as HTMLInputElement;
+    (box.querySelector("#ps-fmtnote") as HTMLElement).textContent = t(
+      "common.saveTarget.legacyNote.msg"
+    );
     const pathEl = box.querySelector("#ps-path") as HTMLElement;
     const updatePath = () => {
       const nm = (nameInput.value.trim() || defaultName).replace(/\.(memoanima|animemo)$/i, "");
@@ -1410,7 +1447,7 @@ async function pickSaveTarget(
     });
     (box.querySelector("#ps-ok") as HTMLElement).addEventListener("click", () => {
       const baseName = (nameInput.value.trim() || defaultName).replace(/\.(memoanima|animemo)$/i, "");
-      close({ album: sel.value, baseName });
+      close({ album: sel.value, baseName, legacy: legacyCheck.checked });
     });
     (box.querySelector("#ps-cancel") as HTMLElement).addEventListener("click", () =>
       close(null)
@@ -1825,7 +1862,9 @@ function openImageImportDialog(
         }
         return;
       }
-      const target = await pickSaveTarget(null, o.title || defaultTitle); // M12-D: おまかせ
+      // M12-D: おまかせ。V163: この経路（DEV限定の画像取り込み）は旧形式（PV5）のまま書くので
+      // 形式チェックの初期値は false（チェックされても projectToBytes 固定＝値は使わない）
+      const target = await pickSaveTarget(null, o.title || defaultTitle, false);
       if (!target) return;
       busy = true;
       (q("#ii-ok") as HTMLButtonElement).disabled = true;
@@ -2007,25 +2046,8 @@ function showEditor(
         settings.customToneColor = on;
         invoke("save_settings", { settings }).catch(() => {});
       },
-      // V161 (B): Rust 側 gzip。チャンクは raw ボディ（number[] JSON を通さない＝M10-23 と同じ理由）
-      gzBegin: (level) => invoke<number>("gz_begin", { level }),
-      gzChunk: async (id, chunk) => {
-        await invoke("gz_chunk", packRawSave({ id }, [chunk]));
-      },
-      gzAbort: async (id) => {
-        await invoke("gz_abort", { id });
-      },
-      saveProjectGz: async (id, c, thumb) => {
-        const libRoot = c.libRoot || settings.libraryDir!;
-        c.libRoot = libRoot;
-        const path = await invoke<string>(
-          "save_project_gz",
-          packRawSave({ id, libRoot, album: c.album, name: c.baseName }, [thumb])
-        );
-        settings.lastAlbum = c.album;
-        invoke("save_settings", { settings }).catch(() => {});
-        return path;
-      },
+      // V163: V161-B の Rust 側 gzip（gz_begin/gz_chunk/gz_abort/save_project_gz）は撤去。
+      // PV6 は Worker が完成品を返すので、下の saveProject（1回の raw ボディ）だけで足りる
       saveProject: async (c, data, thumb) => {
         const libRoot = c.libRoot || settings.libraryDir!;
         c.libRoot = libRoot;
@@ -2037,6 +2059,8 @@ function showEditor(
         );
         // 最後に使ったアルバムを記憶（次回ピッカーの既定に）
         settings.lastAlbum = c.album;
+        // V163: 形式の選択も保存先ごとに記憶（旧形式の保存先を開き直して Ctrl+S しても化けない）
+        rememberLegacyTarget(c.album, c.baseName, c.legacy === true);
         invoke("save_settings", { settings }).catch(() => {});
         return path;
       },
@@ -2122,6 +2146,9 @@ async function openEditorWithProject(item: LibraryView) {
         libRoot: settings.libraryDir!,
         album: item.album,
         baseName: stripExt(item.name),
+        // V163: 旧形式を選んだ保存先なら Ctrl+S も旧形式のまま（Codex 指摘②:
+        // 再起動をまたいでも settings の記録から復元する）
+        legacy: isLegacyTarget(item.album, stripExt(item.name)),
       });
     });
   } catch (e) {
@@ -2211,6 +2238,8 @@ async function checkAutosave() {
             libRoot: settings.libraryDir!,
             album: String(meta.album),
             baseName: String(meta.baseName),
+            // V163: 旧形式を選んでいた保存先はオートセーブ復元後も旧形式のまま（Codex 指摘②）
+            legacy: isLegacyTarget(String(meta.album), String(meta.baseName)),
           }
         : null;
     showEditor(project, ctx, {

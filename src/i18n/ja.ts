@@ -28,6 +28,9 @@ const ja = {
   "common.saveTarget.fileName.label": "ファイル名",
   "common.saveTarget.newFolder.btn": "＋ 新規フォルダ",
   "common.saveTarget.newFolder.msg": "新しいフォルダ名",
+  "common.saveTarget.legacy.msg": "以前のバージョン（v1.5系）でも開ける形式で保存する",
+  "common.saveTarget.legacyNote.msg":
+    "ふだんはチェック不要です。この版の標準の保存形式は開く・保存が速くなりますが、v1.5系以前のメモアニマでは開けません。以前のバージョンで開く必要があるときだけチェックしてください。",
   "common.saveTarget.path.hint": "保存先: {dir}\\{album}\\{name}.memoanima",
   "common.yes.btn": "はい",
 

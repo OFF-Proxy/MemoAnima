@@ -30,6 +30,9 @@ const ko: Record<keyof typeof ja, string> = {
   "common.saveTarget.fileName.label": "파일 이름",
   "common.saveTarget.newFolder.btn": "＋ 새 폴더",
   "common.saveTarget.newFolder.msg": "새 폴더의 이름",
+  "common.saveTarget.legacy.msg": "이전 버전(v1.5 계열)에서도 열 수 있는 형식으로 저장",
+  "common.saveTarget.legacyNote.msg":
+    "평소에는 체크할 필요가 없습니다. 이 버전의 표준 저장 형식은 열기와 저장이 빨라지지만, v1.5 이전의 MemoAnima에서는 열 수 없습니다. 이전 버전에서 열어야 할 때만 체크하세요.",
   "common.saveTarget.path.hint": "저장 위치: {dir}\\{album}\\{name}.memoanima",
   "common.yes.btn": "예",
 

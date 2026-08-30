@@ -29,7 +29,7 @@ import {
   LayerDef,
 } from "../src/editor/model";
 import { compositeFrame, flattenIndexFrame } from "../src/editor/render";
-import { projectToBytes, projectFromBytes, PROJECT_VERSION } from "../src/editor/serialize";
+import { projectToBytes, projectFromBytes, PROJECT_VERSION, PV5_VERSION } from "../src/editor/serialize";
 import { buildWobbleFrames, WOBBLE_TABLE, WobbleKind, WobbleStrength } from "../src/editor/wobble";
 import { WarpField, applyWarp } from "../src/editor/warp";
 // M12-1c-2: 文言の pin が言語に左右されないよう ja に固定する（pin の文字列は変えていない）
@@ -275,7 +275,9 @@ const addLayer = (p: Project, name: string, parent?: string, clip?: boolean): La
 
 // ================= ① serialize（任意キー・PV5・正規化・旧 doc） =================
 await (async () => {
-  check("①保存 PROJECT_VERSION は 5 のまま", PROJECT_VERSION === 5);
+  // V163: 旧形式の書き手（projectToBytes）は 5 のまま。現行形式（PV6・pv6.ts）は 6
+  check("①旧形式の書き手 PV5_VERSION は 5 のまま", PV5_VERSION === 5);
+  check("①現行形式 PROJECT_VERSION は 6", PROJECT_VERSION === 6);
   const p = newProject("ser");
   p.layerDefs[1].clip = true;
   const bytes = await projectToBytes(p);

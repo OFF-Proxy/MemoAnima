@@ -1063,6 +1063,19 @@ function jaLiterals(
    */
   const SAFE_TOKENS = /flipnote\.js|import_flipnotes|scan_flipnote_folder|FlipnoteAudioTrack/gi;
   const hit = (s: string): string[] => [...new Set((s.replace(SAFE_TOKENS, "").match(BANNED) ?? []).map((x) => x))];
+
+  // HK1 (A-12 の恒久カナリア): `g` 付き正規表現を test() に渡す事故（lastIndex の持ち越しで
+  // **マッチした次の文字列を見逃す**）が再発したら、ここで2連続の後者を取りこぼして赤くなる。
+  // A-12 の修正（jaLiterals 内の probe 複製・08d5ee8）が生きていることを毎回確かめる
+  {
+    const canary = jaLiterals(
+      "hk1-canary.ts",
+      'const a = "Flipnote Studio desu"; const b = "Flipnote desu";',
+      BANNED
+    );
+    check("検査9-0: 禁止語2連続を両方拾う（A-12 の再発防止カナリア）", canary.length === 2, `${canary.length} 件`);
+  }
+
   const bad: string[] = [];
   const cut = (s: string) => (s.length > 70 ? s.slice(0, 68) + "…" : s);
 
@@ -1112,6 +1125,9 @@ function jaLiterals(
     ["release-assets/README_en.txt", /other such names are trademarks|trademarks or registered trademarks/, 1],
     // README.md は英語ブロックと日本語ブロックで各1行（どちらも1行に収まっている）
     ["README.md", /trademarks or registered trademarks|商標または登録商標/, 2],
+    // HK1 (A-23): BOOST 支援者メッセージ。zip にも公開リポにも入らないが**支援者へ届く配布文書**。
+    // 帰属表示は無いので許可0行（当たらない正規表現・想定0）
+    ["release-assets/boost/めっせーじ.txt", /(?!)/, 0],
   ];
   for (const [file, allow, expect] of DIST) {
     let allowed = 0;
@@ -1127,7 +1143,8 @@ function jaLiterals(
         bad.push(`  ${file}:${i + 1}  [${w.join(" ")}]  ${cut(line.trim())}`);
       });
     // 帰属表示は**消してはいけない**。許可パターンが消えたら気づけるようにする
-    if (allowed === 0) {
+    // （HK1: 想定0のファイル＝帰属表示を持たない boost 文面には出さない）
+    if (expect > 0 && allowed === 0) {
       warnings.push(`検査9: ${file} の商標帰属表示が見つからない（消していないか確認）`);
     } else if (allowed !== expect) {
       warnings.push(`検査9: ${file} の商標帰属表示が ${allowed} 行（想定 ${expect} 行）`);

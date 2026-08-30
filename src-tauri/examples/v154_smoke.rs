@@ -15,6 +15,8 @@
 //!   7. W-6  — 書いたものを読み戻して確かめ、違っていたら**前の版へ戻す**
 //!   8. W-10 — ログの伏せ字（利用者名を書かない）と上限（1MB・2世代）
 //!            （壊れたほうは `.broken` として残す＝消さない）
+//!   9. HK1 (A-22) — settings.json の書き込みが atomic_replace 流儀になり、
+//!      **書き込み途中で死んでも設定が壊れない**（各クラッシュ窓を実際に作って読ませる）
 //!
 //! **作者の実ライブラリには触らない。**引数で渡された（か一時フォルダに作った）場所だけを使う。
 
@@ -357,6 +359,66 @@ fn main() {
         .count();
     assert_eq!(files, 2, "ログが3つ以上ある（無限に育つ）");
     ok("2世代までで打ち止め（無限に育たない）");
+
+    // ---------------- 9. HK1 (A-22): settings.json の原子化 ----------------
+    // 隔離ディレクトリ（このスモークの一時フォルダの下）だけを使う。作者の実設定には触れない
+    {
+        let cfg = lib.join("hk1_settings");
+        fs::create_dir_all(&cfg).unwrap();
+        let v1 = serde_json::json!({ "lang": "ja", "theme": "dark", "gen": 1 });
+        let v2 = serde_json::json!({ "lang": "ja", "theme": "light", "gen": 2 });
+        let dest = cfg.join("settings.json");
+        let bak = cfg.join("settings.json.bak");
+
+        // 9-1: ふつうの往復
+        animemo_lib::save_settings_impl(&cfg, &v1).expect("save v1");
+        assert_eq!(animemo_lib::load_settings_impl(&cfg), v1);
+        ok("HK1: settings の書き込み→読み込みが往復する");
+
+        // 9-2: 2回目の書き込みで .bak に1世代前が残る（W-1 と同じ形）
+        animemo_lib::save_settings_impl(&cfg, &v2).expect("save v2");
+        assert_eq!(animemo_lib::load_settings_impl(&cfg), v2);
+        let bak_v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&bak).expect(".bak が無い")).unwrap();
+        assert_eq!(bak_v, v1, ".bak が1世代前になっていない");
+        ok("HK1: .bak に1世代前が残る");
+
+        // 9-3: クラッシュ窓① — tmp を書いている途中で死んだ（半端な tmp が残る）。
+        // dest は旧の完全な内容のまま＝読める
+        fs::write(cfg.join("settings.json.99.tmp"), b"{\"half\":").unwrap();
+        assert_eq!(animemo_lib::load_settings_impl(&cfg), v2);
+        ok("HK1: 窓①（tmp 書き込み中に死亡）でも設定は旧内容のまま読める");
+
+        // 9-4: クラッシュ窓② — `dest → .bak` の退避直後・確定 rename の前に死んだ。
+        // dest が存在しない瞬間。従来はここで「初回起動」と誤認して**全設定が既定に戻った**
+        fs::remove_file(&bak).ok();
+        fs::rename(&dest, &bak).unwrap(); // 窓②の状態を作る（dest 無し・.bak=直近）
+        assert_eq!(animemo_lib::load_settings_impl(&cfg), v2, "窓②で設定が失われた");
+        ok("HK1: 窓②（退避後・確定前に死亡）でも .bak から復旧する");
+
+        // 9-5: dest が壊れた JSON でも .bak から復旧し、壊れたものは .broken に残る
+        animemo_lib::save_settings_impl(&cfg, &v2).expect("save v2 again"); // 状態を直す
+        animemo_lib::save_settings_impl(&cfg, &v1).expect("save v1 (bak=v2)");
+        fs::write(&dest, b"{ broken json !!").unwrap();
+        assert_eq!(animemo_lib::load_settings_impl(&cfg), v2, ".bak からの復旧に失敗");
+        assert!(cfg.join("settings.json.broken").is_file(), "壊れた設定が .broken に残っていない");
+        ok("HK1: 壊れた settings は .broken へ退避し .bak から復旧する");
+
+        // 9-6: .bak も無いときだけ既定値＋ __recovered（フロントの案内はこのときだけ）
+        fs::remove_file(&dest).ok();
+        fs::remove_file(&bak).ok();
+        fs::remove_file(cfg.join("settings.json.broken")).ok();
+        fs::write(&dest, b"{ broken json !!").unwrap();
+        let got = animemo_lib::load_settings_impl(&cfg);
+        assert_eq!(got.get("__recovered"), Some(&serde_json::json!(true)), "__recovered が立っていない");
+        ok("HK1: .bak も無いときだけ既定値へ（__recovered でフロントが案内）");
+
+        // 9-7: まっさら（初回起動）は空オブジェクト
+        fs::remove_file(&dest).ok();
+        fs::remove_file(cfg.join("settings.json.broken")).ok();
+        assert_eq!(animemo_lib::load_settings_impl(&cfg), serde_json::json!({}));
+        ok("HK1: 初回起動は空オブジェクト（案内は出ない）");
+    }
 
     if temp {
         let _ = fs::remove_dir_all(&lib);

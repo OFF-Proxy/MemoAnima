@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.5.4
+ MemoAnima v1.6.0
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -16,6 +16,118 @@ Windows only.
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
 
+== CHANGED IN v1.6.0 ==
+- [Opening and saving are dramatically faster] The save format has been renewed
+  (the extension is still .memoanima - only the container inside changed). The
+  bigger the piece, the bigger the effect: measured on a piece with about 1,000
+  frames, opening went from about 40 seconds to 0.2 seconds, saving from about
+  30 seconds to 1-2 seconds, and files are about 30% smaller. Small pieces feel
+  the same as before.
+- [IMPORTANT] A piece saved with this version cannot be opened by MemoAnima
+  v1.5.x or earlier (they will say "This file was created by a newer version").
+  Also, if you go back to an older version after using this one, the autosave
+  backup cannot be read either. All your existing (old-format) pieces still open
+  exactly as before - just opening a file never rewrites it (it becomes the new
+  format when you save).
+- [You can still save in the old format] When you want to hand a file to someone
+  on an older version, tick "Save in a format that older versions (v1.5 and
+  earlier) can open" in the save-target dialog. That save target keeps using the
+  same format from then on.
+
+== CHANGED IN v1.5.10 ==
+- [You can keep drawing while saving] Until now, saving a large piece showed a
+  "Saving..." box and locked the screen until it finished (dozens of seconds for a
+  large piece). Now the picture exactly as it was when you pressed Save is saved in
+  the background, and you can keep drawing the whole time. A small "Saving..." note
+  appears in the bottom-right corner.
+  Note: what gets saved is the picture up to the moment you pressed Save. Anything
+  you draw during the save goes into the next save (and if you press Save while one
+  is running, it automatically saves once more when it finishes).
+- [Saving is faster] Saving a large piece takes much less time now. The file becomes
+  slightly (about 10%) larger, but it still opens in older versions of MemoAnima.
+- If you close the app or start an export while a save is still running, the app now
+  says "Please wait - still saving" and continues once it finishes.
+
+== FIXED IN v1.5.9 ==
+- [My patterns are no longer squashed] When the tone samples were made smaller in
+  v1.5.8, the samples for "My patterns" (the ones you register yourself) were
+  stretched sideways as well, which made them unreadable. Only those samples are back
+  at their original size. The 22 built-in patterns stay small, so the list still
+  scrolls much less.
+- [A "loading" message when you pick an animation] Clicking an animation on the home
+  screen can take a dozen seconds for a large piece, and until now nothing was shown
+  during that time, so it looked frozen. The loading message now appears here too
+  (after a short pause, so it never flickers for animations that open instantly).
+- [Timings are now recorded] How long opening, saving and moving between frames takes
+  is now written to a log file on your PC. It is the material for making the slow
+  parts faster in a future version.
+  Note: only the name of the operation, how long it took, and numbers such as the
+  frame and layer count are recorded. The name of your animation, the folder it is in
+  and the drawing itself are never written. You can get the log from Settings >
+  "Open the log folder". The log is never sent anywhere on its own - see "About
+  network access" below for what the app does connect to.
+
+== NEW AND FIXED IN v1.5.8 ==
+- [Layers are always in view] The right-hand panel is now two rows: tool settings on
+  top, layers underneath. However long the pen or shape settings get, the layers are
+  never pushed off the bottom of the screen any more. Drag the line between the two
+  rows to change their heights (double-click it for the original heights). The little
+  arrow in each row's header folds that row away.
+- [Erase this frame button] A button now sits next to Undo/Redo at the top left. It
+  does exactly what the same button in the left-hand tool column does - and if you
+  have an area selected, only the inside of that area is erased.
+- [Tones are easier to pick] The tone (pattern) samples are now small and wide, so
+  you can see the whole list with much less scrolling.
+- [Shift hint for shapes] The shape tool now says "Hold Shift for a perfect circle or
+  square". It always worked; it just was not written anywhere.
+- [Night paper] Settings now has a Colours section with two choices: Light (what you
+  have had all along) and Night paper (warm dark brown with cream text). It changes
+  the moment you press it.
+  Note: only the app's colours change. Your paper colour, your drawing and everything
+  you export stay exactly the same.
+
+== NEW AND FIXED IN v1.5.7 ==
+- [Layer lock] Layers now have a lock. A locked layer cannot be drawn on, so you can
+  protect a rough sketch or a background. If you try to draw on one, nothing is
+  changed and you are told the layer is locked. Folders can be locked too, which
+  protects everything inside. Show/hide, renaming, reordering, opacity, colour and
+  unlocking all still work while a layer is locked.
+- [Layer colour per frame] Changing a layer's colour used to change every frame.
+  Now you can colour only the frames you picked in the timeline. The colour chip
+  asks whether to use "only this frame", "the N selected" or "all frames".
+  Frames with their own colour get a thin coloured bar in the timeline. The drawing
+  itself never changes, so clearing the colour puts everything back.
+- [Playback audio drift fixed] When playing an animation from the library, the sound
+  could start slightly after the picture on the first loop. Playback now waits for the
+  sound to be ready, so it lines up from the very first loop.
+- Fixed the language buttons in Settings: the ones on the second row used to stretch.
+== CHANGED IN v1.5.6 ==
+- [Large animations are lighter] After an animation with many frames and layers is
+  opened, frames you are not looking at are now tucked away automatically. On an
+  animation of over 1,000 frames the drawing data takes about one twentieth of the
+  space, and the app as a whole uses about a fifth (measured: 1.9GB down to 0.4GB).
+  Not a single dot of your drawing changes. The tucking away happens gradually
+  after the file opens, so opening is just as fast as before.
+- Animations up to about 50 frames behave exactly as they did before - nothing changes.
+- Jumping to a distant frame can take a brief moment. The previous frame stays on
+  screen while it loads; it never goes blank.
+- Undo now goes back 200 steps instead of 64. On large animations the number is
+  reduced automatically to fit the memory available.
+- The memory panel has a new "Actually in use" row (large animations only).
+- Closing an animation and returning to the library now frees that animation's undo
+  history (it used to stay until you opened the next one).
+- When opening an animation, the frame count is now counted a second way and checked.
+  If the two do not agree the file is not opened and you are told - this stops an
+  animation from quietly losing a frame.
+== FIXED IN v1.5.5 ==
+- [Large animations could not be reopened] Saving an animation with many
+  frames and many layers could leave a file that would never open again.
+  Loading now reads the file in small pieces, so those files open normally.
+  Nothing has to be redrawn - the files you already have will open as they are.
+- When an animation takes a while to open, "Opening" now appears in the middle
+  of the screen. A large animation can take tens of seconds; it is not frozen.
+- Messages about something going wrong no longer start with "Error:"
+  (it was hard to read, and it buried the part that actually explains things).
 == FIXED IN v1.5.4 ==
 - [Data safety] If the app is closed while saving, your animation is no longer
   lost. The contents from just before the save are kept as a backup, and the

@@ -24,6 +24,9 @@ const zhHant: Partial<Record<keyof typeof ja, string>> = {
   "common.saveTarget.fileName.label": "檔案名稱",
   "common.saveTarget.newFolder.btn": "＋ 新增資料夾",
   "common.saveTarget.newFolder.msg": "新資料夾的名稱",
+  "common.saveTarget.legacy.msg": "以舊版本（v1.5 及更早）也能開啟的格式儲存",
+  "common.saveTarget.legacyNote.msg":
+    "通常不需勾選。本版本的標準儲存格式開啟與儲存更快，但 v1.5 及更早的 MemoAnima 無法開啟。僅在檔案需要於舊版本開啟時再勾選。",
   "common.saveTarget.path.hint": "儲存到: {dir}\\{album}\\{name}.memoanima",
   "common.yes.btn": "是",
   "lib.album.add.title": "建立相簿",

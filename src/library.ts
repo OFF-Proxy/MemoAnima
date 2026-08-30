@@ -8,6 +8,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { Player, parse } from "flipnote.js";
 import { Project, FPS_TABLE } from "./editor/model";
 import { compositeFrame, presentToCanvas, frameToPngBlob } from "./editor/render";
+// V163 (A-40): PV6 の遅延読みは窓の外のコマが**眠って**届く（V156 の控えの形）。
+// compositeFrame は眠りを知らない（`if (!lb) continue` で白紙になる）ので、
+// プレビューと書き出しはここで起こしてから使う
+import { wakeFrame, sleepFrame, frameHasAsleep, asleepCount, wakeLayersAllFrames } from "./editor/sleep";
 import { projectFromBytes } from "./editor/serialize";
 import { FrameSource, ExportAudioSource, noteSource, projectSource, formatSize } from "./editor/exporter";
 import { AudioPreview, pcmS16ToWav, bgmPlaybackRate, renderExportMix } from "./editor/audio";
@@ -1151,7 +1155,7 @@ export class LibraryScreen {
     const exp = document.createElement("button");
     exp.className = "chip export";
     exp.textContent = t("lib.chip.export.btn");
-    exp.onclick = () => this.exportSelected();
+    exp.onclick = () => void this.exportSelected();
     host.appendChild(exp);
     // M11-3: ドラッグ以外の移動導線（アルバムが多いとスクロールしながらのドラッグは厳しい）
     const mv = document.createElement("button");
@@ -1167,8 +1171,9 @@ export class LibraryScreen {
     host.appendChild(del);
   }
 
-  /** M6-1/2: 選択中の作品（.kwz/.animemo）を書き出す（.kwz直接でも元音を載せる） */
-  exportSelected() {
+  /** M6-1/2: 選択中の作品（.kwz/.animemo）を書き出す（.kwz直接でも元音を載せる）。
+   *  V163: 眠っている .memoanima（PV6 遅延読み）は全コマ起こしを待つため async に */
+  async exportSelected() {
     const it = this.selected;
     if (!it) return;
     const baseName = it.name.replace(/\.[^.]+$/, "");
@@ -1220,6 +1225,18 @@ export class LibraryScreen {
       }
       this.stopPreview();
       const pp = this.previewProject;
+      // ★V163: 書き出しは**全コマを起こしてから**（PV6 の遅延読みはほぼ全コマが眠っている。
+      // projectSource→compositeFrame は眠りを知らず白紙を出す）。読みで起こす＝控えは残る
+      if (asleepCount(pp) > 0) {
+        await runWithBusy("export.wake", t("ed.frameWait.label"), async () => {
+          await wakeLayersAllFrames(
+            pp,
+            pp.layerDefs.map((d) => d.id),
+            "read"
+          );
+        });
+        if (this.previewProject !== pp) return; // 起こしている間に別のメモへ移った
+      }
       this.cb.openExport(
         projectSource(pp),
         baseName,
@@ -1458,6 +1475,19 @@ export class LibraryScreen {
 
   private drawPreview() {
     if (!this.previewProject) return;
+    // ★V163: 眠っているコマは起こしてから描き直す（起こすのは読み＝控えは残る）。
+    // エディタの drawTrialFrame（V156 P-1）と同じ形: 起きるまでこの1コマは前の絵のまま
+    const pp = this.previewProject;
+    const cur = pp.frames[this.previewFrame];
+    if (cur && frameHasAsleep(cur)) {
+      const at = this.previewFrame;
+      void wakeFrame(pp, cur, "read").then(() => {
+        if (this.previewProject === pp && this.previewFrame === at) this.drawPreview();
+      });
+      this.prewakePreview();
+      return;
+    }
+    this.prewakePreview();
     const cv = $("#preview-host") as unknown as HTMLCanvasElement;
     // ノート表示（.ppm=256×192等）でバッキングが変わっている可能性があるため 320×240 に戻す
     if (cv.width !== 320 || cv.height !== 240) {
@@ -1467,6 +1497,25 @@ export class LibraryScreen {
     presentToCanvas(compositeFrame(this.previewProject, this.previewFrame), cv);
     // M11-16: 透明の紙は canvas の背景で薄い市松にする（データには触れない・実色の紙と見分けるため）
     cv.classList.toggle("paper-clear", this.previewProject.frames[this.previewFrame]?.paper === 0);
+  }
+
+  /** V163: プレビュー再生の先回り。進行方向の数コマを読みで起こし、
+   *  通り過ぎたコマを**只で**眠らせ直す（読み起こしの控えは生きている＝圧縮し直さない）。
+   *  これでメモリは「窓ぶん」から増えない（1,098コマ級でも起きているのは十数コマ）。
+   *  📌 共通レイヤーは眠り控えを持たない（decodePv6 が先に展開済み）ので freeOnly が素通しする */
+  private static readonly PREVIEW_AHEAD = 8;
+  private prewakePreview() {
+    const pp = this.previewProject;
+    if (!pp) return;
+    const n = pp.frames.length;
+    for (let k = 1; k <= LibraryScreen.PREVIEW_AHEAD; k++) {
+      const f = pp.frames[(this.previewFrame + k) % n];
+      if (f && frameHasAsleep(f)) void wakeFrame(pp, f, "read");
+    }
+    // 小さい作品（全部が窓に収まる）は片付けない＝起こす/眠らすの往復を作らない
+    if (n <= LibraryScreen.PREVIEW_AHEAD * 2 + 2) return;
+    const behind = pp.frames[(this.previewFrame - LibraryScreen.PREVIEW_AHEAD - 1 + n) % n];
+    if (behind) void sleepFrame(pp, behind, undefined, true /* 只で片付くものだけ */);
   }
 
   /** M5-1: 指定コマの配置SEを発火 */

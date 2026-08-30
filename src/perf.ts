@@ -37,6 +37,7 @@ export type PerfOp =
   | "layer.move"
   | "layer.lock"
   // そのほかの「待つ可能性のある処理」
+  | "export.wake" // V163: 書き出し前の全コマ起こし（PV6 遅延読み・眠り作品）
   | "play.start"
   | "draw.first" // pointerdown → 最初の描画
   | "tool.switch"

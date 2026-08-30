@@ -78,6 +78,7 @@ import {
   dropLayer,
   wakeLayersAllFrames,
   frameHasAsleep,
+  asleepCount,
   setStaleSleepLogger,
 } from "./sleep";
 import { FrameSource, projectSource, ExportAudioSource, formatBytes, formatSize } from "./exporter";
@@ -234,6 +235,10 @@ export interface EditorSaveContext {
   album: string;
   /** 拡張子なしのファイル名ベース */
   baseName: string;
+  /** V163: true＝**旧形式（PV5・v1.5系まで対応）**でこの保存先に書く（作者決定②）。
+   *  保存先ピッカーのチェックで選ぶ。**保存先ごとに覚える**——旧形式で書き出した
+   *  ファイルへ Ctrl+S すると黙って新形式に変わる、を防ぐ（共有目的が静かに壊れる）。 */
+  legacy?: boolean;
 }
 
 /** M11-17: パネル寸法（px）。settings.json の `layout` に保存する3つの数値 */
@@ -382,27 +387,22 @@ export interface EditorCallbacks {
   /** M17: 「🎨 登録した色で塗る」トグルが変わったら settings.json へ保存する */
   onCustomToneColorChange?: (on: boolean) => void;
   /** ライブラリ保存（Rust呼び出し）を委譲 */
-  /** V161 (B): Rust 側 gzip（gz_begin → gz_chunk × n → save_project_gz）。
-   *  無い環境（vite 単体・古いバックエンド）では未定義 or 失敗＝Worker 内 gzip へ fallback。 */
-  gzBegin?: (level: number) => Promise<number>;
-  gzChunk?: (id: number, chunk: Uint8Array) => Promise<void>;
-  gzAbort?: (id: number) => Promise<void>;
-  saveProjectGz?: (
-    id: number,
-    ctx: { libRoot: string; album: string; baseName: string },
-    thumbPng: Uint8Array
-  ) => Promise<string>;
+  // V163: V161-B の Rust 側 gzip（gzBegin/gzChunk/gzAbort/saveProjectGz）は撤去した。
+  // PV6 は Worker が完成品（68.7MB 級）を返すので、従来の saveProject（1回の raw ボディ）で足りる
   saveProject: (
     ctx: EditorSaveContext,
     data: Uint8Array,
     thumbPng: Uint8Array
   ) => Promise<string>;
-  /** F-4: 保存先ピッカー（既存アルバム一覧＋新規作成＋ファイル名） */
+  /** F-4: 保存先ピッカー（既存アルバム一覧＋新規作成＋ファイル名）。
+   *  V163: 形式の選択（旧形式チェック）も**この1つのダイアログ**で受ける。
+   *  legacyDefault＝チェックの初期値（保存先に覚えている値）・戻りの legacy＝選ばれた値 */
   pickSaveTarget: (
     /** M12-D: 入れたいアルバム。**null＝おまかせ**（呼び出し側は既定名の文字列を作らない） */
     album: string | null,
-    defaultName: string
-  ) => Promise<{ album: string; baseName: string } | null>;
+    defaultName: string,
+    legacyDefault: boolean
+  ) => Promise<{ album: string; baseName: string; legacy: boolean } | null>;
   /** F-3: オートセーブ（アプリ設定領域へ・原子的保存はRust側） */
   autosave: (data: Uint8Array, meta: Record<string, unknown>) => Promise<void>;
   clearAutosave: () => Promise<void>;
@@ -1233,7 +1233,11 @@ export class Editor {
     //（スパイク実測: 50コマ×3レイヤーで減らせるのは 11 MiB しかなく、遅くなる理由だけが残る）。
     // 開いた直後は全部起きている——条件1「先に全部圧縮しない」ので、
     // 片付けは `nudgeSweep()` が背景で少しずつ進める
-    this.sleepOn = projectBytes(project) >= Editor.SLEEP_MIN_BYTES;
+    // V163: PV6 の遅延読みは**眠り控えを持った姿**で届く。論理サイズがしきい値を割っていても
+    // 眠っているコマがあるなら sleepOn を立てる（立てないと renderCanvas が起こさず白紙になる）。
+    // 通常は projectFromBytes 側のしきい値（PV6_EAGER_MAX_RAW）と揃っているので保険の側
+    this.sleepOn =
+      projectBytes(project) >= Editor.SLEEP_MIN_BYTES || asleepCount(project) > 0;
     this.sweepCursor = 0;
     // 数え漏れを拾ったときの記録（W-10 の常時ログへ。名前もパスも出さない）
     setStaleSleepLogger(
@@ -1533,14 +1537,18 @@ export class Editor {
     this.autosavePending = false;
     const epoch = this.autosaveEpoch;
     const job = (async () => {
-      const { projectToBytesInterruptible, verifySavedBytes } = await import("./serialize");
+      const { verifySavedBytes } = await import("./serialize");
+      const { encodePV6 } = await import("./pv6");
       // M10-23: 大型作品でエンコードがメインスレッドを数秒塞いでいた（300ページで約2.7秒
       // →ペンの pointerdown が最大1.9秒待たされる実測）。チャンクごとに入力へ譲り、
       // エンコード中に編集が起きたら破棄して次の機会に回す（途切れたスナップショットは
       // 決して書かない）。変更は必ず dirty→autosavePending か history.mutations に現れる
       //（bufferChangeEntry の onApply / afterFrameStructureChange 等が dirty を立てる）
+      // V163: オートセーブも現行形式（PV6）で書く。眠っている塊は控えをそのまま写すので、
+      // 掃除の済んだ大きい作品では従来（全コマ base64+gzip）より桁違いに軽い。
+      // 復元は projectFromBytes の振り分けがそのまま読む（AMAS1 の皮は従来どおり）
       const hist0 = this.history.mutations;
-      const data = await projectToBytesInterruptible(this.project, {
+      const r = await encodePV6(this.project, {
         yieldNow: yieldToInput,
         aborted: () =>
           !this.mounted ||
@@ -1552,6 +1560,7 @@ export class Editor {
           !!this.floatBuf ||
           this.cornerActive,
       });
+      const data = r?.bytes ?? null;
       if (!data) {
         // 中断（エンコード中に編集が始まった等）。変更は残っているので保存待ちに戻し、
         // 次の15秒周期を待たずに、ペンを置いた隙間で保存できるよう短い再試行を1回だけ予約
@@ -1610,6 +1619,8 @@ export class Editor {
       this.endBusy();
     }
     if (!v && this.autosavePending) void this.runAutosave();
+    // V163: 書き出し前の「全コマ起こし」を眠らせ直す（読みで起こしたので只＝freeOnly で片付く）
+    if (!v && this.sleepOn) this.nudgeSweep();
   }
 
   /** 進行中のオートセーブを待ち、以後の古い書き込みを無効化してからスロットを消す */
@@ -6117,6 +6128,23 @@ export class Editor {
       // V161 (A): 書き出しは保存完了を待つ（同じ作品を書き出しと保存が同時に読まない）
       await this.waitForSave();
       if (this.playing) this.stopPlayback();
+      // ★V163: 書き出しは**全コマを起こしてから**。`projectSource` の `getFrameRgba` は
+      // 同期の `compositeFrame` で、眠っているレイヤーは `if (!lb) continue` で**音もなく
+      // 白紙になる**（V156 からの穴。PV6 の遅延読みでは開いた直後ほぼ全コマが眠っている
+      // ので、塞がないと書き出しが白紙だらけになる）。読みで起こす＝控えは残るので、
+      // 書き出し後の眠らせ直しは只（freeOnly）で済む
+      if (this.sleepOn && asleepCount(this.project) > 0) {
+        const hide = this.cb.busy?.(t("ed.frameWait.label"));
+        try {
+          await wakeLayersAllFrames(
+            this.project,
+            this.project.layerDefs.map((d) => d.id),
+            "read"
+          );
+        } finally {
+          hide?.();
+        }
+      }
       this.cb.openExport(
         projectSource(this.project),
         (this.project.meta.title || untitledTitle()).replace(/\.[^.]+$/, ""),
@@ -6137,6 +6165,12 @@ export class Editor {
       if (this.xformGuard()) return; // 変形/歪みの未確定があるときは先に確定させる
       await this.waitForSave(); // V161（Codex 指摘④）: 書き出し系はどれも保存完了を待つ
       if (this.playing) this.stopPlayback();
+      // V163: いま見ているコマは窓の中でほぼ必ず起きているが、眠っていたら白紙が出る
+      // （compositeFrame は眠りを知らない）ので、1コマだけ読みで起こす（数十ms）
+      {
+        const fr = this.project.frames[this.frameIndex];
+        if (this.sleepOn && fr && frameHasAsleep(fr)) await wakeFrame(this.project, fr, "read");
+      }
       this.cb.openImageExport?.(
         this.project,
         this.frameIndex,
@@ -6933,12 +6967,14 @@ export class Editor {
       const defName =
         this.saveCtx?.baseName ??
         (this.project.meta.title || untitledTitle()).replace(/\.[^.]+$/, "");
-      const picked = await this.cb.pickSaveTarget(defAlbum, defName);
+      // V163: 形式チェックの初期値＝この保存先に覚えている値（無ければ新形式）
+      const picked = await this.cb.pickSaveTarget(defAlbum, defName, this.saveCtx?.legacy === true);
       if (!picked) return false;
       this.saveCtx = {
         libRoot: this.saveCtx?.libRoot ?? "",
         album: picked.album,
         baseName: picked.baseName,
+        legacy: picked.legacy,
       };
     }
     // V161 (A): ここから先は**背景**で走る。編集ロックはかけない（W-9 は保存では外した・要件）。
@@ -6966,10 +7002,10 @@ export class Editor {
    *  （V160 S-2 で実証: 眠り控えの z は生成後不変・破棄は参照の付け替えなので clone は安全。
    *   起きている生バッファと音声データは clone がコピーする）。
    *
-   *  ★圧縮は2経路（B）:
-   *   - Rust が使えれば: Worker は gzip **前**の JSON チャンクを返し、ここから
-   *     `gzChunk` で Rust へ流す → `saveProjectGz`（flate2 level 3・実測 6.7 秒）
-   *   - 使えなければ: Worker 内 CompressionStream（v1.5.9 と同一出力）→ 従来の `saveProject`
+   *  ★形式は2つ（V163・作者決定②）:
+   *   - 既定 "pv6": 現行形式。Worker が完成品（68.7MB 級）を1回で返す＝V161-B の
+   *     Rust 側 gzip（チャンク集積）は不要になったので撤去した
+   *   - `saveCtx.legacy` のとき "gzip": 旧形式（PV5）。v1.5.9 以前と同一のバイト列
    *   どちらも書き込みは Rust の同じ `pclib::save_project`（tmp→.bak→rename→照合＝W-1 不変）。
    *
    *  ★検証（C・Cowork 裁定）: 書く前の重複検証は落とし、**ディスクから読み戻す側だけ**残す
@@ -6977,18 +7013,7 @@ export class Editor {
   private async runBackgroundSave(): Promise<boolean> {
     const t0 = performance.now();
     const ctx = this.saveCtx!;
-    let gzId: number | null = null;
     try {
-      // B: Rust の圧縮が使えるか先に確かめる（vite 単体などでは失敗→ Worker 内 gzip へ）。
-      // ★スナップショットの基準点より**前**にやる（Codex 指摘⑤: この await の間に描いた線が
-      //  「保存に入るのに dirty は残る」ズレを作らないため。基準点から postMessage までは同期）
-      if (this.cb.gzBegin && this.cb.gzChunk && this.cb.saveProjectGz) {
-        try {
-          gzId = await this.cb.gzBegin(3); // level 3 ＝ +9% と引き換えに 3.5 倍速（V160 実測）
-        } catch {
-          gzId = null;
-        }
-      }
       const worker = this.ensureSaveWorker();
       const seq = ++this.saveSeq;
       // M10-14: 手動保存のときだけサムネコマを更新（従来どおり）
@@ -7004,26 +7029,13 @@ export class Editor {
       //  Worker のエンコードが下の `frameToPngBlob` の await より先に終わり、
       //  `done` が**誰も聞いていないうちに**発火して保存が永遠に待ち続ける
       // （ハーネスの故意破損テストで実際に踏んだ——大きい作品では出ない競合）。
-      // chunks モードでは届いたチャンクをその場で Rust へ流し、
-      // 流し終えてから ack を返す（＝Worker 側が作り溜めない・背圧）
       const encodedPromise = new Promise<Uint8Array | null>((resolve, reject) => {
         const onMsg = (ev: MessageEvent) => {
           const d = ev.data as
-            | { kind: "chunk"; seq: number; bytes: Uint8Array }
             | { kind: "done"; seq: number; bytes?: Uint8Array }
             | { kind: "error"; seq: number; message: string };
           if (!d || d.seq !== seq) return;
-          if (d.kind === "chunk") {
-            void (async () => {
-              try {
-                await this.cb.gzChunk!(gzId!, d.bytes);
-                worker.postMessage({ kind: "ack", seq });
-              } catch (err) {
-                cleanup();
-                reject(err instanceof Error ? err : new Error(String(err)));
-              }
-            })();
-          } else if (d.kind === "done") {
+          if (d.kind === "done") {
             cleanup();
             resolve(d.bytes ?? null);
           } else {
@@ -7047,7 +7059,8 @@ export class Editor {
       worker.postMessage({
         kind: "encode",
         seq,
-        mode: gzId != null ? "chunks" : "gzip",
+        // V163: 既定は現行形式（PV6）。旧形式チェックの保存先だけ PV5（作者決定②）
+        mode: ctx.legacy ? "gzip" : "pv6",
         project: this.project,
       });
       // ---- ここから編集は自由（この await の間、メインスレッドは空いている） ----
@@ -7057,15 +7070,8 @@ export class Editor {
       const blob = await frameToPngBlob(this.project, this.project.thumbFrame);
       const thumb = blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
       const encoded = await encodedPromise;
-      let path: string;
-      const gzWasUsed = gzId != null;
-      if (gzId != null) {
-        path = await this.cb.saveProjectGz!(gzId, ctx, thumb);
-        gzId = null; // 確定した＝もう abort しない
-      } else {
-        if (!encoded) return this.reportSaveBroken("encode", "worker returned no bytes");
-        path = await this.cb.saveProject(ctx, encoded, thumb);
-      }
+      if (!encoded) return this.reportSaveBroken("encode", "worker returned no bytes");
+      const path = await this.cb.saveProject(ctx, encoded, thumb);
       // V154 (W-6) → V161 (C): 検証は**ディスクから読み戻す側だけ**（書く前の重複は落とした）。
       // 壊れたものを書いてしまう危険は Rust の byte 照合（verify_or_rollback・W-1）が塞いでいて、
       // ここは「書けたものがアプリで開けるか」を確かめる最後の門
@@ -7082,7 +7088,7 @@ export class Editor {
       // オートセーブにも触らない（あちらのほうが新しい状態を守っている。
       // 次の15秒周期が最新の姿で上書きする）
       this.cb.appendLog?.(
-        `[V161] save ok frames=${expectFrames} rust=${gzWasUsed ? "y" : "n"} ms=${Math.round(
+        `[V161] save ok frames=${expectFrames} fmt=${ctx.legacy ? "pv5" : "pv6"} ms=${Math.round(
           performance.now() - t0
         )}`
       );
@@ -7095,9 +7101,6 @@ export class Editor {
       this.cb.onSaved(path);
       return true;
     } catch (e) {
-      // Rust 側に食べかけのジョブを残さない（次の保存は新しい begin をするので実害は無いが、
-      // 2.1GB 級の圧縮途中バッファを持ち続けさせない）
-      if (gzId != null) void this.cb.gzAbort?.(gzId).catch(() => {});
       return this.reportSaveBroken("exception", String(e), e);
     } finally {
       // V159 (G-1): 保存にかかった時間（保存先ピッカーを待った時間は `t0` の位置ゆえ入らない）。

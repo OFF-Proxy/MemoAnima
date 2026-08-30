@@ -28,6 +28,9 @@ const es: Record<keyof typeof ja, string> = {
   "common.saveTarget.fileName.label": "Nombre del archivo",
   "common.saveTarget.newFolder.btn": "＋ Nueva carpeta",
   "common.saveTarget.newFolder.msg": "Nombre de la nueva carpeta",
+  "common.saveTarget.legacy.msg": "Guardar en un formato que las versiones anteriores (v1.5 y anteriores) pueden abrir",
+  "common.saveTarget.legacyNote.msg":
+    "Normalmente no hace falta marcarlo. El formato estándar de esta versión abre y guarda más rápido, pero no puede abrirse con MemoAnima v1.5 o anterior. Márcalo solo si el archivo debe abrirse en una versión anterior.",
   "common.saveTarget.path.hint": "Se guardará en: {dir}\\{album}\\{name}.memoanima",
   "common.yes.btn": "Sí",
 
