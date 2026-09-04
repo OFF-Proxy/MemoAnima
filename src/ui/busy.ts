@@ -49,7 +49,12 @@ export function busyVisible(): boolean {
 export async function runWithBusy<T>(
   op: PerfOp,
   msg: string,
-  fn: () => Promise<T>
+  fn: () => Promise<T>,
+  /** V166: 出すまでの待ち時間。既定は従来どおり `BUSY_DELAY_MS`（450ms）。
+   *  エディタの重い操作（`runHeavy`）は `PERF_MIN_MS`（50ms）を渡す——**長タスクとして
+   *  記録される区間には必ず表示が出ている**状態にするため（要件 §3 基準3）。
+   *  ★遅延を関数の引数にしたのは、**表示の仕組みを2つに増やさない**ため。 */
+  delayMs: number = BUSY_DELAY_MS
 ): Promise<T> {
   const t0 = perfNow();
   // ★V159（Codex 指摘①）: **「最初に始めた人」ではなく「1つでも走っているか」で決める。**
@@ -63,7 +68,7 @@ export async function runWithBusy<T>(
     timer = setTimeout(() => {
       timer = null;
       if (depth > 0 && impl) hide = impl(msg);
-    }, BUSY_DELAY_MS) as unknown as number;
+    }, delayMs) as unknown as number;
   }
   try {
     return await fn();
@@ -79,6 +84,32 @@ export async function runWithBusy<T>(
     }
     perfDone(op, t0);
   }
+}
+
+/** V166: **描く隙を1回だけ渡す**（重い処理を始める前に、無効になった見た目を描かせる）。
+ *
+ *  ★`setTimeout(…, 0)` を使わない理由（実測で踏んだ）: ウィンドウが**隠れている**とき、
+ *   Chromium は `setTimeout` を **1秒までクランプ**する。重い操作のたびに1拍譲ると、
+ *   隠れた窓では**1操作ごとに約1秒**増えた（コマを40枚足すのに 9 秒——実測）。
+ *   `MessageChannel` はこのクランプの対象外なので、見えていても隠れていても
+ *   「次のタスクまで」で戻ってくる。
+ *
+ *  ★`requestAnimationFrame` も使えない: 隠れている間は**1回も発火しない**（永久に止まる）。 */
+export function yieldToPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    // MessageChannel が無い環境（テスト・古い WebView）では、待たずに進む。
+    // 「描く隙を渡せない」だけで、機能は変わらない
+    if (typeof MessageChannel === "undefined") {
+      resolve();
+      return;
+    }
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => {
+      ch.port1.close();
+      resolve();
+    };
+    ch.port2.postMessage(0);
+  });
 }
 
 /** テスト用。 */

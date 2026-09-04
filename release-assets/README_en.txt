@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.6.0
+ MemoAnima v1.7.0
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -16,13 +16,51 @@ Windows only.
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
 
+== CHANGED IN v1.7.0 ==
+- [Onion skin now has a direction] Previous frames only, next frames only, or
+  both. When both sides at once get busy, you can keep just the side you want.
+  The default is "both", which looks exactly the same as it did in v1.6.0.
+- [Onion skin moved to where it can be found] It now sits at the top of the
+  right panel. It used to be further down, out of view on smaller screens
+  unless you scrolled.
+- [A shelf for the colors you use often] Up to 48 of them. Even when a
+  full-colour piece accumulates a lot of colours, the ones you picked stay one
+  click away. The shelf persists across pieces and across restarts.
+- [Frames can be added in bulk] 1-100 at a time, and you can add duplicates of
+  the current frame instead of blank ones. One undo takes them all back.
+- ["My patterns" is visible before you register your first one] Until now the
+  section did not appear at all until you had one, so there was no way to know
+  the feature existed. The scratch eraser now explains what it does on screen
+  as well.
+- [Fewer steps in the shortcut settings] You can press "Change" directly on a
+  built-in set; your own copy is created automatically.
+- [Ctrl / Shift / Alt can be assigned as a "tap"] That is, pressed on their own
+  and released quickly. Useful when a pen tablet's express key is set to send a
+  modifier. Long presses and key combinations behave exactly as before.
+- [Better stability with very large pieces] Pasting a large number of frames no
+  longer crashes the app. Long operations show a "working..." notice and cannot
+  be triggered twice, and when a paste would not fit you are told in advance
+  roughly how many frames still would.
+- [Fixed a save failure that could happen on very large pieces] It showed up
+  right after a big paste, for example. If the app needs to tidy up memory
+  before saving, a small note appears at the bottom right - you can keep
+  drawing while it does. Export no longer expands every frame at once before
+  starting; frames are read one at a time.
+- [The same modifier key can no longer be claimed twice] Assigning one key both
+  as a "tap" and as "modifier + click" is now refused with a reason, because
+  the two would compete the moment the pen touches the canvas. Existing double
+  assignments are flagged in the settings screen. Picking a colour with the
+  eyedropper now shows a brief notice.
+- This update covers display, settings, input and stability. Your project files
+  are unchanged and stay in the same format as v1.6.0.
+
 == CHANGED IN v1.6.0 ==
 - [Opening and saving are dramatically faster] The save format has been renewed
   (the extension is still .memoanima - only the container inside changed). The
   bigger the piece, the bigger the effect: measured on a piece with about 1,000
-  frames, opening went from about 40 seconds to 0.2 seconds, saving from about
-  30 seconds to 1-2 seconds, and files are about 30% smaller. Small pieces feel
-  the same as before.
+  frames, opening went from about 20 seconds to about 3 seconds. Saving is
+  faster too, and you can keep drawing while it saves. Files are about 30%
+  smaller. Small pieces feel the same as before.
 - [IMPORTANT] A piece saved with this version cannot be opened by MemoAnima
   v1.5.x or earlier (they will say "This file was created by a newer version").
   Also, if you go back to an older version after using this one, the autosave

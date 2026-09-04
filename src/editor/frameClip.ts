@@ -80,6 +80,35 @@ export async function unpackClip(clip: FrameClip): Promise<void> {
   clip.packed = false;
 }
 
+/** V166 (Codex 指摘・優先度高③): **開く前に**「開いたら何バイトになるか」を答える。
+ *
+ *  ★なぜ要るか: 貼り付けは `unpackClip` で**クリップ全体を生バッファへ展開してから**
+ *   見積もりに来ていた。1,098コマ×20レイヤーなら、断るより先に 1.57GB を確保してしまう
+ *   ——**断る意味が無い**。展開は畳んだ側の「枚数」と「幅」だけで量が決まるので、
+ *   ここで数えて呼び出し側が展開前に断れるようにする。
+ *
+ *  畳んでいない（`packed` でない）ときは、いま抱えている生バッファの合計を返す。 */
+export function clipUnpackedBytes(clip: FrameClip): number {
+  let n = 0;
+  for (const e of clip.frames) {
+    if (clip.packed) n += (e.layersZ?.length ?? 0) * PIXELS * (e.wide ? 2 : 1);
+    else for (const lay of e.layers) n += lay.byteLength;
+  }
+  return n;
+}
+
+/** V166 (Codex 指摘・優先度高②): コピーが写し取る量（`makeClip` が確保する量）。
+ *  `makeClip` は「選んだコマ × そのコマの実効レイヤー数」だけ `copyIndexBuf` する。 */
+export function clipCopyBytes(p: Project, indices: number[]): number {
+  const w = p.indexBits === 16 ? 2 : 1;
+  let faces = 0;
+  for (const fi of indices) {
+    const f = p.frames[fi];
+    if (f) faces += effectiveLayerIds(p, f).length;
+  }
+  return faces * PIXELS * w;
+}
+
 /** V156 (P-5): 畳んだ状態で抱えているバイト数（コピー直後のトースト用）。 */
 export function clipBytes(clip: FrameClip): number {
   let n = 0;

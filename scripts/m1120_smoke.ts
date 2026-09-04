@@ -37,7 +37,7 @@ import { setLang } from "../src/i18n";
 setLang("ja");
 // exporter.ts は gif.js（ブラウザ前提・`self` を参照）を静的 import するので、Node では self を敷いてから動的 import
 (globalThis as unknown as { self: unknown }).self = globalThis;
-const { projectSource } = await import("../src/editor/exporter");
+const { projectSource } = await import("../src/editor/frameSource"); // V168: 供給元は DOM 非依存の frameSource.ts へ移った
 
 let pass = 0;
 let fail = 0;
@@ -183,7 +183,7 @@ const addLayer = (p: Project, name: string, parent?: string, clip?: boolean): La
   // 編集画面と同じ compositeFrame の結果がそのまま出る（枠外は紙・枠上は赤）
   {
     const src = projectSource(p);
-    const rgba = src.getFrameRgba(0);
+    const rgba = await src.getFrameRgba(0); // V168 (E-1): 供給元は async（Codex 指摘: tsc の範囲外だった取りこぼし）
     const px = (x: number, y: number) => rgba[at(x, y) * 4] | (rgba[at(x, y) * 4 + 1] << 8) | (rgba[at(x, y) * 4 + 2] << 16);
     check("①書き出し FrameSource.getFrameRgba: 枠外 (95,95) 紙色・枠上 (100,100) 赤（clip 適用後）", px(95, 95) === paperRgb && px(100, 100) === hex2rgb("#ff2a2a"));
   }

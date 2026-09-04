@@ -28,6 +28,8 @@ fn app_info() -> serde_json::Value {
 }
 
 /// 任意のファイルをバイト列で読み込む（ビューアが .kwz/.ppm を flipnote.js に渡すのに使う）。
+/// ⚠ V169: **.memoanima を読む道には使わない**（JSON 配列は 128MiB＝134,217,728 要素でレンダラが致命停止する）。
+/// 呼び出し元一覧（**一覧が正**・増えたら赤・V170 で画像が抜けた）は `scripts/v169_smoke.ts` の検査1。.memoanima と画像は `read_file_raw` を通す。
 #[tauri::command]
 fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
     fs::read(&path).map_err(|e| format!("読み込み失敗: {e}"))

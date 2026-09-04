@@ -11,13 +11,13 @@ import { compositeFrame, presentToCanvas, frameToPngBlob } from "./editor/render
 // V163 (A-40): PV6 の遅延読みは窓の外のコマが**眠って**届く（V156 の控えの形）。
 // compositeFrame は眠りを知らない（`if (!lb) continue` で白紙になる）ので、
 // プレビューと書き出しはここで起こしてから使う
-import { wakeFrame, sleepFrame, frameHasAsleep, asleepCount, wakeLayersAllFrames } from "./editor/sleep";
+import { wakeFrame, sleepFrame, frameHasAsleep } from "./editor/sleep"; // V168 (E-3): 全コマ起こしを撤去
 import { projectFromBytes } from "./editor/serialize";
 import { FrameSource, ExportAudioSource, noteSource, projectSource, formatSize } from "./editor/exporter";
 import { AudioPreview, pcmS16ToWav, bgmPlaybackRate, renderExportMix } from "./editor/audio";
 import type { BgmTrack } from "./editor/model";
 import { t, getLang } from "./i18n";
-import { errText } from "./ui/errText";
+import { errText, tooLargeBytes } from "./ui/errText"; // V169 (B-3): 門番の TOO_LARGE を人が読める文へ
 // V159 (G-3): 長くかかりうる処理の共通入口（読み込み中の表示・遅延・計測はここに1つ）
 import { runWithBusy } from "./ui/busy";
 import { collabAlbumName, defaultAlbumName, newAlbumName } from "./i18n/defaults";
@@ -76,6 +76,27 @@ export interface LibraryCallbacks {
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) =>
   document.querySelector(sel) as T;
+
+/** M10-16 → V169 (B-2): .memoanima を読む**唯一の道**（`main.ts` からここへ移した・写しは作らない）。
+ *  raw IPC（`tauri::ipc::Response`＝生バイト）で読む。`read_file_bytes`（`Vec<u8>` → JSON 配列）は
+ *  **128MiB（V8 `FixedArray::kMaxLength` = 134,217,728 要素）を超えた瞬間にレンダラが致命停止**する
+ *  （crbug.com/1201626・例外ではない＝catch もログも効かない＝画面が真っ白）。V168 で保存できるようにした
+ *  大きさ（再現データ 138,540,328 B）がちょうどこの境界をまたいだ。境界の下でも JSON 道は
+ *  文字列 ≈3.6倍＋配列 4B×要素数＋Uint8Array を**同時に**持つ。生バイトなら本体を1回持つだけ。
+ *  .memoanima としてあり得ない巨大ファイルは読み込む**前に** Rust 側で弾く（M10-7 の TOO_LARGE 方式・512MiB。
+ *  `read_file_raw` は 572MB 成功・1.1GB でアプリごと落ちた実測＝上げるのは A-59）。 */
+export const IMPORT_MAX_BYTES = 512 * 1024 * 1024;
+export async function readProjectRaw(path: string): Promise<Uint8Array> {
+  const raw = await invoke<ArrayBuffer | Uint8Array | number[]>("read_file_raw", {
+    path,
+    maxBytes: IMPORT_MAX_BYTES,
+  });
+  return raw instanceof Uint8Array
+    ? raw
+    : raw instanceof ArrayBuffer
+      ? new Uint8Array(raw)
+      : new Uint8Array(raw as number[]);
+}
 
 export class LibraryScreen {
   libRoot = "";
@@ -938,8 +959,9 @@ export class LibraryScreen {
             // .kwz 側と同じく、その場で生成して保存規約どおりの場所へ書き戻す
             //（次回からは即表示）。壊れたファイルは握りつぶしてプレースホルダのまま。
             try {
-              const bytes = await invoke<number[]>("read_file_bytes", { path: it.path });
-              const project = await projectFromBytes(new Uint8Array(bytes));
+              // V169 (B-1): 生バイトで読む（JSON 配列は 128MiB 超でレンダラが死ぬ）。512MiB 超は読む前に弾かれる
+              const bytes = await readProjectRaw(it.path);
+              const project = await projectFromBytes(bytes);
               const blob = await frameToPngBlob(project, project.thumbFrame ?? 0);
               if (!blob) return;
               img.src = URL.createObjectURL(blob);
@@ -1101,9 +1123,10 @@ export class LibraryScreen {
           } catch {
             /* noop */
           }
-          const bytes = await invoke<number[]>("read_file_bytes", { path: it.path });
+          // V169 (B-1): 生バイトで読む。**選んだだけで真っ白**になっていたのはここ（JSON 配列が 128MiB 超で致命停止）
+          const bytes = await readProjectRaw(it.path);
           if (stale()) return; // 読んでいる間に別のメモが選ばれた
-          const proj = await projectFromBytes(new Uint8Array(bytes));
+          const proj = await projectFromBytes(bytes);
           // 解析は重い（再現データで十数秒）。**ここで初めて `previewProject` に入れる**——
           // 先に入れてしまうと、古い読み込みが新しい選択のプレビューを上書きする
           if (stale()) return;
@@ -1132,7 +1155,19 @@ export class LibraryScreen {
    *  長い文だと省略記号で切られるので、**残るほうの帯に一本化**する。
    *  ここは選択したときのプレビュー失敗と、開こうとして失敗したとき（`main.ts`）の共通の出口。 */
   showLoadError(msg: string) {
-    this.renderMeta([t("lib.meta.loadError.label", { err: msg })]);
+    // V169 (B-3): 512MiB の門番（`readProjectRaw`）に当たったときは、生の `TOO_LARGE:<bytes>` ではなく
+    // 人が読める文にする——「約 X MB・上限 Y MB・ファイルは壊れていない・コマを減らして保存し直した版を開く」。
+    // 上限の数字は門番の定数からそのまま作る（別の数字を手で書かない）。**それ以外の失敗の文言は従来どおり**
+    const tooLarge = tooLargeBytes(msg);
+    const text =
+      tooLarge !== null
+        ? t("lib.open.tooLarge.msg", {
+            // Codex 指摘（中）: 四捨五入だと 512MiB+1B が「約 512 MB・上限 512 MB を超えています」になる。切り上げる
+            mb: String(Math.ceil(tooLarge / 1024 / 1024)),
+            max: String(IMPORT_MAX_BYTES / 1024 / 1024),
+          })
+        : t("lib.meta.loadError.label", { err: msg });
+    this.renderMeta([text]);
     // 失敗の文は長い（「…ファイルは壊れていません（中身: 約2.1GB／…）」）。
     // チップは既定で縮まない（flex の min-width:auto）ので、**この1つだけ折り返せる**ようにする
     ($("#stage-meta").firstElementChild as HTMLElement | null)?.classList.add("wrap");
@@ -1225,18 +1260,10 @@ export class LibraryScreen {
       }
       this.stopPreview();
       const pp = this.previewProject;
-      // ★V163: 書き出しは**全コマを起こしてから**（PV6 の遅延読みはほぼ全コマが眠っている。
-      // projectSource→compositeFrame は眠りを知らず白紙を出す）。読みで起こす＝控えは残る
-      if (asleepCount(pp) > 0) {
-        await runWithBusy("export.wake", t("ed.frameWait.label"), async () => {
-          await wakeLayersAllFrames(
-            pp,
-            pp.layerDefs.map((d) => d.id),
-            "read"
-          );
-        });
-        if (this.previewProject !== pp) return; // 起こしている間に別のメモへ移った
-      }
+      // ★V168 (E-3): **ここで全コマを起こさない**（V163 の `runWithBusy("export.wake", …)` を撤去）。
+      //  PV6 の遅延読みはほぼ全コマが眠っているが、白紙防止は `projectSource`（frameSource.ts）が
+      //  読む直前に起こすことで守る。入口で全部起こすと、目安の 10 倍級の作品では
+      //  論理サイズを丸ごと生で展開する見積りなしの確保になる（editor 側と同じ理由）
       this.cb.openExport(
         projectSource(pp),
         baseName,

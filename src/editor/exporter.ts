@@ -7,20 +7,13 @@ import { zipSync } from "fflate";
 import GIF from "gif.js";
 import UPNG from "upng-js";
 import gifWorkerUrl from "gif.js/dist/gif.worker.js?url";
-import { Project, FPS_TABLE, W, H, PIXELS } from "./model";
-import { compositeFrame } from "./render";
+import { W, H, PIXELS } from "./model";
 import { repeatWav } from "./audio"; // M16 (X-1): ループ時の音声（1周ミックスを N 連結）
 import { t } from "../i18n";
-
-export interface FrameSource {
-  /** 総コマ数 */
-  count: number;
-  /** 実fps（分数可） */
-  fps: number;
-  loop: boolean;
-  /** i コマ目の 320×240 RGBA（長さ W*H*4。呼び出しごとに独立のコピーを返す） */
-  getFrameRgba(i: number): Uint8ClampedArray;
-}
+// V168 (E): フレーム供給は DOM に依存しない `frameSource.ts` へ切り出した（Node のスモークが
+// 直接叩けるように）。既存の import 元（main.ts / library.ts）のために、ここから再輸出する
+import type { FrameSource } from "./frameSource";
+export { projectSource, noteSource, withRange, type FrameSource } from "./frameSource";
 
 export type ExportFormat = "mp4" | "gif" | "apng" | "pngzip";
 
@@ -361,6 +354,10 @@ export interface ExportOptions {
   /** M16 (X-1): MP4 のループ回数（1〜10・既定1）。映像はフレーム供給を N 周、音声は1周ミックスを N 連結。
    *  **MP4 以外は無視**。1（既定）のときはエンコーダ入力が従来と完全に同一（x1 バイト一致） */
   loopCount?: number;
+  /** V168（Codex 指摘・中）: GIF の固定パレット。**見積り（M11-23）で数えた結果をそのまま渡す**と、
+   *  `exportGif` が全コマをもう一度走査しない。V168 後は走査が「眠ったコマを起こす→戻す」を伴うので、
+   *  大きい作品で二重に走ると体感で重い。`undefined`＝自分で数える（従来）／`null`＝257色以上（NeuQuant） */
+  gifPalette?: number[] | null;
   /** M10-13: 透過部分を純白 #ffffff で塗ってから書き出す。
    *  .kwz 直接書き出しは透明画素をそのまま流すため、MP4 は yuv420p 変換で
    *  alpha が捨てられて黒、GIF は透明色の解釈がプレイヤー依存で黒く見える。
@@ -368,65 +365,7 @@ export interface ExportOptions {
   whiteBg: boolean;
 }
 
-/** .animemo / エディタの Project から */
-export function projectSource(p: Project): FrameSource {
-  return {
-    count: p.frames.length,
-    fps: FPS_TABLE[p.speedIndex] ?? 8,
-    loop: p.loop,
-    getFrameRgba(i: number): Uint8ClampedArray {
-      // compositeFrame は使い回しバッファではないが、明示コピーで独立性を保証（handoff §9）
-      const u32 = compositeFrame(p, i);
-      return new Uint8ClampedArray(u32.buffer.slice(0, PIXELS * 4));
-    },
-  };
-}
-
-/** flipnote.js の note（.kwz / .ppm）から。256×192(.ppm) は 320×240 の白紙へ中央配置 */
-export function noteSource(note: {
-  frameCount: number;
-  framerate: number;
-  imageWidth: number;
-  imageHeight: number;
-  meta?: { loop?: boolean };
-  getFramePixelsRgba(i: number): Uint32Array;
-}): FrameSource {
-  const nw = note.imageWidth;
-  const nh = note.imageHeight;
-  const ox = Math.floor((W - nw) / 2);
-  const oy = Math.floor((H - nh) / 2);
-  return {
-    count: note.frameCount,
-    fps: note.framerate,
-    loop: note.meta?.loop ?? true,
-    getFrameRgba(i: number): Uint8ClampedArray {
-      const px = note.getFramePixelsRgba(i);
-      if (nw === W && nh === H) {
-        return new Uint8ClampedArray(px.buffer.slice(px.byteOffset, px.byteOffset + PIXELS * 4));
-      }
-      // 中央配置（余白は白）
-      const out = new Uint32Array(PIXELS).fill(0xffffffff);
-      for (let y = 0; y < nh; y++) {
-        const src = y * nw;
-        const dst = (y + oy) * W + ox;
-        out.set(px.subarray(src, src + nw), dst);
-      }
-      return new Uint8ClampedArray(out.buffer);
-    },
-  };
-}
-
-/** コマ範囲 [a..b]（両端含む）に限定するラッパ */
-export function withRange(src: FrameSource, a: number, b: number): FrameSource {
-  const lo = Math.max(0, Math.min(a, b));
-  const hi = Math.min(src.count - 1, Math.max(a, b));
-  return {
-    count: hi - lo + 1,
-    fps: src.fps,
-    loop: src.loop,
-    getFrameRgba: (i) => src.getFrameRgba(lo + i),
-  };
-}
+// V168 (E): projectSource / noteSource / withRange は `frameSource.ts` へ移した（上で再輸出）
 
 /** 320×240 RGBA → 320N×240N へ nearest 拡大（canvas 使い回し） */
 class FrameScaler {
@@ -639,7 +578,7 @@ export async function exportPngZip(src: FrameSource, o: ExportOptions): Promise<
   const files: Record<string, Uint8Array> = {};
   for (let i = 0; i < src.count; i++) {
     if (o.cancel.cancelled) return CANCELLED;
-    const blob = await scaler.toPngBlob(src.getFrameRgba(i));
+    const blob = await scaler.toPngBlob(await src.getFrameRgba(i)); // V168 (E-1): 供給元は async
     if (!blob) throw new Error(t("export.pngGenFailed.msg"));
     // M11-21: 色チャンク（sRGB＋gAMA）を付ける。画素は不変
     files[`${pad4(i)}.png`] = withSrgbChunks(new Uint8Array(await blob.arrayBuffer()));
@@ -669,11 +608,11 @@ export const GIF_MAX_PALETTE = 256;
  * - 色の順は「最初に現れた順」＝決定的（同じ入力なら同じパレット・同じ索引）
  * - 不透明度 <1 のレイヤーが作るブレンド色（合成後の RGB）もそのまま実使用色として数える
  */
-export function collectGifPalette(src: FrameSource, whiteBg: boolean): number[] | null {
+export async function collectGifPalette(src: FrameSource, whiteBg: boolean): Promise<number[] | null> {
   const seen = new Set<number>();
   const order: number[] = [];
   for (let i = 0; i < src.count; i++) {
-    const rgba = src.getFrameRgba(i);
+    const rgba = await src.getFrameRgba(i); // V168 (E-1): 供給元は async（関数ごと async に）
     let prev = -1;
     for (let p = 0; p < PIXELS; p++) {
       const a = rgba[p * 4 + 3];
@@ -695,28 +634,31 @@ export function collectGifPalette(src: FrameSource, whiteBg: boolean): number[] 
   return pal;
 }
 
-export function exportGif(src: FrameSource, o: ExportOptions): Promise<Blob | null> {
-  return new Promise((resolve, reject) => {
-    const scaler = new FrameScaler(o.scale, o.whiteBg);
-    // U-1: GIF のディレイはセンチ秒粒度（gif.js が ms→cs へ丸め）。既知の制約
-    const delay = Math.round(1000 / src.fps);
-    // M11-22: 実使用色が 256 色以下なら固定パレット（NeuQuant を通らない＝色は完全一致・全コマ同一パレット・
-    // 2 コマ目以降のローカル色表なし）。257 色以上は従来どおり（オプションも従来と同一＝出力バイト列不変）
-    o.onProgress(0, src.count * 2, "countColors");
-    const palette = collectGifPalette(src, o.whiteBg);
-    if (o.cancel.cancelled) {
-      resolve(CANCELLED);
-      return;
-    }
-    const gif = new GIF({
-      workers: 2,
-      quality: 10,
-      width: scaler.ow,
-      height: scaler.oh,
-      repeat: src.loop ? 0 : -1,
-      workerScript: gifWorkerUrl,
-      ...(palette ? { globalPalette: palette } : {}),
-    });
+/** V168 (E-1): **Promise executor の中の同期ループを async 関数に組み替えた**。
+ *  供給元が async になったので、executor の中で `await` できない形（同期ループ）は残せない。
+ *  挙動は同じ: 中断→CANCELLED／例外→reject（async 関数の throw）／完了→gif.js の finished。 */
+export async function exportGif(src: FrameSource, o: ExportOptions): Promise<Blob | null> {
+  const scaler = new FrameScaler(o.scale, o.whiteBg);
+  // U-1: GIF のディレイはセンチ秒粒度（gif.js が ms→cs へ丸め）。既知の制約
+  const delay = Math.round(1000 / src.fps);
+  // M11-22: 実使用色が 256 色以下なら固定パレット（NeuQuant を通らない＝色は完全一致・全コマ同一パレット・
+  // 2 コマ目以降のローカル色表なし）。257 色以上は従来どおり（オプションも従来と同一＝出力バイト列不変）
+  o.onProgress(0, src.count * 2, "countColors");
+  // V168（Codex 指摘・中）: 見積りで数えたパレットが渡されていれば、全コマの再走査をしない
+  //（同じ供給元・同じ whiteBg で数えた結果なので出力は同一。渡されなければ従来どおり自分で数える）
+  const palette = o.gifPalette !== undefined ? o.gifPalette : await collectGifPalette(src, o.whiteBg);
+  if (o.cancel.cancelled) return CANCELLED;
+  const gif = new GIF({
+    workers: 2,
+    quality: 10,
+    width: scaler.ow,
+    height: scaler.oh,
+    repeat: src.loop ? 0 : -1,
+    workerScript: gifWorkerUrl,
+    ...(palette ? { globalPalette: palette } : {}),
+  });
+  // エンコードの完了（または中断）を1つの Promise に束ねる。addFrame より先に張る（取り逃がさない）
+  const finished = new Promise<Blob | null>((resolve) => {
     gif.on("finished", (blob) => resolve(blob));
     gif.on("progress", (p) => {
       if (o.cancel.cancelled) {
@@ -726,21 +668,15 @@ export function exportGif(src: FrameSource, o: ExportOptions): Promise<Blob | nu
       }
       o.onProgress(src.count + Math.round(p * src.count), src.count * 2, "gifEncode");
     });
-    try {
-      for (let i = 0; i < src.count; i++) {
-        if (o.cancel.cancelled) {
-          resolve(CANCELLED);
-          return;
-        }
-        scaler.draw(src.getFrameRgba(i));
-        gif.addFrame(scaler.bigCtx, { delay, copy: true });
-        o.onProgress(i + 1, src.count * 2, "frameGen");
-      }
-      gif.render();
-    } catch (e) {
-      reject(e);
-    }
   });
+  for (let i = 0; i < src.count; i++) {
+    if (o.cancel.cancelled) return CANCELLED;
+    scaler.draw(await src.getFrameRgba(i));
+    gif.addFrame(scaler.bigCtx, { delay, copy: true });
+    o.onProgress(i + 1, src.count * 2, "frameGen");
+  }
+  gif.render();
+  return finished;
 }
 
 // ---------------- APNG ----------------
@@ -752,7 +688,7 @@ export async function exportApng(src: FrameSource, o: ExportOptions): Promise<Bl
   const delay = 1000 / src.fps; // UPNG は ms 保持（分数fpsも正確）
   for (let i = 0; i < src.count; i++) {
     if (o.cancel.cancelled) return CANCELLED;
-    imgs.push(scaler.toRgbaBytes(src.getFrameRgba(i)));
+    imgs.push(scaler.toRgbaBytes(await src.getFrameRgba(i))); // V168 (E-1)
     delays.push(delay);
     o.onProgress(i + 1, src.count + 1, "frameGen");
     // UIを固まらせない
@@ -792,7 +728,7 @@ export async function exportMp4(src: FrameSource, o: ExportOptions): Promise<Blo
     // M16 (X-1): フレーム供給を N 周（i%count で元コマへ）。loops=1 なら i=0..count-1＝従来と同一の書き出し
     for (let i = 0; i < total; i++) {
       if (o.cancel.cancelled) return CANCELLED;
-      const blob = await scaler.toPngBlob(src.getFrameRgba(i % src.count));
+      const blob = await scaler.toPngBlob(await src.getFrameRgba(i % src.count)); // V168 (E-1)
       if (!blob) throw new Error(t("export.pngGenFailed.msg"));
       await ffmpeg.writeFile(`f${pad4(i)}.png`, new Uint8Array(await blob.arrayBuffer()));
       o.onProgress(i + 1, total + 1, "frameWrite");

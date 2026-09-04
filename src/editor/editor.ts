@@ -33,7 +33,32 @@ import {
   loadWallFaces,
   LOAD_WALL_BYTES,
 } from "./model";
-import { compositeFrame, presentToCanvas, frameToPngBlob, flattenIndexFrame } from "./render";
+import { compositeFrame, presentToCanvas, frameToPngBlob, flattenIndexFrame, type OnionDir } from "./render";
+// V164: 設定・入力の丸め（純関数だけの一枚。Node から import できる＝スモークが見張る）
+import {
+  sanitizeOnionLevel,
+  sanitizeOnionDir,
+  sanitizeFavoriteColors,
+  normalizeFavColor,
+  FAVORITE_COLORS_MAX,
+  ADD_FRAMES_MAX,
+  clampAddFrames,
+  // V166 (B): 確保する前に見積もって断る
+  HEAVY_ALLOC_MAX_BYTES,
+  checkFrameAlloc,
+  isAllocFailure,
+  // V166 (Codex 指摘④): 16bit 昇格を織り込んだ見積もり
+  estimateBits,
+  promotionExtraBytes,
+  // V167 (K-3): スポイトの知らせを出すか（間引きの規則）
+  shouldNoticePick,
+  // V168 (S-1〜S-3): 保存の写しを、写す前に見積もる／待つか／断るか
+  snapshotBytes,
+  saveSnapshotPlan,
+  saveSnapshotAllowed,
+  SAVE_SNAPSHOT_MAX_BYTES,
+  type SnapshotEstimate,
+} from "./prefs";
 import {
   History,
   bufferChangeEntry,
@@ -67,6 +92,9 @@ import {
   packClip,
   unpackClip,
   clipBytes,
+  // V166 (Codex 指摘②③): 写し取る量・開いたときの量を**確保する前に**知る
+  clipCopyBytes,
+  clipUnpackedBytes,
 } from "./frameClip";
 // V156 (P-1): 見えていないコマを圧縮して眠らせる（仕組みの全文は sleep.ts の冒頭）
 import {
@@ -97,7 +125,9 @@ import { errText } from "../ui/errText";
 // V158 (C-2): canvas に描く UI の色は**配色から読む**（各所が色を持たない）
 import { uiColor, uiColorA } from "../ui/theme";
 // V159 (G-1): 性能ログ。**操作名は列挙されたものだけ**（作品名は書けない作り）
-import { perfNow, perfDone, setPerfContext } from "../perf"; // V155 (A-33): 画面に `Error:` を出さない
+import { perfNow, perfDone, setPerfContext, PERF_MIN_MS, type PerfOp } from "../perf";
+// V166 (層1): 重い操作の漏斗が使う共通の表示（ライブラリ・ホームと**同じ1つの実装**）
+import { runWithBusy, yieldToPaint } from "../ui/busy"; // V155 (A-33): 画面に `Error:` を出さない
 // M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
 import { folderBaseName, layerBaseName, untitledTitle } from "../i18n/defaults";
 import {
@@ -115,6 +145,13 @@ import {
   buildLookup,
   eventKey,
   pointerEventKey,
+  // V165 (D-4): 修飾キーの単体タップ（条件としきい値は keymap.ts の1か所）
+  ModTapWatcher,
+  tapEventKey,
+  isHoldOnlyCommand,
+  // V167 (K-3): 「Alt＋クリックで色を拾いました」の『Alt＋クリック』を作る
+  keyLabel,
+  bindingFromPointer,
   type CommandId,
   type Preset,
 } from "../keymap";
@@ -386,6 +423,11 @@ export interface EditorCallbacks {
   onCustomTonesChange?: (list: CT.CustomTone[]) => void;
   /** M17: 「🎨 登録した色で塗る」トグルが変わったら settings.json へ保存する */
   onCustomToneColorChange?: (on: boolean) => void;
+  /** V164 (U-1): オニオンの段数と向きが変わったら settings.json へ保存する（同じ流儀）。
+   *  作品ではなく**人の好み**なので settings 側（作品ファイルは1バイトも変わらない） */
+  onOnionChange?: (level: number, dir: OnionDir) => void;
+  /** V164 (U-3): よく使う色の棚が変わったら settings.json へ保存する（マイ柄と同じ流儀） */
+  onFavoriteColorsChange?: (list: string[]) => void;
   /** ライブラリ保存（Rust呼び出し）を委譲 */
   // V163: V161-B の Rust 側 gzip（gzBegin/gzChunk/gzAbort/saveProjectGz）は撤去した。
   // PV6 は Worker が完成品（68.7MB 級）を返すので、従来の saveProject（1回の raw ボディ）で足りる
@@ -583,6 +625,12 @@ export class Editor {
    *  move では再解決しない＝ストローク中に 16bit 昇格が起きてバッファ参照が死ぬのを防ぐ） */
   private strokeTone: { kind: "pen" | "brush" | "eraser"; tone: R.ToneTile | null; colorTile: R.ColorTile | null } | null = null;
   onionLevel = 0;
+  /** V164 (U-1): 透かす向き（前のコマだけ／両方／次のコマだけ）。**既定は "both"＝v1.6.0 と同じ絵**。
+   *  段数（`onionLevel`）とは独立した軸で、どちらも settings に保存する（人の好みなので作品には入れない）。 */
+  onionDir: OnionDir = "both";
+  /** V164 (U-3): よく使う色の棚（`settings.favoriteColors` から復元・登録順・"#RRGGBB"）。
+   *  **作品ではなく設定**＝作品をまたいで使える道具箱。履歴には積まない（マイ柄と同じ流儀） */
+  private favoriteColors: string[] = [];
   stabilizer = true;
   pressureEnabled = true;
   textSize = DEFAULT_TEXT.size;
@@ -707,7 +755,11 @@ export class Editor {
    *     `#screen-editor.ed-busy` でポインタを止める）
    *
    *  オートセーブの `autosaveInFlight` と同じ流儀（あちらは自分の周期を見送るだけなので別枠）。 */
-  private busyKind: "" | "save" | "audio" | "export" = "";
+  /** V154b: 重い処理が走っているか（空＝走っていない）。V166: 漏斗（`runHeavy`）が使う "heavy" を追加。
+   *  ★**"save" を型から消した**（Codex 指摘・低）。保存は入口を閉じない（V161-A・壊すなリスト）——
+   *   コメントで方針を書くだけでは、いつか誰かが保存の種別を足して書けてしまう。
+   *   型から消せば**書いた瞬間にコンパイルが落ちる**＝方針が機械で守られる */
+  private busyKind: "" | "audio" | "export" | "heavy" = "";
   /** 進捗を畳む手（`cb.busy` の戻り値）。出していなければ null */
   private busyHide: (() => void) | null = null;
   /** 進捗を出すまでの遅延タイマー（0＝予約なし） */
@@ -733,6 +785,11 @@ export class Editor {
   private saveSeq = 0;
   /** 右下の保存ピルを出すまでの遅延タイマー（0=予約なし）。一瞬で終わる保存でチラつかせない。 */
   private savePillTimer = 0;
+  /** V168 (S-2): 保存の段階。"prepare"＝写す前の掃除待ち／"save"＝写し以降。
+   *  **ピルと中央表示の文言はこれ1つから作る**（`savePhaseText`・文言の源は1つ）。 */
+  private savePhase: "" | "prepare" | "save" = "";
+  /** V168 (S-2): 掃除待ちの進み（片づいたコマ数／全コマ数）。表示にだけ使う。 */
+  private savePrep = { n: 0, total: 0 };
 
   get dirty(): boolean {
     return this._dirty;
@@ -890,6 +947,10 @@ export class Editor {
   private sleepOn = false;
   /** 裏で眠らせる作業が走っているか */
   private sweeping = false;
+  /** V168 (S-2): いま走っている掃除の1周（`sweepSleep` の Promise）。保存の待ちが**同じ周を待つ**ために持つ */
+  private sweepJob: Promise<void> | null = null;
+  /** V168 (S-2): 掃除が進んだときに呼ぶ口（保存の待ちがピルの数字を更新する）。メーターと同じ間引き点で呼ぶ */
+  private sweepProgressCb: (() => void) | null = null;
   /** 次に見にいくコマ（掃除の巡回位置） */
   private sweepCursor = 0;
   /** 起こし直しの世代（追い越しで古い結果を描かないための番号） */
@@ -949,8 +1010,19 @@ export class Editor {
    *  V155 で 11 秒にした「開く速さ」が 36 秒に戻ってしまう。だから**開いたあと**、
    *  1コマずつ・合間にメインスレッドを譲りながら片付ける。
    *  描いている間・再生中は**触らない**（体感に漏らさない）。 */
-  private async sweepSleep(): Promise<void> {
-    if (this.sweeping || !this.sleepOn) return;
+  private sweepSleep(): Promise<void> {
+    if (this.sweeping || !this.sleepOn) return Promise.resolve();
+    // V168 (S-2): 1周の Promise を `sweepJob` に持つ。保存の待ちは**走っている周を待ち**、
+    // 終わったら条件を見直して次の周を頼む（多重起動はしない＝`sweeping` は従来どおり）
+    const job = this.sweepSleepPass().finally(() => {
+      if (this.sweepJob === job) this.sweepJob = null;
+    });
+    this.sweepJob = job;
+    return job;
+  }
+
+  /** V168: 掃除の**1周**。`sweepSleep` から呼ぶ（外からは呼ばない）。 */
+  private async sweepSleepPass(): Promise<void> {
     this.sweeping = true;
     const keep = this.sharedLayerIds();
     try {
@@ -980,6 +1052,7 @@ export class Editor {
           if (now - this.lastSweepMeterAt > 500) {
             this.lastSweepMeterAt = now;
             this.updateSizeMeter();
+            this.sweepProgressCb?.(); // V168 (S-2): 保存の待ちがピルの「片づけ中 n/N」を進める
           }
         }
       }
@@ -1081,6 +1154,8 @@ export class Editor {
    *  開いたまま unmount されると modalDepth が 1 のまま残り、再 mount 後に
    *  ショートカットが全滅する。**modalDepth を直接 0 にはしない**（片付け漏れが隠れる） */
   private wobbleDialogClose: (() => void) | null = null;
+  /** V164 (U-4): 「まとめて追加」ダイアログの閉じ手（`wobbleDialogClose` と同じ理由・同じ流儀） */
+  private addFramesDialogClose: (() => void) | null = null;
   private lassoPts: { x: number; y: number }[] = [];
 
   // 選択・変形
@@ -1127,8 +1202,63 @@ export class Editor {
   private rangeAnchor: number | null = null;
   private rangeSel: { a: number; b: number } | null = null;
 
+  // ================= V166 (C): Alt でカーソルが止まる件 =================
+  //
+  // ★症状（作者・液タブ／Alt に「元に戻す」を割り当てている）
+  //   描いている最中に Alt を押すと**カーソルが止まり、もう一度 Alt を押すまで戻らない**。
+  //
+  // ★候補は2つあり、**どちらかはログでしか決まらない**（要件 C: 推測で直さない）
+  //   候補1: **keyup が届いていない**。Windows は Alt 単独押しで「メニュー操作モード」に入る。
+  //          このとき窓はフォーカスを失い、以後のキー・ポインタがアプリに来ない
+  //          （＝もう一度 Alt を押すと抜ける＝症状の「Alt を押すまで戻らない」と一致する）
+  //   候補2: **タブレットのドライバが Alt を掴んだまま**にしている（押しっぱなし扱い）
+  //
+  // ★見分け方（この回で足した計測）
+  //   候補1なら `keydown key=Alt` の**直後に `win:blur`** が出て、`altD`（押した数）が
+  //   `altU`（離した数）より多いまま止まる。
+  //   候補2なら blur は出ず、**ポインタの行が `alt=1` を出し続ける**（アプリは離したと思っているのに
+  //   イベントは押されていると言う／またはその逆）。`alt=` と `altD/altU` を並べたのはこのため。
+  //
+  // ★直し方は**どちらでも安全な形**にしてある（原因が確定する前に壊さない）
+  //   - イベントが `altKey` について言うことを**真実として採る**（覚えている状態が食い違ったら直す）。
+  //     前例: `onPointerDownInner` の `this.shiftHeld = e.shiftKey;`（M10-7）と同じ作法
+  //   - フォーカスを失ったら修飾キーの状態も落とす（`blurHandler`）
+  //   - ★`preventDefault` は**足していない**。Alt を止めると Alt＋クリックのスポイト（M16 K-4）と
+  //     OS 側の挙動に手が入る＝壊すなリストに触れる。原因が候補1と確定したときに、
+  //     **そのとき初めて**「Alt 単独の keydown だけ止める」を検討する
+
+  /** V166 (C): アプリが覚えている Alt の状態。**イベントと食い違ったらイベントに合わせる**。 */
+  private altHeld = false;
+  /** V166 (C): Alt の押した数／離した数。**釣り合わなければ keyup が来ていない**（候補1）。 */
+  private altDownCount = 0;
+  private altUpCount = 0;
+  /** V166 (C): 食い違いを直した回数（通常ログへ出すのは最初の1回だけ＝ログを埋めない）。 */
+  private altFixCount = 0;
+
+  /** V166 (C): イベントが言う `altKey` に合わせる。**食い違ったときだけ**記録する。
+   *  `where` は "pointerdown" 等の**決められた語**（W-10: 作品名・パスは書かない）。 */
+  private syncAltFromEvent(altKey: boolean, where: string): void {
+    if (this.altHeld === altKey) return;
+    this.altHeld = altKey;
+    this.altFixCount++;
+    // ★通常のログに出す。要件 C の「普通のログには何も出ない」を埋めるため——
+    //  `?inputlog` を立てて再現してもらう前に、**送られてくるログだけで**兆候が分かるようにする。
+    //  最初の1回だけ（連発してログを埋めない）
+    if (this.altFixCount === 1) {
+      this.cb.appendLog?.(
+        `[V166 C] alt mismatch fixed at=${where} now=${altKey ? 1 : 0} ` +
+          `down=${this.altDownCount} up=${this.altUpCount}`
+      );
+    }
+  }
+
   private composite = new Uint32Array(PIXELS);
   private keydownHandler = (e: KeyboardEvent) => {
+    // V166 (C): Alt の押し・離しを数える（釣り合いが崩れたら keyup が届いていない＝候補1）
+    if (e.key === "Alt") {
+      if (!e.repeat) this.altDownCount++;
+      this.altHeld = true;
+    }
     // M10-7: 図形の Shift 拘束を**マウスを動かさずに**即反映する。
     // 条件を満たさないときは何もしない（preventDefault もしない）ので、
     // 変形の15°スナップ・フィルム/レイヤーの Shift 範囲選択・Ctrl+Shift+C/V には触れない
@@ -1136,9 +1266,15 @@ export class Editor {
       this.shiftHeld = true;
       this.refreshShapePreview();
     }
+    this.trackModTapDown(e); // V165 (D-4)
     this.onKeyDown(e);
   };
   private keyupHandler = (e: KeyboardEvent) => {
+    if (e.key === "Alt") {
+      this.altUpCount++;
+      this.altHeld = false;
+    }
+    this.handleModTapUp(e); // V165 (D-4): 単体タップの判定は**離したとき**
     if (e.key === " ") {
       const wasHeld = this.spaceHeld;
       const held = performance.now() - this.spaceDownAt;
@@ -1181,9 +1317,16 @@ export class Editor {
    *  （ポインタ種別で分岐していない。「接触が途切れた」という事実だけを扱う） */
   private blurHandler = () => {
     if (!this.mounted) return;
+    // ★V165 (D-4): **フォーカスを失ったら単体タップの候補は必ず捨てる。**
+    //  Alt+Tab は「Alt を押したまま別の窓へ行き、戻ってきて Alt を離す」＝そのままだと
+    //  戻った瞬間に発動してしまう（要件の名指しの事故）。ここで捨てれば keyup は空振りする
+    this.modTap.cancel();
     this.spaceHeld = false;
     this.spacePanned = false;
     this.shiftHeld = false;
+    // ★V166 (C): 修飾キーの状態も落とす。Alt でメニュー操作モードに入ると（候補1）
+    //  keyup は**二度と来ない**ので、ここで落とさないと押しっぱなしのまま残る
+    this.altHeld = false;
     // M11-11: 透かしたままフォーカスを失うと keyup が来ない（薄いまま戻らなくなる）
     this.setXformPeek(false);
     this.endPointerSession("blur");
@@ -1313,6 +1456,8 @@ export class Editor {
     }
     window.addEventListener("keydown", this.keydownHandler);
     window.addEventListener("keyup", this.keyupHandler);
+    // V165 (D-4): 単体タップの候補を壊すためだけの listener（capture＝誰かが止めても届く）
+    window.addEventListener("pointerdown", this.modTapPointerHandler, true);
     window.addEventListener("resize", this.resizeHandler);
     window.addEventListener("blur", this.blurHandler);
     // M12-C: キャンバスから出たらカーソル層を消す。**addEventListener で足す**
@@ -1409,6 +1554,16 @@ export class Editor {
     // M11-6: 二度呼んでも安全にする（showEditor() の先頭と showLibrary() の両方から
     // 呼ばれ得るため）。mount していない状態での後始末は何もしない
     if (!this.mounted) return;
+    // ★V167 (K-4): Alt の押した数と離した数が**釣り合わないまま**編集を終えたら1行残す。
+    //  2026-09-02 の特定は `?inputlog` を立てた実機ログで `altD=2 / altU=4` が見えたから
+    //  できた（＝OS が keydown を落としている）。同じ報告が次に来たとき、
+    //  **診断ビルドを送る前に**当たりが付くよう、普通のログにも1行だけ残す。
+    //  釣り合っているときは何も書かない（ログを埋めない）
+    if (this.altDownCount !== this.altUpCount) {
+      this.cb.appendLog?.(
+        `[V167 C] alt unbalanced down=${this.altDownCount} up=${this.altUpCount} fix=${this.altFixCount}`
+      );
+    }
     this.stopPlayback();
     // ★V156 (P-5): 履歴を捨てる。**いままで捨てていなかった**——`history.clear()` は
     // `mount` の中にしか無く、ライブラリ画面へ戻っても直前の作品の履歴が抱える生 IndexBuf
@@ -1432,6 +1587,8 @@ export class Editor {
     setStaleSleepLogger(null);
     window.removeEventListener("keydown", this.keydownHandler);
     window.removeEventListener("keyup", this.keyupHandler);
+    window.removeEventListener("pointerdown", this.modTapPointerHandler, true); // V165 (D-4)
+    this.modTap.cancel();
     window.removeEventListener("resize", this.resizeHandler);
     window.removeEventListener("blur", this.blurHandler);
     // M12-C: 同一参照で外す。予約している rAF も畳む（画面を離れてから描かない）
@@ -1493,6 +1650,8 @@ export class Editor {
     // modalDepth の減算・capture リスナー解除・back.remove() が全部走り、
     // await 側は null を受け取って早期 return する（生成は起きない）
     this.wobbleDialogClose?.();
+    // V164 (U-4): 「まとめて追加」も同じ（開いたまま離脱すると modalDepth が残る）
+    this.addFramesDialogClose?.();
     // M10-21: 診断ログの残りを吐き切ってタイマーを止める（フラグなしなら両方とも空/None）
     if (this.inputLogTimer != null) {
       window.clearTimeout(this.inputLogTimer);
@@ -1803,6 +1962,11 @@ export class Editor {
         toneMode === "brush" ? t("ed.tone.head.brush.label") : toneMode === "fill" ? t("ed.tone.head.fill.label") : t("ed.tone.head.eraser.label");
       head.title = toneMode === "eraser" ? t("ed.tone.head.eraser.title") : "";
       tex.classList.add("tonegrid");
+      // ★V165 (D-2): かすり消しは「見えているのに何ができるか分からない」（意見シート#2/#3）。
+      //  補足を `head.title` に逃がしていたので**マウスを乗せないと読めず**、ペンタブでは事実上
+      //  読めなかった。見出しは太らせずに、一覧の先頭へ**小さな1行**として出す（title も残す）。
+      //  **名前（「かすり消し」）は変えない**——3DS の作法に馴染んだ語（要件 D-2）
+      if (toneMode === "eraser") this.appendToneNote(tex, t("ed.tone.head.eraser.hint"));
       const getId = () =>
         toneMode === "brush"
           ? this.brushToneId
@@ -1899,6 +2063,15 @@ export class Editor {
 
   /** M16 (D-1): 「🔀 コマでずらす」トグル行（1行ぶち抜き）。トーン欄の先頭と、M17 でペンの「マイ柄」節にも出す
    *（ペン＋マイ柄にもシフトが効くので、ペン側からも見える・切れるように） */
+  /** V165 (D-1/D-2): トーン一覧の中に出す**小さな説明の1行**（グリッド1行ぶち抜き）。
+   *  `.tone-dither`（🔀 の行）と同じ器の作り方で、畳んでも残る（説明は畳んで隠す物ではない）。 */
+  private appendToneNote(tex: HTMLElement, text: string) {
+    const p = document.createElement("p");
+    p.className = "tone-note";
+    p.textContent = text;
+    tex.appendChild(p);
+  }
+
   private appendDitherRow(tex: HTMLElement) {
     const row = document.createElement("div");
     row.className = "tone-dither";
@@ -1928,11 +2101,26 @@ export class Editor {
     getId: () => string,
     setId: (id: string) => void
   ) {
-    if (this.customTones.length === 0) return;
+    const empty = this.customTones.length === 0;
     const head = document.createElement("div");
-    head.className = "tone-custom-head";
+    // ★V165 (D-1): 空のときは `empty` を付ける。一覧を畳んでいると
+    //  `.tex.collapsed .tone-custom-head { display:none }` で見出しが消えるが、
+    //  **畳みは既定**なので、それだと「マイ柄」という**探している名前**が画面から消えてしまう
+    //（説明だけ出ても、探している語が無ければ見つけたことにならない）。空のときだけ残す
+    head.className = "tone-custom-head" + (empty ? " empty" : "");
     head.textContent = t("ed.tone.custom.head.label");
     tex.appendChild(head);
+    // ★V165 (D-1): **1つも登録していない人にも節を出す**（作者決定）。
+    //  以前はここが `if (this.customTones.length === 0) return;` で、登録が無い人には
+    //  「マイ柄」という節そのものが画面に存在しなかった＝**探しても無いものは見つからない**
+    //  （意見シート: 30分探して未発見）。空のときだけ「どうすれば増えるか」を1行出す。
+    //  ★増えたあとは**この行が消えて従来の見た目に戻る**（画面を無駄に太らせない・要件 D-1）。
+    //  🔀 と 🎨 のトグルは**登録があるときだけ**——柄が1つも無い状態では効き目が無く、
+    //  ペンの「種類」欄に今まで無かった行を増やしてしまう（＝既定の見た目が変わる）
+    if (empty) {
+      this.appendToneNote(tex, t("ed.tone.custom.empty.hint", { btn: t("ed.sel.registerTone.btn") }));
+      return;
+    }
     // ペンの種類欄にはトーン欄先頭の🔀が無いので、マイ柄節に出す（ペン＋マイ柄にもシフトが効く）
     if (kind === "pen") this.appendDitherRow(tex);
     if (kind !== "eraser") {
@@ -2166,6 +2354,14 @@ export class Editor {
       </div>
       <div class="side-secbody" id="ed-side-topbody">
       <div id="ed-toolopts"></div>
+      <!-- ★V164 (U-2): オニオンを**上段の先頭付近**へ移した（道具オプションの直後）。
+           前は「線の太さ」の下＝上段の中ほどにあり、**上段は中でスクロールする**ので
+           狭い画面では初期表示で見えず、「機能があるのに30分探して見つからない」の主因だった
+           （意見シート#2/#3）。どの道具でも使う表示設定で、太さ・種類・色より切り替えが多い。
+           行は2本: 段数（切/1/2/3・従来のまま）と U-1 の向き（前のコマ/両方/次のコマ） -->
+      <h3>${t("ed.onion.head.label")}</h3>
+      <div class="oni" id="ed-onion"></div>
+      <div class="oni" id="ed-oniondir"></div>
       <h3>${t("ed.pen.size.label")}</h3><div class="sizes" id="ed-sizes"></div>
       <h3 id="ed-texhead" class="foldhead">${t("ed.pen.kind.label")}</h3><div class="tex" id="ed-tex"></div>
       <h3 id="ed-colhead">${t("ed.color.head.palette.label")}</h3>
@@ -2174,15 +2370,23 @@ export class Editor {
         <span class="tog">${t("ed.color.fullcolor.label")}</span><div class="sw2" id="ed-fullcolor"></div>
         <input type="color" id="ed-colorpick" value="#141414" style="width:40px;height:28px;border:3px solid var(--ink);border-radius:8px;padding:0;background:#fff" hidden />
       </div>
+      <!-- ★V164 (U-3): よく使う色の棚。上の「色」帯（＝作品の colorTable 全色）とは**別物**で、
+           こちらは**自分で登録した色だけ**・**設定に保存**（作品をまたいで残る道具箱）。
+           フルカラーでは colorTable が際限なく増えて色見本の壁になるので、その逃げ場 -->
+      <h3 id="ed-favhead">${t("ed.color.fav.head.label")}</h3>
+      <div class="pal" id="ed-favpal"></div>
+      <div class="selacts" id="ed-favacts">
+        <button class="minibtn" id="ed-fav-toggle">${t("ed.color.fav.add.btn")}</button>
+      </div>
       <div class="row"><span class="tog">${t("ed.color.paper.label")}</span><div id="ed-paperpal" class="pal" style="flex:1"></div></div>
-      <!-- ここまでが上段（道具）。以降が下段（レイヤー）。
-           U-2: 「線の太さ」は道具段・「レイヤーの控え」はレイヤー段（要件の推奨どおり） -->
+      <!-- V164 (U-2): V158 の記述ミスを訂正。**ここはまだ上段（道具）の中**——
+           下段（レイヤー）が始まるのは #ed-side-bot から。線の太さ〜作品の大きさも
+           全部この #ed-side-topbody の中にある -->
       <h3>${t("ed.linew.head.label")}</h3>
       <div class="selacts" id="ed-linew">
         <button class="minibtn" id="ed-lw-thicken">${t("ed.linew.thicken.btn")}</button>
         <button class="minibtn" id="ed-lw-thin">${t("ed.linew.thin.btn")}</button>
       </div>
-      <h3>${t("ed.onion.head.label")}</h3><div class="oni" id="ed-onion"></div>
       <h3>${t("ed.feel.head.label")}</h3>
       <div class="row"><span class="tog">${t("ed.feel.stabilizer.label")}</span><div class="sw2 on" id="ed-tog-stab"></div></div>
       <div class="row"><span class="tog">${t("ed.feel.pressure.label")}</span><div class="sw2 on" id="ed-tog-press"></div></div>
@@ -2298,7 +2502,7 @@ export class Editor {
     // レイヤー操作
     $("#ed-layer-add").addEventListener("click", () => this.addLayer());
     $("#ed-folder-add").addEventListener("click", () => this.addFolder());
-    $("#ed-layer-del").addEventListener("click", () => this.deleteLayer());
+    $("#ed-layer-del").addEventListener("click", () => void this.deleteLayer());
     // M11-15: レイヤーのコピー＆ペースト
     $("#ed-lc-copy").addEventListener("click", () => this.copyLayerFrame());
     $("#ed-lc-paste").addEventListener("click", () => this.pasteLayerFrame());
@@ -2311,7 +2515,7 @@ export class Editor {
     // M3.8: ▲▼はDnD（挿入線）で代替・撤去
     $("#ed-layer-merge").addEventListener("click", () => void this.mergeLayerDown());
     this.rebuildLayers();
-    // オニオン
+    // オニオン（段数）
     const oni = $("#ed-onion");
     [t("ed.onion.off.btn"), "1", "2", "3"].forEach((label, lv) => {
       const d = document.createElement("button");
@@ -2321,10 +2525,37 @@ export class Editor {
         this.onionLevel = lv;
         oni.querySelectorAll(".lv").forEach((e) => e.classList.remove("on"));
         d.classList.add("on");
+        this.saveOnion(); // V164 (U-1): 段数も設定に保存（向きと揃える）
         this.renderCanvas();
       });
       oni.appendChild(d);
     });
+    // V164 (U-1): オニオンの向き。既存の `.oni`/`.lv` をそのまま使う（新しい CSS は足さない）。
+    // ★文言は「前のコマ／次のコマ」＝タイムラインの ed.tl.prev/next.title と**同じ言葉**にした。
+    //  「前だけ／後だけ」は「前へ向かって」とも読めて逆の意味に取れる（Codex 観点）
+    const dirs = $("#ed-oniondir");
+    for (const it of [
+      { dir: "prev", labelKey: "ed.onion.dirPrev.btn", titleKey: "ed.onion.dirPrev.title" },
+      { dir: "both", labelKey: "ed.onion.dirBoth.btn", titleKey: "ed.onion.dirBoth.title" },
+      { dir: "next", labelKey: "ed.onion.dirNext.btn", titleKey: "ed.onion.dirNext.title" },
+    ] as const) {
+      const d = document.createElement("button");
+      d.className = "lv" + (it.dir === this.onionDir ? " on" : "");
+      d.textContent = t(it.labelKey);
+      d.title = t(it.titleKey); // R-2: 属性はプロパティ代入（訳文に " が入っても割れない）
+      d.addEventListener("click", () => {
+        this.onionDir = it.dir;
+        dirs.querySelectorAll(".lv").forEach((e) => e.classList.remove("on"));
+        d.classList.add("on");
+        this.saveOnion();
+        this.renderCanvas();
+      });
+      dirs.appendChild(d);
+    }
+    // V164 (U-3): よく使う色の棚
+    $("#ed-favhead").title = t("ed.color.fav.head.title");
+    $("#ed-fav-toggle").addEventListener("click", () => this.toggleFavoriteColor());
+    this.rebuildFavPalette();
     // トグル
     const bindTog = (id: string, get: () => boolean, set: (v: boolean) => void) => {
       const el = $(id);
@@ -2383,6 +2614,16 @@ export class Editor {
   /** V154: メーターの3行を書き、履歴の予算（W-4）を作品の大きさに合わせる。
    *  呼ぶ場所は「絵の量が変わり得た直後」だけ（ストローク中は呼ばない）。 */
   private updateSizeMeter() {
+    // ★V166 (D): **重い操作の最中は数え直さない。**
+    //  事故のログで `meter.update` が **12.7秒**（7,687コマ×20レイヤー＝153,740面）かかっていた。
+    //  貼り付け1回ごとに全コマ・全レイヤーを4通り数え直す（論理サイズ・実サイズ・面数・履歴）ので、
+    //  **貼り付けそのものより数え直しのほうが支配的**だった。
+    //  漏斗の中では予約だけして、`runHeavy` の後始末で**1回だけ**数える。
+    //  ⚠ V154 W-2 の「掛け算ではなく実体を数える」は弱めていない——**回数を減らしただけ**
+    if (this.busyKind === "heavy") {
+      this.meterPending = true;
+      return;
+    }
     const _t0 = perfNow();
     const host = document.querySelector("#ed-szmeter") as HTMLElement | null;
     // W-4: 作品が大きいほど履歴に許す量を減らす（＝戻せる回数が自動で減る）。
@@ -3752,9 +3993,81 @@ export class Editor {
     ptp.title = t("ed.color.paper.transparent.title");
     ptp.addEventListener("click", () => this.setPaper(""));
     pp.appendChild(ptp);
+    // V164 (U-3): よく使う色の棚も同じ瞬間に塗り直す（選択中の枠と登録ボタンの文言）。
+    // 色の変更は必ずこの関数を通る＝棚の見た目が現在色と食い違うことがない
+    this.rebuildFavPalette();
     // M11-12: 浮動テキストのプレビューは現在の色で描いているので、色が変わったら描き直す
     //（色の変更は必ずここを通る＝スポイト・カラーピッカー・パレット・透明のすべて）
     if (this.textDraft) this.redrawOverlay();
+  }
+
+  // ---------------- V164 (U-3): よく使う色の棚 ----------------
+
+  /** V164: settings から復元（mount 前でよい。`buildSidePanel` が読む）。
+   *  健全化は `prefs.ts` の純関数（壊れた要素だけ捨てる＝スモークが見張っている） */
+  restoreFavoriteColors(v: unknown) {
+    this.favoriteColors = sanitizeFavoriteColors(v);
+  }
+
+  /** 棚に入れられる色か（透明＝`""` は色ではないので入れられない） */
+  private favoriteHexNow(): string | null {
+    return normalizeFavColor(this.colorHex);
+  }
+
+  /** いまの色を登録／登録済みなら外す（ボタン1つで両方＝要件 U-3 の「登録／解除」） */
+  private toggleFavoriteColor() {
+    const hex = this.favoriteHexNow();
+    if (!hex) return; // 透明のときはボタン自体が無効
+    const at = this.favoriteColors.indexOf(hex);
+    if (at >= 0) {
+      this.favoriteColors.splice(at, 1);
+    } else {
+      if (this.favoriteColors.length >= FAVORITE_COLORS_MAX) {
+        this.cb.toast(t("ed.color.fav.full.toast", { max: FAVORITE_COLORS_MAX }));
+        return;
+      }
+      this.favoriteColors.push(hex);
+    }
+    // マイ柄と同じ流儀: 変えた瞬間に settings へ（履歴には積まない＝作品の Undo とは無関係）
+    this.cb.onFavoriteColorsChange?.([...this.favoriteColors]);
+    this.rebuildFavPalette();
+  }
+
+  /** 棚の描き直し（色見本＋登録ボタンの文言・有効/無効）。DOM が無い場面では何もしない */
+  private rebuildFavPalette() {
+    const pal = document.getElementById("ed-favpal");
+    const btn = document.getElementById("ed-fav-toggle") as HTMLButtonElement | null;
+    if (!pal || !btn) return;
+    const now = this.favoriteHexNow();
+    pal.innerHTML = "";
+    for (const hex of this.favoriteColors) {
+      const d = document.createElement("button");
+      d.className = "sw" + (hex === now ? " on" : "");
+      d.style.background = hex;
+      d.title = t("ed.color.fav.swatch.title", { hex });
+      d.addEventListener("click", () => {
+        this.colorHex = hex;
+        this.rebuildPalette(); // 上の帯と棚の両方が塗り直る（選択枠が2つ点くことはない）
+      });
+      pal.appendChild(d);
+    }
+    const registered = now != null && this.favoriteColors.includes(now);
+    btn.textContent = registered ? t("ed.color.fav.remove.btn") : t("ed.color.fav.add.btn");
+    // 透明（消し色）は棚に入れられない。押せないことが見て分かるよう無効にし、理由は title に
+    btn.disabled = now == null;
+    btn.title = now == null ? t("ed.color.fav.needColor.title") : t("ed.color.fav.toggle.title");
+  }
+
+  /** V164 (U-1): オニオンの段数と向きを settings へ（変えた瞬間に保存＝マイ柄・配色と同じ流儀） */
+  private saveOnion() {
+    this.cb.onOnionChange?.(this.onionLevel, this.onionDir);
+  }
+
+  /** V164 (U-1): settings から復元。**壊れた値・未設定はすべて既定へ倒す**
+   *  （段数 0＝切／向き "both"＝v1.6.0 と同じ絵）。判定は `prefs.ts` の純関数 */
+  restoreOnion(level: unknown, dir: unknown) {
+    this.onionLevel = sanitizeOnionLevel(level);
+    this.onionDir = sanitizeOnionDir(dir);
   }
 
   // ---------------- M3.7: レイヤーツリー（フォルダ・ネスト対応） ----------------
@@ -4149,8 +4462,18 @@ export class Editor {
       this.cb.toast(t("ed.layer.deleteAllBlocked.toast"));
       return;
     }
+    // ★V166 (層2): 中身ごと削除は「レイヤー削除の N 枚ぶん」＝いちばん重い経路のひとつ。
+    //  2段の確認はどちらも漏斗の外（＝待ち時間に箱を出さない）
+    await this.runHeavy("layer.del", t("ed.heavy.delLayer.msg"), () =>
+      this.deleteFolderWithContents(id, memberIdx)
+    );
+  }
+
+  private async deleteFolderWithContents(id: string, memberIdx: number[]) {
     const structBefore = this.captureStructure();
     const removedIds = memberIdx.map((i) => this.project.layerDefs[i].id);
+    // V166 (B): 控えは「全コマ × 消すレイヤーの枚数」＝この回でいちばん大きくなり得る確保
+    if (!this.allowBufferAlloc(this.project.frames.length * removedIds.length, "folder.del", removedIds)) return;
     // ★V156 (P-1): 全コマの画素を控えるので、消す対象のレイヤーだけ先に起こす
     await wakeLayersAllFrames(this.project, removedIds, "write");
     const savedBuffers = this.project.frames.map((f) => {
@@ -5172,7 +5495,7 @@ export class Editor {
       if (isCorner) {
         host
           .querySelector("#ed-corner-ok")
-          ?.addEventListener("click", () => this.commitCornerWarp());
+          ?.addEventListener("click", () => void this.commitCornerWarp());
         host
           .querySelector("#ed-corner-cancel")
           ?.addEventListener("click", () => this.cancelCornerWarp());
@@ -5317,7 +5640,7 @@ export class Editor {
       }
       if (fold) {
         // 畳んでいる間は数値の入力欄が無いので、以降の配線は飛ばす
-        $("#ed-x-ok").addEventListener("click", () => this.commitTransform());
+        $("#ed-x-ok").addEventListener("click", () => void this.commitTransform());
         $("#ed-x-cancel").addEventListener("click", () => {
           this.cancelTransform();
           this.setTool(this.prevTool === "transform" ? "pen" : this.prevTool);
@@ -5347,7 +5670,7 @@ export class Editor {
       });
       // M14 (S-1): 反転（H/V）は単一ソースから（ストリップと共通・現在の反転状態が押された表示で分かる）
       $("#ed-x-flip").appendChild(this.renderFormatGroups(this.toolFormatGroups("transform"), "panel", panelClick));
-      $("#ed-x-ok").addEventListener("click", () => this.commitTransform());
+      $("#ed-x-ok").addEventListener("click", () => void this.commitTransform());
       $("#ed-x-cancel").addEventListener("click", () => {
         this.cancelTransform();
         this.setTool(this.prevTool === "transform" ? "pen" : this.prevTool);
@@ -5395,6 +5718,10 @@ export class Editor {
           `<option value="${i}"${i === this.project.speedIndex ? " selected" : ""}>${t("ed.tl.speedOption.label", { n: i, fps: f })}</option>`
       ).join("")}</select></span>
       <button class="hb" id="ed-addframe">${t("ed.tl.addFrame.btn")}</button>
+      <!-- V164 (U-4): まとめて追加。**「＋ ついか」は1枚のまま**（既定の挙動は変えない）で、
+           枚数を決めて足したいときだけこちら。ゆらゆらと同じ「ボタン→小窓」の作法なので、
+           隠し操作にならず（要件 U-4）押し間違えても Ctrl+Z 一回で全部戻る -->
+      <button class="hb" id="ed-addframes">${t("ed.tl.addFrames.btn")}</button>
       <button class="hb" id="ed-dupframe">${t("ed.tl.dupFrame.btn")}</button>
       <button class="hb" id="ed-wobble">${t("ed.tl.wobble.btn")}</button>
       <button class="hb" id="ed-copypage">${t("ed.tl.copyFrames.btn")}</button>
@@ -5411,6 +5738,7 @@ export class Editor {
       { sel: "#ed-next", titleKey: "ed.tl.next.title" },
       { sel: "#ed-last", titleKey: "ed.tl.last.title" },
       { sel: "#ed-loop", titleKey: "ed.tl.loop.title" },
+      { sel: "#ed-addframes", titleKey: "ed.tl.addFrames.title" },
       { sel: "#ed-dupframe", titleKey: "ed.tl.dupFrame.title" },
       { sel: "#ed-wobble", titleKey: "ed.tl.wobble.title" },
       { sel: "#ed-copypage", titleKey: "ed.tl.copyFrames.title" },
@@ -5467,12 +5795,13 @@ export class Editor {
         this.startPlayback();
       }
     });
-    $("#ed-addframe").addEventListener("click", () => this.addFrame(false));
-    $("#ed-dupframe").addEventListener("click", () => this.addFrame(true));
+    $("#ed-addframe").addEventListener("click", () => void this.addFrame(false));
+    $("#ed-addframes").addEventListener("click", () => void this.onAddFramesClick());
+    $("#ed-dupframe").addEventListener("click", () => void this.addFrame(true));
     $("#ed-wobble").addEventListener("click", () => void this.onWobbleClick());
     $("#ed-copypage").addEventListener("click", () => void this.copySelectedFrames());
     $("#ed-pastepage").addEventListener("click", () => void this.pasteFrames());
-    $("#ed-delframe").addEventListener("click", () => this.deleteFrame());
+    $("#ed-delframe").addEventListener("click", () => void this.deleteFrame());
     this.updatePasteButton();
     this.rebuildFilm();
   }
@@ -5554,6 +5883,21 @@ export class Editor {
       return;
     }
     const willWarn = this.project.frames.length + n >= 2000;
+    // ★V166 (層2/B): 小窓（＝利用者を待っている時間）は漏斗の外。
+    //  実際に作る区間だけを包む。ゆらゆらは最大100枚を**一度に**作るので見積もりも要る
+    // ゆらゆらは既存のコマをずらして作る＝新しい色は増えない
+    if (!this.allowFrameAlloc(opt.count, 0, "frame.wobble")) return;
+    await this.runHeavy("frame.wobble", t("ed.heavy.wobble.msg"), () =>
+      this.onWobbleApply(opt, targetLayerId, targetName, willWarn)
+    );
+  }
+
+  private onWobbleApply(
+    opt: { count: number; kind: WobbleKind; strength: WobbleStrength; target: "all" | "active" },
+    targetLayerId: string | null,
+    targetName: string,
+    willWarn: boolean
+  ) {
     const kindIndex = opt.kind === "line" ? 0 : 1;
     // シード式は M10-3 のまま（対象種別は混ぜない）。「全レイヤー」は従来とビット同一・
     // 単体モードの対象レイヤーは全レイヤーモードの同じレイヤーとビット同一＝機械検証できる不変条件
@@ -5831,7 +6175,7 @@ export class Editor {
     add.title = t("ed.tl.addLast.title");
     // M11-14: フィルム末尾の「＋」は**常に最後尾**へ（うごメモ仕様）。
     // ヘッダの「＋ ついか」とショートカットは従来どおり選択中の次
-    add.addEventListener("click", () => this.addFrame(false, true));
+    add.addEventListener("click", () => void this.addFrame(false, true));
     film.appendChild(add);
     this.updateBadge();
     this.updateFilmSeMarks(); // M5-1: SE配置マーク
@@ -6027,7 +6371,7 @@ export class Editor {
     if (!active || gap === null) return;
     // gap（挿入位置）→ reorderFrame の to（取り除いたあとの添字）へ
     const to = gap > from ? gap - 1 : gap;
-    this.reorderFrame(from, to); // 履歴（コマ並べ替え）も xformGuard も既存のまま
+    void this.reorderFrame(from, to); // 履歴（コマ並べ替え）も xformGuard も既存のまま
   }
 
   /** Esc / pointercancel / ウィンドウ外 → 何も起きない状態へ戻す（並びは動かさない） */
@@ -6128,23 +6472,11 @@ export class Editor {
       // V161 (A): 書き出しは保存完了を待つ（同じ作品を書き出しと保存が同時に読まない）
       await this.waitForSave();
       if (this.playing) this.stopPlayback();
-      // ★V163: 書き出しは**全コマを起こしてから**。`projectSource` の `getFrameRgba` は
-      // 同期の `compositeFrame` で、眠っているレイヤーは `if (!lb) continue` で**音もなく
-      // 白紙になる**（V156 からの穴。PV6 の遅延読みでは開いた直後ほぼ全コマが眠っている
-      // ので、塞がないと書き出しが白紙だらけになる）。読みで起こす＝控えは残るので、
-      // 書き出し後の眠らせ直しは只（freeOnly）で済む
-      if (this.sleepOn && asleepCount(this.project) > 0) {
-        const hide = this.cb.busy?.(t("ed.frameWait.label"));
-        try {
-          await wakeLayersAllFrames(
-            this.project,
-            this.project.layerDefs.map((d) => d.id),
-            "read"
-          );
-        } finally {
-          hide?.();
-        }
-      }
+      // ★V168 (E-3): **ここで全コマを起こさない。** V163 は「眠ったまま書き出すと白紙」を
+      //  入口で全レイヤーを読みで起こすことで塞いだが、目安の 10.8 倍の作品
+      //  （56,860面）ではそれが**論理サイズ 4.1GB を生で展開する見積りなしの確保**になる
+      //  （8/31 の落ち方と同じ形）。白紙防止は `projectSource`（frameSource.ts）が
+      //  **読む直前に起こし、読み終えたら眠らせ直す**ことで守る。不変条件は同じ・守り方だけ変えた
       this.cb.openExport(
         projectSource(this.project),
         (this.project.meta.title || untitledTitle()).replace(/\.[^.]+$/, ""),
@@ -6884,12 +7216,192 @@ export class Editor {
     return { ok: r.ok, reason: r.reason };
   }
 
+  // ================= V166 (層1): 重い操作の漏斗 =================
+  //
+  // ★なぜ要るか（2026-08-31 の事故）
+  //   1,000コマ規模のコマを貼り付け連打 → `Array buffer allocation failed` を8回出しながら
+  //   操作を受け付け続け、最後に WebView ごと落ちた。原因は**貼り付けが「重い処理」として
+  //   扱われていなかった**こと——入口の閉鎖も表示も無く、**連打できた**。
+  //   ログには 11〜25秒の停止が `busy=no` で何度も残っていた（＝何も出さずに固まっていた）。
+  //
+  // ★この関数が唯一の入口（§1-g 層1）
+  //   1. **入口を閉じる**（実行中は同じ操作も他の重い操作も受け付けない＝連打が原理的に起きない）
+  //   2. **ボタンを見た目でも無効に**する（`updateBusyButtons`）
+  //   3. `PERF_MIN_MS`（50ms）を過ぎたら「◯◯しています」を出す（一瞬で終わる操作では出さない）
+  //   4. **`finally` で必ず解放**する（例外で閉じっぱなしにしない）
+  //   5. 終わってから**メーターを1回だけ**数え直す（D: 操作の最中に 12.7 秒かけて数え直さない）
+  //   6. 確保に失敗したら**そこで天井を下げる**（E: 2回目以降を同じ形で失敗させない）
+  //
+  // ★表示の仕組みは増やさない: 中身は `ui/busy.ts` の `runWithBusy` に委ねる
+  //  （ライブラリ・ホームと**同じ1つの実装**。こちらはそれに「入口の閉鎖」を足しているだけ）。
+  //
+  // ⚠ **保存はここを通さない**（V161-A の「保存中も描ける」を殺すため・壊すなリスト）。
+  //   保存は `runBackgroundSave` が自前で持つ（入口を閉じない・右下の小さなピルだけ）。
+
+  /** V166: 重い操作と判定する表示遅延（ms）。`PERF_MIN_MS` と同じ値にしてあるので、
+   *  **長タスクとして記録される区間には必ず表示が出ている**（ログの `busy=no` が消える）。 */
+  private static readonly HEAVY_BUSY_DELAY_MS = PERF_MIN_MS;
+
+  /** V166 (E): 1回の重い操作に許す確保量。確保に失敗したら**その場で下げる**
+   *  （＝以後その先へは伸ばさない。undo や削除で実際に減れば、また入るようになる）。 */
+  private heavyAllocBudget = HEAVY_ALLOC_MAX_BYTES;
+
+  /** V166 (D): 重い操作の最中にメーターの数え直しを頼まれたか（終わってから1回だけ実行する） */
+  private meterPending = false;
+
+  /** V166 (層1): **重い操作はすべてこれを通る。**
+   *
+   *  @param op   `PerfOp`（＝待たせる対象と数える対象を同じ一覧にする・要件 層2）
+   *  @param msg  「◯◯しています」の訳文
+   *  @returns    `fn` の戻り値。**入口が閉じていて実行しなかったときは `undefined`**
+   */
+  async runHeavy<T>(op: PerfOp, msg: string, fn: () => T | Promise<T>): Promise<T | undefined> {
+    // ★連打が原理的に起きない: 走っている間は同じ操作も他の重い操作も受け付けない。
+    //  黙って捨てる（ボタンは無効になっているので、届くのはキー経由だけ）
+    if (this.busyKind) return undefined;
+    this.beginBusy("heavy");
+    try {
+      // ★V166（Codex 指摘・優先度中）: **1回だけ画面に描かせてから**中身を始める。
+      //  重い処理の多くは**同期**（貼り付けの組み立て・統合の焼き込み）で、始まったら
+      //  イベントループが返ってこない＝`beginBusy` で付けた「押せない見た目」が
+      //  **描かれないまま固まる**。ここで1拍譲ると、少なくとも
+      //  「受け付けた・押せなくなった」ことは必ず見える。
+      //  ⚠ 同期処理の最中に「◯◯しています」の箱を**出すことはできない**（タイマーが動けない）。
+      //   それには操作そのものを刻む必要があり、この回の範囲を超える（報告書に明記）。
+      await yieldToPaint();
+      return await runWithBusy(op, msg, async () => fn(), Editor.HEAVY_BUSY_DELAY_MS);
+    } catch (e) {
+      // V166 (E): 確保に失敗したら**1回目でそこを天井にする**。
+      // 事故のログでは `unhandledrejection` を8回出しながら操作を受け付け続けていた
+      if (isAllocFailure(e)) {
+        const real = this.sleepOn
+          ? awakeBytes(this.project) + sleepBytes(this.project)
+          : projectBytes(this.project);
+        this.heavyAllocBudget = Math.max(0, Math.min(this.heavyAllocBudget, Math.floor(real / 8)));
+        this.cb.appendLog?.(`[V166] alloc failed op=${op} budget=${this.heavyAllocBudget}`);
+        if (this.cb.notice) void this.cb.notice(t("ed.heavy.outOfMemory.msg"));
+        else this.cb.toast(t("ed.heavy.outOfMemory.msg"));
+        return undefined;
+      }
+      // それ以外の例外は握り潰さない（呼び出し側／既存の unhandledrejection の網へ）
+      throw e;
+    } finally {
+      // ★どの抜け方でも必ず入口を開ける（基準5: わざと投げても次の操作ができる）
+      this.endBusy();
+      // V166 (D): 溜めておいたメーターの数え直しを**ここで1回だけ**
+      if (this.meterPending) {
+        this.meterPending = false;
+        this.updateSizeMeter();
+      }
+    }
+  }
+
+  /** V166: いま起きている「面」の数（コマ×レイヤーで実体があるもの）。
+   *  昇格（`promoteTo16`）が既存バッファを作り直すぶんの見積もりに使う。 */
+  private awakeFaceCount(): number {
+    let n = 0;
+    for (const f of this.project.frames) n += Object.keys(f.layers).length;
+    return n;
+  }
+
+  /** V166 (Codex 指摘⑤): 指定レイヤーのうち**まだ眠っている面**の数。
+   *  `wakeLayersAllFrames` がこれから展開する＝確保する枚数そのもの。 */
+  private asleepFaces(layerIds: string[]): number {
+    let n = 0;
+    for (const f of this.project.frames) {
+      if (!f.sleep) continue;
+      for (const id of layerIds) if (f.sleep[id] && !f.layers[id]) n++;
+    }
+    return n;
+  }
+
+  /** V166 (B): 「これから n コマ確保してよいか」を聞く。だめなら**断り文句を出して false**。
+   *  丸めと上限は `prefs.ts` の純関数（スモークが直接叩ける）。
+   *
+   *  @param incomingColors 持ち込む色数の上限（クリップの palette 長など）。
+   *    ★Codex 指摘④: これを渡さないと**16bit 昇格を見落として実確保量を半分に見積もる**。
+   *    0 を渡すのは「新しい色が1つも増えない」と分かっている操作だけ（コマ複製・空コマ追加）。
+   *  @param where ログに出す操作名（決められた語だけ・W-10） */
+  private allowFrameAlloc(frames: number, incomingColors = 0, where = "paste"): boolean {
+    const curBits: 8 | 16 = this.project.indexBits === 16 ? 16 : 8;
+    // ★昇格が起こり得るなら 16bit で見積もる（安全側にしか外れない）
+    const bits = estimateBits(this.project.colorTable.length, incomingColors, curBits);
+    const extra = promotionExtraBytes(this.awakeFaceCount(), bits === 16 && curBits === 8);
+    // 昇格ぶんの追加確保は予算から先に引く（＝そのぶん入るコマ数が減る）
+    const budget = Math.max(0, this.heavyAllocBudget - extra);
+    const r = checkFrameAlloc(frames, this.project.layerDefs.length, bits, budget);
+    if (r.ok) return true;
+    // ★「入りません」ではなく**何コマなら入るか**を言う（要件 §2-B）。
+    //  ただし**1コマも入らない**ときに「約0コマまで貼り付けられます」と言うのは
+    //  日本語として壊れているし、助言にもなっていない。そこだけは
+    //  「減らすか、保存して開き直す」と言う（＝E の文面と同じ助言）
+    const msg =
+      r.maxFrames > 0
+        ? t("ed.heavy.tooManyFrames.msg", { max: r.maxFrames })
+        : t("ed.heavy.outOfMemory.msg");
+    if (this.cb.notice) void this.cb.notice(msg);
+    else this.cb.toast(msg);
+    // Codex 指摘（低）: どの操作で断ったのかを書く（前は全部 `paste refused` だった）
+    this.cb.appendLog?.(
+      `[V166] ${where} refused need=${r.needBytes} budget=${budget} bits=${bits} maxFrames=${r.maxFrames}`
+    );
+    return false;
+  }
+
+  /** V166 (Codex 指摘・優先度高②③): **バイト数そのもの**で通す/断るを決める入口。
+   *  「コマ数 × レイヤー数」で表せない確保（クリップの写し取り・展開）に使う。
+   *
+   *  @param perFrameBytes 分かるなら1コマあたりのバイト数。渡すと断り文句が
+   *    **「あと約◯コマまで」**になる（要件 §2-B）。0 なら「減らしてください」だけを言う。
+   *    ★ここを足したのは、展開の見積もり（高③）を先に置いた結果、
+   *     **何コマ入るかを言う道が塞がれてしまった**のに気づいたため。
+   *     断るのが先でも、言うことの質は落とさない。 */
+  private allowBytes(needBytes: number, where: string, perFrameBytes = 0): boolean {
+    if (needBytes <= this.heavyAllocBudget) return true;
+    const maxFrames = perFrameBytes > 0 ? Math.floor(this.heavyAllocBudget / perFrameBytes) : 0;
+    const msg =
+      maxFrames > 0
+        ? t("ed.heavy.tooManyFrames.msg", { max: maxFrames })
+        : t("ed.heavy.outOfMemory.msg");
+    if (this.cb.notice) void this.cb.notice(msg);
+    else this.cb.toast(msg);
+    this.cb.appendLog?.(
+      `[V166] ${where} refused need=${needBytes} budget=${this.heavyAllocBudget} maxFrames=${maxFrames}`
+    );
+    return false;
+  }
+
+  /** V166 (B): 「1レイヤーぶんのバッファを n 枚」確保してよいか。
+   *
+   *  ★コマを増やす操作だけでなく、**全コマに効くレイヤー操作**も同じ形で落ちる:
+   *   レイヤー統合は「全コマ × 2枚」の控えを取るので、7,687コマなら **1.18 GB**——
+   *   貼り付けと同じ確保量になる。コマ数の上限（65,535）はここでも1つも役に立たない。
+   *  ★断り文句は「減らすか、保存して開き直す」（＝この確保のほとんどは**元に戻す**用の控えで、
+   *   開き直せば履歴が空になって実際に入るようになる）。「あと何コマ」は意味を持たないので言わない。 */
+  private allowBufferAlloc(count: number, where: string, wakeLayerIds: string[] = []): boolean {
+    const bits: 8 | 16 = this.project.indexBits === 16 ? 16 : 8;
+    // ★V166（Codex 指摘・優先度高⑤）: **起こすぶんも確保**である。
+    //  見落としていた: これらの操作は控えを取る前に `wakeLayersAllFrames` で
+    //  眠っているコマを展開する。控えだけ数えて起こすぶんを数えないと、
+    //  実際の確保量を半分近く見落とす（眠っている作品ほどズレる）。
+    const wake = wakeLayerIds.length ? this.asleepFaces(wakeLayerIds) : 0;
+    const r = checkFrameAlloc(count + wake, 1, bits, this.heavyAllocBudget);
+    if (r.ok) return true;
+    if (this.cb.notice) void this.cb.notice(t("ed.heavy.outOfMemory.msg"));
+    else this.cb.toast(t("ed.heavy.outOfMemory.msg"));
+    this.cb.appendLog?.(
+      `[V166] ${where} refused need=${r.needBytes} budget=${this.heavyAllocBudget}`
+    );
+    return false;
+  }
+
   // ---------------- V154b (W-7/W-8/W-9): 重い処理は1本だけ ----------------
 
   /** V154b: 重い処理に入る。**入口を閉じてから**呼ぶこと（`busyKind` が空でないときは呼ばない）。
    *  ロック（W-7/W-9）は**この瞬間から**効く。進捗（W-8）は `showBusyAfterDelay` で別に出す
-   *  ——保存先ピッカーのように「利用者を待っている時間」に進捗を出さないため。 */
-  private beginBusy(kind: "save" | "audio" | "export") {
+   *  ——保存先ピッカーのように「利用者を待っている時間」に進捗を出さないため。
+   *  V166: 表示は `runHeavy`（＝`runWithBusy`）へ寄せたので、ここは**入口の閉鎖だけ**を持つ。 */
+  private beginBusy(kind: "audio" | "export" | "heavy") {
     this.busyKind = kind;
     // ポインタを止める（キーは dialogOpen() が見る）。**遅延なしで即座に**——
     // 進捗が出るまでの 450ms に触られたら、そこで混ざったものが保存される
@@ -7016,6 +7528,15 @@ export class Editor {
     try {
       const worker = this.ensureSaveWorker();
       const seq = ++this.saveSeq;
+      // ★V168 (S-1〜S-3): **写す前に見積もり、大きければ掃除を待ち、それでも大きければ断る。**
+      //  2026-09-02: 56,860面（実際に使っている量 2.6GB）の写しが Chromium の実効上限 約2GiB を超え、
+      //  `Data cannot be cloned, out of memory.` で失敗した。写しは確保である。
+      //  ここは**基準点（expectFrames / epoch0）より前**なので、v161 検査5（基準点→postMessage に
+      //  await 無し）は破らない。編集は止めない（V161-A）——掃除は描いている合間に只のものだけ進む。
+      //  ピルはこの時点から出す（待ちが長いときに「押したのに何も出ない」を作らない）
+      this.updateSavePill(true);
+      const prep = await this.prepareSnapshot();
+      if (!prep) return false; // 断った（reportSnapshotTooBig が知らせ・ログ済み。dirty は残る）
       // M10-14: 手動保存のときだけサムネコマを更新（従来どおり）
       this.project.thumbFrame = Math.max(
         0,
@@ -7064,6 +7585,7 @@ export class Editor {
         project: this.project,
       });
       // ---- ここから編集は自由（この await の間、メインスレッドは空いている） ----
+      this.setSavePhase("save"); // V168: 写しに入った＝ピルは従来の「保存中」へ
       this.updateSavePill(true);
       // サムネは postMessage の直後に読む（1コマの合成。スナップショットとほぼ同時点＝
       // その一瞬に描かれた線がサムネだけに写る理屈上の窓はあるが、絵のデータには影響しない）
@@ -7104,8 +7626,10 @@ export class Editor {
       return this.reportSaveBroken("exception", String(e), e);
     } finally {
       // V159 (G-1): 保存にかかった時間（保存先ピッカーを待った時間は `t0` の位置ゆえ入らない）。
-      // 失敗しても測る——「失敗するまでに何秒待たされたか」も知りたい
+      // 失敗しても測る——「失敗するまでに何秒待たされたか」も知りたい。
+      // ★V168: この時間は**掃除の待ち（prepare）を含む**（§1-i-2: 報告書に「何を含む時間か」）
       perfDone("save", t0);
+      this.savePhase = ""; // V168: 段階を畳む（次の保存は "" から始まる）
     }
   }
 
@@ -7116,12 +7640,174 @@ export class Editor {
   async waitForSave(): Promise<void> {
     if (!this.saveInFlight) return;
     this.saveQueued = false;
-    const hide = this.cb.busy?.(t("ed.save.wait.label"));
+    // V168 (S-2): 掃除待ちの最中なら**同じ段階の文言**を出す（固まって見せない・文言の源は1つ）。
+    // ★Codex 指摘（中）: ここはモーダル（背面に触れない）なので「描き続けられます」とは言わない
+    //  ＝`savePhaseText("central")`。中央表示の文字は `renderSavePhase` が段階と進みに合わせて書き換える
+    const hide = this.cb.busy?.(this.savePhaseText("central"));
+    // 箱は次のタスクで DOM に入るので、1拍おいてから「これは保存の段階表示」と印を付ける
+    setTimeout(() => {
+      const msg = document.querySelector(".busy-box .busy-msg") as HTMLElement | null;
+      if (msg && this.saveInFlight) {
+        msg.dataset.savePhase = "1";
+        this.renderSavePhase();
+      }
+    }, 0);
     try {
       await this.saveInFlight.catch(() => {});
     } finally {
       hide?.();
     }
+  }
+
+  // ================= V168 (S): 保存の写しを、写す前に見積もる・待つ・断る =================
+  //
+  // ★事故（2026-09-02・実機）: 56,860面（実際に使っている量 2.6GB）の Ctrl+S が
+  //   `Data cannot be cloned, out of memory.`。写し（structured clone）は 1本の連続バッファに
+  //   直列化され、実効上限は約 2GiB。貼り付け直後は貼ったコマが生のまま（掃除が追いつく前）なので太る。
+  //   掃除が済めば写しはファイル並み（約 0.2GB）＝**眠らせが追いついているかで通ったり落ちたりする**。
+  //
+  // ★作者決定: 「眠らせを待ってから写す ＋ 写す前の門番」
+  //   - 見積り（純関数 `snapshotBytes`）が soft（512MiB）を超えていたら、**基準点より前**で掃除を待つ
+  //   - 待っても max（1.5GiB）を超えていたら**断る**（例外にしない・W-6 と同じ道で知らせる）
+  //   - 編集は止めない（V161-A）。掃除は描いている合間に只のものだけ進む＝待ちは延びるが描ける
+  //   - v161 検査5（基準点→postMessage に await 無し）は破らない（待ちは基準点の**前**）
+
+  /** V168 (S-2): 掃除の1周を待つ（走っている周があればそれを待つ。無ければ1周頼む）。 */
+  private sweepPass(): Promise<void> {
+    if (this.sweepJob) return this.sweepJob;
+    return this.sweepSleep();
+  }
+
+  /** V168 (S-2): 掃除の進み具合を1回の走査で数える。
+   *  @returns n=片づいたコマ数（📌 以外が全部眠っている）／total=全コマ／
+   *           outside=**窓の外**でまだ起きているコマ数（0 ならこれ以上は減らない） */
+  private sweepProgress(keep: Set<string>): { n: number; total: number; outside: number } {
+    let n = 0;
+    let outside = 0;
+    const frames = this.project.frames;
+    for (let i = 0; i < frames.length; i++) {
+      const f = frames[i];
+      let awake = false;
+      for (const id of Object.keys(f.layers)) if (!keep.has(id)) { awake = true; break; }
+      if (!awake) n++;
+      else if (!this.inSleepWindow(i)) outside++;
+    }
+    return { n, total: frames.length, outside };
+  }
+
+  /** V168 (S-1〜S-3): 写す前の見積り → 待ち → 門番。
+   *  @returns 写してよい見積り。**断ったときは null**（知らせとログは済ませてある）。 */
+  private async prepareSnapshot(): Promise<{ est: SnapshotEstimate; waited: number; swept: number } | null> {
+    const t0 = performance.now();
+    const est0 = snapshotBytes(this.project);
+    let est = est0;
+    const plan = saveSnapshotPlan(est.est);
+    let swept = 0;
+    if (plan === "sweep" && this.sleepOn) {
+      const keep = this.sharedLayerIds();
+      let prog = this.sweepProgress(keep);
+      const startN = prog.n;
+      this.savePrep = { n: prog.n, total: prog.total };
+      this.setSavePhase("prepare");
+      let lastProgressAt = performance.now();
+      this.savePrepStalled = false;
+      this.sweepProgressCb = () => {
+        prog = this.sweepProgress(keep);
+        this.savePrep = { n: prog.n, total: prog.total };
+        lastProgressAt = performance.now();
+        this.savePrepStalled = false;
+        this.renderSavePhase();
+      };
+      // ★Codex 指摘（中）: 描き続けていると掃除は只のものしか進まず、数字が止まる。
+      //  3 秒動かなければ「手を離した合間に片づけが進みます」の文言へ切り替える（1 秒ごとに見る）
+      const stallTimer = window.setInterval(() => {
+        const stalled = performance.now() - lastProgressAt > Editor.SAVE_PREP_STALL_MS;
+        if (stalled !== this.savePrepStalled) {
+          this.savePrepStalled = stalled;
+          this.renderSavePhase();
+        }
+      }, 1000);
+      try {
+        // ★1周（scanned === total）ごとに条件を見直す。無限には回さない:
+        //  (a) est ≤ soft になった (b) 窓の外に起きているコマが無くなった（＝これ以上は減らない）
+        //  (c) 画面を離れた——のどれかで抜ける。進みが無かった周（描いている最中は只のものしか
+        //  片づかない）は少し間を空ける＝CPU を回し続けない
+        for (;;) {
+          if (!this.mounted) break;
+          if (saveSnapshotPlan(est.est) === "clone") break;
+          if (prog.outside === 0) break;
+          const before = prog.n;
+          await this.sweepPass();
+          prog = this.sweepProgress(keep);
+          this.savePrep = { n: prog.n, total: prog.total };
+          this.renderSavePhase();
+          est = snapshotBytes(this.project);
+          if (prog.n <= before) await new Promise((r) => setTimeout(r, 250));
+        }
+      } finally {
+        this.sweepProgressCb = null;
+        clearInterval(stallTimer);
+        this.savePrepStalled = false;
+      }
+      swept = Math.max(0, prog.n - startN);
+    }
+    const waited = Math.round(performance.now() - t0);
+    // S-4: 数値と決まった語だけ（W-10）
+    this.cb.appendLog?.(
+      `[V168] save prepare est=${est0.est} awake=${est0.awake} sleep=${est0.sleep} audio=${est0.audio} ` +
+        `faces=${est0.faces} plan=${plan} waited=${waited}ms swept=${swept} est2=${est.est}`
+    );
+    this.setSavePhase("save");
+    if (!saveSnapshotAllowed(est.est)) {
+      this.cb.appendLog?.(`[V168] save refused est=${est.est} max=${SAVE_SNAPSHOT_MAX_BYTES}`);
+      this.reportSnapshotTooBig(est.est);
+      return null;
+    }
+    return { est, waited, swept };
+  }
+
+  /** V168 (S-3): 断る。**何が・いくつ・どうすれば**を1文に。例外にしない（作品は消えていない）。 */
+  private reportSnapshotTooBig(est: number): false {
+    const gb = (n: number) => (n / 1024 / 1024 / 1024).toFixed(1);
+    const msg =
+      t("ed.save.tooBig.msg", { est: gb(est), max: gb(SAVE_SNAPSHOT_MAX_BYTES) }) +
+      "\n" +
+      t("ed.log.sendHint.msg");
+    if (this.cb.notice) void this.cb.notice(msg);
+    else this.cb.toast(msg);
+    return false; // dirty は true のまま／オートセーブも残したまま（W-6 と同じ）
+  }
+
+  /** V168 (S-2): 段階を変えて、出ている表示を揃える。 */
+  private setSavePhase(ph: "" | "prepare" | "save"): void {
+    this.savePhase = ph;
+    this.renderSavePhase();
+  }
+
+  /** V168 (S-2): 掃除待ちの進みが止まって見えているか（描き続けている間は只のものしか片づかない）。
+   *  ★Codex 指摘（中）: 「そのまま描き続けられます」だけだと、数字が止まったときに固まったと誤解される。
+   *  数秒進まなかったら「手を離した合間に片づけが進みます」へ切り替える。 */
+  private savePrepStalled = false;
+  /** V168: 進みが止まったと見なすまでの時間（ms）。掃除は1コマ数十 ms なので、3 秒動かなければ描いている最中 */
+  private static readonly SAVE_PREP_STALL_MS = 3000;
+
+  /** V168 (S-2): **ピルと中央表示の文言はここ1つから**（源は1つ）。
+   *  @param where "pill"=右下（触れる・描ける）／"central"=`waitForSave` のモーダル（**触れない**）。
+   *  ★Codex 指摘（中）: 中央表示はモーダルで背面が遮られるので「描き続けられます」と言ってはいけない。
+   *   同じ関数の中で出し分ける＝文言の置き場は1つのまま。 */
+  private savePhaseText(where: "pill" | "central" = "pill"): string {
+    if (this.savePhase !== "prepare") return where === "central" ? t("ed.save.wait.label") : t("ed.save.bg.label");
+    const v = { n: this.savePrep.n, total: this.savePrep.total };
+    if (where === "central") return t("ed.save.prepareWait.msg", v);
+    return this.savePrepStalled ? t("ed.save.prepareStalled.msg", v) : t("ed.save.prepare.msg", v);
+  }
+
+  /** V168 (S-2): ピル（右下）と、出ていれば中央表示（`waitForSave`）の文字を今の段階に揃える。 */
+  private renderSavePhase(): void {
+    const span = document.querySelector("#ed-savepill span") as HTMLElement | null;
+    if (span) span.textContent = this.savePhaseText("pill");
+    const msg = document.querySelector(".busy-box .busy-msg[data-save-phase]") as HTMLElement | null;
+    if (msg) msg.textContent = this.savePhaseText("central");
   }
 
   /** V161 (A): 保存 Worker（遅延生成）。 */
@@ -7142,7 +7828,10 @@ export class Editor {
       if (this.savePillTimer) return;
       this.savePillTimer = window.setTimeout(() => {
         this.savePillTimer = 0;
-        if (this.saveInFlight) el.hidden = false;
+        if (this.saveInFlight) {
+          this.renderSavePhase(); // V168: 段階に合った文言で出す（掃除待ちなら「保存の準備…」）
+          el.hidden = false;
+        }
       }, 300);
     } else {
       if (this.savePillTimer) {
@@ -7168,8 +7857,13 @@ export class Editor {
 
   // ---------------- ページ／複数ページ・クリップボード（M3.3-B） ----------------
 
-  /** 選択中のコマ（単一 or Shift範囲）をアプリ全体クリップボードへ（非破壊・履歴なし） */
+  /** 選択中のコマ（単一 or Shift範囲）をアプリ全体クリップボードへ（非破壊・履歴なし）
+   *  V166 (層2): **漏斗を通す。** 1,000コマの範囲コピーは全コマの写し取り＋圧縮で数秒かかる。 */
   async copySelectedFrames() {
+    await this.runHeavy("frame.copy", t("ed.heavy.copy.msg"), () => this.copySelectedFramesInner());
+  }
+
+  private async copySelectedFramesInner() {
     // 変形/選択移動の浮動中は、切り出されたピクセルが本体に無く欠損コピーになる
     // M10-2c: 四隅変形中は未確定のプレビューをそのままコピーしてしまうので同様に止める
     if (this.xformActive || this.floatBuf || this.cornerActive) {
@@ -7185,6 +7879,15 @@ export class Editor {
       for (let i = a; i <= b; i++) idxs.push(i);
     } else {
       idxs.push(Math.max(0, Math.min(this.frameIndex, last)));
+    }
+    // ★★V166（Codex 指摘・優先度高②）: **コピー側にも見積もりが要る。**
+    //  見落としていた: `makeClip` は「選んだコマ × そのコマのレイヤー数」を `copyIndexBuf` する。
+    //  1,098コマ×20レイヤーなら **1.57GB**——**貼り付けとまったく同じ量**を、
+    //  コピーを押した時点で確保しに行く。事故は貼り付けで出たが、
+    //  **コピーでも同じ形で落ちる**（起こす処理もそのぶん展開するので、起こすより先に断る）。
+    {
+      const need = clipCopyBytes(this.project, idxs);
+      if (!this.allowBytes(need, "frame.copy", Math.round(need / Math.max(1, idxs.length)))) return;
     }
     // ★V156 (P-1): 選ばれたコマが眠っていると `makeClip` の `?? allocIndexBuf(p)` が
     // **空バッファを写し取る**（＝真っ白なコマがコピーされる）。読みで起こしてから写す
@@ -7213,15 +7916,46 @@ export class Editor {
     );
   }
 
-  /** はりつけ: 1枚=現在ページに上書き（うごメモ準拠）／複数=現在コマの後ろに挿入（総集編） */
+  /** はりつけ: 1枚=現在ページに上書き（うごメモ準拠）／複数=現在コマの後ろに挿入（総集編）
+   *
+   *  ★V166: **2026-08-31 に落ちたのはここ。** 1,098コマ×20レイヤー（約1.69GB）を
+   *  確保しようとして `Array buffer allocation failed`、そのまま連打できたので8回繰り返し、
+   *  WebView ごと落ちた。いまは (1) 漏斗で入口が閉じる (2) 確保の前に見積もって断る。 */
   async pasteFrames() {
+    await this.runHeavy("frame.paste", t("ed.heavy.paste.msg"), () => this.pasteFramesInner());
+  }
+
+  private async pasteFramesInner() {
     const clip = Editor.frameClip;
     if (!clip || clip.frames.length === 0) {
       this.cb.toast(t("ed.tl.clipEmpty.toast"));
       return;
     }
     if (this.xformGuard()) return; // E-4: copy側と統一（暗黙キャンセルしない）
+    // ★★V166（Codex 指摘・優先度高③）: **展開より先に断る。**
+    //  見落としていた: `unpackClip` は畳んだクリップを**全部生バッファへ展開する**ので、
+    //  1,098コマ×20レイヤーなら**見積もりに来る前に 1.57GB を確保**していた
+    //  ——断る意味が無かった。開いたら何バイトになるかは畳んだ側の枚数と幅で分かる
+    if (
+      !this.allowBytes(
+        clipUnpackedBytes(clip),
+        "frame.paste.unpack",
+        Math.round(clipUnpackedBytes(clip) / Math.max(1, clip.frames.length))
+      )
+    )
+      return;
+    // ★Codex 指摘・優先度高①: `unpack` したら**必ず**畳み直す。
+    //  以前は末尾で `void packClip(clip)` としていたので、漏斗が閉じたあとに再圧縮が走り、
+    //  連打防止・予算・例外捕捉の**外**でクリップを書き換え続けていた
     await unpackClip(clip); // V156 (P-5): 畳んであるので開いてから使う
+    try {
+      await this.pasteFramesBody(clip);
+    } finally {
+      await packClip(clip); // 使い終わったらまた畳む（static なので抱えっぱなしにしない）
+    }
+  }
+
+  private async pasteFramesBody(clip: FrameClip) {
     const self = this;
     const bitsBefore = this.project.indexBits;
 
@@ -7229,6 +7963,14 @@ export class Editor {
       // --- 単ページ: 現在ページに上書き ---
       const frame = this.project.frames[this.frameIndex];
       if (!frame) return;
+      // ★V166 (B): 単ページ経路も見積もる（要件 §2-B「単ページ経路にも」）。
+      //  **1コマの上書きでも「4コマぶん」を新しく確保する**——数えるとこうなる:
+      //   ① `beforeLayers`（全レイヤーぶんの写し・履歴が持ち続ける）
+      //   ② `buildFramesFromClip` が組む `built`（全レイヤーぶん）
+      //   ③ `afterLayers`（全レイヤーぶんの写し・履歴が持ち続ける）
+      //   ④ `restore()` の中で1枚ずつ張り替える `nb = allocIndexBuf`（全レイヤーぶん）
+      //  ★**少なく見積もらないこと**が要点。少なく見ると「断るべきものを通す」＝事故が戻る
+      if (!this.allowFrameAlloc(4, clip.palette.length, "frame.paste")) return;
       // before 退避（色再マップ＝昇格の前に取得。widening は undo 側の alloc+set が担保）
       const layerIds = this.project.layerDefs.map((l) => l.id);
       const beforeLayers: Record<string, IndexBuf> = {};
@@ -7276,8 +8018,7 @@ export class Editor {
         this.noticePromote16(); // V154 (W-3)
       }
       this.cb.toast(t("ed.frameclip.pastedOne.toast"));
-      void packClip(clip); // V156 (P-5): 使い終わったらまた畳む（static なので抱えっぱなしにしない）
-      return;
+      return; // V166: 畳み直しは呼び出し元の finally（Codex 指摘①）
     }
 
     // --- 複数ページ: 現在コマの後ろに挿入 ---
@@ -7286,6 +8027,11 @@ export class Editor {
       this.cb.toast(t("ed.tl.pasteLimit.toast"));
       return;
     }
+    // ★V166 (B): **確保する前に**見積もる。ここが事故の急所だった
+    //  ——今までの防御は「65,535コマを超えるか」だけで、**1回で確保する量**を見ていなかった。
+    //  4,393コマの作品に 1,098コマを貼る操作はコマ数の上限にまったく触れないまま
+    //  1.69GB を確保しに行き、確保の途中で落ちた。
+    if (!this.allowFrameAlloc(n, clip.palette.length, "frame.paste")) return;
     const newFrames = buildFramesFromClip(this.project, clip);
     const at = this.frameIndex + 1;
     const apply = () => {
@@ -7312,7 +8058,7 @@ export class Editor {
       this.noticePromote16(); // V154 (W-3)
     }
     this.cb.toast(t("ed.tl.insertedMulti.toast", { count: n }));
-    void packClip(clip); // V156 (P-5): 使い終わったらまた畳む
+    // V166: 畳み直しは呼び出し元の finally（Codex 指摘①）
   }
 
   // ---------------- キャンバス表示 ----------------
@@ -7597,6 +8343,8 @@ export class Editor {
     }
     compositeFrame(this.project, this.frameIndex, this.composite, {
       onion: this.playing ? 0 : this.onionLevel,
+      // V164 (U-1): 向き。再生中は段数が 0 なので向きは効かない（再生中に描かない挙動は不変）
+      onionDir: this.onionDir,
     });
     const cv = $("#ed-canvas") as unknown as HTMLCanvasElement;
     presentToCanvas(this.composite, cv);
@@ -7836,6 +8584,10 @@ export class Editor {
     return (
       `tool=${this.tool} down=${this.pointerDown ? 1 : 0} pan=${this.panState ? 1 : 0} ` +
       `space=${this.spaceHeld ? 1 : 0} shift=${this.shiftHeld ? 1 : 0} ` +
+      // ★V166 (C): Alt の見分けに要る3つ。`altD>altU` で止まっていれば **keyup が来ていない**（候補1）、
+      //  釣り合っているのに `alt=1` が続くなら **掴まれたまま**（候補2）。`fix` は自己修復が効いた回数
+      `alt=${this.altHeld ? 1 : 0} altD=${this.altDownCount} altU=${this.altUpCount} ` +
+      `altFix=${this.altFixCount} ` +
       `capId=${id ?? "-"} capHeld=${held} focus=${document.hasFocus() ? 1 : 0} vis=${document.visibilityState}`
     );
   }
@@ -7853,8 +8605,10 @@ export class Editor {
     const named =
       !printable || e.ctrlKey || e.altKey || e.metaKey || e.key === " " || e.key.toLowerCase() === "h";
     this.inputLogBuf.push(
+      // V169 (A-3): dp=（defaultPrevented）。Alt 単独の既定動作を止めているのに固まる報告が来たら、
+      // 「止めているのに入った（dp=1）」か「そもそも止まっていない（dp=0）」がこの1語で分かる
       `[inputlog] ${e.type} key=${named ? e.key : "*"} code=${named ? e.code : "*"} ` +
-        `repeat=${e.repeat ? 1 : 0} mod=${mod} ` +
+        `repeat=${e.repeat ? 1 : 0} dp=${e.defaultPrevented ? 1 : 0} mod=${mod} ` +
         this.stateLine()
     );
     this.flushInputLogSoon();
@@ -8091,6 +8845,7 @@ export class Editor {
     //（フォーカスを奪われて up が届かなかった場合の自己修復。正常時は何もしない）
     if (this.pointerDown || this.capturedPointerId !== null) this.endPointerSession("down");
     this.shiftHeld = e.shiftKey; // M10-7: pointer 側の modifier を真実として同期
+    this.syncAltFromEvent(e.altKey, "pointerdown"); // V166 (C): Alt も同じ作法で同期する
     this.closeStrip(); // M14 (S-1): キャンバスへ触れたら（描き始め）形式ストリップは畳む
     // ★V157 (D-1): ロック中のレイヤーには描かせない。**捕捉する前に**戻る（掴みっぱなしを作らない）。
     // 変形の途中（`xformActive`）は素通し——始められた時点でロックされていないと分かっているし、
@@ -8330,6 +9085,9 @@ export class Editor {
     //   別のポインタがホバーしただけでストロークが終わってしまうため、この順序を選んでいる
     if (this.capturedPointerId !== null && e.pointerId !== this.capturedPointerId) return;
     this.shiftHeld = e.shiftKey; // M10-7: pointer 側の modifier を真実として同期
+    // ★V166 (C): **ここがいちばん効く。** 描いている最中に Alt の状態が食い違ったら
+    //  （keyup が届かなかった／ドライバが掴んだまま）、動かした時点でイベント側へ合わせて直す
+    this.syncAltFromEvent(e.altKey, "pointermove");
     // M11-5: 「押している最中」のはずなのに、どのボタンも押されていないイベントが来たら、
     // pointerup を取りこぼしている（ペンが浮いて戻ってきた等）。直前の位置で畳んで解放する。
     // これが無いと、かざしただけで線が引かれ、キャプチャも掴まれたままになる
@@ -8618,7 +9376,12 @@ export class Editor {
   }
 
   /** Enter=確定。ここで初めて履歴に積む（それまでは1件も積まない） */
-  private commitCornerWarp(): void {
+  /** V166 (層2): 四隅の歪みの確定。対象レイヤーぶんの全画素比較＋控えが動く。 */
+  private async commitCornerWarp(): Promise<void> {
+    await this.runHeavy("warp.commit", t("ed.heavy.warp.msg"), () => this.commitCornerWarpInner());
+  }
+
+  private commitCornerWarpInner(): void {
     const before = this.cornerBefore;
     const f = this.project.frames[this.frameIndex];
     if (!before || !f) {
@@ -9619,7 +10382,14 @@ export class Editor {
    *    （途中で16bit昇格し得る）→ ②昇格後の幅で確保・remap。パレットは src が全コマ共通（convertToProject の既定）
    *  - 挿入・履歴・上限ガードは pasteFrames の複数ページ挿入と同じ作法（Undo 1回で N コマ全部戻る）
    *  - 変形は通さない（「おさめ方」に従った自動配置のまま焼く）。挿入されるコマは通常のコマと同一バイト */
-  placeConvertedFrames(src: Project, transparentPaper: boolean) {
+  async placeConvertedFrames(src: Project, transparentPaper: boolean) {
+    // V166 (層2): 連番一括は N コマぶんを一度に確保する＝貼り付けと同じ重さ
+    await this.runHeavy("image.frames", t("ed.heavy.imageFrames.msg"), () =>
+      this.placeConvertedFramesInner(src, transparentPaper)
+    );
+  }
+
+  private placeConvertedFramesInner(src: Project, transparentPaper: boolean) {
     const active = this.activeBuffer();
     if (!active) {
       this.cb.toast(t("ed.img.place.noLayer.toast"));
@@ -9641,6 +10411,9 @@ export class Editor {
       this.cb.toast(t("ed.tl.pasteLimit.toast")); // pasteFrames と同じ上限ガード
       return;
     }
+    // V166 (B): pasteFrames と同じ見積もり。★連番画像は**元画像のパレットを丸ごと持ち込む**ので、
+    //  16bit 昇格が起こり得る（Codex 指摘④）。持ち込む色数を渡して幅を決めさせる
+    if (!this.allowFrameAlloc(n, src.colorTable.length, "image.frames")) return;
     if (this.playing) this.stopPlayback();
     // ① 全コマの使用色を一括解決（透過ONなら紙色一致の画素は登録しない＝パレット汚染防止・1枚版と同じ規則）
     const paperHex = (src.colorTable[src.frames[0].paper] || "#ffffff").toLowerCase();
@@ -10596,7 +11369,13 @@ export class Editor {
     this.paintUiOverlay(); // M13-2b (T-6): 枠・ハンドルは画面解像度の層
   }
 
-  private commitTransform() {
+  /** V166 (層2): 変形の焼き込み。M13-2b で**N枚のレイヤーへ同時に**当たるようになったので、
+   *  レイヤーの多い作品では一度の Enter で N×76,800 画素を書き換える。 */
+  private async commitTransform() {
+    await this.runHeavy("xform.commit", t("ed.heavy.xform.msg"), () => this.commitTransformInner());
+  }
+
+  private commitTransformInner() {
     const frame = this.project.frames[this.frameIndex];
     if (!frame || !this.floatBuf || this.xformLayers.length === 0) return;
     // M13-2b (T-2): **1つの Transform を全 float に当てて** N 枚へ焼き込む（REQ §6-2 手順4）。
@@ -10923,9 +11702,32 @@ export class Editor {
   }
 
   /** M16 (K-4): 色を拾うだけ（**ツールは切り替えない**）。スポイト tool と Alt＋クリックの共通の実体。 */
-  private pickColorAt(pt: { x: number; y: number }) {
+  /** V167 (K-3): 直前に「色を拾いました」を出した時刻（間引き用）。 */
+  private lastPickNoticeAt = -Infinity;
+
+  /** V167 (K-3): 拾ったことを知らせる。**規則は `prefs.ts` の `shouldNoticePick` 1か所**。
+   *  @param via `"pointer"` なら「Alt＋クリックで」と**押した組み合わせを名指しする**
+   *    ——事故のときに「なぜ色が変わったか」が分かるのが目的なので、そこが要点。 */
+  private noticePick(prevHex: string, via: "tool" | "pointer" | "key", keys: string) {
+    const next = this.colorHex || "";
+    if (!shouldNoticePick(via, prevHex, next, this.lastPickNoticeAt, performance.now())) return;
+    this.lastPickNoticeAt = performance.now();
+    // ★Codex 指摘（中）: 透明の紙を拾うと `colorHex` は **`""`**。そのまま出すと
+    //  「色を拾いました（）」という**壊れて見える**知らせになる。事故を伝えるための
+    //  知らせがそれでは本末転倒なので、既存の「透明（消す）」の言い方を借りる
+    const color = next === "" ? t("ed.color.transparent.title") : next.toUpperCase();
+    this.cb.toast(
+      via === "pointer"
+        ? t("ed.pick.byKeys.toast", { keys, color })
+        : t("ed.pick.done.toast", { color })
+    );
+  }
+
+  private pickColorAt(pt: { x: number; y: number }, via: "tool" | "pointer" | "key" = "tool", keys = "") {
     const f = this.project.frames[this.frameIndex];
     if (!f) return;
+    // V167 (K-3): 変わったかどうかで知らせるので、拾う前の色を控える
+    const prevHex = this.colorHex || "";
     const i = pt.y * W + pt.x;
     // 上のレイヤーから順に
     for (let L = this.project.layerDefs.length - 1; L >= 0; L--) {
@@ -10936,12 +11738,14 @@ export class Editor {
         this.colorHex = this.project.colorTable[v];
         this.rebuildPalette();
         this.logPick(pt, `layer=${ld.id} idx=${v}`);
+        this.noticePick(prevHex, via, keys);
         return;
       }
     }
     this.colorHex = this.project.colorTable[f.paper];
     this.rebuildPalette();
     this.logPick(pt, "paper");
+    this.noticePick(prevHex, via, keys);
   }
 
   /** スポイト tool の1回ぶん: 色を拾って**元のツールへ戻す**（従来の挙動）。 */
@@ -10961,7 +11765,9 @@ export class Editor {
   private runPointerCommand(id: CommandId, e: PointerEvent) {
     if (id === "edit.pickColor") {
       if (this.playing) this.stopPlayback();
-      this.pickColorAt(this.clientToPixel(e.clientX, e.clientY));
+      // ★V167 (K-3): **押した組み合わせを名指しして知らせる**（「Alt＋クリックで色を拾いました」）。
+      //  2026-09-02 の事故は、まさにこの経路が無音で走っていて気づけなかった
+      this.pickColorAt(this.clientToPixel(e.clientX, e.clientY), "pointer", keyLabel(bindingFromPointer(e)));
       return;
     }
     this.lastPointerEvent = e; // 位置を要するコマンドの保険
@@ -11309,6 +12115,15 @@ export class Editor {
       );
       if (!ok) return;
     }
+    // ★V166 (層2): 確認は漏斗の外・全コマへの書き込みだけを中に入れる
+    await this.runHeavy("layer.allFrames", t("ed.heavy.layerAll.msg"), () =>
+      this.pasteLayerAllFramesInner(clip, layerId, name)
+    );
+  }
+
+  private async pasteLayerAllFramesInner(clip: IndexBuf, layerId: string, name: string) {
+    // V166 (B): 控えは「変化のあったコマ × 1枚」＝最大で全コマぶん。多いほうで見積もる
+    if (!this.allowBufferAlloc(this.project.frames.length, "layer.allFrames", [layerId])) return;
     // ★V156 (P-1): 全コマの画素を読み書きするので、**このレイヤーだけ**全コマで起こす。
     // 起こさないと `f.layers[id] ?? allocIndexBuf(p)` が空バッファを掴んで絵が静かに消える
     await wakeLayersAllFrames(this.project, [layerId], "write");
@@ -11432,6 +12247,16 @@ export class Editor {
     // V151 (E-8): 「次回から表示しない」対象の1つ（id: layerDelete）
     const ok = await this.confirmWithSkip("layerDelete", t("ed.layer.delete.msg", { layer: def.name }));
     if (!ok) return;
+    // ★V166 (層2): ここから先が重い（全コマを起こして全コマぶんの画素を控える＝
+    //  1,000コマなら 76MB の写しが動く）。確認は漏斗の外・作業だけを中に入れる
+    await this.runHeavy("layer.del", t("ed.heavy.delLayer.msg"), () =>
+      this.deleteLayerInner(def, idx)
+    );
+  }
+
+  private async deleteLayerInner(def: LayerDef, idx: number) {
+    // V166 (B): 控えは「全コマ × 1枚」。確保する前に見積もる
+    if (!this.allowBufferAlloc(this.project.frames.length, "layer.del", [def.id])) return;
     // ★V156 (P-1): 下の `saved` が全コマの画素を控えるので、先に起こす（このレイヤーだけ）
     await wakeLayersAllFrames(this.project, [def.id], "write");
     const saved: IndexBuf[] = this.project.frames.map((f) =>
@@ -11471,9 +12296,7 @@ export class Editor {
       undo: revert,
       redo: apply,
     });
-    const _t0 = perfNow();
-    apply();
-    perfDone("layer.del", _t0);
+    apply(); // V166: 計測は漏斗が持つ（`layer.del`）
   }
 
   /**
@@ -11488,35 +12311,63 @@ export class Editor {
     if (this.xformGuard()) return;
     const ld = this.project.layerDefs.find((l) => l.id === id);
     if (!ld) return;
-    // ★V156 (P-1): ON は全コマの画素を現在コマと比べ、OFF は全コマへコピーを配る。
-    // どちらも全コマの中身が要るので、**このレイヤーだけ**先に起こす
+    const turningOn = ld.shared !== true;
+    // ★V166 (層2): この操作は**重い区間が確認をはさんで2つある**（前＝全コマの見比べ／
+    //  後＝全コマへの配り直し）。確認は待ち時間なので**どちらの漏斗にも入れない**
+    if (turningOn) {
+      const scan = await this.runHeavy("layer.allFrames", t("ed.heavy.layerAll.msg"), () =>
+        this.sharedScanOthersDiffer(id)
+      );
+      if (scan === undefined || scan === null) return; // 入口が閉じていた／現在コマに実体が無い
+      // 他コマに「今と違う絵」があるときだけ確認（空 or 同一なら黙って ON）
+      if (scan && !(await this.cb.confirm(t("ed.layer.shared.replace.msg")))) return;
+    }
+    await this.runHeavy("layer.allFrames", t("ed.heavy.layerAll.msg"), () =>
+      this.toggleLayerSharedInner(id, turningOn)
+    );
+  }
+
+  /** V166: 「他のコマに今と違う絵があるか」だけを見る（全コマ走査＝重い側）。
+   *  現在コマに実体が無ければ `null`（呼び出し側は中止する）。 */
+  private async sharedScanOthersDiffer(id: string): Promise<boolean | null> {
+    // V166 (B): 走査も全コマを展開する＝確保する。先に見積もる
+    if (!this.allowBufferAlloc(0, "layer.sharedScan", [id])) return null;
+    // ★V156 (P-1): 全コマの画素を現在コマと比べるので、**このレイヤーだけ**先に起こす。
+    //  ★V166（Codex 指摘⑤）: ここは **"read"**。以前は "write" だったが、
+    //   これは**確認ダイアログの前の見比べ**で、利用者が「いいえ」を押せば何も変えない。
+    //   "write" は `invalidateFrame` で**圧縮控えを捨てる**ので、取り消した場合でも
+    //   眠り控えだけが失われ、次の掃除で圧縮し直す無駄が出ていた（絵は変わらない）
+    await wakeLayersAllFrames(this.project, [id], "read");
+    const frames = this.project.frames;
+    const cur = frames[this.frameIndex]?.layers[id];
+    if (!cur) return null;
+    for (let fi = 0; fi < frames.length; fi++) {
+      if (fi === this.frameIndex) continue;
+      const b = frames[fi].layers[id];
+      if (!b) continue;
+      let empty = true;
+      let same = true;
+      for (let i = 0; i < PIXELS; i++) {
+        if (b[i] !== 0) empty = false;
+        if (b[i] !== cur[i]) same = false;
+        if (!empty && !same) break;
+      }
+      if (!empty && !same) return true;
+    }
+    return false;
+  }
+
+  private async toggleLayerSharedInner(id: string, turningOn: boolean) {
+    const ld = this.project.layerDefs.find((l) => l.id === id);
+    if (!ld) return;
+    // ★V166 (B): 控えは「全コマ × 1枚」。**起こすより先に**見積もる——
+    //  起こす処理そのものが全コマぶんを展開する（＝確保する）ので、
+    //  そのあとで断っても「断る前に確保してしまった」ことになる
+    if (!this.allowBufferAlloc(this.project.frames.length, "layer.shared", [id])) return;
+    // ★V156 (P-1): OFF は全コマへコピーを配る。全コマの中身が要るので先に起こす
+    // （ON 側は走査ですでに起きているが、`wakeLayersAllFrames` は起きているコマを素通りする）
     await wakeLayersAllFrames(this.project, [id], "write");
     const frames = this.project.frames;
-    const turningOn = ld.shared !== true;
-    if (turningOn) {
-      // いま見ているコマの絵。空判定と「他コマに違う絵があるか」を先に見る
-      const cur = frames[this.frameIndex]?.layers[id];
-      if (!cur) return;
-      let curEmpty = true;
-      for (let i = 0; i < PIXELS; i++) if (cur[i] !== 0) { curEmpty = false; break; }
-      let othersDiffer = false;
-      for (let fi = 0; fi < frames.length; fi++) {
-        if (fi === this.frameIndex) continue;
-        const b = frames[fi].layers[id];
-        if (!b) continue;
-        let empty = true;
-        let same = true;
-        for (let i = 0; i < PIXELS; i++) {
-          if (b[i] !== 0) empty = false;
-          if (b[i] !== cur[i]) same = false;
-          if (!empty && !same) break;
-        }
-        if (!empty && !same) { othersDiffer = true; break; }
-      }
-      // 他コマに「今と違う絵」があるときだけ確認（空 or 同一なら黙って ON）
-      if (othersDiffer && !(await this.cb.confirm(t("ed.layer.shared.replace.msg")))) return;
-      void curEmpty; // 空でも ON にはできる（全コマ空で統一）
-    }
     // 履歴: 全コマの before バッファ（copy）＋ 元の shared 状態
     const beforeBufs = frames.map((f) => copyIndexBuf(f.layers[id] ?? allocIndexBuf(this.project)));
     const wasShared = ld.shared === true;
@@ -11609,7 +12460,7 @@ export class Editor {
       ? await this.cb.choose(t("ed.layer.color.scope.msg", { layer: ld.name }), [optSel, optAll])
       : 1;
     if (pick === null || pick === undefined) return;
-    if (pick === 1) this.toggleLayerDisplayColor(id);
+    if (pick === 1) await this.toggleLayerDisplayColor(id);
     else this.applyFrameLayerColor(id, sel, allSelHave ? undefined : this.colorHex || UGO_COLORS.black);
   }
 
@@ -11659,7 +12510,15 @@ export class Editor {
     );
   }
 
-  private toggleLayerDisplayColor(id: string) {
+  /** V166 (層2): レイヤーカラーは**全コマの見た目**が変わる＝`rebuildFilm` が全コマぶん走る。
+   *  画素は1つも書き換えないので確保の見積もりは要らないが、時間は作品の大きさに比例する。 */
+  private async toggleLayerDisplayColor(id: string) {
+    await this.runHeavy("layer.allFrames", t("ed.heavy.layerAll.msg"), () =>
+      this.toggleLayerDisplayColorInner(id)
+    );
+  }
+
+  private toggleLayerDisplayColorInner(id: string) {
     if (this.xformGuard()) return;
     const ld = this.project.layerDefs.find((l) => l.id === id);
     if (!ld) return;
@@ -11709,6 +12568,15 @@ export class Editor {
       this.cb.toast(t("ed.layer.mergeSharedBlocked.toast"));
       return;
     }
+    // ★V166 (層2): ここから先が重い（全コマ×2枚の控え＝1,000コマなら 153MB）
+    await this.runHeavy("layer.merge", t("ed.heavy.mergeLayer.msg"), () =>
+      this.mergeLayerDownInner(top, bottom, idx)
+    );
+  }
+
+  private async mergeLayerDownInner(top: LayerDef, bottom: LayerDef, idx: number) {
+    // V166 (B): 控えは「全コマ × 2枚」。7,687コマなら 1.18GB＝貼り付けと同じ確保量
+    if (!this.allowBufferAlloc(this.project.frames.length * 2, "layer.merge", [top.id, bottom.id])) return;
     // ★V156 (P-1): 下の2つの控えが全コマの画素を読むので、関わる2枚だけ先に起こす
     // （起こさないと `?? allocIndexBuf(p)` が空バッファを掴んで、統合で絵が消える）
     await wakeLayersAllFrames(this.project, [top.id, bottom.id], "write");
@@ -11767,7 +12635,15 @@ export class Editor {
   /** @param atEnd M11-14: true=常に最後尾へ追加（フィルム末尾の「＋」＝うごメモ仕様）。
    *  false=選択中のコマの次（ヘッダの「＋ ついか」・複製・ショートカット＝従来どおり）。
    *  上限ガード・履歴・afterFrameStructureChange は同じ経路を通る */
-  private addFrame(duplicate: boolean, atEnd = false) {
+  /** V166 (層2): コマの追加・複製も漏斗を通す。1枚でも**複製は全レイヤーぶんの写し**なので、
+   *  レイヤーの多い作品では一瞬で終わらない（＝50ms を超えれば表示が出る）。 */
+  private async addFrame(duplicate: boolean, atEnd = false) {
+    await this.runHeavy("frame.add", t("ed.heavy.addFrame.msg"), () =>
+      this.addFrameInner(duplicate, atEnd)
+    );
+  }
+
+  private addFrameInner(duplicate: boolean, atEnd = false) {
     if (this.xformGuard()) return; // E-4
     if (this.project.frames.length >= 65535) {
       this.cb.toast(t("ed.tl.addFrame.limit.toast"));
@@ -11776,6 +12652,8 @@ export class Editor {
     if (this.project.frames.length >= 2000) {
       this.cb.toast(t("ed.common.manyFrames.toast"));
     }
+    // V166 (B): 1枚でも確保の前に見積もる。複製も空コマも**新しい色は増えない**ので昇格しない
+    if (!this.allowFrameAlloc(1, 0, "frame.add")) return;
     const at = atEnd ? this.project.frames.length : this.frameIndex + 1;
     const cur = this.project.frames[this.frameIndex];
     const nf = duplicate ? cloneFrame(cur) : makeEmptyFrame(this.project, cur.paper);
@@ -11799,11 +12677,164 @@ export class Editor {
       undo: revert,
       redo: apply,
     });
-    const _t0 = perfNow();
+    // V166: 計測は漏斗（`runHeavy`→`runWithBusy`）が持つので、ここでは測らない
+    // ——同じ操作が `frame.add` として2行出ると、ログの合計が実際の倍になる
     apply();
-    perfDone("frame.add", _t0);
   }
 
+  // ---------------- V164 (U-4): コマをまとめて追加 ----------------
+
+  /** V164 (U-4): いまのコマの後ろへ N 枚まとめて足す。**履歴は1エントリ**（Ctrl+Z 一回で全部戻る）。
+   *
+   *  ★V156 の眠りは起こさない。空コマは新しく作るだけ・複製はいま見ているコマ（＝窓の中で
+   *   必ず起きている）を写すだけなので、遠くのコマに触れる経路が1つも無い。 */
+  private async addFrames(count: number, duplicate: boolean) {
+    await this.runHeavy("frame.addMany", t("ed.heavy.addFrames.msg"), () =>
+      this.addFramesInner(count, duplicate)
+    );
+  }
+
+  private addFramesInner(count: number, duplicate: boolean) {
+    if (this.xformGuard()) return; // E-4
+    const total = this.project.frames.length;
+    if (total >= 65535) {
+      this.cb.toast(t("ed.tl.addFrame.limit.toast"));
+      return;
+    }
+    // ★枚数の丸めは `prefs.ts` の1か所（上限を超えるぶんは「超えないところまで」で止めて
+    //  **知らせる**。途中まで入って黙って終わるのが最悪＝要件 U-4）
+    const { n, clamped } = clampAddFrames(count, total);
+    if (n <= 0) {
+      this.cb.toast(t("ed.tl.addFrame.limit.toast"));
+      return;
+    }
+    const at = this.frameIndex + 1;
+    // ★取り消したときに**押す前のコマへ戻る**ために覚えておく（Codex V164 指摘①）。
+    //  `Math.min(this.frameIndex, …)` で戻すと、追加後の位置（＝最大100コマ先）に
+    //  居座ってしまい、「誤って足した→取り消した」人が遠くへ飛ばされる
+    const beforeIndex = this.frameIndex;
+    const cur = this.project.frames[this.frameIndex];
+    if (!cur) return;
+    // V166 (B): 確保の前に見積もる。まとめて追加も新しい色は増えない
+    if (!this.allowFrameAlloc(n, 0, "frame.addMany")) return;
+    const added: Frame[] = [];
+    for (let i = 0; i < n; i++)
+      added.push(duplicate ? cloneFrame(cur) : makeEmptyFrame(this.project, cur.paper));
+    const self = this;
+    const apply = () => {
+      // redo 時に 16bit 昇格を跨いでいる可能性があるので正規化（ゆらゆら・はりつけと同じ）
+      for (const f of added) conformFrameWidth(self.project, f);
+      self.project.frames.splice(at, 0, ...added);
+      self.frameIndex = at + added.length - 1; // 足した最後のコマへ（＋ついかと同じ「増えた先に居る」）
+      self.afterFrameStructureChange();
+    };
+    const revert = () => {
+      self.project.frames.splice(at, added.length);
+      // 押す前に見ていたコマへ戻す（クランプは念のため。構造が変わっていても範囲外にしない）
+      self.frameIndex = Math.max(0, Math.min(beforeIndex, self.project.frames.length - 1));
+      self.afterFrameStructureChange();
+    };
+    // V154 (W-2): 取り消すと、足したコマの実体は履歴のクロージャだけが持つ（N 枚ぶんの合計）
+    this.history.push({
+      label: duplicate ? "コマ複製（まとめて）" : "コマ追加（まとめて）",
+      bytesIfUndone: entryBytes(added),
+      undo: revert,
+      redo: apply,
+    });
+    apply(); // V166: 計測は漏斗が持つ（`frame.addMany`）
+    if (clamped) this.cb.toast(t("ed.tl.addFrames.clamped.toast", { count: n }));
+    else this.cb.toast(t("ed.tl.addFrames.done.toast", { count: n }));
+    // 既存の注意はそのまま通す（2,000 コマ超え）
+    if (this.project.frames.length >= 2000) this.cb.toast(t("ed.common.manyFrames.toast"));
+  }
+
+  /** V164 (U-4): まとめて追加のダイアログ。`openWobbleDialog` と同じ作法
+   *（`EditorCallbacks` を増やさず `modal-back`+`modal-box` を自前で組む・新しい CSS は足さない）。 */
+  private openAddFramesDialog(): Promise<{ count: number; duplicate: boolean } | null> {
+    const max = ADD_FRAMES_MAX;
+    return new Promise((resolve) => {
+      const back = document.createElement("div");
+      back.className = "modal-back";
+      const box = document.createElement("div");
+      box.className = "modal-box";
+      back.appendChild(box);
+      box.innerHTML = `<p class="modal-msg">${t("ed.tl.addFrames.dialog.label")}</p>
+        <div class="modal-field">
+          <span>${t("ed.tl.addFrames.count.label")}</span>
+          <input class="tinput" id="af-n" type="number" min="1" max="${max}" step="1" value="5" style="width:90px" />
+          <span class="tog">${t("ed.tl.addFrames.range.hint", { max })}</span>
+        </div>
+        <label class="confirm-skip"><input type="checkbox" id="af-dup"> <span>${t("ed.tl.addFrames.dup.label")}</span></label>
+        <div class="modal-actions">
+          <button class="btn" id="af-cancel">${t("common.cancel.btn")}</button>
+          <button class="btn primary" id="af-ok">${t("ed.tl.addFrames.ok.btn")}</button>
+        </div>`;
+      document.body.appendChild(back);
+      const input = box.querySelector("#af-n") as HTMLInputElement;
+      // ★上限への丸めを**押す前に目で見せる**（Codex V164 指摘②）。1000 と打ったら
+      //  その場で 100 になるので、「頼んだ数と足された数が黙って食い違う」が起きない。
+      //  入力中は直さない（"10" を打つ途中の "1" を潰さないため）＝確定した瞬間だけ
+      input.addEventListener("change", () => {
+        const raw = Math.floor(Number(input.value));
+        if (Number.isFinite(raw)) input.value = String(Math.max(1, Math.min(max, raw)));
+        else input.value = "1";
+      });
+      let done = false;
+      const close = (r: { count: number; duplicate: boolean } | null) => {
+        if (done) return;
+        done = true;
+        this.modalDepth--;
+        this.addFramesDialogClose = null;
+        window.removeEventListener("keydown", onKey, true);
+        back.remove();
+        resolve(r);
+      };
+      this.addFramesDialogClose = () => close(null);
+      // ダイアログ中はエディタのショートカットを通さない（openWobbleDialog と同じ理由・P-8）
+      const onKey = (e: KeyboardEvent) => {
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        if (e.key === "Escape") {
+          e.preventDefault();
+          close(null);
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          pick();
+        }
+      };
+      window.addEventListener("keydown", onKey, true);
+      this.modalDepth++;
+      const pick = () =>
+        // 丸めは `addFrames`（＝`clampAddFrames`）が必ず行うので、ここは生の値を渡すだけ。
+        // 誤って 1000 と打っても上限までにしかならず、そのことはトーストで知らされる
+        close({
+          count: Number(input.value),
+          duplicate: (box.querySelector("#af-dup") as HTMLInputElement).checked,
+        });
+      (box.querySelector("#af-ok") as HTMLElement).addEventListener("click", pick);
+      (box.querySelector("#af-cancel") as HTMLElement).addEventListener("click", () => close(null));
+      // M10-11: ペンで即閉じしないよう pointerdown に（main.ts の modal() と同じ理由）
+      back.addEventListener("pointerdown", (e) => {
+        if (e.target === back) close(null);
+      });
+      input.focus();
+      input.select();
+    });
+  }
+
+  private async onAddFramesClick(): Promise<void> {
+    if (this.xformGuard()) return;
+    if (!this.project.frames[this.frameIndex]) return;
+    const opt = await this.openAddFramesDialog();
+    if (!opt) return;
+    await this.addFrames(opt.count, opt.duplicate);
+  }
+
+  /** V166 (層2): まとめて削除は範囲ぶんの実体を履歴へ移す（＝コマ数ぶんの写しが動く）。
+   *
+   *  ★**確認ダイアログは漏斗の外**に置いてある。中に入れると
+   *  「利用者が読んでいる時間」に『けしています』の箱が重なって出る（V154b W-8 と同じ理由）。
+   *  漏斗が包むのは**実際に動いている区間だけ**。 */
   private async deleteFrame() {
     if (this.xformGuard()) return; // E-4
     const total = this.project.frames.length;
@@ -11837,6 +12868,13 @@ export class Editor {
       // 確認の間にコマ構造が変わっていたら中止（ダイアログ中の変更は無いはずだが保険）
       if (this.project.frames.length !== total) return;
     }
+    // ★ここから先が「実際に動く区間」＝漏斗の中
+    await this.runHeavy("frame.del", t("ed.heavy.delFrame.msg"), () =>
+      this.deleteFrameInner(at, count)
+    );
+  }
+
+  private deleteFrameInner(at: number, count: number) {
     // 削除するコマの実体を保持しておく（SEの配置 Frame.se も frame ごと持ち帰る＝undo で戻る）
     const removed = this.project.frames.slice(at, at + count);
     const self = this;
@@ -11864,14 +12902,20 @@ export class Editor {
       undo: revert,
       redo: apply,
     });
-    const _t0 = perfNow();
-    apply();
-    perfDone("frame.del", _t0);
+    apply(); // V166: 計測は漏斗が持つ（`frame.del`）
   }
 
-  private reorderFrame(from: number, to: number) {
+  /** V166 (層2): 並べ替えそのものは splice 1回だが、そのあとの
+   *  `afterFrameStructureChange`（フィルムの作り直し・メーター）が大作品では重い。 */
+  private async reorderFrame(from: number, to: number) {
     if (from === to) return;
     if (this.xformGuard()) return; // E-4
+    await this.runHeavy("frame.reorder", t("ed.heavy.reorder.msg"), () =>
+      this.reorderFrameInner(from, to)
+    );
+  }
+
+  private reorderFrameInner(from: number, to: number) {
     const self = this;
     const apply = () => {
       const [f] = self.project.frames.splice(from, 1);
@@ -11886,9 +12930,7 @@ export class Editor {
       self.afterFrameStructureChange();
     };
     this.history.push({ label: "コマ並べ替え", undo: revert, redo: apply });
-    const _t0 = perfNow();
-    apply();
-    perfDone("frame.reorder", _t0);
+    apply(); // V166: 計測は漏斗が持つ（`frame.reorder`）
   }
 
   /** M11-8 P-4（REQ 表E）: 「コマが移動した」ときの選択解除。解除の入口をここ1つに集約する
@@ -12286,6 +13328,84 @@ export class Editor {
   private lastCommandAt = new Map<CommandId, number>();
   /** V157 (D-3): 同じコマンドがこの時間内に2回来たら2回目を捨てる。
    *  人間の押し直しは 50ms では届かず、ドライバの二重送信は 1〜2ms で来る（A-27 の報告） */
+  // ================= V165 (D-4): 修飾キーの単体タップ =================
+  //
+  // ★なぜ「離したとき」か
+  //   押した時に確定させると **Ctrl が先に発火して Ctrl+○○ が一切割り当てられなくなる**。
+  //   離した時なら「間に別のキー／ポインタ操作が挟まったか」で組み合わせと区別できる。
+  //   `main.ts` の「修飾キー単体は待ち続ける」（＝押した時は確定しない）は**そのまま残っている**。
+  //
+  // ★発動する条件（全部そろったときだけ。1つでも欠けたら候補を捨てる）
+  //   1. 修飾キー（Ctrl / Shift / Alt）の keydown で候補が立つ（`e.repeat` は候補を捨てる）
+  //   2. その間に**他のキーが押されない**（＝組み合わせではない）
+  //   3. その間に**ポインタが下りない**（＝描いていない・ボタンを押していない）
+  //   4. **同じ修飾キー**の keyup が MOD_TAP_MS 以内に来る
+  //   5. 離した時点で mounted・ダイアログなし・文字入力中でない・ポインタが下りていない
+  //   ペンタブのサイドスイッチが「押しっぱなしで送り続ける」設定のときは 1 か 4 で落ちる
+  //  （＝発動しない。誤爆するより発動しないほうが安全・要件 §1 D-4 ⚠4）
+  //
+  // ★`preventDefault` は**一切しない**。Alt を止めると Alt＋クリックのスポイト（M16 K-4）や
+  //   OS 側の挙動に手を入れることになる。ここは keyup を**見ているだけ**
+  /** 立っている候補を見張る状態機械（条件としきい値は `keymap.ts` の1か所） */
+  private modTap = new ModTapWatcher();
+
+  /** V165 (D-4): keydown 側。候補を立てる／壊す（**発動はしない**）。
+   *
+   *  ★Codex 指摘①: **候補を立てる時点**で「描いている最中か」を見る。
+   *   ここを keyup 側だけで見ていると、**描きながらサイドスイッチで Alt を押し、
+   *   ペンを先に離してから Alt を離す**と、離した時点では `pointerDown` が false なので
+   *   発動してしまう（ペンタブでいちばん起こりやすい誤爆）。 */
+  private trackModTapDown(e: KeyboardEvent) {
+    this.modTap.down(e.key, {
+      repeat: e.repeat,
+      blocked:
+        !this.mounted ||
+        this.pointerDown ||
+        this.dialogOpen() ||
+        this.isTextEntry(e.target) ||
+        e.isComposing ||
+        e.keyCode === 229,
+    });
+  }
+
+  /** V165 (D-4): ポインタが下りたら候補を捨てる（描いている最中・ボタン操作中は判定しない）。
+   *  window の capture で拾うので、キャンバスでも右パネルでも同じように効く */
+  private modTapPointerHandler = () => {
+    this.modTap.cancel();
+  };
+
+  /** V165 (D-4): keyup 側。条件がそろっていれば割り当てを実行する */
+  private handleModTapUp(e: KeyboardEvent) {
+    const key = this.modTap.up(e.key);
+    if (!key) return;
+    // 離した時点の門番（Space の単押しと同じ並び）＋描画中は判定しない
+    if (!this.mounted || this.dialogOpen() || this.isTextEntry(e.target) || this.pointerDown) return;
+    const ids = this.keyLookup.get(tapEventKey(key));
+    if (!ids || ids.length === 0) return; // ★既定では何も割り当てていない＝ここで必ず抜ける
+    // Codex 指摘③: 道具どうしの同キー巡回は**押したときと同じ規則**で選ぶ（先頭固定にしない）
+    const id = this.pickCommandFromIds(ids);
+    // Codex 指摘④: 「押している間だけ」の操作はタップでは動かさない（透かしが戻らなくなる）。
+    // 設定画面でも割り当てを断っているので、ここは保存データを手で書いた場合の保険
+    if (isHoldOnlyCommand(id)) return;
+    // ★V157 (D-3) の二重発火防御（A-27）を**そのまま通す**。ドライバが keyup を2回送っても
+    //  50ms 以内の2回目は捨てる（弱めない・要件の壊すなリスト）
+    const now = performance.now();
+    const prev = this.lastCommandAt.get(id);
+    if (prev !== undefined && now - prev < Editor.DOUBLE_FIRE_MS) return;
+    this.lastCommandAt.set(id, now);
+    this.endArrowSession();
+    this.runCommand(id);
+  }
+
+  /** M11-15: 同じキーを複数の道具が共有しているときの選び方（末尾→先頭へ循環）。
+   *  V165 (D-4・Codex 指摘③): 押したとき（`onKeyDown`）とタップとで**同じ規則**を使うため関数にした */
+  private pickCommandFromIds(ids: CommandId[]): CommandId {
+    if (ids.length <= 1) return ids[0];
+    const curId = `tool.${this.tool}`;
+    const at = ids.indexOf(curId as CommandId);
+    return at >= 0 ? ids[(at + 1) % ids.length] : ids[0];
+  }
+
   private static readonly DOUBLE_FIRE_MS = 50;
   private static readonly REPEATABLE = new Set<string>(
     COMMANDS.filter((c) => (c as { repeatable?: boolean }).repeatable).map((c) => c.id)
@@ -12368,7 +13488,10 @@ export class Editor {
       // M16 (K-4): 主にポインタ割り当て（Alt＋クリック）用。キーに割り当てられたときは直近のカーソル位置で拾う
       case "edit.pickColor":
         if (this.lastPointerEvent)
-          this.pickColorAt(this.clientToPixel(this.lastPointerEvent.clientX, this.lastPointerEvent.clientY));
+          this.pickColorAt(
+          this.clientToPixel(this.lastPointerEvent.clientX, this.lastPointerEvent.clientY),
+          "key"
+        );
         break;
       // M11-19: 線を太らせる／細らせる（非 repeatable＝キーリピートでは1回だけ）
       case "edit.thicken":
@@ -12414,10 +13537,10 @@ export class Editor {
         this.gotoFrame(this.frameIndex + 1);
         break;
       case "frame.add":
-        this.addFrame(false);
+        void this.addFrame(false);
         break;
       case "frame.duplicate":
-        this.addFrame(true);
+        void this.addFrame(true);
         break;
       case "frame.delete":
         void this.deleteFrame();
@@ -12707,12 +13830,12 @@ export class Editor {
       // E-4: Enter=変形確定（変形中・四隅変形中は確定が優先）
       if (this.xformActive) {
         e.preventDefault();
-        this.commitTransform();
+        void this.commitTransform();
         return;
       }
       if (this.cornerActive) {
         e.preventDefault();
-        this.commitCornerWarp();
+        void this.commitCornerWarp();
         return;
       }
       // M11-10: 矢印キーでの移動セッションの明示的な確定
@@ -12735,9 +13858,7 @@ export class Editor {
     let id: CommandId = ids[0];
     if (ids.length > 1) {
       if (e.repeat) return;
-      const curId = `tool.${this.tool}`;
-      const at = ids.indexOf(curId as CommandId);
-      id = at >= 0 ? ids[(at + 1) % ids.length] : ids[0];
+      id = this.pickCommandFromIds(ids); // V165: タップ側と同じ規則（`pickCommandFromIds`）
     }
     // ツール切替などはキーリピートで連続実行しない（Undo/Redo・コマ移動・ズームは従来どおり連続）
     if (e.repeat && !Editor.REPEATABLE.has(id)) return;

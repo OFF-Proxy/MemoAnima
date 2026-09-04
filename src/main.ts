@@ -11,13 +11,13 @@ import type { Update } from "@tauri-apps/plugin-updater";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { runGuide, GuideStep } from "./guide";
-import { LibraryScreen, LibraryView } from "./library";
+import { LibraryScreen, LibraryView, readProjectRaw } from "./library"; // V169 (B-2): .memoanima を読む唯一の道
 import { Editor, EditorSaveContext, sanitizeMiniDock } from "./editor/editor";
 import { sanitizeCursor } from "./editor/cursor";
 import { newProject, UGO_COLORS, W, H, type Project } from "./editor/model";
 import { importFlipnote } from "./editor/kwzImport";
 import { projectFromBytes, projectToBytes } from "./editor/serialize";
-import { errText } from "./ui/errText";
+import { errText, tooLargeBytes } from "./ui/errText"; // V170 (G-2): 画像の門番の TOO_LARGE を人の文へ
 // V158 (C-3): 配色（明るい／夜の紙）。`<html>` の data-theme を付け替えるだけ
 import { applyTheme, sanitizeTheme } from "./ui/theme";
 // V159 (G-1/G-3): 性能ログと「長い処理の共通入口」。**ログには操作名と数値しか書かない**
@@ -84,10 +84,23 @@ import {
   reservedReason,
   sanitizeKeysSettings,
   sharedToolMates,
+  // V167 (K-1/K-2): 同じ修飾キーの取り合い（字面が違っても取り合う）
+  modifierClash,
+  modifierClashMates,
+  modifierClashPartners,
+  modLabel,
+  // V165 (D-4): 単体タップ（条件としきい値は keymap.ts の1か所）
+  isTapMod,
+  tapEventKey,
+  isLoneAltKey, // V169 (A): Alt 単独の既定動作を止める判定（純関数）
+  isHoldOnlyCommand,
+  ModTapWatcher,
+  MOD_TAP_MS,
   type CommandId,
   type KeyBinding,
   type KeysSettings,
   type Preset,
+  type TapMod,
 } from "./keymap";
 
 /** M7-2b: ディスプレイ設定（settings.json に永続化・起動時復元） */
@@ -157,6 +170,15 @@ type Settings = {
   customTones?: { id: number; w: number; h: number; colors: string[] }[];
   /** M17: マイ柄を「登録した色で塗る」か。**未設定＝オン**（`!== false` で見る）。追加のみ */
   customToneColor?: boolean;
+  /** V164 (U-1): オニオンの段数（0〜3）と向き。**未設定＝0 と "both"**（＝v1.6.0 と同じ絵）。
+   *  作品ではなく**人の好み**なので設定側に置く（作品ファイルは1バイトも変わらない）。追加のみ・
+   *  復元は editor の `restoreOnion`（範囲外・不正値は既定へ倒す） */
+  onionLevel?: number;
+  onionDir?: "prev" | "both" | "next";
+  /** V164 (U-3): よく使う色の棚（"#RRGGBB" の配列・登録順・上限48）。**未設定＝空**。
+   *  復元は editor の `sanitizeFavoriteColors`（壊れた要素だけ捨てる＝`customTones` と同じ作法）。
+   *  **プロジェクトの保存形式には無関係** */
+  favoriteColors?: string[];
   /** V151 (E-8): 「次回から表示しない」にした確認の id（"clearFrame" | "layerDelete" | "folderDelete"）。
    *  未設定＝[]（全部出す）。⚙ の「確認ダイアログ」節でいつでも戻せる。追加のみ */
   hiddenConfirms?: string[];
@@ -353,18 +375,49 @@ const hiddenAutosaveHandler = () => {
  *    - 入力欄にフォーカスがあるときは無視（検索バーで Ctrl+, を打っても開かない）
  *  引き当ては `keymap.ts` の表をそのまま使うので、**利用者が割り当てを変えればそれで開く**。 */
 const homeKeyHandler = (e: KeyboardEvent) => {
-  if (editorOpen) return;
-  if (document.querySelector(".modal-back")) return;
-  // IME の変換中は横取りしない（`library.ts` の既存のキー処理と同じ門番に揃える）
-  if (e.isComposing || e.keyCode === 229) return;
-  const el = e.target as HTMLElement | null;
-  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable))
-    return;
+  if (homeKeyBlocked(e)) return;
+  homeModTap.down(e.key, { repeat: e.repeat, blocked: false }); // V165 (D-4)
   const ids = homeLookup.get(eventKey(e));
   if (!ids || !ids.includes("app.settings")) return;
   e.preventDefault();
   void openSettingsMenu();
 };
+
+/** V153 の門番を1か所に（keydown と、V165 で足した keyup の両方が使う） */
+function homeKeyBlocked(e: KeyboardEvent): boolean {
+  if (editorOpen) return true;
+  if (document.querySelector(".modal-back")) return true;
+  // IME の変換中は横取りしない（`library.ts` の既存のキー処理と同じ門番に揃える）
+  if (e.isComposing || e.keyCode === 229) return true;
+  const el = e.target as HTMLElement | null;
+  return !!(
+    el &&
+    (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)
+  );
+}
+
+/** V165 (D-4・Codex 指摘⑤): ホーム画面でも**単体タップ**を拾う。
+ *
+ *  設定画面では `app.settings` にタップを割り当てられるのに、ホームでは keydown しか
+ *  見ていなかったので**登録できるのに効かない**面ができていた（⚙ が画面外に出たときの
+ *  逃げ道という `app.settings` の存在理由からして、効かないほうが困る）。
+ *  条件としきい値は編集画面とまったく同じ実体（`ModTapWatcher`）を使う。 */
+const homeModTap = new ModTapWatcher();
+const homeKeyUpHandler = (e: KeyboardEvent) => {
+  const key = homeModTap.up(e.key);
+  if (!key || homeKeyBlocked(e)) return;
+  const ids = homeLookup.get(tapEventKey(key));
+  if (!ids || !ids.includes("app.settings")) return;
+  e.preventDefault();
+  void openSettingsMenu();
+};
+const homeModTapCancel = () => homeModTap.cancel();
+
+/** V169 (A): Alt 単独の keydown/keyup の既定動作を止める（登録は起動時・window の capture・両方）。
+ *  判定は `isLoneAltKey`（keymap.ts の純関数＝smoke が Node で叩く）。`stopPropagation` はしない。 */
+function loneAltGuard(e: KeyboardEvent): void {
+  if (isLoneAltKey(e.key)) e.preventDefault();
+}
 
 // 開発用: ブラウザ検証からエディタ内部状態へアクセスするためのフック（本番ビルドでは無効）
 if (import.meta.env.DEV) {
@@ -386,6 +439,11 @@ if (import.meta.env.DEV) {
   // M11-11: 1コマ画像書き出しの検証用（ネイティブの保存ダイアログを経ずに Blob だけ作る）
   ((window as unknown as Record<string, unknown>).__animemo as Record<string, unknown>).imageBlob =
     frameToImageBlob;
+  // V165 (D-3/D-4): ショートカット設定の検証用。**この画面はライブラリ設定済みの
+  // ⚙ からしか開けず**、dev（Tauri 無し）では到達できないので、ここから直接開けるようにする
+  //（`imageImport` と同じ DEV 限定フック。本番ビルドでは丸ごと消える）
+  ((window as unknown as Record<string, unknown>).__animemo as Record<string, unknown>).openKeys =
+    () => openKeymapSettings();
 }
 
 // ---------------- モーダル / トースト ----------------
@@ -1071,7 +1129,13 @@ function openExportDialog(
         }
         // M11-23: 実行直前の見積もり（コマ数・倍率・形式・GIF は実使用色数）。**危険域のときだけ**確認を出す。
         // 見積もりの色数は書き出しと同じ `collectGifPalette`（>256色＝null は従来の NeuQuant 経路）
-        const gifPal = format === "gif" ? collectGifPalette(src, whiteBg) : null;
+        // V168（Codex 指摘・中）: この走査は眠ったコマを起こして戻すので、大きい作品では数秒かかる。
+        // 固まった印象にしないよう、数えている間はその旨を出す（書き出し本体では同じ段階の文言を再利用）
+        if (format === "gif") {
+          phaseEl.textContent = exportPhaseLabel("countColors");
+          progress.hidden = false;
+        }
+        const gifPal = format === "gif" ? await collectGifPalette(src, whiteBg) : null; // V168 (E-1): async
         // M16 (X-1): MP4 のループ回数（1〜10）。見積もりも書き出しも同じ値を使う（過小見積り防止）
         const loops =
           format === "mp4" ? Math.max(1, Math.min(10, Math.floor(Number(loopInput.value) || 1))) : 1;
@@ -1146,6 +1210,8 @@ function openExportDialog(
           whiteBg,
           // M16 (X-1): MP4 のみ・1〜10。既定1（=従来と同一入力）。見積もりと同じ loops を使う
           loopCount: loops,
+          // V168（Codex 指摘・中）: GIF は見積りで数えたパレットをそのまま渡す（全コマの再走査を省く）
+          gifPalette: format === "gif" ? gifPal : undefined,
           onProgress: (done, total, phase) => {
             bar.style.width = `${Math.round((done / Math.max(1, total)) * 100)}%`;
             // M11-23: 残り時間は「出せるようになってから」だけ添える（短い書き出しでは最後まで出ない）
@@ -1458,10 +1524,27 @@ async function pickSaveTarget(
 
 // ---------------- M8-1: 📷 画像を取り込む（さつえいGUI） ----------------
 
+/** V170: 画像取り込みの上限（**読み込む前に** Rust 側の metadata で判定する）。
+ *  JSON 配列（read_file_bytes）をやめた理由は V169 と同じ（128MiB 超でレンダラが致命停止する・catch もログも効かない）。
+ *  512MiB（.memoanima の `IMPORT_MAX_BYTES`）より小さいのは、画像は**デコード後の RGBA がさらに大きい**ため
+ *  （長辺 4096 に縮めるのは createImageBitmap の**あと**＝A-61）。数字は作者決定（REQ_image_import_guard §6）。
+ *  ⚠ 断りの文（`img.tooLarge.toast`）の上限の数字はこの定数から作る——文に直書きしない（`ed.audio.tooLarge.toast` の轍を踏まない） */
+const IMAGE_IMPORT_MAX_BYTES = 64 * 1024 * 1024;
+
 /** 画像ファイル→RGBA（canvasデコード・長辺4096超は事前縮小=メモリ保護） */
 async function decodeImageFile(path: string): Promise<SourceImage> {
-  const bytes = await invoke<number[]>("read_file_bytes", { path });
-  const blob = new Blob([new Uint8Array(bytes)]);
+  // V170 (G-1): 生バイト＋読む前の門番。超えていれば `TOO_LARGE:<実サイズ>` が投げられ、呼び出し元が1枚ずつ拾う
+  const raw = await invoke<ArrayBuffer | Uint8Array | number[]>("read_file_raw", {
+    path,
+    maxBytes: IMAGE_IMPORT_MAX_BYTES,
+  });
+  const bytes =
+    raw instanceof Uint8Array
+      ? raw
+      : raw instanceof ArrayBuffer
+        ? new Uint8Array(raw)
+        : new Uint8Array(raw as number[]);
+  const blob = new Blob([bytes]);
   const bmp = await createImageBitmap(blob);
   const MAXSIDE = 4096;
   const scale = Math.min(1, MAXSIDE / Math.max(bmp.width, bmp.height));
@@ -1475,6 +1558,22 @@ async function decodeImageFile(path: string): Promise<SourceImage> {
   bmp.close();
   const data = ctx.getImageData(0, 0, w, h).data;
   return { w, h, data };
+}
+
+/** V170 (G-2): 画像が1枚読めなかったときのトーストの文。**文を作る所はここ1つ**（2つの呼び出し元が同じ文を出す）。
+ *  門番に当たった（`TOO_LARGE:<bytes>`＝読む前に弾かれた）なら「大きすぎる・上限・どうする・どのファイル」、
+ *  それ以外（壊れた画像・無いファイル・createImageBitmap の失敗）は**従来どおり** `img.decodeFail.toast`。
+ *  上限の数字は `IMAGE_IMPORT_MAX_BYTES` から作る（別の数字を手で書かない）。約 X MB は**切り上げ**
+ *  （四捨五入だと 64MiB+1B が「64MB…64MB以下」になって意味が通らない）。ファイル名は**最後**（数字が省略記号に飲まれない）。 */
+function imageImportErrorText(name: string, e: unknown): string {
+  const tooLarge = tooLargeBytes(errText(e));
+  if (tooLarge !== null)
+    return t("img.tooLarge.toast", {
+      mb: String(Math.ceil(tooLarge / 1024 / 1024)),
+      max: String(IMAGE_IMPORT_MAX_BYTES / 1024 / 1024),
+      name,
+    });
+  return t("img.decodeFail.toast", { name, err: errText(e) });
 }
 
 /** ライブラリ経路（新規メモとして取り込む）。
@@ -1502,7 +1601,7 @@ async function openImageImportFlow(paths?: string[]) {
     try {
       images.push(await decodeImageFile(f));
     } catch (e) {
-      toast(t("img.decodeFail.toast", { name: f.split(/[\\/]/).pop(), err: errText(e) }));
+      toast(imageImportErrorText(f.split(/[\\/]/).pop() ?? f, e)); // V170 (G-2): 文を作る所は1つ
     }
   }
   if (!images.length) return;
@@ -1553,7 +1652,8 @@ async function openImageImportFlowForEditor(path?: string | string[]) {
       try {
         images.push(await decodeImageFile(files[i]));
       } catch (e) {
-        toast(t("img.decodeFail.toast", { name: base(files[i]), err: errText(e) }));
+        // V170 (G-2): 文を作る所は1つ。門番に当たった1枚（TOO_LARGE）もここで拾う＝その1枚だけ飛ばして残りは続く
+        toast(imageImportErrorText(base(files[i]), e));
       }
     }
   } finally {
@@ -1576,6 +1676,8 @@ async function openImageImportFlowForEditor(path?: string | string[]) {
     layerName: info.layerName,
     frameNo: info.frameNo,
     onPlace: (proj, transparentPaper) => editor.placeConvertedImage(proj, transparentPaper),
+    // V166: 漏斗を通すので非同期になった。★Codex 指摘（中）: `void` で投げっぱなしにすると
+    //  配置中の例外が下の try/catch に捕まらない（利用者に何も出ない）。Promise を返して待たせる
     onPlaceFrames: (proj, transparentPaper) => editor.placeConvertedFrames(proj, transparentPaper),
   });
 }
@@ -1586,7 +1688,10 @@ interface EditorImportCtx {
   frameNo: number;
   onPlace: (proj: ReturnType<typeof convertToProject>, transparentPaper: boolean) => void;
   /** V151 (M8-3): 2枚以上のとき＝連番モード。全コマを今のコマの後ろへ挿入する（変形は通さない） */
-  onPlaceFrames?: (proj: ReturnType<typeof convertToProject>, transparentPaper: boolean) => void;
+  onPlaceFrames?: (
+    proj: ReturnType<typeof convertToProject>,
+    transparentPaper: boolean
+  ) => Promise<void> | void;
 }
 
 /** 調整モーダル（リアルタイムプレビュー＋モードタブ3つ・ライブラリ/エディタ共用）。
@@ -1847,7 +1952,7 @@ function openImageImportDialog(
             await new Promise((r) => setTimeout(r, 30));
             const proj = convertToProject(images, o);
             close(true);
-            editorCtx.onPlaceFrames(proj, transparentPaper);
+            await editorCtx.onPlaceFrames(proj, transparentPaper);
           } else {
             const proj = convertToProject([images[0]], o);
             close(true);
@@ -1979,6 +2084,10 @@ function showEditor(
   // M17: マイ柄（壊れた要素だけ捨てる）／「登録した色で塗る」（false 以外はオン＝既定）
   editor.restoreCustomTones(settings.customTones);
   editor.restoreCustomToneColor(settings.customToneColor);
+  // V164 (U-1/U-3): オニオンの段数と向き（未設定・壊れた値は 0/"both"＝v1.6.0 と同じ絵）／
+  // よく使う色の棚（壊れた要素だけ捨てる）
+  editor.restoreOnion(settings.onionLevel, settings.onionDir);
+  editor.restoreFavoriteColors(settings.favoriteColors);
   // V151 (E-8): 非表示にした確認（知らない id は捨てる・未設定は []＝全部出す）
   editor.restoreHiddenConfirms(settings.hiddenConfirms);
   editor.mount(
@@ -2044,6 +2153,17 @@ function showEditor(
       },
       onCustomToneColorChange: (on) => {
         settings.customToneColor = on;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      // V164 (U-1): オニオンの段数と向きも同じ流儀（押した瞬間に保存・履歴には積まない）
+      onOnionChange: (level, dir) => {
+        settings.onionLevel = level;
+        settings.onionDir = dir;
+        invoke("save_settings", { settings }).catch(() => {});
+      },
+      // V164 (U-3): よく使う色の棚も同じ流儀（マイ柄と同じ・作品をまたいで残る）
+      onFavoriteColorsChange: (list) => {
+        settings.favoriteColors = list;
         invoke("save_settings", { settings }).catch(() => {});
       },
       // V163: V161-B の Rust 側 gzip（gz_begin/gz_chunk/gz_abort/save_project_gz）は撤去。
@@ -2135,8 +2255,11 @@ async function openEditorWithProject(item: LibraryView) {
   // ここを try の外に出すと、読み終わってから画面が出るまでがまた空白になる
   try {
     await runWithBusy("open.project", t("ed.busy.loading.label"), async () => {
-      const bytes = await invoke<number[]>("read_file_bytes", { path: item.path });
-      const project = await projectFromBytes(new Uint8Array(bytes), {
+      // V169 (B-1): 生バイトで読む。JSON 配列（read_file_bytes）は 128MiB 超でレンダラが致命停止し、
+      // ここの catch にも `[V154b] open failed` にも届かなかった（項目21・画面が真っ白）。
+      // 512MiB 超は読む前に Rust が弾き（TOO_LARGE）、その断りは showLoadError が人の文にする
+      const bytes = await readProjectRaw(item.path);
+      const project = await projectFromBytes(bytes, {
         // 1コマごとに書き換えると描き直しが増えるので、32コマに1回だけ
         onFrame: (n) => {
           if (n % 32 === 0) setBusyMsg(t("ed.busy.loading.frames.label", { n }));
@@ -2957,15 +3080,23 @@ function currentPreset(): Preset {
   return activePreset(keys);
 }
 
-/** 組み込みを選んでいる状態で編集しようとしたときの誘導。複製したら true */
+/** 組み込みを選んでいる状態で編集しようとしたときの入口。編集できる状態になったら true。
+ *
+ *  ★V165 (D-3): **確認を挟まずに、その場で複製して編集を続けさせる。**
+ *   以前はここで「『◯◯』は組み込みのため編集できません。複製して編集しますか？」を出していた。
+ *   利用者は「このキーを変えたい」だけなのに、**やりたいことの前に意味の分からない一手間**が
+ *   入る（意見シート#1「設定方法が難しくてあまり使えていない」の最有力候補）。
+ *   複製は取り消せる（作った組み合わせは「削除」で消せる・組み込みは元のまま残る）ので、
+ *   先に進めて**事後に知らせる**ほうが手数も迷いも少ない。
+ *   ※ 複製そのものが失敗する場合（上限に達している）は `duplicateCurrentPreset` が理由を出す。 */
 async function ensureEditablePreset(): Promise<boolean> {
   const cur = currentPreset();
   if (!cur.builtin) return true;
-  const ok = await confirmDialog(
-    t("keys.preset.builtin.msg", { name: presetName(cur) })
-  );
-  if (!ok) return false;
-  return duplicateCurrentPreset();
+  const from = presetName(cur);
+  if (!(await duplicateCurrentPreset())) return false;
+  // 事後の知らせ: 何が起きたか・元は無事か・どう戻すかが1文で分かるように
+  toast(t("keys.preset.autoCopied.toast", { from, to: presetName(currentPreset()) }));
+  return true;
 }
 
 /** 今のプリセットを複製して、それを有効にする */
@@ -2994,20 +3125,46 @@ function captureKey(): { promise: Promise<KeyBinding | null>; cancel: () => void
   const promise = new Promise<KeyBinding | null>((resolve) => {
     const finish = (v: KeyBinding | null) => {
       window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keyup", onKeyUp, true); // V165 (D-4)
+      window.removeEventListener("blur", onBlur); // V165 (D-4)
       window.removeEventListener("pointerdown", onPointer, true);
       resolve(v);
     };
+    // V165 (D-4): 立っている単体タップの候補（keydown の時刻）。keyup で使う
+    let tapCand: { key: TapMod; at: number } | null = null;
     const onKey = (e: KeyboardEvent) => {
       // 修飾キー単体は待ち続ける（Ctrl だけ押した状態で確定させない）
-      if (e.key === "Control" || e.key === "Shift" || e.key === "Alt" || e.key === "Meta") return;
+      // ——★この行は**消さない**。ここで確定させると Ctrl が先に決まって
+      //   Ctrl+○○ が一切割り当てられなくなる（V165 D-4 の設計の前提）。
+      //   V165: 代わりに「**離したとき**の道」を下の onKeyUp に足した
+      if (e.key === "Control" || e.key === "Shift" || e.key === "Alt" || e.key === "Meta") {
+        // 単体タップの候補を立てる（Meta は割り当てられないので候補にしない）。
+        // 押しっぱなし（repeat）・2つ目の修飾キーは候補を壊す＝組み合わせとして扱う
+        tapCand = !e.repeat && !tapCand && isTapMod(e.key) ? { key: e.key, at: performance.now() } : null;
+        return;
+      }
+      tapCand = null; // 他のキーが来た＝組み合わせ（この直後 finish するので実質は保険）
       e.preventDefault();
       e.stopPropagation();
       finish(e.code === "Escape" ? null : bindingFromEvent(e));
+    };
+    // ★V165 (D-4): 修飾キーを**単独で押してすぐ離した**ら、そのタップを割り当てとして受ける。
+    //  組み合わせ（Ctrl+S 等）は上の onKey が S の keydown で確定済み＝ここへは来ない。
+    //  つまり両方の取り方が同じ画面で両立する（要件 D-4）
+    const onKeyUp = (e: KeyboardEvent) => {
+      const cand = tapCand;
+      tapCand = null;
+      if (!cand || !isTapMod(e.key) || cand.key !== e.key) return;
+      if (performance.now() - cand.at > MOD_TAP_MS) return; // 長押しは受けない（実行側と同じ値）
+      e.preventDefault();
+      e.stopPropagation();
+      finish({ code: "", tap: cand.key });
     };
     // M16 (K-4): 修飾キー＋クリックも取る。**素の左クリック（無修飾 button=0）は待ち続ける**
     //（描画と衝突するので割り当て不可＝そのクリックは素通しさせて「変更」を続けられる）。
     // Win（meta）＋クリックも登録不可なので待ち続ける
     const onPointer = (e: PointerEvent) => {
+      tapCand = null; // V165 (D-4): クリックが挟まったら単体タップではない
       const mods = e.ctrlKey || e.altKey || e.shiftKey;
       if (e.metaKey) return; // Win は登録できない
       if (e.button === 0 && !mods) return; // 素の左クリックは割り当て不可（待機継続）
@@ -3015,8 +3172,16 @@ function captureKey(): { promise: Promise<KeyBinding | null>; cancel: () => void
       e.stopPropagation();
       finish(bindingFromPointer(e));
     };
+    // V165（Codex 指摘⑥）: 割り当て待ちの最中にフォーカスが移ったら候補を捨てる
+    //（Alt+Tab・リモートデスクトップ・スクリーンキーボードで、戻ってきた瞬間に
+    //  「Alt のタップ」として拾ってしまうのを防ぐ。実行側の blur と同じ考え方）
+    const onBlur = () => {
+      tapCand = null;
+    };
     cancel = () => finish(null);
     window.addEventListener("keydown", onKey, true);
+    window.addEventListener("keyup", onKeyUp, true); // V165 (D-4)
+    window.addEventListener("blur", onBlur); // V165 (D-4)
     window.addEventListener("pointerdown", onPointer, true);
   });
   return { promise, cancel };
@@ -3038,6 +3203,9 @@ async function openKeymapSettings() {
           <button class="minibtn danger" id="km-del">${t("keys.preset.delete.btn")}</button>
         </div>
         <p class="hintline" id="km-note"></p>
+        <!-- V165 (D-4): 単体タップは**知らなければ絶対に見つからない**操作なので、
+             設定画面に1行だけ常設する（この回の趣旨＝見つかること） -->
+        <p class="hintline" id="km-tapnote"></p>
       </div>
       <div class="km-list" id="km-list"></div>
       <div class="modal-actions">
@@ -3063,6 +3231,8 @@ async function openKeymapSettings() {
       noteEl.textContent = cur.builtin
         ? t("keys.preset.builtin.hint")
         : t("keys.assign.hint");
+      // V165 (D-4): 単体タップの案内（プリセットの種類によらず同じ）
+      (box.querySelector("#km-tapnote") as HTMLElement).textContent = t("keys.tap.msg");
       (box.querySelector("#km-rename") as HTMLButtonElement).disabled = !!cur.builtin;
       (box.querySelector("#km-del") as HTMLButtonElement).disabled = !!cur.builtin;
       listEl.innerHTML = "";
@@ -3094,12 +3264,31 @@ async function openKeymapSettings() {
           const shared = mates.length > 0;
           if (shared) row.classList.add("km-shared");
           const mateNames = mates.map(commandLabel).join(t("keys.row.mates.separator.label"));
+          // ★V167 (K-2): **すでに二重になっている設定**に印を出す。
+          //  K-1 はこれから登録するものを断るだけなので、**いま二重の人は救われない**
+          //  （作者の設定がまさにこれだった）。⚠ 黙って外さない——理由と直し方を出すだけ
+          const clashes = modifierClashMates(cur, c.id as CommandId);
+          const clashed = clashes.length > 0;
+          if (clashed) row.classList.add("km-clash");
+          const clashMod = clashed
+            ? modifierClash(b as KeyBinding, cur.bindings[clashes[0]] as KeyBinding)
+            : null;
+          const clashNames = clashes.map(commandLabel).join(t("keys.row.mates.separator.label"));
           const note = (c as { noteKey?: string }).noteKey;
           row.innerHTML = `
             <span class="km-name">${escapeHtml(commandLabel(c.id))}${
               note ? `<em>${escapeHtml(t(note))}</em>` : ""
-            }${shared ? `<em class="km-shared-note">${t("keys.row.sharedMates.label", { names: escapeHtml(mateNames) })}</em>` : ""}</span>
-            <span class="km-key${label ? "" : " none"}">${escapeHtml(label || t("keys.row.unassigned.label"))}${shared ? " 🔁" : ""}</span>
+            }${shared ? `<em class="km-shared-note">${t("keys.row.sharedMates.label", { names: escapeHtml(mateNames) })}</em>` : ""}${
+              clashed
+                ? `<em class="km-clash-note">${escapeHtml(
+                    t("keys.row.clash.msg", {
+                      mod: clashMod ? modLabel(clashMod) : "",
+                      names: clashNames,
+                    })
+                  )}</em>`
+                : ""
+            }</span>
+            <span class="km-key${label ? "" : " none"}">${escapeHtml(label || t("keys.row.unassigned.label"))}${shared ? " 🔁" : ""}${clashed ? " ⚠" : ""}</span>
             <button class="minibtn km-set">${t("keys.row.set.btn")}</button>
             <button class="minibtn km-clr"${label ? "" : " disabled"}>${t("keys.row.clear.btn")}</button>`;
           listEl.appendChild(row);
@@ -3117,6 +3306,54 @@ async function openKeymapSettings() {
           render();
           return;
         }
+        // V165 (D-4・Codex 指摘④): 「押している間だけ」の操作は単体タップに割り当てられない
+        //（離した瞬間に発動する仕組みなので、押しっぱなしの意味を持てない）。**複製の前に断る**
+        if (b.tap && isHoldOnlyCommand(cmd)) {
+          await confirmDialog(t("keys.tap.holdOnly.msg", { cmd: commandLabel(cmd) }));
+          render();
+          return;
+        }
+      }
+      // ★V165（Codex 指摘②）: **衝突の確認は複製より先**。あとにすると、
+      //  「置き換えますか？→ いいえ」で何も変えなかったのに**あなた用の組み合わせだけが残る**
+      //  （「勝手に作られた」に見える）。組み込みと複製は中身が同じなので、
+      //  衝突は複製前の実体で判定して構わない
+      let conflict: CommandId | null = null;
+      // V167（Codex 指摘・低）: 取り合いの相手は複数あり得るので、消す相手をここで覚える
+      let clashAll: CommandId[] = [];
+      if (b) {
+        // M11-15: 道具どうしは衝突ではなく**共存**（同キー巡回）。findConflict は道具どうしなら null
+        conflict = findConflict(currentPreset(), b, cmd);
+        if (conflict) {
+          // ★V167 (K-1): **同じ修飾キーの取り合い**は、字面が違うので従来の文言では
+          //  「なぜ駄目か」が分からない（「Alt（タップ）」と「Alt＋クリック」は別の文字列）。
+          //  取り合いのときだけ、**何が起きるか**を書いた文面に差し替える。
+          //  流れ（置き換えますか？→はい で片方を消す）は従来のまま＝新しい断り方を作らない
+          const other = currentPreset().bindings[conflict];
+          const clash = other ? modifierClash(b, other as KeyBinding) : null;
+          if (clash) {
+            // ★Codex 指摘（低）: 取り合う相手は**1つとは限らない**。
+            //  古い設定に `Alt（タップ）` と `Alt＋左クリック` と `Alt＋右クリック` が
+            //  同居していると、1つ消しただけでは**直ったように見えて取り合いが残る**。
+            //  取り合いのときは**相手を全部**挙げて、全部消す
+            clashAll = modifierClashPartners(currentPreset(), b, cmd);
+          }
+          const msg = clash
+            ? t("keys.conflict.modifier.msg", {
+                mod: modLabel(clash),
+                cmd: clashAll.map(commandLabel).join(t("keys.row.mates.separator.label")),
+                otherKey: clashAll
+                  .map((id) => keyLabel(currentPreset().bindings[id]))
+                  .join(t("keys.row.mates.separator.label")),
+                key: keyLabel(b),
+              })
+            : t("keys.conflict.replace.msg", { key: keyLabel(b), cmd: commandLabel(conflict) });
+          const ok = await confirmDialog(msg);
+          if (!ok) {
+            render();
+            return;
+          }
+        }
       }
       if (!(await ensureEditablePreset())) {
         render();
@@ -3124,18 +3361,9 @@ async function openKeymapSettings() {
       }
       const cur = currentPreset(); // 複製後の実体を取り直す
       if (b) {
-        // M11-15: 道具どうしは衝突ではなく**共存**（同キー巡回）。findConflict は道具どうしなら null
-        const conflict = findConflict(cur, b, cmd);
-        if (conflict) {
-          const ok = await confirmDialog(
-            t("keys.conflict.replace.msg", { key: keyLabel(b), cmd: commandLabel(conflict) })
-          );
-          if (!ok) {
-            render();
-            return;
-          }
-          delete cur.bindings[conflict];
-        }
+        // V167: 取り合いは**全部**消す（1つだけ消すと取り合いが残る）。それ以外は従来どおり1つ
+        if (clashAll.length) for (const id of clashAll) delete cur.bindings[id];
+        else if (conflict) delete cur.bindings[conflict];
         cur.bindings[cmd] = b;
         // 道具どうしで同キーになったときは、置き換えではなく巡回の案内を出す（共存済み）
         const mates = sharedToolMates(cur, cmd);
@@ -3380,20 +3608,8 @@ function projectDropDialog(paths: string[]): Promise<"import" | "edit" | null> {
 /** M10-16: 取り込み中フラグ（多重実行ガード。実行中の追加ドロップはトーストで無視） */
 let importRunning = false;
 
-/** M10-16: raw IPC で読む（number[] JSON を廃止）。.memoanima としてあり得ない
- *  巨大ファイルは読み込む**前に** Rust 側で弾く（M10-7 の TOO_LARGE 方式・512MB） */
-const IMPORT_MAX_BYTES = 512 * 1024 * 1024;
-async function readProjectRaw(path: string): Promise<Uint8Array> {
-  const raw = await invoke<ArrayBuffer | Uint8Array | number[]>("read_file_raw", {
-    path,
-    maxBytes: IMPORT_MAX_BYTES,
-  });
-  return raw instanceof Uint8Array
-    ? raw
-    : raw instanceof ArrayBuffer
-      ? new Uint8Array(raw)
-      : new Uint8Array(raw as number[]);
-}
+// M10-16 → V169 (B-2): `readProjectRaw` と `IMPORT_MAX_BYTES` は `library.ts` へ移した（定義は1つ・写しを作らない）。
+// 取り込み（M10-16）・読み戻し（V154 W-6）・ドロップの即編集・開く（V169）の全部が同じ門番を通る
 
 /** M10-16: 取り込み進捗モーダル。実行中は背景クリック（capture で先取り）でも
  *  Escape（modal() は元々 Esc を持たない）でも閉じない。閉じるのは finish() だけ。 */
@@ -4932,12 +5148,30 @@ window.addEventListener("DOMContentLoaded", async () => {
   if (import.meta.env.DEV && new URLSearchParams(location.search).has("editor")) {
     // 開発用: Tauriなしでエディタを確認する（?editor / ?editor&kwz=/xxx.kwz でインポート経路）
     const kwzUrl = new URLSearchParams(location.search).get("kwz");
+    // V168: `&proj=<url>` で .memoanima（PV5/PV6）を開く。再現データ（1,098コマ×20L・PV6）を
+    // Tauri 無しで開いて、保存の待ち・書き出しの1コマ起こしを検証するため（DEV 限定・本番では消える）。
+    // **読むだけ**（Tauri が無いので保存は Rust に届かない＝ファイルには一切書かれない）
+    const projUrl = new URLSearchParams(location.search).get("proj");
     if (kwzUrl) {
       const buf = await (await fetch(kwzUrl)).arrayBuffer();
       const { project } = await importFlipnote(buf, kwzUrl);
       showEditor(project, null);
+    } else if (projUrl) {
+      const { projectFromBytes } = await import("./editor/serialize");
+      const bytes = new Uint8Array(await (await fetch(projUrl)).arrayBuffer());
+      showEditor(await projectFromBytes(bytes), null);
     } else {
       showEditor(newProject("デザイン確認"), null);
+    }
+    // V165: `&tool=eraser` で道具を選んだ状態から始める。**道具ごとに違う面**（消しゴムの
+    // 「かすり消し」など）を検証・撮影するのに、ヘッドレスでは押しに行けないため
+    //（`&kwz=` と同じ DEV 限定の入口。本番ビルドではこの分岐ごと消える）。
+    // **道具列のボタンを押す**＝利用者と同じ道を通す（Editor の私有メソッドには触らない）
+    const tool = new URLSearchParams(location.search).get("tool");
+    if (tool) {
+      document
+        .querySelector<HTMLElement>(`#ed-tools .tool[data-tool="${CSS.escape(tool)}"]`)
+        ?.click();
     }
     return;
   }
@@ -5017,9 +5251,23 @@ window.addEventListener("DOMContentLoaded", async () => {
   // （エディタの mount/unmount には紐づけない。中の判定は `editorOpen` で行う）。
   // keydown は **capture** ＝ 既存の bubble のハンドラとは別の口。順序は変えない。
   window.addEventListener("keydown", reloadGuardHandler, true);
+  // V169 (A): Alt 単独の既定動作（Win32 の SC_KEYMENU＝メニュー操作モード）に入れない。
+  // ページが処理済みにすれば WebView2 は DefWindowProc へ流さない。keydown で印が立ち keyup で発火するので**両方**止める。
+  // altKey・keyup の配信・OS のキー状態は変わらない＝スポイト（M16 K-4）・タップ（V165 D-4）・Alt+F4 は無傷。
+  // `repeat` も文字入力中も止める（Alt 単独は文字を作らない）。伝播は止めない（既存ハンドラの順序は不変）。
+  // **アプリの生存中ずっと・1か所**（reloadGuardHandler と同じ流儀＝window の capture）。
+  // 原因は V166 が「候補1と確定したら初めて止める」と待っていたもの（editor.ts の V166 (C)）——
+  // 2026-09-04 の実機ログ `[V167 C] alt unbalanced down=1 up=2`（1回の押し離しで keyup が2回＝
+  // 2回目の keydown がメニューモードを抜けるのに消費された）で確定した
+  window.addEventListener("keydown", loneAltGuard, true);
+  window.addEventListener("keyup", loneAltGuard, true);
   // V153: ホーム画面のショートカット（いまは「設定を開く」1つ）。**アプリの生存中ずっと**張り、
   // 中の判定で「ホームのときだけ」に絞る（reloadGuardHandler と同じ流儀）
   window.addEventListener("keydown", homeKeyHandler);
+  // V165 (D-4): 単体タップは離したときに判定する。候補は blur とポインタ操作で捨てる
+  window.addEventListener("keyup", homeKeyUpHandler);
+  window.addEventListener("blur", homeModTapCancel);
+  window.addEventListener("pointerdown", homeModTapCancel, true);
   document.addEventListener("visibilitychange", hiddenAutosaveHandler);
   // M7-2b: ディスプレイ設定の復元（破損値は既定へ）
   await applyDisplaySettings(settings.display);

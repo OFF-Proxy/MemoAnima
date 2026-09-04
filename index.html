@@ -102,6 +102,14 @@
         <div class="h-title" id="ed-title"></div>
         <button class="ic" id="ed-undo" type="button" data-i18n-title="ed.undo.title">↶</button>
         <button class="ic" id="ed-redo" type="button" data-i18n-title="ed.redo.title">↷</button>
+        <!-- V158 (L-2): 「このコマの絵を消す」。左ツール列の 🌀 と**同じ実装**（clearFrame）を呼ぶ。
+             確認ダイアログ・選択範囲があれば範囲だけ・Undo1回——すべて 🌀 と同一。
+             Undo/Redo の右に置くのは作者の要望（描いていて一番よく使う3つがまとまる） -->
+        <button class="ic" id="ed-clearframe" type="button" data-i18n-title="ed.clearFrame.title">🌀</button>
+        <!-- V161 (A): 右下の保存ピル。保存は背景で走る（描き続けられる）ので、中央の
+             「保存中です」はやめて、視界の隅で「保存していること」だけを知らせる。
+             title に「押した瞬間までの絵が保存される」ことを書く（Codex 観点③の言葉の防波堤） -->
+        <div id="ed-savepill" hidden data-i18n-title="ed.save.bg.title"><i></i><span data-i18n="ed.save.bg.label"></span></div>
         <div class="sp"></div>
         <div class="h-spec" data-i18n="ed.spec.label"></div>
         <div class="sp"></div>
@@ -139,6 +147,11 @@
           </div>
           <div class="cvbadge" id="ed-badge"></div>
           <div class="xform-badge" id="ed-xform-badge" data-i18n="ed.xform.badge.label" hidden></div>
+          <!-- V156（Codex レビュー §4）: 遠くのコマへ飛んだとき、絵が揃うまでの「一瞬」に出す小さな札。
+               白紙にはしない（前のコマを出したまま待つ）が、それだと「押せていない」「違うコマを見ている」に
+               見える余地がある。**待ちが目に見える長さになったときだけ**出す（150ms 未満なら出ない）。
+               変形の札と位置を共有しているが、変形中はコマ移動が塞がれるので同時には出ない -->
+          <div class="xform-badge wait-badge" id="ed-wait-badge" data-i18n="ed.frameWait.label" hidden></div>
           <div class="cvright">
             <button class="ic" id="ed-view-rot" type="button" data-i18n-title="ed.view.rotate.title">🔄</button>
             <button class="ic" id="ed-view-flip" type="button" data-i18n-title="ed.view.flip.title">↔</button>

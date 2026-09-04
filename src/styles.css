@@ -1689,6 +1689,24 @@ button:disabled {
 .tex.collapsed .tone-custom-head {
   display: none;
 }
+/* V165 (D-1): ただし**まだ1つも登録が無いとき**の見出しは畳んでも残す。
+   一覧の畳みは既定なので、隠すと「マイ柄」という**探している名前**ごと画面から消える。
+   登録が1つでもあれば従来どおり（畳んだら見出しは隠れて、選んでいるチップだけ残る） */
+.tex.collapsed .tone-custom-head.empty {
+  display: block;
+}
+/* V165 (D-1/D-2): トーン一覧の中の**小さな説明の1行**（かすり消しの説明・空のマイ柄の増やし方）。
+   見出し（h3）は太らせず、一覧側に置く＝他の道具の見出しと釣り合いを崩さない。
+   `.tone-custom-head` と同じ字送り・同じ色で、注記だと見て分かる。畳んでも残す
+   （畳むのは「柄を選ぶ場所」を縮める操作で、説明を隠す操作ではない）。 */
+.tex .tone-note {
+  grid-column: 1 / -1;
+  margin: 2px 0 4px;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
 .tex .tone-colormode {
   grid-column: 1 / -1;
   display: flex;
@@ -2655,6 +2673,21 @@ input[type="text"] {
   color: var(--orange) !important;
 }
 
+/* V167 (K-2): すでに二重になっている割り当て（同じ修飾キーの取り合い）の印。
+   ★🔁「同キー共有中」（上の km-shared）は**共存できる正常な状態**なので橙、
+   こちらは**直してほしい状態**なので赤にして、ひと目で別物と分かるようにする。
+   ⚠ 黙って外さない（作者決定）。印と理由を出すだけで、割り当ては触らない */
+.keymap-menu .km-row.km-clash {
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  border-left: 3px solid var(--red);
+  padding-left: 5px;
+  border-radius: 6px;
+}
+
+.keymap-menu .km-clash-note {
+  color: var(--red) !important;
+}
+
 .keymap-menu .km-cycle-note {
   margin: 2px 0 6px;
 }
@@ -3193,6 +3226,20 @@ input[type="text"] {
    キー入力は editor.ts の dialogOpen() が止める。 */
 #screen-editor.ed-busy {
   pointer-events: none;
+}
+
+/* V166 (層1): 重い操作の最中は**ボタンが押せないことを見て分かる**ようにする。
+   上の pointer-events:none は「押しても効かない」だけで、見た目は普段のままだった
+   ——押せると思って連打する動機がそこにあった（要件 層1）。
+
+   ★`disabled` 属性ではなく class + CSS にしてある。属性を立てると
+   **戻すときに元の状態を復元しなければならない**（例: 貼り付けボタンは
+   クリップボードが空なら元から disabled）。class なら外すだけで元へ戻り、
+   「復元し忘れてボタンが死ぬ／空なのに押せる」という壊れ方が起きない。 */
+#screen-editor.ed-busy button,
+#screen-editor.ed-busy select,
+#screen-editor.ed-busy input {
+  opacity: 0.45;
 }
 
 /* W-8: 「◯◯中です」。取り込みの進捗と同じ .modal-box の上に乗る */

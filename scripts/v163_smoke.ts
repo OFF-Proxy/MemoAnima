@@ -405,13 +405,50 @@ async function wakeAll(p: Project): Promise<void> {
   check("9 保存 Worker の既定は pv6（旧形式チェック時のみ gzip）", /mode: ctx\.legacy \? "gzip" : "pv6"/.test(ed));
   check("9 オートセーブは encodePV6（中断可能）", /await import\("\.\/pv6"\)/.test(ed) && /await encodePV6\(this\.project, \{/.test(ed));
   check("9 オートセーブの書く前検証は verifySavedBytes（PV6 も振り分けが効く）", /okAuto = await verifySavedBytes/.test(ed));
+  // ★V168 (E-4): 検査9 の2本を置き換えた。
+  //  以前は「書き出しの入口で全コマを起こす」を不変条件にしていたが、それは
+  //  目安の 10.8 倍の作品で**論理サイズ 4.1GB をそのまま生で展開する見積りなしの確保**になる。
+  //  守りたいのは「眠ったコマでも白紙にならない」であって、「全部起こす」ではない。
+  //  **不変条件は残し、守り方だけを変える**（読む直前に起こす）。
+  {
+    // (2z) 供給元は眠ったコマでも白紙を返さない: 眠らせた作品で getFrameRgba の結果が、
+    //      起きている状態の合成と**全画素一致**する
+    const { projectSource } = await import("../src/editor/frameSource");
+    const { compositeFrame } = await import("../src/editor/render");
+    const p = make(6, 3, 11);
+    // 起きている状態の合成を先に控える（これが正）
+    const truth = Array.from({ length: p.frames.length }, (_, i) =>
+      new Uint8ClampedArray(compositeFrame(p, i).buffer.slice(0, PIXELS * 4))
+    );
+    // 全コマを眠らせる（読みでなく書き→控えなし→圧縮）。窓の外を模す
+    for (const f of p.frames) await sleepFrame(p, f);
+    const asleepAll = p.frames.every((f) => frameHasAsleep(f));
+    const src = projectSource(p);
+    let same = 0;
+    for (let i = 0; i < p.frames.length; i++) {
+      const got = await src.getFrameRgba(i);
+      let eq = got.length === truth[i].length;
+      if (eq) for (let k = 0; k < got.length; k++) if (got[k] !== truth[i][k]) { eq = false; break; }
+      if (eq) same++;
+    }
+    // 反証（同じ1本の中で）: 眠ったまま compositeFrame を直に呼ぶと白紙になる＝この検査が空振りしていない
+    const q = make(2, 3, 11);
+    const before = new Uint8ClampedArray(compositeFrame(q, 0).buffer.slice(0, PIXELS * 4));
+    for (const f of q.frames) await sleepFrame(q, f);
+    const blank = new Uint8ClampedArray(compositeFrame(q, 0).buffer.slice(0, PIXELS * 4));
+    let differs = false;
+    for (let k = 0; k < before.length; k++) if (before[k] !== blank[k]) { differs = true; break; }
+    check(
+      "9 ★書き出しの供給元は眠ったコマでも白紙を返さない（起きている合成と全画素一致・2z・反証つき）",
+      asleepAll && same === p.frames.length && differs,
+      `眠らせた=${asleepAll} 一致=${same}/${p.frames.length} 直合成は白紙=${differs}`
+    );
+  }
+  // 書き出しの入口に全コマ起こしが**無い**（走査・editor と library）。入口で起こすと見積りなしの確保になる
   check(
-    "9 ★書き出し前に全コマを起こす（editor。眠りのまま書き出すと白紙になる）",
-    /#ed-export"\)\.onclick = async[\s\S]{0,1600}?wakeLayersAllFrames\(/.test(ed)
-  );
-  check(
-    "9 ★書き出し前に全コマを起こす（library）",
-    /exportSelected\(\)[\s\S]{0,3000}?wakeLayersAllFrames\(/.test(lib)
+    "9 ★書き出しの入口（editor／library）で全コマを起こしていない",
+    !/#ed-export"\)\.onclick = async[\s\S]{0,1600}?wakeLayersAllFrames\(/.test(ed) &&
+      !/exportSelected\(\)[\s\S]{0,3000}?wakeLayersAllFrames\(/.test(lib)
   );
   check("9 ライブラリのプレビューが眠ったコマを起こしてから描く", /drawPreview\(\) \{[\s\S]{0,700}?frameHasAsleep\(cur\)/.test(lib));
   check("9 プレビューの先回り（起こす）と後片付け（只で眠らす）がある", /prewakePreview\(\) \{[\s\S]{0,900}?sleepFrame\(/.test(lib));

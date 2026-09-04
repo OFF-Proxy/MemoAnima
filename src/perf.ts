@@ -31,13 +31,33 @@ export type PerfOp =
   | "frame.add"
   | "frame.del"
   | "frame.reorder"
+  // ★V166 (層2): 重い操作は**待たせる対象と数える対象を同じ一覧**にする。
+  //  ここに無い操作は `runHeavy` を通せない＝漏斗の外に置けない（型で縛る）。
+  //  ⚠ 要件 §1 の表のうち、**ここに無い2つ**は意図して外してある（報告書に理由あり）:
+  //   ・「コマでずらす」＝トグル1つ。画素も確保も動かない（漏斗に入れると
+  //     チェックボックスにロックが掛かるだけで、守るものが無い）
+  //   ・眠らせ（sweep）＝**描きながら裏で進む**のが設計。入口を閉じたら描けなくなる。
+  //     多重起動を防ぐ入口は `this.sweeping` が元から持っている
+  | "frame.copy"
+  | "frame.paste"
+  | "frame.addMany"
+  | "frame.wobble"
   // レイヤー
   | "layer.add"
   | "layer.del"
   | "layer.move"
   | "layer.lock"
+  | "layer.merge"
+  | "layer.allFrames"
+  // 変形・歪み
+  | "xform.commit"
+  | "warp.commit"
+  // 画像
+  | "image.frames"
   // そのほかの「待つ可能性のある処理」
-  | "export.wake" // V163: 書き出し前の全コマ起こし（PV6 遅延読み・眠り作品）
+  //  ⚠ V168: "export.wake"（V163 の書き出し前の全コマ起こし）は**消した**。
+  //   全コマを一度に起こすのは論理サイズを丸ごと生で展開する見積りなしの確保で、
+  //   書き出しは1コマずつ読むので不要（frameSource.ts が読む直前に起こす）
   | "play.start"
   | "draw.first" // pointerdown → 最初の描画
   | "tool.switch"

@@ -22,7 +22,14 @@ export interface CompositeOptions {
   excludeLayer?: string;
   /** オニオンスキン: 前後何コマ透かすか（0=off） */
   onion?: number;
+  /** V164 (U-1): 透かす向き。"prev"=前のコマだけ（赤）／"next"=次のコマだけ（青）／
+   *  **省略時は "both"＝前後の両方**（v1.6.0 までと1画素も変わらない既定）。
+   *  段数（`onion`）とは独立した軸で、色は現行のまま（前＝赤・後＝青）。 */
+  onionDir?: OnionDir;
 }
+
+/** V164 (U-1): オニオンの向き。設定に保存する値そのもの（`settings.onionDir`）。 */
+export type OnionDir = "prev" | "both" | "next";
 
 const ONION_PREV = 0xff3b3bff; // 前=赤（値は下で分解して使う）
 const ONION_NEXT = 0xffa21fff; // 次=青
@@ -264,11 +271,16 @@ export function compositeFrame(
   const bases = hasClipLayers(p) ? clipBaseMap(p) : null;
   const onion = opts.onion ?? 0;
   if (onion > 0) {
+    // V164 (U-1): 向きで行を通す/通さないだけ。**段数・色・不透明度の式は1つも変えていない**
+    //（"both" は従来と同じ2行＝既定の絵はビット同一）
+    const dir = opts.onionDir ?? "both";
+    const wantPrev = dir !== "next";
+    const wantNext = dir !== "prev";
     for (let k = onion; k >= 1; k--) {
       const a = 0.28 / k;
-      if (frameIndex - k >= 0)
+      if (wantPrev && frameIndex - k >= 0)
         blendOnion(buf, p, eff, bases, frameIndex - k, 0xff, 0x3b, 0x3b, a);
-      if (frameIndex + k < p.frames.length)
+      if (wantNext && frameIndex + k < p.frames.length)
         blendOnion(buf, p, eff, bases, frameIndex + k, 0x1f, 0xa2, 0xff, a);
     }
   }

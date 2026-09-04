@@ -29,6 +29,100 @@ export interface KeyBinding {
   /** M16 (K-4): 修飾キー＋クリックのポインタ割り当て（0=左 / 1=中 / 2=右）。
    *  **素の左クリック（無修飾 button=0）は割り当て不可**（描画と衝突・sanitize で弾く）。未指定＝キーボード割り当て */
   button?: 0 | 1 | 2;
+  /** V165 (D-4): **修飾キーの単体タップ**割り当て（押してすぐ離す）。`code: ""` ＋この項目が実体。
+   *
+   *  ★なぜ押した時ではなく離した時なのか: 修飾キーの keydown で確定させると **Ctrl が先に発火して
+   *   Ctrl+○○ が一切割り当てられなくなる**（`captureKey` の「修飾キー単体は待ち続ける」はそのため）。
+   *   離した時なら、間に別のキーが来たかどうかで**組み合わせと単体タップを見分けられる**。
+   *  追加のみ＝この項目を知らない旧ビルドは `code: ""` として読み、`sanitizeBinding` が捨てる
+   *  （＝割り当てが消えるだけで、他の割り当ては生きる）。 */
+  tap?: TapMod;
+}
+
+/** V165 (D-4): 単体タップを取れる修飾キー（`KeyboardEvent.key` の値そのもの＝左右を区別しない）。
+ *  Meta（Windows キー）は OS が持っていくので入れない（`captureKey` も従来から拒否している）。 */
+export type TapMod = "Control" | "Shift" | "Alt";
+
+const TAP_MODS = new Set<string>(["Control", "Shift", "Alt"]);
+
+/** V165 (D-4): `KeyboardEvent.key` が単体タップの対象か */
+export function isTapMod(key: string): key is TapMod {
+  return TAP_MODS.has(key);
+}
+
+/** V169 (A): このキーの既定動作を**アプリの生存中ずっと**止めるか。
+ *  Win32 の `DefWindowProc` は **Alt 単独**の押し離しで `WM_SYSCOMMAND(SC_KEYMENU)`＝メニュー操作モードに入る
+ *  （メニューバーが無くても入る）。以後ポインタが来ず、次のキーで抜ける＝「Alt を押すまでカーソルが固まる」
+ *  （V166 の候補1・2026-09-04 の実機ログ `down=1 up=2` で確定）。ページが `preventDefault` すれば
+ *  WebView2 は `DefWindowProc` へ流さない。**`"Alt"` だけ**——`AltGraph`（欧州配列の文字入力）・
+ *  他の修飾キー・F4 等は止めない（Alt+F4 は F4 側の `WM_SYSKEYDOWN` なので無傷）。
+ *  純関数＝Node の smoke が直接叩く。 */
+export function isLoneAltKey(key: string): boolean {
+  return key === "Alt";
+}
+
+/** V165 (D-4): 単体タップの引き当て表キー。`|T…` は code 側（`|KeyP`）とも
+ *  ポインタ側（`|B0`）とも**字面が重ならない**＝どちらとも衝突しない */
+export function tapEventKey(key: TapMod): string {
+  return `|T${key}`;
+}
+
+/** V165 (D-4): 単体タップと見なす上限（ms）。**編集画面も設定画面もこの1つを使う**——
+ *  取れる操作と発動する操作が食い違うと「登録できたのに動かない」になる。
+ *  値は Space の単押し（`Editor.SPACE_TAP_MS`）と同じ 250ms＝このアプリの「タップ」の定義を割らない。 */
+export const MOD_TAP_MS = 250;
+
+/** V165 (D-4・Codex 指摘①⑤): 修飾キーの単体タップを見張る小さな状態機械。
+ *
+ *  ★**編集画面と設定画面とホーム画面で同じ実体を使う**（同じ条件・同じしきい値）。
+ *   Node から import できるので、条件の抜けはスモークが直接叩いて見張れる。
+ *
+ *  使い方: keydown で `down()`／keyup で `up()`（発動するなら修飾キーを返す）／
+ *  pointerdown・blur・画面離脱で `cancel()`。 */
+export class ModTapWatcher {
+  private cand: { key: TapMod; at: number } | null = null;
+  /** テストから時計を差し替えられるようにしておく（既定は performance.now） */
+  constructor(private now: () => number = () => performance.now()) {}
+
+  /** keydown。候補を立てる／壊す。**`blocked` が真の間は候補を立てない**
+   *  （描画中・ダイアログ中・文字入力中・IME 変換中＝Codex 指摘①）。 */
+  down(key: string, opts: { repeat?: boolean; blocked?: boolean } = {}): void {
+    if (!isTapMod(key)) {
+      this.cand = null; // 修飾キー以外が押された＝組み合わせ
+      return;
+    }
+    // 押しっぱなしのリピート・同じキーの2度目・2つ目の修飾キー・止められている状態では候補にしない
+    if (opts.repeat || opts.blocked || this.cand) {
+      this.cand = null;
+      return;
+    }
+    this.cand = { key, at: this.now() };
+  }
+
+  /** keyup。条件がそろっていれば修飾キーを返す（＝発動してよい）。候補は必ず畳む。 */
+  up(key: string): TapMod | null {
+    const cand = this.cand;
+    this.cand = null;
+    if (!cand || !isTapMod(key) || cand.key !== key) return null;
+    return this.now() - cand.at <= MOD_TAP_MS ? cand.key : null;
+  }
+
+  /** ポインタが下りた・フォーカスを失った・画面を離れた——どれでも候補は無効 */
+  cancel(): void {
+    this.cand = null;
+  }
+
+  /** 検査用: いま候補が立っているか */
+  get pending(): TapMod | null {
+    return this.cand?.key ?? null;
+  }
+}
+
+/** V165 (D-4・Codex 指摘④): **押している間だけ効く操作**は単体タップに割り当てられない。
+ *  タップは「離した瞬間」に発動するので、押しっぱなしの意味を持てない
+ *  （`xform.peek` を割り当てると透かしが入りっぱなしで戻らなくなる）。 */
+export function isHoldOnlyCommand(id: string): boolean {
+  return COMMANDS.some((c) => c.id === id && (c as { holdOnly?: boolean }).holdOnly === true);
 }
 
 /** 設定画面の分類（**識別子**。表示名は COMMAND_GROUPS の labelKey で引く） */
@@ -44,6 +138,9 @@ export interface CommandDef {
   repeatable?: boolean;
   /** 備考（設定画面の行に小さく出す）の辞書キー（M12-1c-1: 旧 `note`） */
   noteKey?: string;
+  /** V165 (D-4): **押している間だけ効く操作**（離すと戻る）。単体タップには割り当てられない
+   *  ——タップは「離した瞬間」に発動するので、押しっぱなしの意味を持てない */
+  holdOnly?: boolean;
 }
 
 /** M11-10: キーを割り当てられる操作の母集合。
@@ -149,6 +246,8 @@ export const COMMANDS = [
     labelKey: "keys.cmd.xformPeek.label",
     group: "playView",
     noteKey: "keys.cmd.xformPeek.hint",
+    // V165 (D-4): 押している間だけ透かす操作＝単体タップには割り当てさせない
+    holdOnly: true,
   },
   {
     // M11-16: 中身は「HUD をまとめて隠す/出す」に置き換わったが、**id は据え置き**
@@ -233,6 +332,8 @@ function normCode(code: string): string {
  *  折り畳むと Win+Z が Ctrl+Z と一致して元に戻ってしまう）。割り当て側は meta を持てないので、
  *  Win を押しながらの打鍵は**どのコマンドにも一致しない**＝従来どおり何も起きない */
 export function bindingKey(b: KeyBinding): string {
+  // V165 (D-4): 単体タップは修飾を持たない（それ自体が修飾キーなので）。**先に見る**
+  if (b.tap) return tapEventKey(b.tap);
   const mods = `${b.ctrl ? "C" : ""}${b.shift ? "S" : ""}${b.alt ? "A" : ""}`;
   // M16 (K-4): ポインタ割り当ては `…|B0/B1/B2`。code（"KeyP" 等）とは字面が重ならない＝キーボードと衝突しない
   if (b.button !== undefined) return `${mods}|B${b.button}`;
@@ -345,6 +446,10 @@ function pointerLabel(button: 0 | 1 | 2): string {
 
 export function keyLabel(b: KeyBinding | null | undefined): string {
   if (!b) return "";
+  // V165 (D-4): 「Alt（タップ）」。キーの刻印そのもの（Ctrl/Shift/Alt）は訳さず、注記だけ訳す
+  //（`codeLabel` の「記号・英数は刻印なので訳さない」と同じ考え方）。
+  // Codex 指摘⑦: `KeyboardEvent.key` は "Control" だが、この画面と案内文の表記は "Ctrl" なので揃える
+  if (b.tap) return t("keys.tap.label", { key: b.tap === "Control" ? "Ctrl" : b.tap });
   const mods = [b.ctrl ? "Ctrl" : "", b.shift ? "Shift" : "", b.alt ? "Alt" : ""].filter(Boolean);
   // M16 (K-4): ポインタ割り当ては「Alt＋クリック」等（末尾がボタン名）
   const last = b.button !== undefined ? pointerLabel(b.button) : codeLabel(b.code);
@@ -468,6 +573,12 @@ function sanitizeBinding(v: unknown): KeyBinding | null {
   const ctrl = o.ctrl === true;
   const shift = o.shift === true;
   const alt = o.alt === true;
+  // V165 (D-4): 単体タップ。**知っている3つ以外は捨てる**（未知の値が入った settings でも
+  // その割り当てが1つ消えるだけで、他は生きる＝「壊れた項目だけ捨てて既定へ」の作法）。
+  // 修飾フラグは持たない（それ自体が修飾キー）ので落とす
+  if (o.tap !== undefined) {
+    return typeof o.tap === "string" && isTapMod(o.tap) ? { code: "", tap: o.tap } : null;
+  }
   // M16 (K-4): ポインタ割り当て（button が 0/1/2）。**素の左クリック（無修飾 button=0）は拒否**
   //（描画と衝突するため受け付けない。中/右クリックは無修飾でも描画と衝突しないので可）
   if (o.button === 0 || o.button === 1 || o.button === 2) {
@@ -618,9 +729,64 @@ export function buildLookup(preset: Preset): Map<string, CommandId[]> {
   return m;
 }
 
+// ================= V167 (K-1): 同じ修飾キーの取り合い =================
+//
+// ★2026-09-02 の事故（作者の実機・ログで確定）
+//   液タブのサイドスイッチを Alt にして描くと、**ペンを置いても線が引けず色だけ変わる**。
+//   設定がこうなっていた:
+//     元に戻す           = **Alt（タップ）**   ← V165 で足した
+//     色を拾う（スポイト） = **Alt＋クリック**   ← M16 K-4 から前からある
+//   Alt を押しながらペンを置くと `onPointerDownInner` が Alt＋クリックに一致し、
+//   **描画を始めずに折り返す**（`pointerDown` すら立たない）。全ストロークが食われていた。
+//
+// ★なぜ検出できていなかったか（設計上の見落とし）
+//   V165 は「タップの表キー（`|TAlt`）と ＋クリックの表キー（`A|B0`）は**字面が重ならない**」
+//   ことを確かめ、コメントに「どちらとも衝突しない」と書いた。**字面は重ならない。
+//   だが押す指は同じ。** `findConflict` は文字列比較なので、同じ Alt に2役を持たせても
+//   衝突として出てこなかった。
+//
+// ★直し方: **字面ではなく「同じ修飾キーを取り合うか」で見る。**
+//   ⚠ `Ctrl+Alt＋クリック` は取り合いにならない（Alt 単体のタップでは発動しない組み合わせ）。
+//    だから「＋クリック側の修飾キーが**ちょうどその1つだけ**」のときに限って衝突とする。
+
+/** V167 (K-1): 修飾キーの真偽3つを取り出す（`KeyBinding` と `TapMod` の橋渡し）。 */
+function modsOf(b: KeyBinding): { ctrl: boolean; shift: boolean; alt: boolean } {
+  return { ctrl: b.ctrl === true, shift: b.shift === true, alt: b.alt === true };
+}
+
+/** V167 (K-1): その `KeyBinding` が「**その修飾キー1つだけ**＋クリック」か。
+ *  `Ctrl+Alt＋クリック` は false（Alt 単体のタップと取り合いにならない）。 */
+function isSoloModPointer(b: KeyBinding, mod: TapMod): boolean {
+  if (b.button === undefined) return false; // ＋クリックでなければ関係ない
+  const m = modsOf(b);
+  const on = [m.ctrl, m.shift, m.alt].filter(Boolean).length;
+  if (on !== 1) return false; // 修飾キーが0個（素のクリック）や2個以上は対象外
+  return mod === "Control" ? m.ctrl : mod === "Shift" ? m.shift : m.alt;
+}
+
+/** V167 (K-1): **2つの割り当てが同じ修飾キーを取り合うか。** 取り合うならその修飾キーを返す。
+ *
+ *  取り合いになるのは「**片方がタップ・もう片方がその修飾キー1つ＋クリック**」のときだけ。
+ *  - `Alt（タップ）` × `Alt＋クリック` → **"Alt"**（今回の事故そのもの）
+ *  - `Alt（タップ）` × `Ctrl+Alt＋クリック` → null（Alt 単体では発動しない）
+ *  - `Alt（タップ）` × `Alt+P` → null（キーボードの組み合わせは指が別＝ペンを置いても発動しない）
+ *  - `Alt（タップ）` × `Shift＋クリック` → null（別のキー）
+ *  - 同じもの同士（`Alt（タップ）`×`Alt（タップ）`）→ null。**これは字面が一致するので
+ *    従来の文字列比較が拾う**（ここで二重に拾うと衝突の理由を取り違える）
+ *
+ *  ★純関数。スモークが全組み合わせを直接叩ける（`scripts/v167_smoke.ts`）。 */
+export function modifierClash(a: KeyBinding, b: KeyBinding): TapMod | null {
+  const pair = (tap: KeyBinding, ptr: KeyBinding): TapMod | null => {
+    if (!tap.tap) return null;
+    return isSoloModPointer(ptr, tap.tap) ? tap.tap : null;
+  };
+  return pair(a, b) ?? pair(b, a);
+}
+
 /** そのプリセットで、この割り当てを既に使っているコマンド（衝突検出）。
  *  M11-15: **道具同士は衝突ではない**（同キー巡回で共存する）ので null を返す。
- *  道具どうし以外（片方でも道具以外）は従来どおり衝突として返す */
+ *  道具どうし以外（片方でも道具以外）は従来どおり衝突として返す。
+ *  V167 (K-1): 字面が違っても**同じ修飾キーを取り合う**組み合わせは衝突として返す。 */
 export function findConflict(
   preset: Preset,
   b: KeyBinding,
@@ -629,11 +795,51 @@ export function findConflict(
   const key = bindingKey(b);
   for (const [id, cur] of Object.entries(preset.bindings)) {
     if (!cur || id === exceptId) continue;
-    if (bindingKey(cur as KeyBinding) !== key) continue;
-    if (exceptId && isToolCommand(exceptId) && isToolCommand(id)) continue; // 共存できる
+    const other = cur as KeyBinding;
+    // 字面が同じ（従来） か 同じ修飾キーの取り合い（V167）
+    const same = bindingKey(other) === key;
+    const clash = modifierClash(b, other) !== null;
+    if (!same && !clash) continue;
+    // ★M11-15 の「道具どうしは共存できる」は**字面が同じときだけ**の規則。
+    //  修飾キーの取り合いは道具どうしでも起きる（ペンを置いた瞬間に取られる）ので免除しない
+    if (same && exceptId && isToolCommand(exceptId) && isToolCommand(id)) continue; // 共存できる
     return id as CommandId;
   }
   return null;
+}
+
+/** V167（Codex 指摘・低）: これから入れる割り当て `b` と**取り合う相手を全部**返す。
+ *
+ *  ★1つとは限らない。古い設定に `Alt（タップ）` と `Alt＋左クリック` と `Alt＋右クリック` が
+ *   同居していると、`findConflict` が返す1つだけを消しても**取り合いが残る**
+ *  （「はい」を押したのに直っていない＝いちばん質の悪い直り方）。
+ *  設定画面はこの一覧を文面に出し、まとめて消す。 */
+export function modifierClashPartners(
+  preset: Preset,
+  b: KeyBinding,
+  exceptId?: CommandId
+): CommandId[] {
+  return Object.entries(preset.bindings)
+    .filter(([id, cur]) => id !== exceptId && !!cur && modifierClash(b, cur as KeyBinding) !== null)
+    .map(([id]) => id as CommandId)
+    .sort((x, y) => (COMMAND_ORDER.get(x) ?? 0) - (COMMAND_ORDER.get(y) ?? 0));
+}
+
+/** V167 (K-2): そのプリセットで、このコマンドと**同じ修飾キーを取り合っている**コマンド。
+ *  すでに二重になっている設定を開いたときに、その行へ印を出すために使う。
+ *  （`sharedToolMates` と同じ形。あちらは「共存できる」印、こちらは「取り合っている」印） */
+export function modifierClashMates(preset: Preset, id: CommandId): CommandId[] {
+  const b = preset.bindings[id];
+  if (!b) return [];
+  return Object.entries(preset.bindings)
+    .filter(([oid, ob]) => oid !== id && !!ob && modifierClash(b, ob as KeyBinding) !== null)
+    .map(([oid]) => oid as CommandId)
+    .sort((x, y) => (COMMAND_ORDER.get(x) ?? 0) - (COMMAND_ORDER.get(y) ?? 0));
+}
+
+/** V167: 修飾キーの表示名。画面と案内文は "Ctrl" 表記で揃える（`keyLabel` と同じ規則）。 */
+export function modLabel(m: TapMod): string {
+  return m === "Control" ? "Ctrl" : m;
 }
 
 /** M11-15: そのプリセットで、この道具コマンドと同じキーを共有している道具（自分を除く・定義順）。
