@@ -77,15 +77,151 @@ export async function decodeAudio(bytes: Uint8Array): Promise<AudioBuffer> {
   return await ctx.decodeAudioData(ab);
 }
 
+// ---------------- V172 (G-2): 共有 AudioContext と、その復帰 ----------------
+//
+// 音はアプリ全体で **1 つの AudioContext** を共有する（エディタの再生・SE・ライブラリのプレビュー）。
+// Mac（WKWebView）ではスリープ復帰などで state が標準外の **"interrupted"** に落ち、
+// `=== "suspended"` の判定では拾えず resume されない＝以後ずっと無音・再起動まで戻らない（v1.7.0 の実機報告）。
+// ここでは「running でなければ resume・resume できなければ作り直す」を **1 か所**（`ensureAudioRunning`）に寄せ、
+// state の変化を **W-10 の枠でログに 1 行**残す（作品名・パスは書かない。書くのは state・visibility・秒数だけ）。
+
+/** V172: 選んだ音声ファイル（ダイアログの結果）。読むのは別の関数（`main.ts readAudioFile`）。 */
+export interface AudioPick {
+  path: string;
+  name: string;
+  ext: string;
+}
+
+/** ログの流し先（`main.ts` が `append_log` へ橋渡しする）。無ければ書かない（Node のスモークでも安全）。 */
+let logSink: ((line: string) => void) | null = null;
+export function setAudioLogSink(fn: ((line: string) => void) | null): void {
+  logSink = fn;
+}
+
+/** `resume()` がこれだけ待っても返ってこなければ「復帰できない」とみなして作り直す。
+ *  WebKit の interrupted は `resume()` の Promise が**割り込みが終わるまで返ってこない**ことがあり、
+ *  スリープ復帰では割り込みが終わらない（＝永遠に待つ）ため。 */
+export const AUDIO_RESUME_TIMEOUT_MS = 1500;
+
+/** 「スリープしていた」の目安: 1 秒おきの tick がこれ以上飛んでいたら、その間タイマーが止まっていた。 */
+const SLEEP_GAP_SEC = 5;
+
 let _ctx: AudioContext | null = null;
+/** 1 秒おきの tick（前回からの経過で「スリープしていたか」を推定する） */
+let tickTimer: ReturnType<typeof setInterval> | null = null;
+let lastTick = 0;
+/** 直近に見つけた大きな飛び（秒）とその時刻。statechange が tick より先に届いても、少し前の飛びを言えるように */
+let recentGap: { sec: number; at: number } | null = null;
+
+function nowMs(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+function startTick(): void {
+  if (tickTimer !== null) return;
+  lastTick = nowMs();
+  tickTimer = setInterval(() => {
+    const now = nowMs();
+    const gap = (now - lastTick) / 1000;
+    if (gap > SLEEP_GAP_SEC) recentGap = { sec: gap, at: now };
+    lastTick = now;
+  }, 1000);
+  // Node（スモーク）ではプロセスを生かし続けない。ブラウザの数値ハンドルには unref が無いので何もしない
+  (tickTimer as unknown as { unref?: () => void }).unref?.();
+}
+
+/** いま「前回の tick から何秒」か。直近 30 秒以内に大きな飛びがあれば、そちらを言う（スリープ復帰の証拠）。 */
+function gapSec(): number {
+  const now = nowMs();
+  const cur = (now - lastTick) / 1000;
+  if (cur > SLEEP_GAP_SEC) return cur;
+  if (recentGap && now - recentGap.at < 30_000) return recentGap.sec;
+  return cur;
+}
+
+function visibility(): string {
+  if (typeof document === "undefined") return "unknown";
+  const v = document.visibilityState;
+  return v === "visible" || v === "hidden" ? v : "unknown";
+}
+
+/** ログに書いてよい state の語（WebKit 標準外の interrupted を含む 4 値）。これ以外は "unknown" */
+const KNOWN_STATES: ReadonlySet<string> = new Set(["running", "suspended", "interrupted", "closed"]);
+
+/** W-10: 書くのは state（4 値のどれか）・visibility・秒数だけ。 */
+function logState(state: string): void {
+  if (!logSink) return;
+  const s = KNOWN_STATES.has(state) ? state : "unknown";
+  logSink(`[audio] ctx state=${s} vis=${visibility()} gap=${gapSec().toFixed(1)}`);
+}
+
 function sharedCtx(): AudioContext {
-  if (!_ctx) _ctx = new AudioContext();
+  // closed は二度と鳴らない（自分で閉じたか、環境に閉じられたか）。次に使う人には新しいものを渡す
+  if (_ctx && (_ctx.state as string) === "closed") _ctx = null;
+  if (!_ctx) {
+    const ctx = new AudioContext();
+    _ctx = ctx;
+    startTick();
+    // ★購読は **ctx ごとに 1 回**（作った直後にだけ付ける）。捨てた ctx からの通知は書かない
+    ctx.addEventListener("statechange", () => {
+      if (ctx !== _ctx) return;
+      logState(ctx.state as string);
+    });
+  }
   return _ctx;
 }
 
 /** 共有 AudioContext（波形パネルの試し再生などで使用） */
 export function getAudioCtx(): AudioContext {
   return sharedCtx();
+}
+
+/** V172 (G-2): 再生の前に必ずここを通す。**返ってきた ctx を使うこと**（作り直されていることがある）。
+ *
+ *  - running ならそのまま
+ *  - それ以外（suspended・WebKit の interrupted）は `resume()` を試す
+ *  - closed、`resume()` の失敗、`resume()` が `AUDIO_RESUME_TIMEOUT_MS` 返ってこない → 古い ctx を捨てて作り直す
+ *    （`sharedCtx()` が次から新しいものを返す。古い ctx に繋いだノードは鳴らないが、止める側は try/catch 済み）
+ *
+ *  `resume()` が返ってきたのに running でない（自動再生の制限など）ときは、この ctx で続ける＝従来どおり無音で続行。
+ *  await できない場所（SE の即時発火・試し再生）は `void ensureAudioRunning(ctx)` で投げっぱなしにしてよい。
+ *  その 1 回は古い ctx で鳴らそうとするが、次の発火から新しい ctx に乗る。 */
+export async function ensureAudioRunning(ctx: AudioContext): Promise<AudioContext> {
+  const state = ctx.state as string;
+  if (state === "running") return ctx;
+  let reason: "closed" | "resume-failed" | "resume-timeout" | null = state === "closed" ? "closed" : null;
+  if (!reason) {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), AUDIO_RESUME_TIMEOUT_MS);
+      });
+      const r = await Promise.race([ctx.resume().then(() => "ok" as const), timeout]);
+      if (r === "timeout") reason = "resume-timeout";
+    } catch {
+      reason = "resume-failed";
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+  if (!reason) return ctx;
+  // 作り直し。古いほうは閉じる（閉じ損ねても、`ctx !== _ctx` で購読は黙る）
+  if (_ctx === ctx) _ctx = null;
+  try {
+    void ctx.close().catch(() => {});
+  } catch {
+    /* noop */
+  }
+  logSink?.(`[audio] ctx recreate reason=${reason}`);
+  return sharedCtx();
+}
+
+/** テスト用: 共有 ctx と tick を捨てる。 */
+export function _resetAudioForTest(): void {
+  _ctx = null;
+  if (tickTimer !== null) clearInterval(tickTimer);
+  tickTimer = null;
+  recentGap = null;
 }
 
 /** BGM の再生レート（速度連動・原作準拠のピッチ変化）。異常値は 1 に落とす */
@@ -117,6 +253,8 @@ interface SeNode {
   track: SeTrack | null;
   /** ctx.currentTime 基準の「このSEの 0秒地点」。途中から鳴らした場合は offset を引いてある */
   startedAt: number;
+  /** V172: このノードを繋いだ ctx。作り直しの後に `pauseSe` が別の ctx の時計で経過を測らないため */
+  ctx: AudioContext;
 }
 
 /**
@@ -172,8 +310,8 @@ export class AudioPreview {
     if (!track || track.muted) return;
     const mySeq = ++this.seq;
     try {
-      const ctx = sharedCtx();
-      if (ctx.state === "suspended") await ctx.resume().catch(() => {});
+      // V172 (G-2): running でなければ復帰（interrupted も）。作り直されたら返ってきた ctx を使う
+      const ctx = await ensureAudioRunning(sharedCtx());
       if (this.cacheFor !== track || !this.buffer) {
         const buf = await decodeAudio(track.data);
         if (mySeq !== this.seq) return; // decode 中に stop/再start された
@@ -275,13 +413,12 @@ export class AudioPreview {
   /** M11-9: 一時停止。鳴っているSEを「どこまで鳴ったか」つきで畳む。
    *  resumeSe() を呼ぶまで音は止まったまま。stopSe() を挟むと続きは捨てられる */
   pauseSe() {
-    const ctx = _ctx;
     const fired = this.killLiveSe();
-    if (!ctx) return;
     for (const e of fired) {
       // 経過時間 = いまの時刻 - このノードの「0秒地点」。start(0, offset) で始めたものは
-      // startedAt に offset を引いた値を入れてあるので、**繰り返しても累積しない**
-      const played = ctx.currentTime - e.startedAt;
+      // startedAt に offset を引いた値を入れてあるので、**繰り返しても累積しない**。
+      // V172: 時計は**そのノードを繋いだ ctx** のもの（作り直しの後に別の ctx の時計で測らない）
+      const played = e.ctx.currentTime - e.startedAt;
       if (!isFinite(played) || played < 0) continue;
       if (played >= e.buf.duration) continue; // 鳴り終わっている＝続きは無い
       this.sePaused.push({ buf: e.buf, track: e.track, offset: played });
@@ -355,7 +492,8 @@ export class AudioPreview {
   private playSeBuffer(buf: AudioBuffer, track: SeTrack | null, offset = 0) {
     try {
       const ctx = sharedCtx();
-      if (ctx.state === "suspended") void ctx.resume().catch(() => {});
+      // V172 (G-2): 同期の場所なので投げっぱなし。作り直されたら次の発火から新しい ctx に乗る
+      void ensureAudioRunning(ctx);
       const node = ctx.createBufferSource();
       node.buffer = buf;
       const gain = ctx.createGain();
@@ -371,6 +509,7 @@ export class AudioPreview {
         buf,
         track,
         startedAt: ctx.currentTime - offset,
+        ctx,
       };
       node.onended = () => {
         this.seNodes.delete(entry); // stopSe 由来の終了でも安全（delete は冪等）

@@ -114,6 +114,8 @@ import {
   AudioPreview,
   decodeAudio,
   getAudioCtx,
+  ensureAudioRunning, // V172 (G-2)
+  type AudioPick,
   bgmPlaybackRate,
   renderExportMix,
 } from "./audio";
@@ -121,6 +123,8 @@ import type { BgmTrack, SeTrack, ProjectAudio, Frame } from "./model";
 import { newSeId, sanitizeAudio } from "./model";
 import { createSlider, SliderHandle } from "../ui/slider";
 import { t } from "../i18n";
+// V171: 線画アイコン（絵文字は OS で絵が変わるので、インライン SVG・currentColor に）
+import { icon, iconHtml, iconLabelHtml, setIconLabel, type IconId } from "../icons";
 import { errText } from "../ui/errText";
 // V158 (C-2): canvas に描く UI の色は**配色から読む**（各所が色を持たない）
 import { uiColor, uiColorA } from "../ui/theme";
@@ -200,6 +204,8 @@ interface FormatItem {
   id: string;
   /** 文字ラベルの i18n キー（variant="oni"）。既存キーを再利用する */
   labelKey?: string;
+  /** V171: ラベルの先頭に置く線画アイコン（絵文字は i18n から剥がし、呼び出し側がここで指定する） */
+  icon?: IconId;
   titleKey?: string;
   active: boolean;
   disabled?: boolean;
@@ -261,10 +267,11 @@ function escHtml(s: string): string {
 
 // M12-1b: 表示名は i18n のキーで持つ（値は ja.ts。t() は使う直前に呼ぶ＝言語切替に追従する）
 // **動的キーの規約**: 変数で引くキーは `*Key: "…"` という名前のプロパティで持つ（検査4 がこの形を見る）
-const TEXTURES: { key: PenTexture; labelKey: string; icon: string }[] = [
-  { key: "solid", labelKey: "ed.pen.tex.solid.title", icon: "━" },
-  { key: "spray", labelKey: "ed.pen.tex.spray.title", icon: "░" },
-  { key: "sand", labelKey: "ed.pen.tex.sand.title", icon: "▒" },
+// V171: 絵文字（━ ░ ▒）→ 線画アイコンの id（質感の見本として線画で描いてある）
+const TEXTURES: { key: PenTexture; labelKey: string; icon: IconId }[] = [
+  { key: "solid", labelKey: "ed.pen.tex.solid.title", icon: "tex-solid" },
+  { key: "spray", labelKey: "ed.pen.tex.spray.title", icon: "tex-spray" },
+  { key: "sand", labelKey: "ed.pen.tex.sand.title", icon: "tex-sand" },
 ];
 
 export interface EditorSaveContext {
@@ -464,7 +471,9 @@ export interface EditorCallbacks {
   /** M6-2: 音声ファイル（mp3/wav/ogg）を選んで読み込む。
    *  M10-8: m4a と動画（mp4/mov/webm/mkv）も通る。動画は main.ts 側で
    *  音声だけ MP3 192kbps に抽出されてから、外部音声と同じ形で返ってくる。 */
-  pickAudioFile: () => Promise<{ bytes: Uint8Array; mime: string; name: string } | null>;
+  /** V172: ダイアログだけ（読まない）。読みは `readAudioFile`＝呼び出し元の「読み込み中」の中で行う */
+  pickAudioFile: () => Promise<AudioPick | null>;
+  readAudioFile: (pick: AudioPick) => Promise<{ bytes: Uint8Array; mime: string; name: string } | null>;
   confirm: (msg: string) => Promise<boolean>;
   /** V157 (D-2): 選択肢から1つ選ばせる（`null` = やめる）。レイヤーカラーの適用先など、
    *  「はい/いいえ」では足りない場面用。未実装なら呼び出し側が従来の動きへ落ちる */
@@ -1478,7 +1487,7 @@ export class Editor {
     this.cancelRowDrag();
     this.cancelFrameDrag(); // M11-7: 掴んだまま別の作品を開かない
     this.finishSplitDrag(false); // M11-17: スプリッターも同じ
-    $("#ed-title").textContent = `✏ ${project.meta.title || untitledTitle()}`;
+    setIconLabel($("#ed-title"), "pen", project.meta.title || untitledTitle()); // V171: ✏ → pen（線画）
     // M11-18: キャンバス集中は**持ち越さない**（previewLarge と同じ一時的な見方）。個別の畳み（collapsed）と
     // ミニの置き場（miniDock）は設定から復元済みで、applyLayout / applyHud が DOM へ反映する
     this.focusActive = false;
@@ -1833,35 +1842,36 @@ export class Editor {
   // ---------------- UI 構築 ----------------
 
   private buildToolsPanel() {
-    const tools: { key: Tool; icon: string; label: string }[] = [
+    const tools: { key: Tool; icon: IconId; label: string }[] = [
       // M3.10 G-2: 手のひらは最上段（ペンの上）。H/Space の割当は不変
-      { key: "hand", icon: "✋", label: t("ed.tool.hand.label") },
-      { key: "pen", icon: "✏", label: t("ed.tool.pen.label") },
-      { key: "brush", icon: "🖌", label: t("ed.tool.brush.label") },
-      { key: "eraser", icon: "🧽", label: t("ed.tool.eraser.label") },
-      { key: "fill", icon: "🪣", label: t("ed.tool.fill.label") },
-      { key: "shape", icon: "⬛", label: t("ed.tool.shape.label") },
-      { key: "text", icon: "Ａ", label: t("ed.tool.text.label") },
-      { key: "eyedrop", icon: "💧", label: t("ed.tool.eyedrop.label") },
+      { key: "hand", icon: "hand", label: t("ed.tool.hand.label") },
+      { key: "pen", icon: "pen", label: t("ed.tool.pen.label") },
+      { key: "brush", icon: "brush", label: t("ed.tool.brush.label") },
+      { key: "eraser", icon: "eraser", label: t("ed.tool.eraser.label") },
+      { key: "fill", icon: "fill", label: t("ed.tool.fill.label") },
+      { key: "shape", icon: "shape", label: t("ed.tool.shape.label") },
+      { key: "text", icon: "text", label: t("ed.tool.text.label") },
+      { key: "eyedrop", icon: "eyedrop", label: t("ed.tool.eyedrop.label") },
     ];
-    const edits: { key: Tool | "copyprev" | "clear"; icon: string; label: string }[] = [
+    const edits: { key: Tool | "copyprev" | "clear"; icon: IconId; label: string }[] = [
       // M11-8 P-2: 絵を動かすのはこのツール（選択範囲内のドラッグは枠だけが動く）
-      { key: "move", icon: "✥", label: t("ed.tool.move.label") },
-      { key: "select", icon: "⬚", label: t("ed.tool.select.label") },
-      { key: "transform", icon: "🔀", label: t("ed.tool.transform.label") },
+      { key: "move", icon: "move", label: t("ed.tool.move.label") },
+      { key: "select", icon: "select", label: t("ed.tool.select.label") },
+      { key: "transform", icon: "transform", label: t("ed.tool.transform.label") },
       // M10-2a: 方式（押す/ふくらませ/へこませ/四隅）はツールオプション内で切り替える。
       // 方式ごとにボタンを増やすと段組みが崩れるので、ツールは1つだけ（REQ §3.6）
-      { key: "warp", icon: "🌊", label: t("ed.tool.warp.label") },
-      { key: "copyprev", icon: "🗐", label: t("ed.tool.copyprev.label") },
-      { key: "clear", icon: "🌀", label: t("ed.tool.clear.label") },
+      { key: "warp", icon: "warp", label: t("ed.tool.warp.label") },
+      { key: "copyprev", icon: "copyprev", label: t("ed.tool.copyprev.label") },
+      { key: "clear", icon: "clear", label: t("ed.tool.clear.label") },
     ];
     const host = $("#ed-tools");
     host.innerHTML = "";
-    const mk = (icon: string, label: string, key: string) => {
+    // V171: `icon` は絵文字の文字列から**アイコン id**（IconId・icons.json から型で作る）へ。インライン SVG で挿す
+    const mk = (iconId: IconId, label: string, key: string) => {
       const b = document.createElement("button");
       b.className = "tool";
       b.dataset.tool = key;
-      b.innerHTML = `<span class="em">${icon}</span><span class="nm">${label}</span>`;
+      b.innerHTML = `<span class="em">${iconHtml(iconId)}</span><span class="nm">${escHtml(label)}</span>`;
       return b;
     };
     // M14 (S-1): ツールボタンへ setTool＋形式ストリップ（ホバー＋選択中の再クリックで開く）を配線する。
@@ -1892,7 +1902,7 @@ export class Editor {
     }
     // M8-2b: 画像取り込みは左ツール列の「♪ 音声」直上（上部バーから移設）。
     // ツール選択ではないので dataset.tool は既存ツールと重ならない値にする（"on" が付かない）
-    const img = mk("📷", t("ed.tool.image.label"), "image");
+    const img = mk("camera", t("ed.tool.image.label"), "image");
     img.id = "ed-tool-image";
     img.title = t("ed.tool.image.title");
     img.addEventListener("click", () => {
@@ -1902,7 +1912,7 @@ export class Editor {
     });
     host.appendChild(img);
     // M6-3 A-3: 音声は左ツール列のボタン → 波形調整パネル（モーダル）
-    const au = mk("♪", t("ed.tool.audio.label"), "audio");
+    const au = mk("audio", t("ed.tool.audio.label"), "audio");
     au.id = "ed-tool-audio";
     au.addEventListener("click", () => void this.openAudioPanel());
     host.appendChild(au);
@@ -1919,7 +1929,7 @@ export class Editor {
     const allMuted =
       has && (!a!.bgm || a!.bgm.muted) && a!.se.every((s) => s.muted) && (a!.bgm != null || a!.se.length > 0);
     const em = b.querySelector(".em") as HTMLElement;
-    em.textContent = has && allMuted ? "🔇" : "♪";
+    em.replaceChildren(icon(has && allMuted ? "audio-muted" : "audio")); // V171: 状態ペア audio / audio-muted
     b.style.opacity = has ? "1" : "0.55";
     // M12-1b-2（監査 #6 / R-3）: 断片を連結せず、BGM の状態 × 全ミュート有無で**完全文**を選ぶ。
     // 差し込み先は title プロパティなので escHtml は通さない（通すと &lt; が字として見える）
@@ -2038,7 +2048,7 @@ export class Editor {
         // M17: マイ柄を選んでいる間はどの texture も押された表示にしない
         d.className = "tx" + (tx.key === this.texture && !this.penToneId ? " on" : "");
         d.title = t(tx.labelKey);
-        d.textContent = tx.icon;
+        d.replaceChildren(icon(tx.icon)); // V171: 線画アイコン（currentColor）
         d.addEventListener("click", () => {
           this.texture = tx.key;
           this.penToneId = ""; // M17: texture を選んだらマイ柄は解除
@@ -2079,7 +2089,7 @@ export class Editor {
     sw.className = "sw2" + (this.ditherFrameShift ? " on" : "");
     const lab = document.createElement("span");
     lab.className = "tog";
-    lab.textContent = t("ed.tone.ditherShift.label");
+    setIconLabel(lab, "transform", t("ed.tone.ditherShift.label")); // V171: 🔀 → transform
     row.title = t("ed.tone.ditherShift.title");
     row.appendChild(sw);
     row.appendChild(lab);
@@ -2131,7 +2141,7 @@ export class Editor {
       sw.className = "sw2" + (this.customToneColor ? " on" : "");
       const lab = document.createElement("span");
       lab.className = "tog";
-      lab.textContent = t("ed.tone.custom.colorMode.label");
+      setIconLabel(lab, "palette", t("ed.tone.custom.colorMode.label")); // V171: 🎨 → palette
       row.appendChild(sw);
       row.appendChild(lab);
       row.addEventListener("click", () => {
@@ -2249,7 +2259,7 @@ export class Editor {
         mark.className = "foldmark";
         head.appendChild(mark);
       }
-      mark.textContent = this.toneOpen ? " ▾" : " ▸";
+      mark.replaceChildren(icon(this.toneOpen ? "chev-down" : "chev-right")); // V171: ▾/▸ → chevron
     }
   }
 
@@ -2350,7 +2360,7 @@ export class Editor {
              （＝「道具列を畳む」・左の道具列を畳むボタンの説明）を借りていたので、
              畳んだあとに「道具列を畳む」だけが残って別の操作に見えていた -->
         <span>${t("ed.side.tools.label")}</span>
-        <button class="minibtn sfold" id="ed-sfold-top" type="button">▲</button>
+        <button class="minibtn sfold" id="ed-sfold-top" type="button">${iconHtml("chev-up")}</button>
       </div>
       <div class="side-secbody" id="ed-side-topbody">
       <div id="ed-toolopts"></div>
@@ -2384,8 +2394,8 @@ export class Editor {
            全部この #ed-side-topbody の中にある -->
       <h3>${t("ed.linew.head.label")}</h3>
       <div class="selacts" id="ed-linew">
-        <button class="minibtn" id="ed-lw-thicken">${t("ed.linew.thicken.btn")}</button>
-        <button class="minibtn" id="ed-lw-thin">${t("ed.linew.thin.btn")}</button>
+        <button class="minibtn" id="ed-lw-thicken">${iconLabelHtml("line-thicken", t("ed.linew.thicken.btn"))}</button>
+        <button class="minibtn" id="ed-lw-thin">${iconLabelHtml("line-thin", t("ed.linew.thin.btn"))}</button>
       </div>
       <h3>${t("ed.feel.head.label")}</h3>
       <div class="row"><span class="tog">${t("ed.feel.stabilizer.label")}</span><div class="sw2 on" id="ed-tog-stab"></div></div>
@@ -2403,19 +2413,19 @@ export class Editor {
       <div class="side-sechead">
         <span>${t("ed.layer.head.label")}</span>
         <button class="minibtn" id="ed-layer-add">＋</button>
-        <button class="minibtn" id="ed-folder-add">📁</button>
-        <button class="minibtn" id="ed-layer-del">🗑</button>
-        <button class="minibtn" id="ed-layer-merge">${t("ed.layer.mergeDown.btn")}</button>
-        <button class="minibtn sfold" id="ed-sfold-bot" type="button">▼</button>
+        <button class="minibtn" id="ed-folder-add">${iconHtml("folder")}</button>
+        <button class="minibtn" id="ed-layer-del">${iconHtml("trash")}</button>
+        <button class="minibtn" id="ed-layer-merge">${iconLabelHtml("merge-down", t("ed.layer.mergeDown.btn"))}</button>
+        <button class="minibtn sfold" id="ed-sfold-bot" type="button">${iconHtml("chev-down")}</button>
       </div>
       <div class="side-secbody" id="ed-side-botbody">
       <div id="ed-layers"></div>
       <!-- M11-15: レイヤーのコピー＆ペースト（コマ1枚ぶん・レイヤー専用の控え） -->
       <div class="selacts" id="ed-layerclip">
-        <button class="minibtn" id="ed-lc-copy">${t("ed.layerclip.copy.btn")}</button>
-        <button class="minibtn" id="ed-lc-paste">${t("ed.layerclip.paste.btn")}</button>
-        <button class="minibtn" id="ed-lc-paste-new">${t("ed.layerclip.pasteNew.btn")}</button>
-        <button class="minibtn" id="ed-lc-paste-all">${t("ed.layerclip.pasteAll.btn")}</button>
+        <button class="minibtn" id="ed-lc-copy">${iconLabelHtml("copy-to-layer", t("ed.layerclip.copy.btn"))}</button>
+        <button class="minibtn" id="ed-lc-paste">${iconLabelHtml("clipboard", t("ed.layerclip.paste.btn"))}</button>
+        <button class="minibtn" id="ed-lc-paste-new">${iconLabelHtml("clipboard", t("ed.layerclip.pasteNew.btn"))}</button>
+        <button class="minibtn" id="ed-lc-paste-all">${iconLabelHtml("clipboard", t("ed.layerclip.pasteAll.btn"))}</button>
       </div>
       </div>
       </div>
@@ -2789,6 +2799,11 @@ export class Editor {
     let trialFrame = 0;
     let trialNode: AudioBufferSourceNode | null = null;
     let trialGain: GainNode | null = null;
+    /** V172 (Codex 指摘・中): 試し再生のノードを繋いだ ctx。再生ヘッドと停止位置の時計は**必ずこれ**で測る。
+     *  `ensureAudioRunning` が途中で ctx を作り直しても、ノード（古い ctx）と時計（新しい ctx）が食い違わない
+     *  （古い ctx は closed で時計が止まる＝音が止まったのと同じ側に倒れる）。次の再生で新しい ctx に乗る */
+    let trialCtx: AudioContext | null = null;
+    const headClock = () => (trialCtx ?? getAudioCtx()).currentTime;
     // M6-4 P-5: 再生ヘッド（AudioContext.currentTime 基準。null=非再生）
     let playheadT0: number | null = null;
     let playheadRaf = 0;
@@ -2822,7 +2837,10 @@ export class Editor {
       if (!buffer || w.muted) return;
       try {
         const ctx = getAudioCtx();
-        if (ctx.state === "suspended") void ctx.resume().catch(() => {});
+        // V172 (G-2): interrupted（WebKit）も拾う。同期の場所なので投げっぱなし＝作り直されたら次の再生から新しい ctx。
+        // Codex 指摘（中）: ヘッドの時計は**この ctx**で測る（`headClock`）。作り直しが起きても、ノードと時計が別の ctx にならない
+        trialCtx = ctx;
+        void ensureAudioRunning(ctx);
         const { ts, te } = normTrim();
         const startAt = ts + Math.max(0, offsetSec);
         if (startAt >= te) return; // 音側は終端まで再生済み（アニメだけ続く）
@@ -2844,7 +2862,7 @@ export class Editor {
      *  offset=tsからの相対・音源秒。実時間には 1/rate 換算で積む） */
     const resetPlayhead = (offsetSec = 0) => {
       try {
-        playheadT0 = getAudioCtx().currentTime - Math.max(0, offsetSec) / trialRate();
+        playheadT0 = headClock() - Math.max(0, offsetSec) / trialRate();
       } catch {
         playheadT0 = null;
       }
@@ -2855,7 +2873,7 @@ export class Editor {
       let t = ts;
       if (playheadT0 != null) {
         try {
-          t = ts + (getAudioCtx().currentTime - playheadT0) * trialRate();
+          t = ts + (headClock() - playheadT0) * trialRate();
         } catch {
           /* noop */
         }
@@ -2864,7 +2882,7 @@ export class Editor {
     };
     const setTrialButton = (playing: boolean) => {
       const b = box.querySelector("#ap-trial") as HTMLButtonElement | null;
-      if (b) b.textContent = playing ? t("ed.audio.trial.stop.btn") : t("ed.audio.trial.play.btn");
+      if (b) setIconLabel(b, playing ? "stop" : "play", playing ? t("ed.audio.trial.stop.btn") : t("ed.audio.trial.play.btn")); // V171
     };
     const stopTrial = () => {
       pausedAt = null; // R-5: 完全停止（再開位置は持ち越さない）
@@ -3156,7 +3174,7 @@ export class Editor {
       if (playheadT0 != null) {
         let t = ts;
         try {
-          t = ts + (getAudioCtx().currentTime - playheadT0) * trialRate();
+          t = ts + (headClock() - playheadT0) * trialRate();
         } catch {
           /* noop */
         }
@@ -3202,9 +3220,9 @@ export class Editor {
               : t("ed.audio.status.replaced.label", { fps: baseFps });
       if (!w.bytes || w.deleted) {
         box.innerHTML = `
-          <p class="modal-msg"><b>${t("ed.audio.panel.label")}</b>　${statusText}</p>
+          <p class="modal-msg"><b>${iconHtml("audio")} ${t("ed.audio.panel.label")}</b>　${statusText}</p>
           <div class="modal-field">
-            <button class="btn blue" id="ap-load">${t("ed.audio.load.btn")}</button>
+            <button class="btn blue" id="ap-load">${iconLabelHtml("audio-file", t("ed.audio.load.btn"))}</button>
           </div>
           <div id="ap-se"></div>
           <div class="modal-actions">
@@ -3214,7 +3232,7 @@ export class Editor {
           </div>`;
       } else {
         box.innerHTML = `
-          <p class="modal-msg"><b>${t("ed.audio.panelEdit.label")}</b>　${statusText}</p>
+          <p class="modal-msg"><b>${iconHtml("audio")} ${t("ed.audio.panelEdit.label")}</b>　${statusText}</p>
           <!-- M5-5 T-1: 広幅レイアウト（プレビュー左＋SE右・波形は全幅が主役） -->
           <div class="ap-top">
             <canvas id="ap-mini" width="320" height="240" class="ap-big"></canvas>
@@ -3226,7 +3244,7 @@ export class Editor {
           <div class="modal-field"><span>${t("ed.audio.zoom.label")}</span>
             <span id="ap-zoom"></span>
             <span id="ap-zoomv" style="font-weight:700;font-size:12px;width:86px">${t("ed.audio.zoom.fit.label")}</span>
-            <button class="minibtn ok" id="ap-trial">${t("ed.audio.trial.play.btn")}</button>
+            <button class="minibtn ok" id="ap-trial">${iconLabelHtml("play", t("ed.audio.trial.play.btn"))}</button>
           </div>
           <div class="modal-field">
             <span>${t("ed.audio.trimStart.label")}</span><input id="ap-start" type="number" min="0" step="0.001" style="width:100px"> ${t("ed.audio.trim.sec.label")}
@@ -3238,8 +3256,8 @@ export class Editor {
             <span class="tog">${t("ed.audio.mute.label")}</span><div class="sw2${w.muted ? " on" : ""}" id="ap-mute"></div>
           </div>
           <div class="modal-actions">
-            <button class="minibtn" id="ap-load">${t("ed.audio.replace.btn")}</button>
-            <button class="minibtn" id="ap-del">${t("ed.audio.delete.btn")}</button>
+            <button class="minibtn" id="ap-load">${iconLabelHtml("audio-file", t("ed.audio.replace.btn"))}</button>
+            <button class="minibtn" id="ap-del">${iconLabelHtml("trash", t("ed.audio.delete.btn"))}</button>
             <span style="flex:1"></span>
             <button class="btn primary" id="ap-apply">${t("ed.audio.apply.btn")}</button>
             <button class="btn" id="ap-cancel">${t("common.cancel.btn")}</button>
@@ -3261,32 +3279,42 @@ export class Editor {
       box.querySelector("#ap-load")?.addEventListener("click", async () => {
         // V154b (W-7): 読み込み中の再入を止める（動画からの抽出は数十秒かかることがある）
         if (self.busyKind) return;
-        const picked = await self.cb.pickAudioFile();
-        if (!picked) return;
-        w.bytes = picked.bytes;
-        w.mime = picked.mime;
-        w.name = picked.name;
-        w.source = "external";
-        w.deleted = false;
-        w.trimStartMs = 0;
-        w.trimEndMs = null;
-        w.baseSpeedIndex = proj.speedIndex; // M5-1: 付けた時点の速度が連動の基準
-        zoomT = 0;
-        viewStart = 0;
-        stopMarkT = null; // Q-2: 音源が変わるのでマーカーもクリア
-        buffer = null;
-        // V154b (W-8): 波形にするデコードは長い曲で数秒かかる。「読み込み中です」を出し、
-        // その間は編集を受け付けない（W-9）
+        const sel = await self.cb.pickAudioFile(); // V172: ダイアログだけ（読まない）
+        if (!sel) return;
+        // V172 (G-1b・件 1): ダイアログを閉じた**直後**から入口を閉じ（W-7/W-9）、
+        // 読む→デコードを `runWithBusy` 1 本で覆う（箱は 1 枚・遅延は既定の 450ms）。
+        // 以前は読み終わってから beginBusy していたので、Mac では読んでいる間「固まった」に見えた。
+        // 表示は runWithBusy に任せ、beginBusy は入口の閉鎖だけ（showBusyAfterDelay は使わない＝二重にならない）
         self.beginBusy("audio");
+        let done = false;
         try {
-          self.showBusyAfterDelay(t("ed.busy.audio.label"));
-          buffer = await decodeAudio(w.bytes);
-        } catch {
-          self.cb.toast(t("ed.audio.decodeFailed.toast"));
+          await runWithBusy("audio.load", t("ed.busy.audio.label"), async () => {
+            const picked = await self.cb.readAudioFile(sel);
+            if (!picked) return;
+            w.bytes = picked.bytes;
+            w.mime = picked.mime;
+            w.name = picked.name;
+            w.source = "external";
+            w.deleted = false;
+            w.trimStartMs = 0;
+            w.trimEndMs = null;
+            w.baseSpeedIndex = proj.speedIndex; // M5-1: 付けた時点の速度が連動の基準
+            zoomT = 0;
+            viewStart = 0;
+            stopMarkT = null; // Q-2: 音源が変わるのでマーカーもクリア
+            buffer = null;
+            done = true;
+            // V154b (W-8): 波形にするデコードは長い曲で数秒かかる。同じ箱の中で続ける（W-9: その間は編集を受け付けない）
+            try {
+              buffer = await decodeAudio(w.bytes);
+            } catch {
+              self.cb.toast(t("ed.audio.decodeFailed.toast"));
+            }
+          });
         } finally {
           self.endBusy();
         }
-        render();
+        if (done) render();
       });
       box.querySelector("#ap-del")?.addEventListener("click", () => {
         w.deleted = true;
@@ -3571,7 +3599,7 @@ export class Editor {
         row.className = "ap-se-row";
         const nm = document.createElement("span");
         nm.className = "nm";
-        nm.textContent = `♪ ${se1.name}`;
+        setIconLabel(nm, "audio", se1.name); // V171: ♪ → audio
         nm.title = t("ed.audio.se.rename.title");
         nm.addEventListener("dblclick", async () => {
           const v = await self.cb.prompt(t("ed.audio.se.rename.msg"), se1.name);
@@ -3601,20 +3629,20 @@ export class Editor {
         mute.addEventListener("click", () => self.toggleSeMute(se1.id));
         const listen = document.createElement("button");
         listen.className = "minibtn";
-        listen.textContent = "🔊";
+        listen.replaceChildren(icon("listen")); // V171
         listen.title = t("ed.audio.se.listen.title");
         listen.addEventListener("click", () => self.audioPreview.fireSe(se1));
         const place = document.createElement("button");
         const placedAll =
           selFrames.length > 0 && selFrames.every((i) => proj.frames[i]?.se?.includes(se1.id));
         place.className = "minibtn" + (placedAll ? " ok" : "");
-        place.textContent = placedAll ? t("ed.audio.se.placeActive.btn") : t("ed.audio.se.place.btn");
+        setIconLabel(place, "se-place", placedAll ? t("ed.audio.se.placeActive.btn") : t("ed.audio.se.place.btn")); // V171: 🎯 → se-place
         place.title =
           t("ed.audio.se.place.title");
         place.addEventListener("click", () => self.toggleSePlacement(se1.id, selFrames));
         const del = document.createElement("button");
         del.className = "minibtn";
-        del.textContent = "🗑";
+        del.replaceChildren(icon("trash")); // V171
         del.title = t("ed.audio.se.delete.title");
         del.addEventListener("click", () => self.deleteSeTrack(se1.id));
         row.append(nm, vol.root, mute, listen, place, del);
@@ -3644,12 +3672,16 @@ export class Editor {
     };
     const addSe = async () => {
       if (self.busyKind) return; // V154b (W-7)
-      const picked = await self.cb.pickAudioFile();
-      if (!picked) return;
+      const sel = await self.cb.pickAudioFile(); // V172: ダイアログだけ（読まない）
+      if (!sel) return;
+      // V172 (G-1b): ダイアログを閉じた直後から入口を閉じ、読み→追加を箱 1 枚で（BGM 読み込みと同じ形）
       self.beginBusy("audio");
       try {
-        self.showBusyAfterDelay(t("ed.busy.audio.label"));
-        self.addSeTrack(picked);
+        await runWithBusy("audio.load", t("ed.busy.audio.label"), async () => {
+          const picked = await self.cb.readAudioFile(sel);
+          if (!picked) return;
+          self.addSeTrack(picked);
+        });
       } finally {
         self.endBusy();
       }
@@ -4183,11 +4215,12 @@ export class Editor {
       g.className = "drag-ghost";
       const name =
         d.kind === "folder"
-          ? `📁 ${this.folderById(d.id)?.name ?? ""}`
+          ? (this.folderById(d.id)?.name ?? "")
           : this.project.layerDefs.find((l) => l.id === d.id)?.name ?? "";
       const n = this.dragNodes.length;
       // textContent なので escHtml は通さない（レイヤー名・フォルダ名はユーザーのデータ）
       g.textContent = n > 1 ? t("ed.layer.dragGhostMulti.label", { name, count: n - 1 }) : name;
+      if (d.kind === "folder") g.prepend(icon("folder")); // V171: 📁 → folder（文字の前に SVG）
       document.body.appendChild(g);
       d.ghost = g;
     }
@@ -4703,7 +4736,7 @@ export class Editor {
       row.style.marginLeft = `${depth * 14}px`;
       const col = document.createElement("span");
       col.className = "eye";
-      col.textContent = f.collapsed ? "▶" : "▼";
+      col.replaceChildren(icon(f.collapsed ? "chev-right" : "chev-down")); // V171
       col.title = t("ed.layer.folderCollapse.title");
       col.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -4713,7 +4746,7 @@ export class Editor {
       });
       const eye = document.createElement("span");
       eye.className = "eye";
-      eye.textContent = f.visible ? "👁" : "🚫";
+      eye.replaceChildren(icon(f.visible ? "eye" : "eye-off")); // V171: 状態ペア eye / eye-off
       eye.style.opacity = f.visible ? "1" : "0.35";
       eye.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -4724,7 +4757,7 @@ export class Editor {
       });
       const nm = document.createElement("span");
       nm.className = "nm";
-      nm.textContent = `📁 ${f.name}`;
+      setIconLabel(nm, "folder", f.name); // V171: 📁 → folder
       nm.title = t("ed.layer.rename.title");
       nm.addEventListener("dblclick", async (e) => {
         e.stopPropagation();
@@ -4781,7 +4814,7 @@ export class Editor {
         "eye lay-lock" + (fLockedBySelf ? " on" : "") + (fLockedByParent ? " byparent" : "");
       // V157（Codex レビュー §5）: **オフは 🔓**。閉じた鍵を薄く出すと
       // 「全部にロックが掛かっている」と一瞬読める（👁/🚫 と同じく字を変えて分ける）
-      flk.textContent = fLockedBySelf || fLockedByParent ? "🔒" : "🔓";
+      flk.replaceChildren(icon(fLockedBySelf || fLockedByParent ? "lock" : "unlock")); // V171: 状態ペア lock / unlock
       flk.style.opacity = fLockedBySelf ? "1" : fLockedByParent ? "0.25" : "0.35";
       flk.title = fLockedByParent
         ? t("ed.layer.lock.byFolder.title")
@@ -4794,7 +4827,7 @@ export class Editor {
       });
       const del = document.createElement("button");
       del.className = "minibtn";
-      del.textContent = "🗑";
+      del.replaceChildren(icon("trash")); // V171
       del.title = t("ed.layer.folderDelete.title");
       del.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -4874,7 +4907,7 @@ export class Editor {
       });
       const eye = document.createElement("span");
       eye.className = "eye";
-      eye.textContent = ld.visible ? "👁" : "🚫";
+      eye.replaceChildren(icon(ld.visible ? "eye" : "eye-off")); // V171: 状態ペア eye / eye-off
       eye.style.opacity = ld.visible ? "1" : "0.35";
       eye.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -4915,7 +4948,7 @@ export class Editor {
       // M15 (K-1): 📌 全コマ共通トグル（クリップの隣）。フォルダには付けない＝レイヤー行だけ
       const pin = document.createElement("span");
       pin.className = "eye lay-shared" + (ld.shared === true ? " on" : "");
-      pin.textContent = "📌";
+      pin.replaceChildren(icon("pin")); // V171
       pin.style.opacity = ld.shared === true ? "1" : "0.35";
       pin.title = ld.shared === true ? t("ed.layer.shared.on.title") : t("ed.layer.shared.off.title");
       pin.addEventListener("click", (e) => {
@@ -4931,7 +4964,7 @@ export class Editor {
       lk.className =
         "eye lay-lock" + (lockedBySelf ? " on" : "") + (lockedByParent ? " byparent" : "");
       // V157（Codex レビュー §5）: オフは 🔓（上のフォルダ行と同じ理由）
-      lk.textContent = lockedBySelf || lockedByParent ? "🔒" : "🔓";
+      lk.replaceChildren(icon(lockedBySelf || lockedByParent ? "lock" : "unlock")); // V171: 状態ペア lock / unlock
       lk.style.opacity = lockedBySelf ? "1" : lockedByParent ? "0.25" : "0.35";
       lk.title = lockedByParent
         ? t("ed.layer.lock.byFolder.title")
@@ -4996,9 +5029,9 @@ export class Editor {
           {
             key: "format", variant: "oni",
             items: [
-              { id: "bucket", labelKey: "ed.fill.bucket.btn", active: this.fillMode === "bucket",
+              { id: "bucket", labelKey: "ed.fill.bucket.btn", icon: "fill", active: this.fillMode === "bucket",
                 select: () => { this.fillMode = "bucket"; this.enclosePts = []; this.afterFormatChange(); } },
-              { id: "enclose", labelKey: "ed.fill.enclose.btn", active: this.fillMode === "enclose",
+              { id: "enclose", labelKey: "ed.fill.enclose.btn", icon: "fill-enclose", active: this.fillMode === "enclose",
                 select: () => { this.fillMode = "enclose"; this.enclosePts = []; this.afterFormatChange(); } },
             ],
           },
@@ -5020,9 +5053,9 @@ export class Editor {
             items: [
               { id: "line", labelKey: "ed.shape.line.btn", active: this.shapeKind === "line",
                 select: () => { this.shapeKind = "line"; this.afterFormatChange(); } },
-              { id: "rect", labelKey: "ed.shape.rect.btn", active: this.shapeKind === "rect",
+              { id: "rect", labelKey: "ed.shape.rect.btn", icon: "shape-rect", active: this.shapeKind === "rect",
                 select: () => { this.shapeKind = "rect"; this.afterFormatChange(); } },
-              { id: "ellipse", labelKey: "ed.shape.ellipse.btn", active: this.shapeKind === "ellipse",
+              { id: "ellipse", labelKey: "ed.shape.ellipse.btn", icon: "shape-ellipse", active: this.shapeKind === "ellipse",
                 select: () => { this.shapeKind = "ellipse"; this.afterFormatChange(); } },
             ],
           },
@@ -5032,13 +5065,13 @@ export class Editor {
           {
             key: "mode", variant: "oni", panelChunk: 2,
             items: [
-              { id: "push", labelKey: "ed.warp.push.btn", active: this.warpMode === "push",
+              { id: "push", labelKey: "ed.warp.push.btn", icon: "warp-push", active: this.warpMode === "push",
                 select: () => this.selectWarpMode("push") },
-              { id: "bulge", labelKey: "ed.warp.bulge.btn", active: this.warpMode === "bulge",
+              { id: "bulge", labelKey: "ed.warp.bulge.btn", icon: "warp-bulge", active: this.warpMode === "bulge",
                 select: () => this.selectWarpMode("bulge") },
-              { id: "pinch", labelKey: "ed.warp.pinch.btn", active: this.warpMode === "pinch",
+              { id: "pinch", labelKey: "ed.warp.pinch.btn", icon: "warp-pinch", active: this.warpMode === "pinch",
                 select: () => this.selectWarpMode("pinch") },
-              { id: "corner", labelKey: "ed.warp.corner.btn", active: this.warpMode === "corner",
+              { id: "corner", labelKey: "ed.warp.corner.btn", icon: "warp-corner", active: this.warpMode === "corner",
                 select: () => this.selectWarpMode("corner") },
             ],
           },
@@ -5048,11 +5081,11 @@ export class Editor {
           {
             key: "kind", variant: "oni",
             items: [
-              { id: "rect", labelKey: "ed.sel.rect.btn", active: this.selectKind === "rect",
+              { id: "rect", labelKey: "ed.sel.rect.btn", icon: "select", active: this.selectKind === "rect",
                 select: () => { this.selectKind = "rect"; this.afterFormatChange(); } },
-              { id: "lasso", labelKey: "ed.sel.lasso.btn", active: this.selectKind === "lasso",
+              { id: "lasso", labelKey: "ed.sel.lasso.btn", icon: "select-lasso", active: this.selectKind === "lasso",
                 select: () => { this.selectKind = "lasso"; this.afterFormatChange(); } },
-              { id: "auto", labelKey: "ed.sel.auto.btn", active: this.selectKind === "auto",
+              { id: "auto", labelKey: "ed.sel.auto.btn", icon: "select-auto", active: this.selectKind === "auto",
                 select: () => { this.selectKind = "auto"; this.afterFormatChange(); } },
             ],
           },
@@ -5120,9 +5153,9 @@ export class Editor {
           {
             key: "flip", variant: "oni",
             items: [
-              { id: "fliph", labelKey: "ed.xform.flipH.btn", active: this.xform.flipH,
+              { id: "fliph", labelKey: "ed.xform.flipH.btn", icon: "flip-h", active: this.xform.flipH,
                 select: () => { this.xform.flipH = !this.xform.flipH; this.afterFormatChange(); this.redrawOverlay(); } },
-              { id: "flipv", labelKey: "ed.xform.flipV.btn", active: this.xform.flipV,
+              { id: "flipv", labelKey: "ed.xform.flipV.btn", icon: "flip-v", active: this.xform.flipV,
                 select: () => { this.xform.flipV = !this.xform.flipV; this.afterFormatChange(); this.redrawOverlay(); } },
             ],
           },
@@ -5145,6 +5178,7 @@ export class Editor {
     b.dataset.fid = it.id;
     if (it.disabled) b.disabled = true;
     if (it.makeInner) it.makeInner(b);
+    else if (it.labelKey && it.icon) setIconLabel(b, it.icon, t(it.labelKey)); // V171: アイコン＋文字
     else if (it.labelKey) b.textContent = t(it.labelKey);
     if (it.titleKey) b.title = t(it.titleKey);
     const run = clickFor(it);
@@ -5387,8 +5421,8 @@ export class Editor {
         <textarea id="ed-textinput" class="tinput" rows="3" spellcheck="false"
           ${drafting ? "" : "disabled"}></textarea>
         <div class="selacts">
-          <button class="minibtn ok" id="ed-text-ok"${drafting ? "" : " disabled"}>${t("ed.common.commit.btn")}</button>
-          <button class="minibtn" id="ed-text-cancel"${drafting ? "" : " disabled"}>${t("ed.text.cancel.btn")}</button>
+          <button class="minibtn ok" id="ed-text-ok"${drafting ? "" : " disabled"}>${iconLabelHtml("check", t("ed.common.commit.btn"))}</button>
+          <button class="minibtn" id="ed-text-cancel"${drafting ? "" : " disabled"}>${iconLabelHtml("close", t("ed.text.cancel.btn"))}</button>
         </div>
         <p class="hintline" id="ed-text-hint">${
           drafting ? t("ed.text.draftingHint.hint") : t("ed.text.idleHint.hint")
@@ -5484,8 +5518,8 @@ export class Editor {
         <p class="hintline">${warpHint}</p>${
           isCorner
             ? `<div class="selacts">
-        <button class="minibtn ok" id="ed-corner-ok">${t("ed.common.commit.btn")}</button>
-        <button class="minibtn" id="ed-corner-cancel">${t("ed.common.cancelMark.btn")}</button>
+        <button class="minibtn ok" id="ed-corner-ok">${iconLabelHtml("check", t("ed.common.commit.btn"))}</button>
+        <button class="minibtn" id="ed-corner-cancel">${iconLabelHtml("close", t("ed.common.cancelMark.btn"))}</button>
       </div>`
             : ""
         }`;
@@ -5589,9 +5623,9 @@ export class Editor {
       host.innerHTML = `<h3>${t("ed.xform.head.label")}</h3>
       <div class="selacts">
         <button class="minibtn" id="ed-x-fold">${
-          fold ? t("ed.xform.numsOpen.btn") : t("ed.xform.numsClose.btn")
+          fold ? iconLabelHtml("chev-right", t("ed.xform.numsOpen.btn")) : iconLabelHtml("chev-down", t("ed.xform.numsClose.btn"))
         }</button>
-        <button class="minibtn" id="ed-x-peek">${t("ed.xform.peek.btn")}</button>
+        <button class="minibtn" id="ed-x-peek">${iconLabelHtml("eye", t("ed.xform.peek.btn"))}</button>
       </div>
       <div id="ed-x-nums"${fold ? " hidden" : ""}>
         <div class="row"><span class="tog">${t("ed.xform.angle.label")}</span><input type="number" id="ed-x-angle" value="${Math.round(
@@ -5608,8 +5642,8 @@ export class Editor {
         <div id="ed-x-flip"></div>
       </div>
       <div class="selacts">
-        <button class="minibtn ok" id="ed-x-ok">${t("ed.common.commit.btn")}</button>
-        <button class="minibtn" id="ed-x-cancel">${t("ed.common.cancelMark.btn")}</button>
+        <button class="minibtn ok" id="ed-x-ok">${iconLabelHtml("check", t("ed.common.commit.btn"))}</button>
+        <button class="minibtn" id="ed-x-cancel">${iconLabelHtml("close", t("ed.common.cancelMark.btn"))}</button>
       </div>`;
       // R-2 案1: 属性はプロパティで
       for (const { sel, titleKey } of [
@@ -5703,12 +5737,12 @@ export class Editor {
   private buildTimeline() {
     const head = $("#ed-tlhead");
     head.innerHTML = `
-      <button class="ic" id="ed-first">⏮</button>
-      <button class="ic" id="ed-prev">◀</button>
-      <button class="ic play" id="ed-play">▶</button>
-      <button class="ic" id="ed-next">▶︎▍</button>
-      <button class="ic" id="ed-last">⏭</button>
-      <button class="ic${this.project.loop ? " onb" : ""}" id="ed-loop">🔁</button>
+      <button class="ic" id="ed-first">${iconHtml("skip-first")}</button>
+      <button class="ic" id="ed-prev">${iconHtml("prev")}</button>
+      <button class="ic play" id="ed-play">${iconHtml("play")}</button>
+      <button class="ic" id="ed-next">${iconHtml("next")}</button>
+      <button class="ic" id="ed-last">${iconHtml("skip-last")}</button>
+      <button class="ic${this.project.loop ? " onb" : ""}" id="ed-loop">${iconHtml("loop")}</button>
       <span class="t" style="margin-left:4px">${t("ed.tl.head.label")}</span>
       <span class="sp"></span>
       <span class="speed">${t("ed.tl.speed.label")} <select id="ed-speed">${FPS_TABLE.map(
@@ -5722,13 +5756,13 @@ export class Editor {
            枚数を決めて足したいときだけこちら。ゆらゆらと同じ「ボタン→小窓」の作法なので、
            隠し操作にならず（要件 U-4）押し間違えても Ctrl+Z 一回で全部戻る -->
       <button class="hb" id="ed-addframes">${t("ed.tl.addFrames.btn")}</button>
-      <button class="hb" id="ed-dupframe">${t("ed.tl.dupFrame.btn")}</button>
+      <button class="hb" id="ed-dupframe">${iconLabelHtml("copy-to-layer", t("ed.tl.dupFrame.btn"))}</button>
       <button class="hb" id="ed-wobble">${t("ed.tl.wobble.btn")}</button>
-      <button class="hb" id="ed-copypage">${t("ed.tl.copyFrames.btn")}</button>
-      <button class="hb" id="ed-pastepage" disabled>${t("ed.tl.pasteFrames.btn")}</button>
-      <button class="hb danger" id="ed-delframe">${t("ed.tl.delFrame.btn")}</button>
+      <button class="hb" id="ed-copypage">${iconLabelHtml("copyprev", t("ed.tl.copyFrames.btn"))}</button>
+      <button class="hb" id="ed-pastepage" disabled>${iconLabelHtml("clipboard", t("ed.tl.pasteFrames.btn"))}</button>
+      <button class="hb danger" id="ed-delframe">${iconLabelHtml("trash", t("ed.tl.delFrame.btn"))}</button>
       <button class="ic tl-ic" id="ed-tlmore" hidden>…</button>
-      <button class="ic tl-ic" id="ed-fold-tl">▾</button>
+      <button class="ic tl-ic" id="ed-fold-tl">${iconHtml("chev-down")}</button>
     `;
     // R-2 案1: 属性はテンプレートに埋めず、組んだあとにプロパティで入れる
     for (const { sel, titleKey } of [
@@ -6814,13 +6848,14 @@ export class Editor {
    *  innerHTML を作り直すので、mount のたびに（build の後で）呼び直す。つまみはカード直下の最後の子＝
    *  畳んだとき CSS が中身を消してもこれだけ残る */
   private bindPanelFolds() {
-    const mk = (cls: string, id: string, title: string, text: string, onClick: () => void) => {
+    // V171: 山形（chevron）のアイコンは呼び出し側が id で指定する（◂ ▸ ▴ ▾ は i18n から剥がした）
+    const mk = (cls: string, id: string, title: string, text: string, iconId: IconId, onClick: () => void) => {
       const b = document.createElement("button");
       b.type = "button";
       b.className = cls;
       b.id = id;
       b.title = title;
-      b.textContent = text;
+      setIconLabel(b, iconId, text);
       b.addEventListener("click", onClick);
       return b;
     };
@@ -6828,10 +6863,10 @@ export class Editor {
     const tools = $("#ed-tools");
     tools.querySelectorAll(".ed-fold, .ed-tab").forEach((e) => e.remove());
     tools.prepend(
-      mk("ed-fold", "ed-fold-tools", t("ed.panel.foldTools.title"), t("ed.panel.foldTools.btn"), () => this.setCollapsed("tools", true))
+      mk("ed-fold", "ed-fold-tools", t("ed.panel.foldTools.title"), t("ed.panel.foldTools.btn"), "chev-left", () => this.setCollapsed("tools", true))
     );
     tools.appendChild(
-      mk("ed-tab v", "ed-tab-tools", t("ed.panel.tabTools.title"), t("ed.panel.tabTools.btn"), () => this.setCollapsed("tools", false))
+      mk("ed-tab v", "ed-tab-tools", t("ed.panel.tabTools.title"), t("ed.panel.tabTools.btn"), "chev-right", () => this.setCollapsed("tools", false))
     );
     // 右パネル: 畳むボタンは先頭行の右端・つまみは最後
     const side = $("#ed-side");
@@ -6839,17 +6874,17 @@ export class Editor {
     const row = document.createElement("div");
     row.className = "ed-fold-row";
     row.appendChild(
-      mk("ed-fold", "ed-fold-side", t("ed.panel.foldSide.title"), t("ed.panel.foldSide.btn"), () => this.setCollapsed("side", true))
+      mk("ed-fold", "ed-fold-side", t("ed.panel.foldSide.title"), t("ed.panel.foldSide.btn"), "chev-right", () => this.setCollapsed("side", true))
     );
     side.prepend(row);
     side.appendChild(
-      mk("ed-tab v", "ed-tab-side", t("ed.panel.tabSide.title"), t("ed.panel.tabSide.btn"), () => this.setCollapsed("side", false))
+      mk("ed-tab v", "ed-tab-side", t("ed.panel.tabSide.title"), t("ed.panel.tabSide.btn"), "chev-left", () => this.setCollapsed("side", false))
     );
     // タイムライン: 畳むボタンは見出しの右端（buildTimeline が作る #ed-fold-tl）・つまみは最後
     const tl = $("#ed-timeline");
     tl.querySelectorAll(":scope > .ed-tab").forEach((e) => e.remove());
     tl.appendChild(
-      mk("ed-tab h", "ed-tab-tl", t("ed.panel.tabTl.title"), t("ed.panel.tabTl.btn"), () =>
+      mk("ed-tab h", "ed-tab-tl", t("ed.panel.tabTl.title"), t("ed.panel.tabTl.btn"), "chev-up", () =>
         this.setCollapsed("tl", false)
       )
     );
@@ -8080,7 +8115,7 @@ export class Editor {
     }
     wrap.style.width = `${W * z}px`;
     wrap.style.height = `${H * z}px`;
-    $("#ed-zoominfo").textContent = t("ed.view.zoominfo.label", { zoom: `${z}.0` });
+    setIconLabel($("#ed-zoominfo"), "zoom", t("ed.view.zoominfo.label", { zoom: `${z}.0` })); // V171: 🔍 → zoom
     // E-2/M3.10 G-1: ピクセル格子（1ドット≥8pxで表示・実測ピッチで再描画）
     this.updateGridOverlay(z);
     // M12-C: カーソル層も同じ寸法で取り直す（格子と同じ集約点に乗せる）。
@@ -10658,18 +10693,20 @@ export class Editor {
   /** ボタンの定義。M11-9 P-5 で並び順とアイコンを確定:
    *  「範囲をいじる」3つ ｜ 「絵をどうにかする」4つ ｜ 解除（末尾＝誤爆しにくい位置）。
    *  sep:true の直前に細い区切り線を1本入れる */
-  private static readonly SEL_OPS: { op: string; icon: string; title: string; sep?: boolean }[] = [
-    { op: "invert", icon: "⬛⬜", title: t("ed.sel.invert.title") },
-    { op: "expand", icon: "⊕", title: t("ed.sel.expand.title") },
-    { op: "contract", icon: "⊖", title: t("ed.sel.contract.title") },
-    { op: "erase", icon: "🧽", title: t("ed.sel.erase.title"), sep: true },
+  // V171: `icon` は絵文字の文字列からアイコン id へ（⬛⬜→select-invert・⊕→select-expand・⊖→select-contract・
+  // 🧽→eraser・◉/◎→line-thicken/line-thin・✂→cut-to-layer・⧉→copy-to-layer・⤢→transform・✕→close）
+  private static readonly SEL_OPS: { op: string; icon: IconId; title: string; sep?: boolean }[] = [
+    { op: "invert", icon: "select-invert", title: t("ed.sel.invert.title") },
+    { op: "expand", icon: "select-expand", title: t("ed.sel.expand.title") },
+    { op: "contract", icon: "select-contract", title: t("ed.sel.contract.title") },
+    { op: "erase", icon: "eraser", title: t("ed.sel.erase.title"), sep: true },
     // M11-19: 線を太らせる／細らせる（範囲内だけ）。サイドパネルのボタン・コマンドと同じ実体
-    { op: "thicken", icon: t("ed.linew.thicken.launcher.btn"), title: t("ed.linew.thicken.launcher.title") },
-    { op: "thin", icon: t("ed.linew.thin.launcher.btn"), title: t("ed.linew.thin.launcher.title") },
-    { op: "cut-layer", icon: "✂", title: t("ed.sel.cutToLayer.title") },
-    { op: "copy-layer", icon: "⧉", title: t("ed.sel.copyToLayer.title") },
-    { op: "transform", icon: "⤢", title: t("ed.sel.toTransform.title") },
-    { op: "deselect", icon: "✕", title: t("ed.sel.deselect.title"), sep: true },
+    { op: "thicken", icon: "line-thicken", title: t("ed.linew.thicken.launcher.title") },
+    { op: "thin", icon: "line-thin", title: t("ed.linew.thin.launcher.title") },
+    { op: "cut-layer", icon: "cut-to-layer", title: t("ed.sel.cutToLayer.title") },
+    { op: "copy-layer", icon: "copy-to-layer", title: t("ed.sel.copyToLayer.title") },
+    { op: "transform", icon: "transform", title: t("ed.sel.toTransform.title") },
+    { op: "deselect", icon: "close", title: t("ed.sel.deselect.title"), sep: true },
   ];
 
   private launcherEl: HTMLElement | null = null;
@@ -10727,7 +10764,7 @@ export class Editor {
       const b = document.createElement("button");
       b.type = "button";
       b.dataset.op = o.op;
-      b.textContent = o.icon;
+      b.replaceChildren(icon(o.icon)); // V171: 線画アイコン
       b.title = o.title;
       b.setAttribute("aria-label", o.title);
       el.appendChild(b);
@@ -11967,7 +12004,7 @@ export class Editor {
       const full = ld?.name ?? "";
       const cps = [...full]; // 判定も切り出しもコードポイント単位（絵文字名で「…」だけ付かないように）
       const short = cps.length > 8 ? `${cps.slice(0, 8).join("")}…` : full;
-      paste.textContent = ld ? t("ed.layerclip.pasteTo.btn", { layerShort: short }) : t("ed.layerclip.paste.btn");
+      setIconLabel(paste, "clipboard", ld ? t("ed.layerclip.pasteTo.btn", { layerShort: short }) : t("ed.layerclip.paste.btn")); // V171
       paste.title = ld
         ? t("ed.layerclip.pasteTo.title", { layer: full })
         : t("ed.layerclip.paste.title");
@@ -12999,7 +13036,7 @@ export class Editor {
     // M11-8 P-4（REQ 表E）: 再生はコマを進めるので選択を解除する
     //（再生ループは gotoFrame を通らず frameIndex を直接進めるため、ここで1回だけ）
     this.clearSelectionOnFrameMove();
-    $("#ed-play").textContent = "⏸";
+    $("#ed-play").replaceChildren(icon("pause")); // V171: 状態ペア play / pause
     const fps = FPS_TABLE[this.project.speedIndex] || 8;
     // M6-2/3: BGMプレビュー（開始フレーム位置に頭出し・ループ毎リセット）
     // M5-1: 速度連動 rate（ピッチも変わる=原作準拠）＋SEのコマ発火
@@ -13070,7 +13107,7 @@ export class Editor {
       this.playTimer = null;
     }
     const btn = document.querySelector("#ed-play");
-    if (btn) btn.textContent = "▶";
+    if (btn) btn.replaceChildren(icon("play")); // V171
     if (this.mounted) this.renderCanvas();
     this.refreshSelectionLauncher();
   }
@@ -13289,7 +13326,7 @@ export class Editor {
       const b = document.getElementById(`ed-sfold-${which}`);
       if (!b) continue;
       const folded = this.sideFold[which];
-      b.textContent = folded ? (which === "top" ? "▼" : "▲") : which === "top" ? "▲" : "▼";
+      b.replaceChildren(icon(folded ? (which === "top" ? "chev-down" : "chev-up") : which === "top" ? "chev-up" : "chev-down")); // V171
       b.title = t(Editor.SIDE_FOLD_TITLE[folded ? "expand" : "fold"].msgKey);
       b.classList.toggle("onb", folded);
     }

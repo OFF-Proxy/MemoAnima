@@ -59,6 +59,9 @@ export type PerfOp =
   //   全コマを一度に起こすのは論理サイズを丸ごと生で展開する見積りなしの確保で、
   //   書き出しは1コマずつ読むので不要（frameSource.ts が読む直前に起こす）
   | "play.start"
+  // V172: 音源の読み込み（ダイアログの後・**読む前**から「読み込み中」を出すための漏斗）
+  | "audio.read" // ファイルを読む（read_file_raw）／動画からの抽出
+  | "audio.load" // 読む→デコードまで（箱 1 枚ぶん・BGM 読み込みと SE 追加）
   | "draw.first" // pointerdown → 最初の描画
   | "tool.switch"
   | "film.rebuild"

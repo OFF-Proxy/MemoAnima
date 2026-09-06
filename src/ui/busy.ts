@@ -64,6 +64,9 @@ export async function runWithBusy<T>(
   //  いまは走っている数（depth）が 0 になったときだけ畳む。
   depth++;
   if (depth === 1 && impl && timer === null && hide === null) {
+    // V172: `withBusyHidden` が箱を戻すときに使う（文言と遅延は最初に始めた人のもの）
+    lastMsg = msg;
+    lastDelay = delayMs;
     // 素の `setTimeout`（`window.` を付けない）。理由は `perf.ts` の同じ箇所と同じ
     timer = setTimeout(() => {
       timer = null;
@@ -83,6 +86,36 @@ export async function runWithBusy<T>(
       hide = null;
     }
     perfDone(op, t0);
+  }
+}
+
+/** `withBusyHidden` が箱を戻すときの文言と遅延（`runWithBusy` が箱を始めたときに覚える）。 */
+let lastMsg = "";
+let lastDelay = BUSY_DELAY_MS;
+
+/** V172: **利用者に何かを聞く間だけ箱を消す**（「読み込み中」の裏で「続行しますか？」を出さない）。
+ *  `runWithBusy` の中から呼ぶ。聞き終わったら、まだ走っている処理があれば箱を戻す
+ *  （出ていたなら即座に、まだ出ていなかったなら改めて `delayMs` 後に）。
+ *  箱の外（`depth === 0`）で呼んでも、ただ `fn` を実行するだけ。 */
+export async function withBusyHidden<T>(fn: () => Promise<T>): Promise<T> {
+  const wasVisible = hide !== null;
+  if (timer !== null) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  hide?.();
+  hide = null;
+  try {
+    return await fn();
+  } finally {
+    if (depth > 0 && impl && hide === null && timer === null) {
+      if (wasVisible) hide = impl(lastMsg);
+      else
+        timer = setTimeout(() => {
+          timer = null;
+          if (depth > 0 && impl) hide = impl(lastMsg);
+        }, lastDelay) as unknown as number;
+    }
   }
 }
 

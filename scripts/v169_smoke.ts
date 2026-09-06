@@ -9,7 +9,7 @@
 //   ② **Alt 単独の既定動作（Win32 SC_KEYMENU）を止める網が片方だけになる**
 //      → DefWindowProc は keydown で印を立て keyup で発火するので、**両方**止めないと入る。検査5 と 5z（片方外すと赤）。
 //
-// 1. `read_file_bytes` の呼び出し元一覧（src 全走査・file:関数名）。許可 6件・増えたら赤
+// 1. `read_file_bytes` の呼び出し元一覧（src 全走査・file:関数名）。許可 4件（V172 で音声が抜けて 5→4）・増えたら赤
 // 2. `projectFromBytes(` の入力は `readProjectRaw` から（同じ関数の手前に `read_file_bytes` が無い）
 // 3. `readProjectRaw` の定義は src に1つ（写し禁止）
 // 4. `TOO_LARGE:` が帯に生のまま届かない（純関数 `tooLargeBytes` ＋ showLoadError の分岐 ＋ 7言語）
@@ -88,16 +88,16 @@ const SRC = listSrc();
   let mentions = 0;
   for (const f of SRC) mentions += (strip(read(f)).match(/read_file_bytes/g) ?? []).length;
   check("1 read_file_bytes の語はコメント以外では invoke の呼び出しにしか現れない（ラッパー無し）", mentions === all.length, `語=${mentions} 呼び出し=${all.length}`);
-  // 許可（5件）: .kwz/.ppm と PNG サイドカーと音声（数MB〜64MB・境界の下・残りは A-60）。
-  // 画像は V170 で read_file_raw へ（読む前の門番 IMAGE_IMPORT_MAX_BYTES＝v170_smoke 検査1）
+  // 許可（4件）: .kwz/.ppm と PNG サイドカー（数MB・境界の下）。
+  // 画像は V170 で read_file_raw へ（読む前の門番 IMAGE_IMPORT_MAX_BYTES＝v170_smoke 検査1）。
+  // 音声（mp3/wav/ogg）は V172 で read_file_raw へ（読む前の門番 AUDIO_IMPORT_MAX_BYTES＝v172_smoke 検査1）
   const ALLOW = [
     "src/library.ts:loadThumb", // PNG サイドカー／note のサムネ（同じ関数の中に2つ。V169 前は project の予備道も含めて3つ）
     "src/library.ts:loadThumb",
     "src/library.ts:select", // note のプレビュー
     "src/main.ts:openEditorWithNote", // .kwz/.ppm を開く
-    "src/main.ts:pickAudioFile", // 音声（mp3/wav/ogg・64MB/16MB の門番は読んだ後＝境界の下）
   ].sort();
-  check("1 ★read_file_bytes の呼び出し元は許可5件と一致（.memoanima・画像を読む道に残っていない・増えていない）", JSON.stringify(got) === JSON.stringify(ALLOW), `いま ${got.length} 件: ${got.join(" | ")}`);
+  check("1 ★read_file_bytes の呼び出し元は許可4件と一致（.memoanima・画像・音声を読む道に残っていない・増えていない）", JSON.stringify(got) === JSON.stringify(ALLOW), `いま ${got.length} 件: ${got.join(" | ")}`);
   check("1 全走査の対象に main.ts と library.ts が入っている", SRC.includes("src/main.ts") && SRC.includes("src/library.ts"));
 }
 

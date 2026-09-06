@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.7.0
+ MemoAnima v1.8.0
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -15,6 +15,25 @@ Windows only.
 - Your source data (the SD card and so on) is only ever READ. Nothing is
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
+
+== CHANGED IN v1.8.0 ==
+- [Emoji on tools and buttons replaced with our own line-art icons] All 86 of
+  them. Emoji were drawn by the OS font, so they could look different from one
+  machine to another and could not be recolored on the dark theme. Meanings,
+  button positions and operations are unchanged.
+- ["Loading..." now appears right after you pick an audio file] When loading an
+  audio file (mp3 / wav / ogg), the notice appears as soon as the file is
+  chosen. Until now nothing appeared until the file had been read, so larger
+  files could look frozen.
+- [Fixed sound going silent after the computer slept] After the computer went
+  to sleep or another app interrupted audio, no sound would play until the app
+  was restarted. If the audio output has stopped, it is now rebuilt
+  automatically, and the audio state is written to the log so the cause can be
+  pinned down if it ever happens again.
+- [New app icon] The app icon has been redrawn from the pixel-art version to a
+  smooth one. The icon shown on the taskbar and desktop changes.
+- This update covers display and audio. Your project files are unchanged and
+  stay in the same format as v1.6.0 and later.
 
 == CHANGED IN v1.7.0 ==
 - [Onion skin now has a direction] Previous frames only, next frames only, or

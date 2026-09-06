@@ -24,6 +24,9 @@
      - カーソルの SVG … 同上
      - `UGO_COLORS` などの**作品データの色**（紙色・パレット）… 配色とは無関係 */
 :root {
+  /* V171: 黄色（選択中）の上に置く文字・アイコンの色。明るい配色では --ink と同じ値＝従来と1ピクセルも変わらない。
+     夜の紙では --ink がクリームになって黄色の上で消えるので、こちらだけ濃いまま */
+  --ink-on-accent: #2c2621;
   --paper: #fbefd6;
   --paper2: #f3e3c2;
   /* 紙まわりの斜線（ステージの地） */
@@ -76,6 +79,7 @@
    温かい暗色（こげ茶＋クリーム文字）。`data-theme` は main.ts が `<html>` に付ける。
    ★キャンバスの紙の色・作品の色はここに含まれない（作品データなので配色では変わらない）。 */
 :root[data-theme="dark"] {
+  --ink-on-accent: #2c2621; /* V171: 黄色（選択中）の上は夜の紙でも濃い文字・アイコン */
   --paper: #2a2320;
   --paper2: #221c1a;
   --paper3: #241e1b;
@@ -1098,7 +1102,40 @@ button:disabled {
 .tool .em {
   font-size: 19px;
   line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
+
+/* ===== V171: 線画アイコン（インライン SVG・currentColor） =====
+   既定は 1em（周りの文字に追従・行高をばらつかせない）。固定サイズはクラスで（数値をあちこちに書かない）。
+   ツール列 22px・ボタン 16px・見出し 20px。選択中（.on）は色を継承するので自動で白/濃色になる */
+svg.icon {
+  width: 1em;
+  height: 1em;
+  display: inline-block;
+  vertical-align: -0.15em;
+  flex: none;
+}
+.icon-16 { width: 16px; height: 16px; }
+.icon-20 { width: 20px; height: 20px; }
+.icon-24 { width: 24px; height: 24px; }
+.btn-ic {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 0.35em;
+  vertical-align: -0.1em;
+}
+.btn-ic svg.icon { width: 1.1em; height: 1.1em; }
+.btn-ic.btn-ic-after { margin-right: 0; margin-left: 0.35em; } /* 「次へ →」のように文字の後ろに置く矢印 */
+.tool .em svg.icon { width: 22px; height: 22px; }
+.ic svg.icon, .rbtn svg.icon { width: 20px; height: 20px; }
+.minibtn svg.icon, .chip svg.icon { width: 14px; height: 14px; }
+.tx svg.icon { width: 20px; height: 20px; }
+.eye svg.icon, .lay-lock svg.icon, .lay-pin svg.icon { width: 15px; height: 15px; }
+.toast svg.icon { width: 1.1em; height: 1.1em; vertical-align: -0.2em; margin-right: 0.25em; }
+.modal-msg svg.icon, h3 svg.icon, .side-sechead svg.icon { width: 1.1em; height: 1.1em; }
+.foldmark svg.icon { width: 0.9em; height: 0.9em; margin-left: 0.2em; }
 
 .tool .nm {
   font-size: 9px;
@@ -1107,6 +1144,13 @@ button:disabled {
 
 .tool.on {
   background: var(--yellow);
+}
+/* V171 (AC-5・実画面で発見): 夜の紙では --ink がクリームなので、黄色の選択中ボタンの上でアイコンと文字が消えていた。
+   黄色の上だけ濃い色（--ink-on-accent＝明るい配色では --ink と同値・見た目は従来どおり） */
+.tool.on,
+.tx.on,
+.lv.on {
+  color: var(--ink-on-accent);
 }
 
 /* 中央: キャンバス（E-1: 高倍率時は手のひら/Spaceパンでスクロール）
@@ -2842,15 +2886,18 @@ input[type="text"] {
   margin: 2px 0 8px;
 }
 
-/* M5-1: フィルムの SE 配置マーク */
+/* M5-1: フィルムの SE 配置マーク。V171: 絵文字（content: "♪"）をやめ、線画 audio.svg を mask で塗る
+   （src/icons/audio.svg と同じ path。色は background-color＝従来の var(--blue)） */
 .fr.hasse::after {
-  content: "♪";
+  content: "";
   position: absolute;
   right: 2px;
   top: 1px;
-  font-size: 10px;
-  font-weight: 800;
-  color: var(--blue);
+  width: 11px;
+  height: 11px;
+  background-color: var(--blue);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='7' cy='15' r='2.2'/%3E%3Cpath d='M9.2 15V4l6 2v3l-6-2'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='7' cy='15' r='2.2'/%3E%3Cpath d='M9.2 15V4l6 2v3l-6-2'/%3E%3C/svg%3E") center / contain no-repeat;
   text-shadow: 0 0 2px var(--panel), 0 0 2px var(--panel);
   pointer-events: none;
 }

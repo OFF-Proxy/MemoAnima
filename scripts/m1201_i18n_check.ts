@@ -356,7 +356,6 @@ const OVER_BASELINE_EN = new Set<string>([
   "ed.audio.wave.info.label", // 62字 / 上限 28
   // --- エディタ（3 件） ---
   "ed.view.zoominfo.label", // 33字 / 上限 28
-  "ed.layerclip.pasteTo.btn", // 22字 / 上限 21
   // --- 変形（2 件） ---
   "ed.xform.badge.label", // 41字 / 上限 28
   "ed.xform.head.label", // 36字 / 上限 28
@@ -397,7 +396,6 @@ const OVER_BASELINE_ZH = new Set<string>([
   "keys.row.sharedMates.label", // 22字 / 上限 16（ja 26字より短い）
   "keys.cmd.viewFocusToggle.hint", // 36字 / 上限 30（ja 53字より大幅に短い・折り返して表示）
   // --- エディタ（5 件） ---
-  "ed.save.btn", // 13字 / 上限 12（ja も 13字）
   "ed.sel.drag.hint", // 31字 / 上限 30（V152b・範囲選択パネルの説明。実測 227px 枠に2行・切れ0。en/es/pt-BR/ko に前例）
   "ed.feel.head.label", // 21字 / 上限 16（実測 223px < 親 247px）
   "ed.view.badge.label", // 21字 / 上限 16（キャンバス上のバッジ・実測 71px）
@@ -432,7 +430,6 @@ const OVER_BASELINE_ZH_HANT = new Set<string>([
   "img.dialog.target.hint", // 34字 / 上限 30
   "keys.row.sharedMates.label", // 22字 / 上限 16
   "keys.cmd.viewFocusToggle.hint", // 36字 / 上限 30
-  "ed.save.btn", // 13字 / 上限 12
   "ed.feel.head.label", // 21字 / 上限 16
   "ed.view.badge.label", // 21字 / 上限 16
   "ed.view.zoominfo.label", // 28字 / 上限 16
@@ -453,13 +450,11 @@ const OVER_BASELINE = new Set<string>([
   // --- M12-1a（index.html / main.ts）17 件 ---
   "common.saveTarget.path.hint",
   "lib.chooseDir.label",
-  "lib.drop.import.btn",
   "lib.import.btn",
   "lib.missing.hint",
   "lib.missing.label",
   "imp.cancelling.label",
   "imp.progress.hint",
-  "ed.save.btn",
   "ed.xform.badge.label",
   "img.dialog.target.hint",
   "set.about.author.label",
@@ -512,7 +507,8 @@ const OVER_BASELINE = new Set<string>([
     const kind = k.split(".").pop()!;
     const lim = LIMIT_OVERRIDE[k] ?? LIMIT[kind];
     if (!lim) continue;
-    const len = [...v].length;
+    // V171: 文中の `{icon:xxx}`（線画アイコンの差し込み）は画面では 1 文字ぶんの絵＝1 字として数える
+    const len = [...v.replace(/\{icon:[a-z0-9-]+\}/g, "◇")].length;
     if (len > lim) over.push({ key: k, len, lim });
   }
   const known = over.filter((o) => OVER_BASELINE.has(o.key));
@@ -575,7 +571,8 @@ const OVER_BASELINE = new Set<string>([
       const base = LIMIT_OVERRIDE[k] ?? LIMIT[kind];
       if (!base) continue;
       const lim = Math.floor(base * factor);
-      const len = [...v].length;
+      // V171: 文中の `{icon:xxx}`（線画アイコンの差し込み）は画面では 1 文字ぶんの絵＝1 字として数える（上限は見た目の幅の話）
+      const len = [...v.replace(/\{icon:[a-z0-9-]+\}/g, "◇")].length;
       if (len > lim) over.push({ key: k, len, lim });
     }
     const known = over.filter((o) => baseline.has(o.key));

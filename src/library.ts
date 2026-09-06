@@ -18,6 +18,7 @@ import { AudioPreview, pcmS16ToWav, bgmPlaybackRate, renderExportMix } from "./e
 import type { BgmTrack } from "./editor/model";
 import { t, getLang } from "./i18n";
 import { errText, tooLargeBytes } from "./ui/errText"; // V169 (B-3): 門番の TOO_LARGE を人が読める文へ
+import { icon, setIconLabel } from "./icons"; // V171: 線画アイコン（絵文字は OS で絵が変わる）
 // V159 (G-3): 長くかかりうる処理の共通入口（読み込み中の表示・遅延・計測はここに1つ）
 import { runWithBusy } from "./ui/busy";
 import { collabAlbumName, defaultAlbumName, newAlbumName } from "./i18n/defaults";
@@ -407,7 +408,7 @@ export class LibraryScreen {
       btn.className = "minibtn";
       btn.id = "lib-reload";
       btn.type = "button";
-      btn.textContent = "🔄";
+      btn.replaceChildren(icon("update")); // V171: 🔄 → update
       btn.title = t("lib.reload.title");
       btn.onclick = async () => {
         btn.disabled = true;
@@ -485,7 +486,7 @@ export class LibraryScreen {
     if (!src || typeof src !== "string") return;
     const footer = $("#import-footer");
     footer.hidden = false;
-    $("#import-label").textContent = t("imp.progress.label");
+    setIconLabel($("#import-label"), "import", t("imp.progress.label")); // V171: 📥 → import
     try {
       const res = await invoke<any>("import_flipnotes", {
         srcRoot: src,
@@ -513,10 +514,7 @@ export class LibraryScreen {
   private updateProgress(p: ImportProgress) {
     const footer = $("#import-footer");
     footer.hidden = false;
-    $("#import-label").textContent = t("lib.import.progress.label", {
-      album: p.album,
-      skipped: p.skipped,
-    });
+    setIconLabel($("#import-label"), "import", t("lib.import.progress.label", { album: p.album, skipped: p.skipped })); // V171
     $("#import-count").textContent = `${p.done} / ${p.total}`;
     ($("#import-bar-fill") as HTMLElement).style.width = `${Math.round(
       (p.done / Math.max(1, p.total)) * 100
@@ -631,7 +629,8 @@ export class LibraryScreen {
       pic.appendChild(img);
       const cap = document.createElement("div");
       cap.className = "cap";
-      cap.textContent = (it.kind === "project" ? "📝 " : "") + it.name;
+      cap.textContent = it.name;
+      if (it.kind === "project") cap.prepend(icon("project")); // V171: 📝 → project（作品の印・文字の前に SVG）
       card.dataset.path = it.path; // L-2: 選択ハイライトの差分更新用
       // 並べ替えキー: ノート=h:<hash> / プロジェクト=p:<rel_path>（両方永続化）
       card.dataset.orderkey = this.orderKey(it);
@@ -776,7 +775,8 @@ export class LibraryScreen {
       this.suppressCardClick = true;
       const g = document.createElement("div");
       g.className = "drag-ghost"; // 既存クラス（エディタのレイヤードラッグと共用）
-      g.textContent = (d.it.kind === "project" ? "📝 " : "") + d.it.name;
+      g.textContent = d.it.name;
+      if (d.it.kind === "project") g.prepend(icon("project")); // V171: 📝 → project
       document.body.appendChild(g);
       d.ghost = g;
       const src = this.cardEl(d.it.path);
@@ -1184,24 +1184,24 @@ export class LibraryScreen {
     });
     const edit = document.createElement("button");
     edit.className = "chip edit";
-    edit.textContent = t("lib.chip.edit.btn");
+    setIconLabel(edit, "pen", t("lib.chip.edit.btn")); // V171: ✏ → pen
     edit.onclick = () => this.selected && this.edit(this.selected);
     host.appendChild(edit);
     const exp = document.createElement("button");
     exp.className = "chip export";
-    exp.textContent = t("lib.chip.export.btn");
+    setIconLabel(exp, "export", t("lib.chip.export.btn")); // V171: ⬇ → export
     exp.onclick = () => void this.exportSelected();
     host.appendChild(exp);
     // M11-3: ドラッグ以外の移動導線（アルバムが多いとスクロールしながらのドラッグは厳しい）
     const mv = document.createElement("button");
     mv.className = "chip";
-    mv.textContent = t("lib.chip.move.btn");
+    setIconLabel(mv, "folder", t("lib.chip.move.btn")); // V171: 📁 → folder
     mv.title = t("lib.chip.move.title");
     mv.onclick = () => void this.moveSelectedWithPicker();
     host.appendChild(mv);
     const del = document.createElement("button");
     del.className = "chip danger";
-    del.textContent = t("lib.chip.delete.btn");
+    setIconLabel(del, "trash", t("lib.chip.delete.btn")); // V171: 🗑 → trash
     del.onclick = () => this.selected && this.deleteSelected();
     host.appendChild(del);
   }
@@ -1497,7 +1497,7 @@ export class LibraryScreen {
         : this.player
           ? !this.player.paused
           : false;
-    $("#tp-play").textContent = playing ? "⏸" : "▶";
+    $("#tp-play").replaceChildren(icon(playing ? "pause" : "play")); // V171: 状態ペア play / pause
   }
 
   private drawPreview() {

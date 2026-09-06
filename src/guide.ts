@@ -8,6 +8,7 @@
 // "1 / 5" のような番号表示は日本語を含まない＝そのまま（訳す語が無い）。
 
 import { t } from "./i18n";
+import { iconizeText, iconLabelHtml, iconHtml } from "./icons"; // V171: 文中の {icon:xxx}／ボタンの矢印を線画に
 
 export interface GuideStep {
   title: string;
@@ -99,13 +100,15 @@ export function runGuide(steps: GuideStep[]): Promise<void> {
         <div class="g-actions">
           <button class="minibtn" data-g="skip">${t("guide.skip.btn")}</button>
           <span style="flex:1"></span>
-          ${isFirst ? "" : `<button class="minibtn" data-g="prev">${t("guide.prev.btn")}</button>`}
+          ${isFirst ? "" : `<button class="minibtn" data-g="prev">${iconLabelHtml("prev", t("guide.prev.btn"))}</button>`}
           <button class="btn primary" data-g="next">${
-            isLast ? t("guide.start.btn") : isFirst ? t("guide.begin.btn") : t("guide.next.btn")
+            // V171: 「次へ →」「ガイドを見る →」の矢印は i18n から剥がし、線画（next）を文字の**後ろ**に置く
+            isLast ? t("guide.start.btn") : `${isFirst ? t("guide.begin.btn") : t("guide.next.btn")} <span class="btn-ic btn-ic-after">${iconHtml("next")}</span>`
           }</button>
         </div>`;
       (bubble.querySelector("h4") as HTMLElement).textContent = step.title;
-      (bubble.querySelector("p") as HTMLElement).textContent = step.text;
+      // V171: 文中の {icon:xxx}（⚙ ♪ ⬇ 📷 等の UI 参照）を線画に。それ以外は escape（HTML の入口を作らない）
+      (bubble.querySelector("p") as HTMLElement).innerHTML = iconizeText(step.text);
       bubble.querySelector('[data-g="skip"]')?.addEventListener("click", finish);
       bubble.querySelector('[data-g="prev"]')?.addEventListener("click", prev);
       bubble.querySelector('[data-g="next"]')?.addEventListener("click", next);

@@ -18,11 +18,13 @@ import { newProject, UGO_COLORS, W, H, type Project } from "./editor/model";
 import { importFlipnote } from "./editor/kwzImport";
 import { projectFromBytes, projectToBytes } from "./editor/serialize";
 import { errText, tooLargeBytes } from "./ui/errText"; // V170 (G-2): 画像の門番の TOO_LARGE を人の文へ
+// V171: 線画アイコン（絵文字は OS で絵が変わる）。ラベル先頭は呼び出し側が id を指定・文中は {icon:xxx} を tHtml/iconizeText で
+import { iconHtml, iconLabelHtml, setIconLabel, iconizeText, tHtml, applyIcons } from "./icons";
 // V158 (C-3): 配色（明るい／夜の紙）。`<html>` の data-theme を付け替えるだけ
 import { applyTheme, sanitizeTheme } from "./ui/theme";
 // V159 (G-1/G-3): 性能ログと「長い処理の共通入口」。**ログには操作名と数値しか書かない**
 import { setPerfSink, startLongTaskWatch, flush as perfFlush } from "./perf";
-import { runWithBusy, setBusyImpl } from "./ui/busy";
+import { runWithBusy, setBusyImpl, withBusyHidden } from "./ui/busy";
 import { frameToPngBlob, frameToImageBlob } from "./editor/render";
 import {
   DEFAULT_CONVERT,
@@ -51,7 +53,7 @@ import {
   formatDuration,
   formatBytes,
 } from "./editor/exporter";
-import { mimeFromExt } from "./editor/audio";
+import { mimeFromExt, setAudioLogSink, type AudioPick } from "./editor/audio";
 // M12-1a: i18n（自前・依存なし）。設計は docs/REQ_M12_i18n_master.md §3
 import { t, setLang, getLang, sanitizeLang, detectLang, applyI18n, HIDDEN_LANGS, type Lang } from "./i18n";
 // M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
@@ -452,7 +454,7 @@ function toast(msg: string) {
   const host = $("#toast-host");
   const el = document.createElement("div");
   el.className = "toast";
-  el.textContent = msg;
+  el.innerHTML = iconizeText(msg); // V171: 文の先頭の {icon:warn} 等を線画に（それ以外は escape）
   host.appendChild(el);
   setTimeout(() => el.classList.add("show"), 10);
   setTimeout(() => {
@@ -507,6 +509,14 @@ function logError(kind: string, detail: string) {
   invoke("append_log", { text: line }).catch(() => {});
 }
 
+/** V172: エラー**ではない**出来事を同じログへ 1 行（行の形は logError と同じ・意味で使い分ける）。
+ *  「β の Mac 版で latest.json に自分の platform が無い」のような**仕様どおりの空振り**に使う。
+ *  `scripts/v172_smoke.ts` の検査5 が「その分岐に logError が無い」ことを見張っている */
+function log(kind: string, detail: string) {
+  const line = `[${new Date().toISOString()}] [${kind}] ${detail}`;
+  invoke("append_log", { text: line }).catch(() => {});
+}
+
 let errorDialogOpen = false;
 
 /** 未捕捉エラーのダイアログ（白画面のまま死なない・詳細コピー可） */
@@ -519,11 +529,11 @@ function showErrorDialog(detail: string) {
     // M12-1a: 既存の HTML テンプレートはそのままに、日本語だけ ${t(...)} に置き換える
     // （textContent へ移すと DOM 構造が変わり「見た目が1ドットも変わらない」の検証が難しくなるため）
     box.innerHTML = `
-      <p class="modal-msg"><b>${t("err.unexpected.label")}</b><br>
+      <p class="modal-msg"><b>${tHtml("err.unexpected.label")}</b><br>
       ${t("err.unexpected.msg")}</p>
       <pre class="err-detail"></pre>
       <div class="modal-actions">
-        <button class="btn" id="err-copy">${t("err.copyDetail.btn")}</button>
+        <button class="btn" id="err-copy">${iconLabelHtml("clipboard", t("err.copyDetail.btn"))}</button>
         <span style="flex:1"></span>
         <button class="btn primary" id="err-close">${t("common.close.btn")}</button>
       </div>`;
@@ -571,7 +581,7 @@ function confirmDialog(msg: string, labels?: { yes: string; no: string }): Promi
     (box.querySelector('[data-v="0"]') as HTMLElement).textContent = labels?.no ?? t("common.no.btn");
     const msgEl = box.querySelector(".modal-msg") as HTMLElement;
     if (msg.includes("\n")) msgEl.style.whiteSpace = "pre-line";
-    msgEl.textContent = msg;
+    msgEl.innerHTML = iconizeText(msg); // V171: 文中の {icon:xxx} を線画に（それ以外は escape＝XSS の網）
     box.querySelectorAll("button").forEach((b) =>
       b.addEventListener("click", () => close(b.dataset.v === "1"))
     );
@@ -590,7 +600,7 @@ function chooseDialog(msg: string, options: string[]): Promise<number | null> {
     box.innerHTML = `<p class="modal-msg"></p><div class="modal-actions modal-choose"></div>`;
     const msgEl = box.querySelector(".modal-msg") as HTMLElement;
     if (msg.includes("\n")) msgEl.style.whiteSpace = "pre-line";
-    msgEl.textContent = msg;
+    msgEl.innerHTML = iconizeText(msg); // V171: 文中の {icon:xxx} を線画に（それ以外は escape＝XSS の網）
     const acts = box.querySelector(".modal-actions") as HTMLElement;
     options.forEach((label, i) => {
       const b = document.createElement("button");
@@ -621,7 +631,7 @@ function noticeDialog(msg: string): Promise<void> {
     (box.querySelector('[data-v="1"]') as HTMLElement).textContent = t("common.close.btn");
     const msgEl = box.querySelector(".modal-msg") as HTMLElement;
     if (msg.includes("\n")) msgEl.style.whiteSpace = "pre-line";
-    msgEl.textContent = msg;
+    msgEl.innerHTML = iconizeText(msg); // V171: 文中の {icon:xxx} を線画に（それ以外は escape＝XSS の網）
     box.querySelector("button")?.addEventListener("click", () => close(true));
     return box;
   }).then(() => undefined);
@@ -712,7 +722,7 @@ function confirmSkippableDialog(msg: string): Promise<{ ok: boolean; skip: boole
     (box.querySelector(".confirm-skip span") as HTMLElement).textContent = t("common.dontShowAgain.label");
     const msgEl = box.querySelector(".modal-msg") as HTMLElement;
     if (msg.includes("\n")) msgEl.style.whiteSpace = "pre-line";
-    msgEl.textContent = msg;
+    msgEl.innerHTML = iconizeText(msg); // V171: 文中の {icon:xxx} を線画に（それ以外は escape＝XSS の網）
     (box.querySelector("#cs-skip") as HTMLInputElement).addEventListener("change", (e) => {
       skip = (e.target as HTMLInputElement).checked;
     });
@@ -778,10 +788,18 @@ const EXTRACT_EXTS = ["m4a", "mp4", "mov", "webm", "mkv"];
  *  （読んでから捨てる形だと 1.1GB のファイルでアプリごと落ちた。572MB は成功） */
 const EXTRACT_MAX_MB = 512;
 
-/** M6-2: 音声ファイル（mp3/wav/ogg）を選んで読み込む。
- *  M10-7: 動画（mp4/mov/webm/mkv）と m4a も選べる。選ばれたら同梱 ffmpeg で
- *  音声だけを MP3 192kbps に抽出し、以降は mp3 を選んだ場合と同じ流れに乗せる。 */
-async function pickAudioFile(): Promise<{ bytes: Uint8Array; mime: string; name: string } | null> {
+/** V172 (G-1): 音声（mp3/wav/ogg）の上限。**読む前**の門番（`read_file_raw` の maxBytes）。
+ *  従来 `sizeGuard` が読んだ後に見ていた 64MB と同じ境界（`len/1024/1024 > 64`）。 */
+const AUDIO_IMPORT_MAX_BYTES = 64 * 1024 * 1024;
+
+/** M6-2: 音声ファイル（mp3/wav/ogg）を選ぶ。**ダイアログだけ**——読むのは `readAudioFile`。
+ *  M10-7: 動画（mp4/mov/webm/mkv）と m4a も選べる（読む側が同梱 ffmpeg で音声だけを MP3 192kbps に抽出する）。
+ *
+ *  ★V172（件 1）で「選ぶ」と「読む」を分けた理由: 以前は 1 つの関数で読み終わってから返し、呼び出し元は
+ *   **返ってから** `beginBusy` していた＝読んでいる間は「読み込み中」の**外**。Mac（JavaScriptCore）は
+ *   JSON 配列の受け取りが遅く、数 MB でも「固まった」に見えた。いまは呼び出し元がダイアログを閉じた直後から
+ *   入口を閉じ、`readAudioFile` → デコードを 1 本の「読み込み中」（`runWithBusy("audio.load")`）で覆う。 */
+async function pickAudioFile(): Promise<AudioPick | null> {
   const sel = await open({
     multiple: false,
     title: t("ed.audio.pick.title"),
@@ -793,9 +811,26 @@ async function pickAudioFile(): Promise<{ bytes: Uint8Array; mime: string; name:
   if (!sel || typeof sel !== "string") return null;
   const name = sel.split(/[\\/]/).pop() ?? "audio";
   const ext = (name.split(".").pop() ?? "").toLowerCase();
+  return { path: sel, name, ext };
+}
+
+/** V172: 選んだ音声を読む（**生バイト**・読む前の門番）。
+ *  呼び出し元（editor.ts の BGM 読み込み／SE 追加）は `runWithBusy("audio.load")` の中から呼ぶが、
+ *  ここ自身も読みを `runWithBusy("audio.read")` で包む＝単独で呼んでも「読み込み中」が出る（入れ子でも箱は 1 枚）。
+ *  遅延は既定の 450ms（`BUSY_DELAY_MS`・短い読み込みではチラつかせない）。
+ *
+ *  A-60 の音声ぶん: `read_file_bytes`（`number[]` の JSON 配列）をやめた。理由は V169 と同じ
+ *  （128MiB 超でレンダラが致命停止する・catch もログも効かない）＋ Mac では JSON 配列の受け取りが遅い。
+ *  **16MB の確認は読んだ後のまま**（文言・条件は不変）。箱の裏で聞かないよう `withBusyHidden` で聞く。 */
+async function readAudioFile(
+  pick: AudioPick
+): Promise<{ bytes: Uint8Array; mime: string; name: string } | null> {
+  const { path: sel, name, ext } = pick;
 
   /** 埋め込みサイズのガード（.animemo 肥大・デコード/転送のメモリ対策）。
-   *  抽出経路も同じガードを通す（192kbps なら 64MB ≒ 46分で実質かからないが経路は統一） */
+   *  抽出経路も同じガードを通す（192kbps なら 64MB ≒ 46分で実質かからないが経路は統一）。
+   *  V172: mp3/wav/ogg の 64MB は読む前の門番（`AUDIO_IMPORT_MAX_BYTES`）に吸収されたので、
+   *  ここの `> 64` に当たるのは抽出経路だけ。しきい値・文言・戻り値は従来と同一 */
   const sizeGuard = async (len: number): Promise<boolean> => {
     const mb = len / 1024 / 1024;
     if (mb > 64) {
@@ -804,10 +839,19 @@ async function pickAudioFile(): Promise<{ bytes: Uint8Array; mime: string; name:
     }
     if (mb > 16) {
       // M12-1a: 元は2つのリテラルを + で連結していた。辞書では1キーにまとめる（訳文を分断しないため）
-      return await confirmDialog(t("ed.audio.largeWarn.msg", { mb: mb.toFixed(0) }));
+      // V172: 「読み込み中」の箱の裏で聞かない（聞いている間だけ箱を消し、答えたら戻す）
+      return await withBusyHidden(() =>
+        confirmDialog(t("ed.audio.largeWarn.msg", { mb: mb.toFixed(0) }))
+      );
     }
     return true;
   };
+  const toBytes = (raw: ArrayBuffer | Uint8Array | number[]): Uint8Array =>
+    raw instanceof Uint8Array
+      ? raw
+      : raw instanceof ArrayBuffer
+        ? new Uint8Array(raw)
+        : new Uint8Array(raw as number[]);
 
   // ---- M10-7: 動画 / m4a → 音声だけ抽出 ----
   if (EXTRACT_EXTS.includes(ext)) {
@@ -815,16 +859,14 @@ async function pickAudioFile(): Promise<{ bytes: Uint8Array; mime: string; name:
     try {
       // 生バイナリで受ける（Vec<u8> の JSON 配列では数百MBの動画は扱えない）。
       // サイズ判定は Rust 側で**読み込む前に**行う（読んでから捨てると 1GB 級で落ちる）
-      const raw = await invoke<ArrayBuffer | Uint8Array | number[]>("read_file_raw", {
-        path: sel,
-        maxBytes: EXTRACT_MAX_MB * 1024 * 1024,
-      });
-      src =
-        raw instanceof Uint8Array
-          ? raw
-          : raw instanceof ArrayBuffer
-            ? new Uint8Array(raw)
-            : new Uint8Array(raw as number[]);
+      src = await runWithBusy("audio.read", t("ed.busy.audio.label"), async () =>
+        toBytes(
+          await invoke<ArrayBuffer | Uint8Array | number[]>("read_file_raw", {
+            path: sel,
+            maxBytes: EXTRACT_MAX_MB * 1024 * 1024,
+          })
+        )
+      );
     } catch (e) {
       const m = /TOO_LARGE:(\d+)/.exec(String(e));
       if (m) {
@@ -841,8 +883,11 @@ async function pickAudioFile(): Promise<{ bytes: Uint8Array; mime: string; name:
     toast(t("ed.audio.extracting.toast"));
     let mp3: Uint8Array | null = null;
     try {
-      const { extractAudioToMp3 } = await import("./editor/exporter");
-      mp3 = await extractAudioToMp3(src, ext);
+      // V172: 抽出（数十秒かかることがある）も同じ箱の中
+      mp3 = await runWithBusy("audio.read", t("ed.busy.audio.label"), async () => {
+        const { extractAudioToMp3 } = await import("./editor/exporter");
+        return await extractAudioToMp3(src, ext);
+      });
     } catch (e) {
       // 例外は上へ投げない（呼び出し元は null=キャンセルとして扱う）
       logError("audio", t("err.log.audioExtract.msg", { err: e }));
@@ -861,16 +906,37 @@ async function pickAudioFile(): Promise<{ bytes: Uint8Array; mime: string; name:
   }
 
   // ---- 既存経路（mp3 / wav / ogg）----
-  // 判定の順序も内容も従来どおり（mimeFromExt → read_file_bytes → 64MB/16MB ガード）。
-  // ガードだけ抽出経路と共有する sizeGuard に括り出してある（しきい値・文言・戻り値は同一）
+  // 判定の順序は従来どおり（mimeFromExt → 読む → 16MB の確認）。64MB だけ読む前の門番へ
   const mime = mimeFromExt(sel);
   if (!mime) {
     toast(t("ed.audio.unsupported.toast"));
     return null;
   }
-  const bytes = await invoke<number[]>("read_file_bytes", { path: sel });
-  if (!(await sizeGuard(bytes.length))) return null;
-  return { bytes: new Uint8Array(bytes), mime, name };
+  let bytes: Uint8Array;
+  try {
+    bytes = await runWithBusy("audio.read", t("ed.busy.audio.label"), async () =>
+      toBytes(
+        await invoke<ArrayBuffer | Uint8Array | number[]>("read_file_raw", {
+          path: sel,
+          maxBytes: AUDIO_IMPORT_MAX_BYTES,
+        })
+      )
+    );
+  } catch (e) {
+    const m = /TOO_LARGE:(\d+)/.exec(String(e));
+    if (m) {
+      // 従来 sizeGuard が読んだ後に出していた文と同じ（{mb} は実サイズ）
+      const mb = Number(m[1]) / 1024 / 1024;
+      toast(t("ed.audio.tooLarge.toast", { mb: mb.toFixed(0) }));
+      return null;
+    }
+    // 以前（read_file_bytes）は例外が呼び出し元へ抜けて未捕捉の網に落ちていた。同じ文で断る（err に作品名は入らない）
+    logError("audio", `audio read failed: ${errText(e)}`);
+    toast(t("ed.audio.readFailed.toast", { err: errText(e) }));
+    return null;
+  }
+  if (!(await sizeGuard(bytes.byteLength))) return null;
+  return { bytes, mime, name };
 }
 
 /** エクスポートダイアログ（形式・倍率・範囲 → 進捗＋キャンセル → 保存）。
@@ -903,7 +969,7 @@ function openExportDialog(
     ).join("");
     // M12-1a: HTML の骨格はそのまま・日本語だけ ${t(...)} へ（DOM を変えない）
     box.innerHTML = `
-      <p class="modal-msg"><b>${t("export.dialog.title")}</b>　${t("export.dialog.summary.hint", { count: source.count, fps: source.fps })}</p>
+      <p class="modal-msg"><b>${iconHtml("export")} ${t("export.dialog.title")}</b>　${t("export.dialog.summary.hint", { count: source.count, fps: source.fps })}</p>
       <div class="modal-field"><span>${t("export.format.label")}</span><div class="oni" id="ex-fmt" style="flex:1;flex-wrap:wrap">${fmtButtons}</div></div>
       <p class="modal-path" id="ex-note"></p>
       <div class="modal-field"><span>${t("export.scale.label")}</span><div class="oni" id="ex-scale" style="flex:1">${scaleButtons}</div></div>
@@ -970,7 +1036,7 @@ function openExportDialog(
       if (format === "gif" && scale === 8) {
         const warn = document.createElement("span");
         warn.className = "warn";
-        warn.textContent = `　${gifX8Warning()}`;
+        warn.innerHTML = "　" + iconizeText(gifX8Warning()); // V171: 先頭の {icon:warn} を線画に（それ以外は escape）
         scaleNoteEl.appendChild(warn);
       }
     };
@@ -1274,7 +1340,7 @@ function openImageExportDialog(p: Project, frameIndex: number, baseName: string)
         }</button>`
     ).join("");
     box.innerHTML = `
-      <p class="modal-msg"><b>${t("export.image.dialog.title")}</b>　${t("export.image.dialog.msg", { n: frameIndex + 1 })}</p>
+      <p class="modal-msg"><b>${iconHtml("image")} ${t("export.image.dialog.title")}</b>　${t("export.image.dialog.msg", { n: frameIndex + 1 })}</p>
       <div class="modal-field"><span>${t("export.image.format.label")}</span>
         <div class="oni" id="ie-fmt" style="flex:1">
           <button type="button" class="lv on" data-f="png">PNG</button>
@@ -1404,7 +1470,7 @@ async function pickAlbum(
   return modal((close) => {
     const box = document.createElement("div");
     box.innerHTML = `
-      <p class="modal-msg"><b>${t("lib.moveTo.dialog.title")}</b><br><span id="pa-title"></span></p>
+      <p class="modal-msg"><b>${iconHtml("folder")} ${t("lib.moveTo.dialog.title")}</b><br><span id="pa-title"></span></p>
       <div class="modal-field"><span>${t("common.album.label")}</span>
         <select id="pa-album">${list.map(() => `<option></option>`).join("")}</select>
       </div>
@@ -1456,7 +1522,7 @@ async function pickSaveTarget(
   return modal((close) => {
     const box = document.createElement("div");
     box.innerHTML = `
-      <p class="modal-msg"><b>${t("common.saveTarget.dialog.title")}</b></p>
+      <p class="modal-msg"><b>${iconHtml("save")} ${t("common.saveTarget.dialog.title")}</b></p>
       <div class="modal-field"><span>${t("common.album.label")}</span>
         <select id="ps-album">${albums
           .map((a) => `<option${a === def ? " selected" : ""}></option>`)
@@ -1640,7 +1706,7 @@ async function openImageImportFlowForEditor(path?: string | string[]) {
   if (files.length > BATCH_IMPORT_CONFIRM_AT) {
     const back = document.createElement("div");
     back.className = "modal-back";
-    back.innerHTML = `<div class="modal-box"><p class="modal-msg"><b>${t("imp.progress.label")}</b></p><p class="modal-path" id="bi-prog"></p></div>`;
+    back.innerHTML = `<div class="modal-box"><p class="modal-msg"><b>${iconHtml("import")} ${t("imp.progress.label")}</b></p><p class="modal-path" id="bi-prog"></p></div>`;
     document.body.appendChild(back);
     prog = { back, label: back.querySelector("#bi-prog") as HTMLElement };
   }
@@ -1721,14 +1787,14 @@ function openImageImportDialog(
     // M11-24: 「複数ページのアニメ背景は、ライブラリ画面の📷を…」の案内を削除した。
     // M8-2b でライブラリの📷ボタン自体を撤去しており、**存在しない導線を案内していた**
     box.innerHTML = `
-      <p class="modal-msg"><b>${t("img.dialog.title")}</b>　${headNote}</p>
+      <p class="modal-msg"><b>${iconHtml("camera")} ${t("img.dialog.title")}</b>　${headNote}</p>
       <div class="imgimp">
         <div class="imgimp-left">
           <canvas id="ii-cv" width="${W}" height="${H}"></canvas>
           <div class="imgimp-pager" id="ii-pager" ${images.length > 1 ? "" : "hidden"}>
-            <button class="minibtn" id="ii-prev" type="button">◀</button>
+            <button class="minibtn" id="ii-prev" type="button">${iconHtml("prev")}</button>
             <span id="ii-pageno">1 / ${images.length}</span>
-            <button class="minibtn" id="ii-next" type="button">▶</button>
+            <button class="minibtn" id="ii-next" type="button">${iconHtml("next")}</button>
           </div>
         </div>
         <div class="imgimp-right">
@@ -1762,7 +1828,7 @@ function openImageImportDialog(
               ${inkSwatches.map((c) => `<button type="button" class="ii-sw${c === o.ink ? " on" : ""}" data-c="${c}" style="background:${c}"></button>`).join("")}
               <input type="color" id="ii-ink-custom" value="${o.ink}">
             </div></div>
-            <div class="modal-field"><span>${t("img.invert.label")}</span><button type="button" class="lv" id="ii-invert">${t("img.invert.btn")}</button></div>
+            <div class="modal-field"><span>${t("img.invert.label")}</span><button type="button" class="lv" id="ii-invert">${iconLabelHtml("invert", t("img.invert.btn"))}</button></div>
           </div>
           <div class="modal-field"><span>${t("img.brightness.label")} <b id="ii-br-v">0</b></span><div class="ii-sl" id="ii-br"></div></div>
           <div class="modal-field"><span>${t("img.contrast.label")} <b id="ii-ct-v">0</b></span><div class="ii-sl" id="ii-ct"></div></div>
@@ -1948,7 +2014,7 @@ function openImageImportDialog(
             // 取り込み中の文言を出し、1フレーム譲って描画させてから重い処理に入る（無言の凍結を避ける）
             const okBtn = q<HTMLButtonElement>("#ii-ok");
             okBtn.disabled = true;
-            okBtn.textContent = t("imp.progress.label");
+            setIconLabel(okBtn, "import", t("imp.progress.label")); // V171
             await new Promise((r) => setTimeout(r, 30));
             const proj = convertToProject(images, o);
             close(true);
@@ -2198,6 +2264,7 @@ function showEditor(
       openImageExport: (proj, frameIndex, baseName) =>
         void openImageExportDialog(proj, frameIndex, baseName),
       pickAudioFile,
+      readAudioFile, // V172: ダイアログと読みを分けた（読みは呼び出し元の「読み込み中」の中）
       confirm: confirmDialog,
       choose: chooseDialog, // V157 (D-2): レイヤーカラーの適用先を選ばせる
       notice: noticeDialog, // V154 (W-3)
@@ -2327,7 +2394,7 @@ async function checkAutosave() {
     // M12-1a: 文中に作品名が入る箇所は、{title} に**空の span** を差して DOM をそのまま保ち、
     // 中身は下の textContent で入れる（ユーザーのデータを HTML に混ぜない）
     box.innerHTML = `
-      <p class="modal-msg"><b>${t("lib.autosave.restore.label")}</b><br>
+      <p class="modal-msg"><b>${iconHtml("help")} ${t("lib.autosave.restore.label")}</b><br>
       ${t("lib.autosave.restore.msg", { title: `<span id="as-title"></span>` })}<br>
       <span class="modal-path"></span></p>
       <div class="modal-actions">
@@ -2498,6 +2565,18 @@ async function runUpdateCheck(mode: "startup" | "manual"): Promise<Update | null
     const { check } = await import("@tauri-apps/plugin-updater");
     return await check();
   } catch (e) {
+    // V172 (G-3): β 方針で latest.json に Mac の platform が無い（`RELEASE_BETA_mac_plan.md` §0）。
+    // これは**仕様どおりの空振り**で、エラーではない。起動時はログ 1 行だけ（`logError` にしない）、
+    // 手動は「この版では自動更新に対応していません」と言う。
+    // Windows の正当な失敗（通信できない・feed が無い・署名が合わない）は下の従来どおり。
+    // Codex 指摘（中）: 語だけで分岐すると、万一 Windows 向け feed から windows の項目が消えても
+    // 「Mac テスト版」扱いで飲み込む。無かった platform が `darwin-…` のときだけ静かにする
+    const msg = String(e);
+    if (msg.includes("None of the fallback platforms") && msg.includes("darwin-")) {
+      log("update", `no platform entry in feed (${mode})`);
+      if (mode === "manual") toast(t("set.update.noPlatform.toast"));
+      return null;
+    }
     // ログはローカルへ追記するだけ（送信機能は無い）。起動時は**画面に何も出さない**
     logError("update", `check failed (${mode}): ${e}`);
     if (mode === "manual") toast(t("set.update.failed.toast"));
@@ -2622,8 +2701,8 @@ async function updateNoticeOnce(): Promise<void> {
       <p class="modal-msg"><b></b></p>
       <p class="hintline"></p>
       <div class="modal-actions"><button class="btn primary">OK</button></div>`;
-    (box.querySelector("b") as HTMLElement).textContent = t("set.update.check.label");
-    (box.querySelector(".hintline") as HTMLElement).textContent = t("set.update.check.hint");
+    setIconLabel(box.querySelector("b") as HTMLElement, "update", t("set.update.check.label")); // V171: 🔄 → update
+    (box.querySelector(".hintline") as HTMLElement).innerHTML = tHtml("set.update.check.hint"); // V171: 文中の {icon:gear}
     (box.querySelector("button") as HTMLElement).addEventListener("click", () => close(null));
     return box;
   });
@@ -2644,9 +2723,9 @@ async function openSettingsMenu() {
     const ver = appInfoCache?.version ?? "?";
     // M11-24: プレビュー小窓は3ボタンの説明を並べ立てない（既定の一言だけ・詳細は各ボタンの title へ）
     box.innerHTML = `
-      <p class="modal-msg"><b>${t("set.dialog.label")}</b></p>
+      <p class="modal-msg"><b>${iconHtml("gear")} ${t("set.dialog.label")}</b></p>
       <div class="set-sec">
-        <b>${t("set.lang.label")}</b>
+        <b>${iconHtml("language")} ${t("set.lang.label")}</b>
         <div class="oni" style="flex:1" id="set-lang">
           <button type="button" class="lv" data-lang="ja"></button>
           <button type="button" class="lv" data-lang="en"></button>
@@ -2659,12 +2738,12 @@ async function openSettingsMenu() {
         <p class="hintline">${t("set.lang.hint")}</p>
       </div>
       <div class="set-sec">
-        <b>${t("set.log.label")}</b>
+        <b>${iconHtml("log")} ${t("set.log.label")}</b>
         <button class="minibtn" id="set-log-open">${t("set.log.open.btn")}</button>
         <p class="hintline">${t("set.log.hint")}</p>
       </div>
       <div class="set-sec">
-        <b>${t("set.libdir.label")}</b>
+        <b>${iconHtml("folder")} ${t("set.libdir.label")}</b>
         <p class="modal-path" id="set-dir-path"></p>
         <button class="minibtn" id="set-dir">${t("set.libdir.btn")}</button>
         <!-- V154（穴⑥）: 上書き保存のたびに1つ前を控えとして残す＝**同じ作品の分だけ場所を使う**。
@@ -2674,15 +2753,15 @@ async function openSettingsMenu() {
       <!-- U-1: 起動時の更新確認。**畳まれた下ではなく上のほう**に置く——初回案内が
            「⚙ でオフにできます」と言うので、スクロールしないと見つからない位置だと嘘になる -->
       <div class="set-sec">
-        <b>${t("set.update.check.label")}</b>
+        <b>${iconHtml("update")} ${t("set.update.check.label")}</b>
         <div class="modal-field">
           <div class="sw2" id="set-update-sw"></div>
           <button class="minibtn" id="set-update-now">${t("set.update.checkNow.btn")}</button>
         </div>
-        <p class="hintline">${t("set.update.check.hint")}</p>
+        <p class="hintline">${tHtml("set.update.check.hint")}</p>
       </div>
       <div class="set-sec">
-        <b>${t("set.display.label")}</b>
+        <b>${iconHtml("display")} ${t("set.display.label")}</b>
         <div class="modal-field"><span>${t("set.display.mode.label")}</span>
           <div class="oni" style="flex:1" id="set-modes">
             <button type="button" class="lv" data-mode="windowed">${t("set.mode.windowed.btn")}</button>
@@ -2702,7 +2781,7 @@ async function openSettingsMenu() {
       </div>
       <!-- V158 (C-3): 配色。🖥ディスプレイ設定の隣（2択・即時反映・再起動なし） -->
       <div class="set-sec">
-        <b>${t("set.theme.label")}</b>
+        <b>${iconHtml("palette")} ${t("set.theme.label")}</b>
         <!-- 見出しが「配色」なので、行のラベルで同じ語を繰り返さない（表示言語の節と同じ作り） -->
         <div class="oni" id="set-theme">
           <button type="button" class="lv" data-theme="light">${t("set.theme.light.btn")}</button>
@@ -2711,7 +2790,7 @@ async function openSettingsMenu() {
         <p class="hintline">${t("set.theme.hint")}</p>
       </div>
       <div class="set-sec">
-        <b>${t("set.minidock.label")}</b>
+        <b>${iconHtml("image")} ${t("set.minidock.label")}</b>
         <div class="modal-field"><span>${t("set.minidock.place.label")}</span>
           <div class="oni" style="flex:1" id="set-minidock">
             <button type="button" class="lv" data-dock="timeline">${t("set.minidock.timeline.btn")}</button>
@@ -2723,7 +2802,7 @@ async function openSettingsMenu() {
         <p class="hintline">${t("set.minidock.hint")}</p>
       </div>
       <div class="set-sec">
-        <b>${t("set.cursor.label")}</b>
+        <b>${iconHtml("mouse")} ${t("set.cursor.label")}</b>
         <div class="modal-field"><span>${t("set.cursor.style.label")}</span>
           <div class="oni" style="flex:1" id="set-cursor-style">
             <button type="button" class="lv" data-cur="dot">${t("set.cursor.dot.btn")}</button>
@@ -2744,19 +2823,19 @@ async function openSettingsMenu() {
            既存のコマ削除の確認（M13-2a A-4・settings.frameDeleteConfirm）は表示だけこの節へ統合（キーは既存のまま） -->
       <div class="set-sec">
         <b>${t("set.confirms.label")}</b>
-        <div class="modal-field"><div class="sw2" id="set-conf-clearFrame"></div><span class="tog">${t("set.confirms.clearFrame.label")}</span></div>
+        <div class="modal-field"><div class="sw2" id="set-conf-clearFrame"></div><span class="tog">${iconLabelHtml("clear", t("set.confirms.clearFrame.label"))}</span></div>
         <div class="modal-field"><div class="sw2" id="set-conf-layerDelete"></div><span class="tog">${t("set.confirms.layerDelete.label")}</span></div>
         <div class="modal-field"><div class="sw2" id="set-conf-folderDelete"></div><span class="tog">${t("set.confirms.folderDelete.label")}</span></div>
-        <div class="modal-field"><div class="sw2" id="set-framedel-sw"></div><span class="tog">${t("set.frameDeleteConfirm.label")}</span></div>
+        <div class="modal-field"><div class="sw2" id="set-framedel-sw"></div><span class="tog">${iconLabelHtml("trash", t("set.frameDeleteConfirm.label"))}</span></div>
         <p class="hintline">${t("set.confirms.hint")}</p>
       </div>
       <div class="set-sec">
-        <b>${t("set.keys.label")}</b>
+        <b>${iconHtml("keyboard")} ${t("set.keys.label")}</b>
         <p class="modal-path" id="set-keys-cur"></p>
         <button class="minibtn" id="set-keys">${t("set.keys.btn")}</button>
       </div>
       <div class="set-sec">
-        <button class="minibtn" id="set-guide">${t("set.guide.btn")}</button>
+        <button class="minibtn" id="set-guide">${iconLabelHtml("help", t("set.guide.btn"))}</button>
       </div>
       <div class="set-sec">
         <b>${t("set.about.label")}</b>
@@ -2766,14 +2845,14 @@ async function openSettingsMenu() {
           <p>${t("set.legal.scope.msg")}</p>
           <p>${t("set.legal.trademark.msg")}</p>
           <p>${t("set.legal.privacy.msg")}</p>
-          <p>${t("set.legal.offline.msg")}</p>
+          <p>${tHtml("set.legal.offline.msg")}</p>
           <p>${t("set.legal.license.msg")}</p>
           <p>${t("set.legal.contact.msg")}</p>
         </div>
         <p class="credits">${CREDITS.map((c) => escapeHtml(c)).join("<br>")}</p>
       </div>
       <div class="modal-actions">
-        <button class="btn" id="set-quit">${t("set.quit.btn")}</button>
+        <button class="btn" id="set-quit">${iconLabelHtml("quit", t("set.quit.btn"))}</button>
         <span style="flex:1"></span>
         <button class="btn primary" id="set-close">${t("common.close.btn")}</button>
       </div>`;
@@ -2952,6 +3031,7 @@ async function openSettingsMenu() {
         settings.lang = l;
         invoke("save_settings", { settings }).catch(() => {});
         applyI18n(document); // index.html の静的 DOM（data-i18n / -title / -placeholder）
+        applyIcons(document); // V171: applyI18n が textContent を書いたあとに data-icon の SVG を差し直す
         close(null);
         // ホームを作り直す（アルバム一覧・ヘッダ・空状態）。ライブラリ未設定なら空状態を出し直す
         if (settings.libraryDir) await library.mount(settings.libraryDir, libraryCallbacks);
@@ -3192,7 +3272,7 @@ async function openKeymapSettings() {
     const box = document.createElement("div");
     box.className = "settings-menu keymap-menu";
     box.innerHTML = `
-      <p class="modal-msg"><b>${t("keys.dialog.title")}</b></p>
+      <p class="modal-msg"><b>${iconHtml("keyboard")} ${t("keys.dialog.title")}</b></p>
       <div class="set-sec">
         <div class="modal-field"><span>${t("keys.preset.label")}</span>
           <select id="km-preset" style="flex:1"></select>
@@ -3278,9 +3358,9 @@ async function openKeymapSettings() {
           row.innerHTML = `
             <span class="km-name">${escapeHtml(commandLabel(c.id))}${
               note ? `<em>${escapeHtml(t(note))}</em>` : ""
-            }${shared ? `<em class="km-shared-note">${t("keys.row.sharedMates.label", { names: escapeHtml(mateNames) })}</em>` : ""}${
+            }${shared ? `<em class="km-shared-note">${iconHtml("loop")} ${t("keys.row.sharedMates.label", { names: escapeHtml(mateNames) })}</em>` : ""}${
               clashed
-                ? `<em class="km-clash-note">${escapeHtml(
+                ? `<em class="km-clash-note">${iconHtml("warn")} ${escapeHtml(
                     t("keys.row.clash.msg", {
                       mod: clashMod ? modLabel(clashMod) : "",
                       names: clashNames,
@@ -3288,7 +3368,7 @@ async function openKeymapSettings() {
                   )}</em>`
                 : ""
             }</span>
-            <span class="km-key${label ? "" : " none"}">${escapeHtml(label || t("keys.row.unassigned.label"))}${shared ? " 🔁" : ""}${clashed ? " ⚠" : ""}</span>
+            <span class="km-key${label ? "" : " none"}">${escapeHtml(label || t("keys.row.unassigned.label"))}${shared ? " " + iconHtml("loop") : ""}${clashed ? " " + iconHtml("warn") : ""}</span>
             <button class="minibtn km-set">${t("keys.row.set.btn")}</button>
             <button class="minibtn km-clr"${label ? "" : " disabled"}>${t("keys.row.clear.btn")}</button>`;
           listEl.appendChild(row);
@@ -3569,7 +3649,7 @@ async function firstRunGate(): Promise<void> {
       box.innerHTML = `
         <p class="modal-msg"><b>${t("lib.firstRun.label")}</b><br>
         ${t("lib.firstRun.msg").split("\n").join("<br>")}</p>
-        <div class="modal-actions"><button class="btn primary">${t("lib.firstRun.chooseDir.btn")}</button></div>`;
+        <div class="modal-actions"><button class="btn primary">${iconLabelHtml("folder", t("lib.firstRun.chooseDir.btn"))}</button></div>`;
       (box.querySelector("button") as HTMLElement).addEventListener("click", async () => {
         if (await chooseLibraryDir()) close(true);
       });
@@ -3589,8 +3669,8 @@ function projectDropDialog(paths: string[]): Promise<"import" | "edit" | null> {
     const box = document.createElement("div");
     box.innerHTML = `<p class="modal-msg"></p>
       <div class="modal-actions">
-        <button class="btn primary" data-v="import">${t("lib.drop.import.btn")}</button>
-        <button class="btn" data-v="edit">${t("lib.drop.edit.btn")}</button>
+        <button class="btn primary" data-v="import">${iconLabelHtml("import", t("lib.drop.import.btn"))}</button>
+        <button class="btn" data-v="edit">${iconLabelHtml("pen", t("lib.drop.edit.btn"))}</button>
         <button class="btn" data-v="cancel">${t("common.cancel.btn")}</button>
       </div>`;
     (box.querySelector(".modal-msg") as HTMLElement).textContent = msg;
@@ -3624,7 +3704,7 @@ function openImportProgressModal(total: number): {
   void modal((close) => {
     closeFn = close;
     const box = document.createElement("div");
-    box.innerHTML = `<p class="modal-msg"><b>${t("imp.progress.label")}</b></p>
+    box.innerHTML = `<p class="modal-msg"><b>${iconHtml("import")} ${t("imp.progress.label")}</b></p>
       <div class="bar"><i id="ip-bar" style="width:0%"></i></div>
       <p class="modal-path" id="ip-text"></p>
       <div class="modal-actions">
@@ -5206,6 +5286,11 @@ window.addEventListener("DOMContentLoaded", async () => {
   setPerfSink((text) =>
     invoke("append_log", { text: `[${new Date().toISOString()}] ${text}` }).catch(() => {})
   );
+  // V172 (G-2): 音の state（interrupted / closed …）も同じログへ。行の形は audio.ts の logState が決める
+  // （state・visibility・秒数だけ＝作品名は書けない）
+  setAudioLogSink((text) =>
+    invoke("append_log", { text: `[${new Date().toISOString()}] ${text}` }).catch(() => {})
+  );
   setBusyImpl(busyOverlay);
   startLongTaskWatch();
   // 閉じるときに溜まっている行を落とさない（最後の1秒ぶんが消えると、
@@ -5215,14 +5300,15 @@ window.addEventListener("DOMContentLoaded", async () => {
   // 切替 UI は M12-2。ここでは「読む・不正値を弾く・判定する」までを配線する
   setLang(detectLang(settings.lang));
   applyI18n(document);
+  applyIcons(document); // V171: index.html の data-icon に線画を差す（applyI18n の後＝textContent で消えた子を作り直す）
   // U-1: 更新の確認を**ここで投げる**（await しない）。以降の起動処理と並行して走らせるため。
   // 起動処理の最後で投げると、途中のモーダル（オートセーブの復元など）を人が答えるまで
   // **確認が始まってすらいない**状態になる（実測で判明したので、投げる場所を前へ出した）。
   // オフの人はここで何もしない＝通信そのものが起きない
   beginStartupUpdateCheck();
   // 動的に書き換わるノード（data-i18n を振っていない）の初期値。どちらも起動時は hidden
-  $("#ed-title").textContent = t("ed.title.newNote.label");
-  $("#import-label").textContent = t("imp.progress.label");
+  setIconLabel($("#ed-title"), "pen", t("ed.title.newNote.label")); // V171: ✏ → pen
+  setIconLabel($("#import-label"), "import", t("imp.progress.label")); // V171: 📥 → import
   // M10-20: 並び順を設定から復元（項目なし・不正値は "manual"＝従来挙動）
   library.shelfSort =
     settings.shelfSort === "name" || settings.shelfSort === "date"
@@ -5319,7 +5405,7 @@ function showMissingLibraryState() {
       <p><b>${t("lib.missing.label")}</b></p>
       <p class="hintline">${escapeHtml(settings.libraryDir ?? "")}</p>
       <p class="hintline">${t("lib.missing.hint")}</p>
-      <button class="btn primary" id="lib-missing-pick">${t("lib.missing.pick.btn")}</button>`;
+      <button class="btn primary" id="lib-missing-pick">${iconLabelHtml("folder", t("lib.missing.pick.btn"))}</button>`;
     shelf.appendChild(box);
     (box.querySelector("#lib-missing-pick") as HTMLElement).addEventListener("click", async () => {
       if (await chooseLibraryDir()) {
