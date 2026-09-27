@@ -78,6 +78,7 @@ import {
   cursorLayerHidden,
   hasRing,
   footprintEdges,
+  outerRingRuns, // V178 (A-72): 全レイヤー消しゴムの二重線（外側の線）
   antColor,
   canvasCursorFor,
   panCursorFor,
@@ -141,6 +142,8 @@ import {
   ancestorChain,
   // M13-1: 同名のメソッドがあるので別名で入れる（`this.` の有無で意味が変わると読み違える）
   moveTargetLayerIds as computeMoveTargetLayerIds,
+  // V178 (A-72): 全レイヤー消しゴムの対象（実効の 👁 かつ実効の 🔒 でない・規則は 1 つ）
+  eraseAllTargets,
   DropTarget,
 } from "./layerTree";
 // M11-10: ショートカット（キー → コマンドID → 実行）。定義とプリセットは src/keymap.ts に集約
@@ -159,6 +162,9 @@ import {
   type CommandId,
   type Preset,
 } from "../keymap";
+// V181 (A-25): 「Ctrl か（Mac なら ⌘ も）」。`ctrlKey` を直に読まずにこれを通す（v181_smoke [S-5] が数える）。
+//  isMacPlatform は押しっぱなしのくり返しを Mac でだけ止めるため（swallowRepeatOnMac）
+import { isMacPlatform, primaryMod } from "../platform";
 // M10-1c: 書体テーブル・明示ロード・サイズ選択の規則は fonts.ts に集約
 import {
   FONTS,
@@ -529,6 +535,39 @@ const SEL_MASK_RGBA: readonly [number, number, number, number] = [64, 140, 255, 
  *  カーソル非依存の視覚補助（モードラベル .xmode-label）を併設する。 */
 const ROTATE_CURSOR = "grab";
 
+/** ★V178 (A-72): 全レイヤー消しゴムの 1 ストロークぶんの状態。 */
+interface EraseAllStroke {
+  /** なぞった作品。確定のときに作品が替わっていたら積まない（別の作品の履歴を汚さない） */
+  project: Project;
+  /** なぞり始めたコマ。**Frame オブジェクトで持つ**＝確定・取り消しは必ずこのコマへ戻る
+   *  （表示中のコマ番号で引くと、コマを移ってからの Ctrl+Z が別のコマへ書き戻す） */
+  frame: Frame;
+  /** 対象のレイヤー id（下→上。規則は layerTree.ts の `eraseAllTargets`） */
+  ids: string[];
+  /** なぞる前の写し（対象ぶん） */
+  before: Record<string, IndexBuf>;
+  /** ★距離の位相（`dashAcc`）は**レイヤーごと**に持つ。同じものを枚数ぶん回すと、1 本の線分で位相が
+   *  枚数ぶん進み、点線の穴の位置がレイヤーごとにずれる（要件 §3-2）。いまの消しゴムは solid で
+   *  位相を消費しないが、種類が増えたときに黙って壊れないよう、形を先に揃えておく */
+  dash: Record<string, { d: number }>;
+  /** 📌 の id（消したら全コマの絵が変わる＝フィルムを全部塗り直す） */
+  shared: Set<string>;
+}
+
+/** ★V178 (A-72・最後の網): 積む直前に 1 つだけ口を持つ履歴。
+ *  全レイヤーの束より**先に**別の操作の履歴が積まれると、Ctrl+Z を続けても元の絵に戻らない。
+ *  入口（コマンド・重い処理・↶↷・UI を押した時点・キー）で畳めなかった経路（知られていない経路・これから足す機能）でも、
+ *  積む直前に束を確定すれば**履歴の順序（消しゴム → その操作）だけは必ず守れる** */
+class EditorHistory extends History {
+  constructor(private readonly beforePush: () => void) {
+    super();
+  }
+  push(entry: HistoryEntry) {
+    this.beforePush();
+    super.push(entry);
+  }
+}
+
 export class Editor {
   project!: Project;
   saveCtx: EditorSaveContext | null = null;
@@ -566,6 +605,11 @@ export class Editor {
   selectAutoGlobal = false;
   /** M10-19: バケツ塗りの参照（false=このレイヤー（既定・従来） / true=全レイヤー）。セッションのみ */
   fillRefAll = false;
+  /** ★V178 (A-72): 消しゴムの「全レイヤー」。オンのとき、なぞったところが**そのコマの見えているレイヤー
+   *  すべて**から消える（対象の規則は layerTree.ts の `eraseAllTargets`）。
+   *  **覚えない**＝settings に書かない（アプリを開き直すと必ずオフ・上の `fillRefAll` と同じ「セッションのみ」）。
+   *  *知らないうちにオンのまま* が、この道具でいちばん怖いから（要件 §3-4）。切り替えは `setEraseAllLayers` だけを通す */
+  private eraseAllLayers = false;
   /** M14 (S-2): 塗りツールの形式（bucket=従来のバケツ / enclose=囲い塗り）。セッションのみ・既定はバケツ */
   private fillMode: FillMode = "bucket";
   /** M14 (S-2): 囲い塗りのドラッグ軌跡（自由選択の lassoPts と同じ流儀・別枠で持つ） */
@@ -745,7 +789,10 @@ export class Editor {
   playing = false;
   playTimer: number | null = null;
 
-  history = new History();
+  // ★V178 (A-72): 積む直前に全レイヤーの束を確定する（EditorHistory の説明）
+  history = new EditorHistory(() => {
+    if (this.eraseAllStroke) this.finishEraseAllNow();
+  });
   /** ライブラリ未保存の変更があるか。true をセットするとオートセーブ対象にもなる */
   private _dirty = false;
   private autosavePending = false;
@@ -944,6 +991,202 @@ export class Editor {
     set(!before);
   }
 
+  // ---------------- V178 (A-72): 全レイヤー消しゴム ----------------
+  /** V178: いま「全レイヤー」で消すか（道具が消しゴムで、切り替えがオン） */
+  private eraseAllOn(): boolean {
+    return this.tool === "eraser" && this.eraseAllLayers;
+  }
+
+  /** V178: 知らせと説明の文言。**動的キーは `*Key` で持つ**（`LOCK_TOAST` と同じ作法・検査が沈黙しないように） */
+  private static readonly ERASE_ALL_TEXT = {
+    none: { msgKey: "ed.eraser.allLayers.none.toast" },
+    wait: { msgKey: "ed.eraser.allLayers.wait.toast" },
+    hint: { msgKey: "ed.eraser.allLayers.hint" },
+  } as const;
+
+  /** V178: 描きながら押さえて使うキー（`KeyboardEvent.key`）。これらが来ても全レイヤーの束は終えない
+   *  （Shift・Ctrl・Alt は修飾・単体タップの割り当て、Space は手のひら。どれも作品を変えない） */
+  private static readonly HELD_WHILE_DRAWING = new Set(["Shift", "Control", "Alt", "Meta", " "]);
+
+  /** V178: 「全レイヤー」を切り替える。**覚えない**（設定に書く口を呼ばない）。
+   *  カーソルの二重線を描き直し、オンにしたとき窓がまだ眠っていれば起こしておく（§3-5）。
+   *  起こす入口は `renderCanvas` の 1 つだけ——同じコマを 2 か所から同時に起こすと、後から起きたほうが
+   *  `f.layers[id]` を差し替え、その間に描いた線が消える */
+  private setEraseAllLayers(on: boolean) {
+    this.eraseAllLayers = on;
+    this.cursorPainted = "";
+    this.paintCursorLayer();
+    if (on && this.sleepOn && !this.frameReady()) this.renderCanvas();
+  }
+
+  /** V178: 全レイヤー消しゴムの関所。**描けないとき true**（呼び出し側は何もせず戻る＝`lockGuard` と同じ形）。
+   *  いまのレイヤーの 🔒 では止めない——🔒 のレイヤーは対象から外れるだけ（移動・変形と同じ線引き）。
+   *   ① 対象のうち、まだ眠っているものがある → 描かない（半分だけ消えた状態を作らない・§3-5）
+   *   ② 対象が 0 枚（全部 🔒／全部非表示）→ 描かない
+   *  どちらもトーストで知らせる（`lockGuard` と同じ 3.4 秒の間引き） */
+  private eraseAllGuard(): boolean {
+    const { ids, asleep } = eraseAllTargets(this.project, this.frameIndex);
+    if (asleep.length > 0) {
+      this.eraseAllToast("wait");
+      // 窓（表示中＋前後3）を起こすのは renderCanvas の入口だけ。起きたら次のストロークから効く
+      if (this.sleepOn && !this.frameReady()) this.renderCanvas();
+      return true;
+    }
+    if (ids.length === 0) {
+      this.eraseAllToast("none");
+      return true;
+    }
+    return false;
+  }
+
+  private eraseAllToast(kind: "none" | "wait") {
+    const now = performance.now();
+    if (now - this.lastEraseAllToastAt < 3400) return;
+    this.lastEraseAllToastAt = now;
+    this.cb.toast(t(Editor.ERASE_ALL_TEXT[kind].msgKey));
+  }
+
+  /** V178: 全レイヤーのストロークを始める。対象ごとに写しと位相を用意し、📌 が入っていれば
+   *  **その作品で最初の 1 回だけ**知らせる（決-1: 確認ダイアログは出さない＝描き味を止めない）。
+   *  関所（`eraseAllGuard`）を通ったあとに呼ぶ。対象が 0 枚でも束は返す＝1 枚の経路へは落とさない */
+  private beginEraseAll(): EraseAllStroke | null {
+    const frame = this.project.frames[this.frameIndex];
+    if (!frame) return null;
+    const { ids } = eraseAllTargets(this.project, this.frameIndex);
+    const pinnedIds = this.sharedLayerIds();
+    const st: EraseAllStroke = { project: this.project, frame, ids, before: {}, dash: {}, shared: new Set() };
+    for (const id of ids) {
+      st.before[id] = copyIndexBuf(frame.layers[id]);
+      st.dash[id] = { d: 0 };
+      if (pinnedIds.has(id)) st.shared.add(id);
+    }
+    if (st.shared.size > 0 && !this.eraseAllPinNoticed.has(this.project)) {
+      this.eraseAllPinNoticed.add(this.project);
+      this.cb.toast(t("ed.eraser.allLayers.pinned.toast"));
+    }
+    this.eraseAllStroke = st;
+    return st;
+  }
+
+  /** V178: 押した瞬間の打点を、対象のレイヤーぜんぶに打つ（座標は整数の pt＝A-70 の約束どおり）。
+   *  `stamp` は位相を使わない（点線の間引きは `strokeSegment` の側）ので、ここでは dashAcc を替えない */
+  private eraseAllStamp(st: EraseAllStroke, x: number, y: number, o: R.PenOptions) {
+    for (const id of st.ids) {
+      const buf = st.frame.layers[id];
+      if (!buf) continue;
+      R.stamp(buf, x, y, o);
+    }
+  }
+
+  /** V178: 線分を、対象のレイヤーぜんぶに引く。座標（lastPt / smoothPt）は全レイヤー共通の 1 組。
+   *  ★位相（dashAcc）だけは**レイヤーごと**に差し替える（同じ o を枚数ぶん回すと位相が枚数ぶん進む）。
+   *  `seed` と `toneShift` はコマ単位なので共有してよい */
+  private eraseAllSegment(
+    st: EraseAllStroke,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    o: R.PenOptions
+  ) {
+    for (const id of st.ids) {
+      const buf = st.frame.layers[id];
+      if (!buf) continue;
+      o.dashAcc = st.dash[id];
+      R.strokeSegment(buf, x0, y0, x1, y1, o);
+    }
+  }
+
+  /** ★V178 (A-72・Codex 指摘 2〜3 回目・高): 全レイヤーの束を、**作品に別の変更が入る前に**確定して終える。
+   *
+   *  描いている最中でもキーやもう 1 本のポインタは効く（`onKeyDown` に `pointerDown` の関所は無い）。コマの削除・
+   *  取り消し・コマ移動・重い処理が束より**先に**走ると、その履歴が「消したあと」の絵を抱えてしまい、
+   *  **Ctrl+Z しても元の絵に戻らない**（Codex 実測: コマ削除 → Ctrl+Z で 93 画素が消えたまま）。
+   *  だから入口——キー（`onKeyDown`・ダイアログ／文字入力欄／IME の関所のあと）・コマンド（`runCommand`）・重い処理（`beginBusy`）・↶↷（`handleUndo` /
+   *  `handleRedo`）・UI を押した時点（`uiPointerHandler`）——で先にここを通し、入口を通らない経路は
+   *  **ほかの履歴を積む直前**（`EditorHistory`）で拾う（最後の網）。
+   *  押している最中なら、そのストロークはここで終わる（残りのなぞりは次に押すまで描かない＝座標は触らない） */
+  private finishEraseAllNow(): void {
+    if (!this.eraseAllStroke) return;
+    this.commitEraseAll();
+    if (this.pointerDown) {
+      // pointerup と同じ後始末（押していない・終端の控えなし・解決済みトーンなし・捕捉なし）
+      this.pointerDown = false;
+      this.lastPointerEvent = null;
+      this.strokeTone = null;
+      this.releaseCapture();
+    }
+  }
+
+  /** V178: 全レイヤーのストロークを確定する。**歪みの確定と同じ形**——1 画素でも変わったレイヤーだけ
+   *  before/after を積み、`multiBufferChangeEntry` を **1 つだけ** push する（ひとなぞり＝ Ctrl+Z 1 回）。
+   *
+   *  ★歪みの形から 2 つだけ変えた（どちらも、歪みの形のままだと壊れると V178 の調べで実測した所）:
+   *   ① 戻し先は **Frame オブジェクト**で引く。歪みは「Ctrl+Z を押した時点で表示中のコマ」で引くので、
+   *      コマを移ってから Ctrl+Z すると**別のコマへ書き戻す**（`pushBufferHistory`・変形・「消す」と同じ持ち方）
+   *   ② 取り消し・やり直しの前に、そのコマを**書きで起こす**（`prepare`）。大きい作品で窓の外へ出て眠った
+   *      コマは `frame.layers[id]` が無く、起こさないと Ctrl+Z が**黙って空振り**する */
+  private commitEraseAll() {
+    const st = this.eraseAllStroke;
+    this.eraseAllStroke = null;
+    if (!st) return;
+    // 作品が替わっていたら積まない（別の作品の履歴を汚さない）。★なぞったコマが作品から外れていても、
+    // 同じ作品なら積む——外したのは**いま積まれようとしている操作**（コマの削除など・EditorHistory の網）で、
+    // 束が先に積まれれば、その操作の取り消しでコマが戻ったあと、束の取り消しで元の絵に戻る
+    if (st.project !== this.project) return;
+    const frame = st.frame;
+    const beforeDiff: Record<string, IndexBuf> = {};
+    const afterDiff: Record<string, IndexBuf> = {};
+    let pinned = false;
+    for (const id of st.ids) {
+      const b = st.before[id];
+      const a = frame.layers[id];
+      if (!b || !a) continue;
+      let differs = false;
+      for (let i = 0; i < b.length; i++) {
+        if (b[i] !== a[i]) {
+          differs = true;
+          break;
+        }
+      }
+      if (!differs) continue; // 1 画素も変わっていないレイヤーは積まない（メモリ・§3-3）
+      beforeDiff[id] = b;
+      afterDiff[id] = copyIndexBuf(a);
+      if (st.shared.has(id)) pinned = true;
+    }
+    if (Object.keys(afterDiff).length === 0) return; // 1 枚も変わっていなければ履歴を積まない
+    const self = this;
+    // 📌 は全コマの絵が変わる＝フィルムを全部塗り直す（§3-4b・全コマが変わったことに気づける唯一の目印）。
+    // 塗り直しは rebuildFilm（見えている分だけ遅延で描く＝F-0 の流儀・全コマ貼り付けと同じ）
+    const repaint = () => {
+      if (pinned) self.rebuildFilm();
+      else {
+        const fi = self.project.frames.indexOf(frame);
+        if (fi >= 0) self.paintFilmThumb(fi);
+      }
+    };
+    const onApply = () => {
+      // Undo/Redo もデータ変更なので dirty（＝オートセーブ対象）にする
+      self.dirty = true;
+      self.renderCanvas();
+      repaint();
+    };
+    const entry = multiBufferChangeEntry(
+      "消しゴム（全レイヤー）",
+      (id) => frame.layers[id] ?? null,
+      beforeDiff,
+      afterDiff,
+      onApply
+    );
+    entry.prepare = () => wakeFrame(self.project, frame, "write");
+    this.history.push(entry);
+    // 書いたコマの圧縮控えは古い。dirty の漏斗は「表示中のコマ」だけを見るので、ここは名指しで捨てる
+    if (this.sleepOn) invalidateFrame(frame);
+    this.dirty = true;
+    this.renderCanvas();
+    repaint();
+  }
+
   // ---------------- V156 (P-1): 眠り ----------------
   /** 眠りを効かせるしきい値。**これ未満の作品はいままでと完全に同じ経路**を通る
    *  （スパイク実測: 50コマ×3レイヤーで減らせるのは 11 MiB しかなく、遅くなる理由だけが残る）。 */
@@ -1097,6 +1340,15 @@ export class Editor {
   private strokeBefore: IndexBuf | null = null;
   private strokeSeed = 1;
   private dashAcc = { d: 0 };
+  /** ★V178 (A-72): 進行中の全レイヤーのストローク（pointerdown で作り、pointerup で確定して捨てる）。
+   *  null なら 1 枚の経路（従来どおり） */
+  private eraseAllStroke: EraseAllStroke | null = null;
+  /** V178 (決-1): 「📌 は全コマから消える」を知らせた作品。**作品（Project）ごと**に 1 回
+   *  （mount でのリセットに頼らない＝別の作品を開けば自然に出し直す。弱い参照なので閉じた作品を抱え込まない） */
+  private eraseAllPinNoticed = new WeakSet<Project>();
+  /** V178: 「消せるレイヤーがない／準備中」の間引き（`lockGuard` と同じ 3.4 秒）。
+   *  -Infinity で始める＝起動した直後の 1 回目も必ず出す */
+  private lastEraseAllToastAt = -Infinity;
   private lastPt: { x: number; y: number } | null = null;
   private smoothPt: { x: number; y: number } | null = null;
   private _pointerDown = false;
@@ -1352,6 +1604,10 @@ export class Editor {
    *（保存・書き出し・タイムライン・レイヤー行・キャンバス…を1箇所でまかなう） */
   private uiPointerHandler = () => {
     if (this.mounted) this.endArrowSession();
+    // ★V178 (A-72・Codex 3 回目): 描いている最中に**もう 1 本のポインタ**（ペンを置いたままマウス等）で
+    //  ボタンを押すと、そのボタンの処理が束より先に作品を変える（↶↷・消す・コマの追加…）。
+    //  ここは capture 段階で**どのボタンの処理より先**に走る漏斗なので、ここで束を確定して終える
+    if (this.mounted && this.eraseAllStroke) this.finishEraseAllNow();
   };
   /** M11-8: ステージのスクロール（手のひら・ホイール）にランチャーを追従させる */
   private stageScrollHandler = () => {
@@ -1416,6 +1672,9 @@ export class Editor {
     // V154: 知らせは「作品につき1回」＝別の作品を開いたら出し直す（Editor は使い回される）
     this.promoteNoticed = false;
     this.sizeNoticedLevel = "";
+    // V178 (A-72): 描きかけの束を持ち越さない（📌 の知らせは作品ごとの WeakSet なので、ここで戻さなくてよい）。
+    //（「全レイヤー」の切り替え自体は `fillRefAll` と同じくアプリを閉じるまで残る＝設定には書かない）
+    this.eraseAllStroke = null;
     this.exporting = false; // W-5: 書き出し中に戻る→別の作品を開く、で取り残さない
     this.playing = false;
     this.selMask = null;
@@ -3527,13 +3786,14 @@ export class Editor {
           if (wavePointerId === e.pointerId) wavePointerId = null;
         });
         // 任意: Ctrl+ホイール=カーソル位置基準ズーム / ホイール=パン
+        // V181: Mac は ⌘＋スクロールでも（`primaryMod`）。トラックパッドのピンチが ctrlKey のホイールで来るなら今までどおり
         cv.addEventListener(
           "wheel",
           (e) => {
             if (!buffer) return;
             e.preventDefault();
             const { v0, vd } = view();
-            if (e.ctrlKey) {
+            if (primaryMod(e)) {
               const frac = Math.max(0, Math.min(1, localX(e) / cv.width));
               setZoom(zoomT - Math.sign(e.deltaY) * 0.08, v0 + frac * vd, frac);
             } else {
@@ -4604,7 +4864,8 @@ export class Editor {
         this.selectedFolderId = null;
       }
     }
-    if (kind === "folder" && !ev.shiftKey && !ev.ctrlKey)
+    // V181: Mac の ⌘＋クリックも Ctrl＋クリックと同じ（上のトグルは以前から ctrl と meta の両方を見ている）
+    if (kind === "folder" && !ev.shiftKey && !primaryMod(ev))
       this.selectedFolderId = this.selectedFolderId === id ? null : id;
     this.rebuildLayers();
   }
@@ -5489,7 +5750,8 @@ export class Editor {
             e.preventDefault();
             e.stopPropagation();
             this.cancelTextDraft();
-          } else if ((e.code === "Enter" || e.code === "NumpadEnter") && e.ctrlKey) {
+          } else if ((e.code === "Enter" || e.code === "NumpadEnter") && primaryMod(e)) {
+            // V181: Mac は ⌘Enter でも確定（`primaryMod`＝Ctrl か、Mac なら ⌘ も）
             e.preventDefault();
             e.stopPropagation();
             this.commitTextDraft();
@@ -5708,6 +5970,21 @@ export class Editor {
       $("#ed-x-cancel").addEventListener("click", () => {
         this.cancelTransform();
         this.setTool(this.prevTool === "transform" ? "pen" : this.prevTool);
+      });
+    } else if (this.tool === "eraser") {
+      // ★V178 (A-72・決-3 ①): 「全レイヤー」の切り替え。形は描き味の切り替え（`bindTog` / `ed-tog-stab`）と
+      //  同じ `sw2`。**覚えない**（既定オフ・設定に書かない）。規則（👁 と 🔒）は画面に 1 行で出す
+      //  （ペンではツールチップを出しにくいので、説明は見えるところに置く）
+      host.innerHTML = `<h3>${t("ed.eraser.head.label")}</h3>
+        <div class="row"><span class="tog">${t("ed.eraser.allLayers.label")}</span><div class="sw2${
+          this.eraseAllLayers ? " on" : ""
+        }" id="ed-tog-eraseall"></div></div>
+        <p class="opt-hint" id="ed-eraseall-hint"></p>`;
+      $("#ed-eraseall-hint").textContent = t(Editor.ERASE_ALL_TEXT.hint.msgKey);
+      const sw = $("#ed-tog-eraseall");
+      sw.addEventListener("click", () => {
+        this.setEraseAllLayers(!this.eraseAllLayers);
+        sw.classList.toggle("on", this.eraseAllLayers);
       });
     }
   }
@@ -7437,6 +7714,9 @@ export class Editor {
    *  ——保存先ピッカーのように「利用者を待っている時間」に進捗を出さないため。
    *  V166: 表示は `runHeavy`（＝`runWithBusy`）へ寄せたので、ここは**入口の閉鎖だけ**を持つ。 */
   private beginBusy(kind: "audio" | "export" | "heavy") {
+    // ★V178 (A-72・Codex 2 回目): 重い処理が作品を変える前に、全レイヤーの束を確定して終える。
+    //  busyKind を立てるのはここだけ＝重い処理の最中に束が残ることは無くなる（pointerup の関所で取りこぼさない）
+    if (this.eraseAllStroke) this.finishEraseAllNow();
     this.busyKind = kind;
     // ポインタを止める（キーは dialogOpen() が見る）。**遅延なしで即座に**——
     // 進捗が出るまでの 450ms に触られたら、そこで混ざったものが保存される
@@ -8263,10 +8543,13 @@ export class Editor {
     }
     const size = this.penSize;
     const ring = this.cursorCfg.ring && hasRing(this.tool);
+    // ★V178 (A-72・決-3 ②): 全レイヤー消しゴムのときだけ、輪の外側にもう 1 本（二重線）。
+    //  太さの輪はそのまま＝消える範囲は変わらない。輪を切っている設定なら二重線も出さない（輪の飾りなので）
+    const dbl = ring && this.eraseAllOn();
     // 同じ絵をもう一度描かない（位置・太さ・ツール・寸法が全部同じなら何もしない）
     const cssW = canvas.offsetWidth;
     const cssH = canvas.offsetHeight;
-    const key = `${dot!.x},${dot!.y},${size},${ring ? 1 : 0},${this.cursorCfg.cell ? 1 : 0},${cssW}x${cssH}`;
+    const key = `${dot!.x},${dot!.y},${size},${ring ? 1 : 0}${dbl ? "d" : ""},${this.cursorCfg.cell ? 1 : 0},${cssW}x${cssH}`;
     if (key === this.cursorPainted && !cv.hidden) return;
     if (!cssW || !cssH) return;
     const dpr = window.devicePixelRatio || 1;
@@ -8304,6 +8587,22 @@ export class Editor {
         else ctx.fillRect(x1 - 1, y0, 1, y1 - y0);
       }
     }
+    if (dbl) {
+      // 輪との間隔（物理 px）。細い線 2 本が離れて見える最小限（dpr 1 で 2px の隙間）
+      const g = Math.max(3, Math.round(3 * dpr));
+      for (const r of outerRingRuns(size, L, T, g)) {
+        // 色は輪と同じ黒／白の交互（キャンバスのドットで 4 周期）。帯を 1 ドットの境目で区切って塗る
+        const ay = Math.floor(r.y / py);
+        const end = r.x + r.w;
+        for (let x = r.x; x < end; ) {
+          const ax = Math.floor(x / px);
+          const next = Math.min(end, Math.max(x + 1, Math.ceil((ax + 1) * px)));
+          ctx.fillStyle = antColor(ax, ay);
+          ctx.fillRect(x, r.y, next - x, 1);
+          x = next;
+        }
+      }
+    }
     this.cursorPainted = key;
   }
 
@@ -8321,9 +8620,28 @@ export class Editor {
     wrap.style.transform = `rotate(${this.viewRot}deg)${this.viewFlipH ? " scaleX(-1)" : ""}`;
   }
 
-  /** クライアント座標 → キャンバスドット座標（表示回転/反転の逆写像）。
-   *  M3.10 G-1: wrap 矩形は枠線4pxを含みドット領域とズレるため、canvas 自身の矩形で写像する */
+  /** クライアント座標 → キャンバスドット座標（表示回転/反転の逆写像）。**ドットに落とした整数**。
+   *  M3.10 G-1: wrap 矩形は枠線4pxを含みドット領域とズレるため、canvas 自身の矩形で写像する。
+   *
+   *  ★A-70: 中身は `clientToPixelF` の `Math.floor` **だけ**。写像の式をここに持たないこと
+   *  （2つに書き分けると、カーソル表示と描線で座標がズレる。しかも誰も気づけない）。 */
   private clientToPixel(cx: number, cy: number): { x: number; y: number } {
+    const p = this.clientToPixelF(cx, cy);
+    return { x: Math.floor(p.x), y: Math.floor(p.y) };
+  }
+
+  /** クライアント座標 → キャンバスドット座標（**小数のまま**）。
+   *
+   *  ★A-70: ブラシの線が階段状になる真因は「量子化が2段」あったこと。
+   *  ① ここ（旧 `clientToPixel`）で `Math.floor` して入力の時点で段が付く
+   *  ② そのうえ描線側が関節ごとに `Math.round` して `lastPt` を整数で持ち回る
+   *  → 丸め誤差が**関節のたびに入り直す**ので、段が 2,3,2,3… と不揃いになる。
+   *  直線ツールが揃って見えるのは、始点から終点まで**1本**で引くから（同じラスタライザ）。
+   *
+   *  そこで**描線の経路だけ**がこの小数版を使い、`lastPt` / `smoothPt` を小数のまま持つ。
+   *  **丸めるのは打点の瞬間だけ**——`raster.ts` の `strokeSegment` が既に内部で
+   *  `Math.round` しているので、`raster.ts` は1行も変えなくてよい。 */
+  private clientToPixelF(cx: number, cy: number): { x: number; y: number } {
     const rect = ($("#ed-canvas") as unknown as HTMLCanvasElement).getBoundingClientRect();
     // rect は回転後の AABB。回転が 90/270 のとき幅高さが入れ替わる
     let u: number, v: number;
@@ -8347,7 +8665,22 @@ export class Editor {
         v = ny;
     }
     if (this.viewFlipH) u = 1 - u;
-    return { x: Math.floor(u * W), y: Math.floor(v * H) };
+    return { x: u * W, y: v * H };
+  }
+
+  /** 描線に渡す座標。**`clientToPixelF` を半画素ずらしたもの**。
+   *
+   *  ★なぜ半画素引くのか（Codex のリリース前レビュー指摘・重大度 高）:
+   *  `clientToPixelF` は「画素 n が [n, n+1) を占める」座標系（＝`Math.floor` で画素に落ちる）。
+   *  ところが `raster.ts` の `strokeSegment` / `stamp` は **`Math.round` で画素に落とす**＝
+   *  「画素 n が [n−0.5, n+0.5) を占める」座標系。そのまま渡すと、
+   *  **カーソルが指す画素と、実際に描かれる画素が 1 ドットずれる**（10.75 → カーソルは 10・描線は 11）。
+   *  端でも `319.7` が `320` に丸まり、範囲外になってクリックだけでは描けなくなる。
+   *  半画素引けば `Math.round` の結果が `Math.floor` と一致するので、**従来と同じ画素**に着く。
+   *  この回で変えたいのは「関節ごとに丸め直すのをやめる」ことだけで、**線の位置ではない**。 */
+  private clientToStrokePt(cx: number, cy: number): { x: number; y: number } {
+    const p = this.clientToPixelF(cx, cy);
+    return { x: p.x - 0.5, y: p.y - 0.5 };
   }
 
   renderCanvas() {
@@ -8879,13 +9212,25 @@ export class Editor {
     // M11-5: 前の接触が pointerup 無しで終わっていたら、ここで畳んでから始める
     //（フォーカスを奪われて up が届かなかった場合の自己修復。正常時は何もしない）
     if (this.pointerDown || this.capturedPointerId !== null) this.endPointerSession("down");
+    // ★V178 (A-72・Codex 指摘): 網。全レイヤーの束が確定されないまま残っていたら（入口で畳み、ほかの履歴を積む直前にも
+    //  確定するので、知られている経路では起きない）、**次のストロークの pointermove が古い束（古いコマ）へ描く**ので、
+    //  ここで必ず確定してから始める
+    if (this.eraseAllStroke) this.commitEraseAll(); // 取りこぼした束を先に確定（次の 1 枚の経路を乗っ取らせない）
     this.shiftHeld = e.shiftKey; // M10-7: pointer 側の modifier を真実として同期
     this.syncAltFromEvent(e.altKey, "pointerdown"); // V166 (C): Alt も同じ作法で同期する
     this.closeStrip(); // M14 (S-1): キャンバスへ触れたら（描き始め）形式ストリップは畳む
     // ★V157 (D-1): ロック中のレイヤーには描かせない。**捕捉する前に**戻る（掴みっぱなしを作らない）。
     // 変形の途中（`xformActive`）は素通し——始められた時点でロックされていないと分かっているし、
     // ここで止めると確定できずに宙に浮く
-    if (!this.spaceHeld && !this.xformActive && Editor.PIXEL_TOOLS.has(this.tool) && this.lockGuard())
+    // ★V178 (A-72): 全レイヤー消しゴムは「いまのレイヤー」の 🔒 ではなく**対象の束**で決める
+    //  （🔒 のレイヤーは対象から外れるだけ＝移動・変形の `moveTargetLayerIds` と同じ線引き）。
+    //  対象 0 枚・眠り残りのときは、同じく**捕捉する前に**戻る（`eraseAllGuard`）
+    if (
+      !this.spaceHeld &&
+      !this.xformActive &&
+      Editor.PIXEL_TOOLS.has(this.tool) &&
+      (this.eraseAllOn() ? this.eraseAllGuard() : this.lockGuard())
+    )
       return;
     this.lastPointerEvent = e;
     try {
@@ -8928,16 +9273,25 @@ export class Editor {
         // この順序（解決→penOptions→activeBuffer）が 257 色目を跨ぐストロークの安全の要
         this.strokeTone = { kind: this.tool, ...this.resolveToneFor(this.tool) };
         const o = this.penOptions(e.pressure);
-        const buf2 = this.activeBuffer();
-        if (!buf2) return;
-        this.strokeBefore = copyIndexBuf(buf2);
+        // ★V178 (A-72): 全レイヤー消しゴムは「対象の束」へ打つ。オフなら multi=false＝ここから下は
+        //  従来の 1 枚の経路と同じ文の並び。束が作れないときも 1 枚の経路へは落とさない（buf2 は null のまま）
+        const multi = this.eraseAllOn();
+        const all = multi ? this.beginEraseAll() : null;
+        const buf2 = multi ? null : this.activeBuffer();
+        if (!all && !buf2) return;
+        this.strokeBefore = buf2 ? copyIndexBuf(buf2) : null;
         this.strokeSeed = (Math.random() * 1e9) | 0;
         this.dashAcc = { d: 0 };
         o.seed = this.strokeSeed;
         o.dashAcc = this.dashAcc;
-        this.smoothPt = { x: pt.x, y: pt.y };
-        this.lastPt = { x: pt.x, y: pt.y };
-        R.stamp(buf2, pt.x, pt.y, o);
+        // ★A-70: 描線の経路だけ**小数のまま**持つ（関節ごとの丸め誤差を無くす）。
+        //  ⚠ 最初の打点は**従来どおり整数の `pt`**（＝`floor`）で打つ。小数を丸め直すと
+        //   カーソルの指す画素と 1 ドットずれる（Codex 指摘）
+        const ptF = this.clientToStrokePt(e.clientX, e.clientY);
+        this.smoothPt = { x: ptF.x, y: ptF.y };
+        this.lastPt = { x: ptF.x, y: ptF.y };
+        if (buf2) R.stamp(buf2, pt.x, pt.y, o);
+        else if (all) this.eraseAllStamp(all, pt.x, pt.y, o);
         this.renderCanvas();
         break;
       }
@@ -9162,25 +9516,37 @@ export class Editor {
         case "pen":
         case "brush":
         case "eraser": {
-          const buf = this.activeBuffer();
-          if (!buf || !this.lastPt) break;
-          let tx = pt.x;
-          let ty = pt.y;
+          // ★V178 (A-72): 全レイヤーのストロークは対象の束へ（null なら従来の 1 枚の経路そのまま）
+          const all = this.eraseAllStroke;
+          const buf = all ? null : this.activeBuffer();
+          if ((!all && !buf) || !this.lastPt) break;
+          // ★A-70: この経路だけ**小数のまま**受け取る（`pt` は整数版で、他の道具が使う）。
+          //  丸めるのは打点の瞬間だけ＝`strokeSegment` の中（`raster.ts` は触らない）
+          const ptF = this.clientToStrokePt(ev.clientX, ev.clientY);
+          let tx = ptF.x;
+          let ty = ptF.y;
           if (this.stabilizer && this.smoothPt) {
-            // 手ブレ補正: EMA（OFFで3DS準拠の生座標）
-            this.smoothPt.x += (pt.x - this.smoothPt.x) * 0.35;
-            this.smoothPt.y += (pt.y - this.smoothPt.y) * 0.35;
-            tx = Math.round(this.smoothPt.x);
-            ty = Math.round(this.smoothPt.y);
+            // 手ブレ補正: EMA（OFF でも掛けないだけ＝3DS 準拠の生座標という約束はそのまま。
+            // ★A-70 で外したのは「丸め」であって EMA ではない。係数 0.35 も変えていない）
+            this.smoothPt.x += (ptF.x - this.smoothPt.x) * 0.35;
+            this.smoothPt.y += (ptF.y - this.smoothPt.y) * 0.35;
+            tx = this.smoothPt.x;
+            ty = this.smoothPt.y;
           }
-          R.strokeSegment(
-            buf,
-            this.lastPt.x,
-            this.lastPt.y,
-            tx,
-            ty,
-            this.penOptions(ev.pressure)
-          );
+          if (buf) {
+            R.strokeSegment(
+              buf,
+              this.lastPt.x,
+              this.lastPt.y,
+              tx,
+              ty,
+              this.penOptions(ev.pressure)
+            );
+          } else if (all && this.tool === "eraser") {
+            // ★V178: 途中でショートカットが道具を変えたら、束にはもう描かない（penOptions が新しい道具の
+            //  色を返す＝ペンの色で全レイヤーを塗る事故になる）。確定は pointerup（道具に関係なく）
+            this.eraseAllSegment(all, this.lastPt.x, this.lastPt.y, tx, ty, this.penOptions(ev.pressure));
+          }
           this.lastPt = { x: tx, y: ty };
           break;
         }
@@ -9446,22 +9812,28 @@ export class Editor {
     if (changed) {
       // frameIndex は**キャプチャした値**で引く（確定後にコマが移動しても正しいコマへ戻すため）
       const fi = this.frameIndex;
-      this.history.push(
-        multiBufferChangeEntry(
-          "四隅変形",
-          (id) => this.project.frames[fi]?.layers[id] ?? null,
-          bd,
-          ad,
-          () => {
-            // M10-23: Undo/Redo もデータ変更なので dirty（＝オートセーブ対象）にする
-            //（bufferChangeEntry の onApply と同じ流儀。オートセーブ分割エンコードの
-            // 中断判定もこの不変条件に依る）
-            this.dirty = true;
-            this.renderCanvas();
-            this.paintFilmThumb(fi);
-          }
-        )
+      const cornerEntry = multiBufferChangeEntry(
+        "四隅変形",
+        (id) => this.project.frames[fi]?.layers[id] ?? null,
+        bd,
+        ad,
+        () => {
+          // M10-23: Undo/Redo もデータ変更なので dirty（＝オートセーブ対象）にする
+          //（bufferChangeEntry の onApply と同じ流儀。オートセーブ分割エンコードの
+          // 中断判定もこの不変条件に依る）
+          this.dirty = true;
+          this.renderCanvas();
+          this.paintFilmThumb(fi);
+        }
       );
+      // ★V180 (A-78 ②): 取り消し・やり直しの前に、そのコマを**書きで起こす**（V178 の全レイヤー消しゴムと同じ形）。
+      //  大きい作品で窓の外へ出て眠ったコマは `layers[id]` が無く、起こさないと Ctrl+Z が黙って空振りする。
+      //  コマ番号で持つので、そのコマが無ければ何もしない（例外を投げない）
+      cornerEntry.prepare = () => {
+        const fr = this.project.frames[fi];
+        return fr ? wakeFrame(this.project, fr, "write") : Promise.resolve();
+      };
+      this.history.push(cornerEntry);
       // M10-23 レビュー検出の既存バグ: 確定時に dirty を立てておらず、四隅変形だけでは
       // オートセーブも終了警告も働かなかった（歪みストローク確定と同じ流儀に揃える）
       this.dirty = true;
@@ -9726,6 +10098,9 @@ export class Editor {
       this.updatePanCursor();
       return;
     }
+    // ★V178 (A-72): 全レイヤーのストロークは、いまの道具に関係なく**ここで**確定する
+    //  （途中でショートカットが道具を変えても、消した分を履歴に積まずに取り残さない）
+    if (this.eraseAllStroke) this.commitEraseAll();
     const pt = this.clientToPixel(e.clientX, e.clientY);
 
     if (this.xformActive && this.dragMode) {
@@ -9798,21 +10173,28 @@ export class Editor {
           afterDiff[ld.id] = copyIndexBuf(a);
         }
         if (Object.keys(afterDiff).length === 0) break;
-        // ストローク1回＝履歴1エントリ。実体は適用時に解決する（構造undo対策）
-        this.history.push(
-          multiBufferChangeEntry(
-            "歪み",
-            (layerId) => this.project.frames[this.frameIndex]?.layers[layerId] ?? null,
-            beforeDiff,
-            afterDiff,
-            () => {
-              // M10-23: Undo/Redo もデータ変更なので dirty にする（四隅変形と同じ）
-              this.dirty = true;
-              this.renderCanvas();
-              this.paintFilmThumb(this.frameIndex);
-            }
-          )
+        // ストローク1回＝履歴1エントリ。実体は適用時に解決する（構造undo対策）。
+        // ★V180 (A-78 ①): 戻し先は**歪ませたコマ**（Frame オブジェクト `f`）で引く。以前は適用時の
+        //  `this.frameIndex`＝Ctrl+Z を押した時点で見ているコマで引いていたので、コマを移ってから取り消すと
+        //  **別のコマへ書き戻していた**（V178 の実測: コマ 5 の 6,800 画素がコマ 0 の絵で上書き）。
+        //  `pushBufferHistory`・変形・「消す」・全レイヤー消しゴムと同じ持ち方
+        const warpEntry = multiBufferChangeEntry(
+          "歪み",
+          (layerId) => f.layers[layerId] ?? null,
+          beforeDiff,
+          afterDiff,
+          () => {
+            // M10-23: Undo/Redo もデータ変更なので dirty にする（四隅変形と同じ）
+            this.dirty = true;
+            this.renderCanvas();
+            // ★V180: 塗り直すのも歪ませたコマのサムネ（見ているコマではない）
+            const fi = this.project.frames.indexOf(f);
+            if (fi >= 0) this.paintFilmThumb(fi);
+          }
         );
+        // ★V180 (A-78 ②): 取り消し・やり直しの前に、そのコマを書きで起こす（眠っていると黙って空振りする）
+        warpEntry.prepare = () => wakeFrame(this.project, f, "write");
+        this.history.push(warpEntry);
         this.dirty = true;
         this.renderCanvas();
         this.paintFilmThumb(this.frameIndex);
@@ -10200,19 +10582,28 @@ export class Editor {
     if (d.dx === 0 && d.dy === 0) return; // 動いていない＝履歴に積まない
     const after: Record<string, IndexBuf> = {};
     for (const id of d.ids) if (f.layers[id]) after[id] = copyIndexBuf(f.layers[id]);
-    this.history.push(
-      multiBufferChangeEntry(
-        "レイヤーの移動",
-        (id) => this.project.frames[frameIdx]?.layers[id] ?? null,
-        d.before,
-        after,
-        () => {
-          this.renderCanvas();
-          this.redrawOverlay();
-          this.paintFilmThumb(frameIdx);
-        }
-      )
+    const moveEntry = multiBufferChangeEntry(
+      "レイヤーの移動",
+      (id) => this.project.frames[frameIdx]?.layers[id] ?? null,
+      d.before,
+      after,
+      () => {
+        // ★V180（指示からの追加・Codex 1 回目の穴から見つけた漏れ）: Undo/Redo もデータ変更なので dirty（M10-23 と同じ）。
+        //  これだけ立てていなかったので、保存した直後にレイヤーの移動を取り消しても未保存の印が立たず、
+        //  オートセーブも終了時の確認も働かなかった（Node 実測: 取り消し・やり直しのあと dirty=false のまま）
+        this.dirty = true;
+        this.renderCanvas();
+        this.redrawOverlay();
+        this.paintFilmThumb(frameIdx);
+      }
     );
+    // ★V180 (A-78 ②): 取り消し・やり直しの前に、そのコマを書きで起こす（眠っていると黙って空振りする）。
+    //  コマ番号で持つので、そのコマが無ければ何もしない（例外を投げない）
+    moveEntry.prepare = () => {
+      const fr = this.project.frames[frameIdx];
+      return fr ? wakeFrame(this.project, fr, "write") : Promise.resolve();
+    };
+    this.history.push(moveEntry);
     this.dirty = true;
     this.renderCanvas();
     this.paintFilmThumb(frameIdx);
@@ -10982,6 +11373,13 @@ export class Editor {
     this.history.push({
       label: cut ? "切り取って新規レイヤー" : "コピーして新規レイヤー",
       bytes: entryBytes(beforeSrc, mask), // V154 (W-2)
+      // ★V180 (A-78 ②・指示からの追加): 元のレイヤーが眠っていると `s` が無く、取り消しでは切り取った絵が
+      //  元へ戻らないまま新しいレイヤーだけ外れて**絵が消え**、やり直しでは新しいレイヤーが空になる（Node 実測）。
+      //  取り消し・やり直しの前にそのコマを書きで起こす。コマ番号で持つので、そのコマが無ければ何もしない
+      prepare: () => {
+        const fr = self.project.frames[frameIdx];
+        return fr ? wakeFrame(self.project, fr, "write") : Promise.resolve();
+      },
       undo: revert,
       redo: apply,
     });
@@ -11051,7 +11449,11 @@ export class Editor {
       this.cancelSelectionMove();
       return;
     }
-    void this.applyHistory(() => this.history.undo(), this.history.peekUndo());
+    // ★V178 (A-72・Codex 3 回目): ↶ ボタンは runCommand を通らない（フォーカスのあるボタンをキーで押しても来る）。
+    //  描きかけの束を**先に**確定する——でないと前の操作のほうが巻き戻り、あとで束を取り消すと巻き戻したはずのものが戻る。
+    //  peek より前に置く（いま確定した束が、この取り消しの対象になる）
+    if (this.eraseAllStroke) this.finishEraseAllNow();
+    this.queueHistory("undo");
   }
 
   /** M3.8 L-B: Ctrl+Y / ↷。変形・浮動中は無効 */
@@ -11060,7 +11462,36 @@ export class Editor {
       this.cb.toast(t("ed.xform.noRedo.toast"));
       return;
     }
-    void this.applyHistory(() => this.history.redo(), this.history.peekRedo());
+    // ★V178 (A-72・Codex 3 回目): ↷ も同じ。描きかけの束を先に確定する（新しい操作が積まれるので、やり直しは空になる）
+    if (this.eraseAllStroke) this.finishEraseAllNow();
+    this.queueHistory("redo");
+  }
+
+  /** ★V180 (A-78 [D]): 取り消し・やり直しの**列**。前の 1 回（眠ったコマを起こす `prepare` の待ちを含む）が
+   *  済むまで次を走らせず、どのエントリを待つかは**走る直前**に引く。
+   *
+   *  以前は押した瞬間に `peekUndo()` で引いてから `await prepare` していたので、Ctrl+Z の押しっぱなしで 2 回が
+   *  同じ瞬間に入ると、2 回とも一番上のエントリの `prepare`（同じコマを 2 か所から起こす）を待ち、2 回目の
+   *  `undo()` はその下のエントリを**起こさずに**走らせていた。V180 の [S-6] で実測: 眠ったコマ 2 つが**両方とも**
+   *  戻らない（上のコマは、あとから起き終わった古い控えが戻した絵を上書きし、下のコマは空振り）。
+   *  この回の前から prepare を持っていた全レイヤー消しゴム（V178）でも同じ形だった。
+   *
+   *  失敗した 1 回は列を止めない（`release` は finally）。拒否はこれまでどおり投げっぱなし（main.ts の
+   *  unhandledrejection の網がログに残す）。眠りの無い小さい作品では `prepare` がマイクロタスクで済むので、
+   *  次のキー入力より前に終わる（結果はこの回の前と 1 画素も変わらない＝[S-4]） */
+  private historyQueue: Promise<void> = Promise.resolve();
+  private queueHistory(dir: "undo" | "redo"): void {
+    const prev = this.historyQueue;
+    let release!: () => void;
+    this.historyQueue = new Promise<void>((r) => (release = r));
+    void prev.then(async () => {
+      try {
+        if (dir === "undo") await this.applyHistory(() => this.history.undo(), this.history.peekUndo());
+        else await this.applyHistory(() => this.history.redo(), this.history.peekRedo());
+      } finally {
+        release();
+      }
+    });
   }
 
   /** M11-8: 履歴の適用中は「コマ構造の変更＝選択解除」を働かせない
@@ -11443,6 +11874,8 @@ export class Editor {
         if (fi >= 0) self.paintFilmThumb(fi);
       }
     );
+    // ★V180 (A-78 ②): 取り消し・やり直しの前に、そのコマを書きで起こす（pushWithSelection が包むエントリへ運ぶ）
+    base.prepare = () => wakeFrame(this.project, frame, "write");
     this.pushWithSelection(base, frame, {
       before: this.selMask ? this.selMask.slice() : null,
       after: null,
@@ -11878,6 +12311,13 @@ export class Editor {
     this.history.push({
       label: "複写",
       bytes: entryBytes(beforeLayers, afterLayers), // V154 (W-2)
+      // ★V180 (A-78 ②・指示からの追加): そのコマが眠っていると `f.layers[k]?.set(v)` が黙って空振りする
+      //  （Node 実測: 履歴は戻るのに 3 枚とも複写した絵のまま）。取り消し・やり直しの前に書きで起こす。
+      //  コマ番号で持つので、そのコマが無ければ何もしない
+      prepare: () => {
+        const fr = self.project.frames[fi];
+        return fr ? wakeFrame(self.project, fr, "write") : Promise.resolve();
+      },
       undo() {
         const f = self.project.frames[fi];
         for (const [k, v] of Object.entries(beforeLayers)) f.layers[k]?.set(v);
@@ -11957,20 +12397,21 @@ export class Editor {
     }
     // バッファ実体は構造 undo/redo で作り直され得るので、Frame オブジェクト起点で適用時に解決する
     const self = this;
-    this.history.push(
-      multiBufferChangeEntry(
-        "消す",
-        (id) => frame.layers[id] ?? null,
-        before,
-        after,
-        () => {
-          self.dirty = true;
-          self.renderCanvas();
-          const fi = self.project.frames.indexOf(frame);
-          if (fi >= 0) self.paintFilmThumb(fi);
-        }
-      )
+    const clearEntry = multiBufferChangeEntry(
+      "消す",
+      (id) => frame.layers[id] ?? null,
+      before,
+      after,
+      () => {
+        self.dirty = true;
+        self.renderCanvas();
+        const fi = self.project.frames.indexOf(frame);
+        if (fi >= 0) self.paintFilmThumb(fi);
+      }
     );
+    // ★V180 (A-78 ②): 取り消し・やり直しの前に、そのコマを書きで起こす（眠っていると黙って空振りする）
+    clearEntry.prepare = () => wakeFrame(this.project, frame, "write");
+    this.history.push(clearEntry);
     // afterStructuralChange は「今表示中のコマ」のサムネを塗るが、対象は確認ダイアログ前に
     // 捉えたコマなので、ここは対象コマのサムネを塗る（矢印キー等でコマが動いていても整合）
     this.dirty = true;
@@ -13142,6 +13583,10 @@ export class Editor {
         if (fi >= 0) self.paintFilmThumb(fi);
       }
     );
+    // ★V180 (A-78 ②): 描画・塗り・図形・文字・選択の移動／切り取り／消去…**ほぼ全部の 1 枚の操作**がここを通る。
+    //  取り消し・やり直しの前に、そのコマを書きで起こす（大きい作品で窓の外へ出て眠ったコマは `layers[id]` が
+    //  無く、起こさないと Ctrl+Z が黙って空振りする＝V178 の実測で 123 画素が消えたまま）。V178 と同じ形
+    base.prepare = () => wakeFrame(self.project, frame, "write");
     if (!sel) {
       this.history.push(base);
     } else {
@@ -13157,6 +13602,9 @@ export class Editor {
         // V154 (W-2): base（バッファのスナップショット）を包むので、その申告を引き継ぐ
         //（マスクは 0/1 の Uint8Array・76.8KB に対して十分小さいが、同じ流儀で足す）
         bytes: (base.bytes ?? 0) + entryBytes(selBefore, selAfter),
+        // ★V180 (A-78 ②): 包んだエントリにも起こす準備を運ぶ（pushWithSelection と同じ。運ばないと選択の移動・
+        //  切り取りだけ眠ったコマで空振りする）
+        prepare: base.prepare,
         undo() {
           base.undo();
           if (onFrame()) {
@@ -13373,7 +13821,9 @@ export class Editor {
   //   `main.ts` の「修飾キー単体は待ち続ける」（＝押した時は確定しない）は**そのまま残っている**。
   //
   // ★発動する条件（全部そろったときだけ。1つでも欠けたら候補を捨てる）
-  //   1. 修飾キー（Ctrl / Shift / Alt）の keydown で候補が立つ（`e.repeat` は候補を捨てる）
+  //   1. 修飾キー（Ctrl / Shift / Alt）の keydown で候補が立つ（`e.repeat` は候補を捨てる）。
+  //      V183 (A-82): その keydown で**ほかの修飾キーが押されていない**こと（イベントのフラグで見る・Win / ⌘ も数える）。
+  //      以前は 2 つ目の修飾キーで候補を捨てたあと、3 つ目で新しい候補が立った（⇧＋⌥ を押したまま Ctrl をトンで発動）
   //   2. その間に**他のキーが押されない**（＝組み合わせではない）
   //   3. その間に**ポインタが下りない**（＝描いていない・ボタンを押していない）
   //   4. **同じ修飾キー**の keyup が MOD_TAP_MS 以内に来る
@@ -13402,6 +13852,7 @@ export class Editor {
         this.isTextEntry(e.target) ||
         e.isComposing ||
         e.keyCode === 229,
+      mods: e, // V183 (A-82): ほかの修飾キーが押されていたら候補にしない（判定は keymap.ts の tapCandidateOf）
     });
   }
 
@@ -13434,6 +13885,14 @@ export class Editor {
     this.runCommand(id);
   }
 
+  /** V181（Codex 1 回目・中）: 一致した打鍵を**押しっぱなしのくり返しだから走らせない**とき、Mac でだけ既定の動きを止める。
+   *  WKWebView はページが止めなかった ⌘ のキーを既定のメニュー（Edit の Copy / Cut / Paste…）へ回し、メニューに無い
+   *  ⌘S などは警告音になる。一致した以上はアプリのキーなので、走らせなくても止める（⌘C を押しっぱなしにしても
+   *  2 回目以降がメニューの Copy にならない）。**Windows は今までどおり止めない**（1 か所も変えない） */
+  private swallowRepeatOnMac(e: KeyboardEvent): void {
+    if (isMacPlatform()) e.preventDefault();
+  }
+
   /** M11-15: 同じキーを複数の道具が共有しているときの選び方（末尾→先頭へ循環）。
    *  V165 (D-4・Codex 指摘③): 押したとき（`onKeyDown`）とタップとで**同じ規則**を使うため関数にした */
   private pickCommandFromIds(ids: CommandId[]): CommandId {
@@ -13460,6 +13919,8 @@ export class Editor {
 
   /** M11-10: コマンドの実行。**既存のボタンと同じ処理を呼ぶだけ**（新機能は作らない） */
   private runCommand(id: CommandId) {
+    // ★V178 (A-72・Codex 2 回目): コマンドが作品を変える前に、全レイヤーの束を確定して終える（finishEraseAllNow）
+    if (this.eraseAllStroke) this.finishEraseAllNow();
     switch (id) {
       // 道具
       case "tool.pen":
@@ -13771,6 +14232,11 @@ export class Editor {
     // M11-10: IME 変換中は発火しない（変換確定の Enter で再生が始まらないように）。
     // keyCode 229 は composition 中の古い環境向けの保険
     if (e.isComposing || e.keyCode === 229) return;
+    // ★V178 (A-72): エディタのキー処理へ進むキーが来たら、全レイヤーの束を**どの分岐より先に**確定して終える。
+    //  ショートカットの表を通らない固定のキー（Backspace の選択消去・Enter でフォーカスのあるボタンを押す…）も、ここなら先に通る。
+    //  修飾キーと Space（描きながら押さえて使う）と、押しっぱなしのくり返しでは終えない。ダイアログ・文字入力欄・IME 変換中の
+    //  キーはエディタの操作ではないので上の関所で抜ける（そこから作品が変わっても、履歴を積む直前の網＝EditorHistory が拾う）
+    if (this.eraseAllStroke && !e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.finishEraseAllNow();
 
     // ---- 予約キー（割り当ての対象外。従来どおりの固定の分岐で受ける） ----
     if (e.code === "Space") {
@@ -13858,8 +14324,8 @@ export class Editor {
     }
     if (e.code === "Enter" || e.code === "NumpadEnter") {
       // M11-12: Ctrl+Enter=浮動テキストの確定（入力欄の外にフォーカスがある場合。
-      // 入力欄の中では、そちらの keydown が同じことをする）
-      if (this.textDraft && e.ctrlKey) {
+      // 入力欄の中では、そちらの keydown が同じことをする）。V181: Mac は ⌘Enter でも（`primaryMod`）
+      if (this.textDraft && primaryMod(e)) {
         e.preventDefault();
         this.commitTextDraft();
         return;
@@ -13894,11 +14360,11 @@ export class Editor {
     //（末尾→先頭へ循環）、含まれていなければ定義順の先頭へ。**キーリピートでは巡回しない**
     let id: CommandId = ids[0];
     if (ids.length > 1) {
-      if (e.repeat) return;
+      if (e.repeat) return this.swallowRepeatOnMac(e);
       id = this.pickCommandFromIds(ids); // V165: タップ側と同じ規則（`pickCommandFromIds`）
     }
     // ツール切替などはキーリピートで連続実行しない（Undo/Redo・コマ移動・ズームは従来どおり連続）
-    if (e.repeat && !Editor.REPEATABLE.has(id)) return;
+    if (e.repeat && !Editor.REPEATABLE.has(id)) return this.swallowRepeatOnMac(e);
     e.preventDefault();
     // ★V157 (D-3): 二重発火の防御（A-27）。**押しっぱなしのリピートではない**イベントに限り、
     // 同じコマンドが 50ms 以内にもう一度来たら2回目を捨てる。

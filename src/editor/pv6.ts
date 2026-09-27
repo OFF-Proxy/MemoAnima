@@ -181,6 +181,11 @@ export interface Pv6Stats {
   reusedSleepZ: number;
   /** 起きていて圧縮した塊の数 */
   compressedAwake: number;
+  /** V177 (A-75): 論理サイズ（コマ × レイヤーの参照を全部数えた生の大きさ）。
+   *  読み手が遅延か一括かを決める値と**同じ関数**で数える（`pv6LogicalRaw`） */
+  logicalRaw: number;
+  /** V177 (A-75): 中身が同じで 1 つにまとめた塊の数（論理 32MiB 未満はまとめないので 0） */
+  contentMerged: number;
 }
 
 /** ★互換の要: ヘッダ JSON の**キー順の自己検査**。
@@ -203,6 +208,8 @@ export function assertPv6HeaderOrder(headJson: string): void {
  *  - 眠っている塊（`f.sleep[id].z`）は**そのまま**写す（再圧縮しない＝保存 0.5s の理由）
  *  - 起きているバッファはレイヤー単位で gzip（V156 の眠り控えと同一の形式）
  *  - 同じ実体（バッファ／z）は塊1個に**まとめる**＝📌 共通レイヤーは1回だけ書かれる（A-34）
+ *  - V177 (A-75): **論理 32MiB 以上の作品だけ**、そのあと**中身が同じ塊**も1個にまとめる
+ *   （パス 2 = `mergeSameContent`）。未満の作品の出力はいままでと1バイトも同じ
  *  - `opts`（オートセーブ用）: `aborted` が true を返したら**null を返して破棄**、
  *    `yieldNow` で約8msごとにメインスレッドを譲る（serialize.ts の分割エンコードと同じ作法）
  */
@@ -294,6 +301,25 @@ export async function encodePV6(
   }
   if (opts?.aborted?.()) return null;
 
+  // ★V177 (A-75): パス 2 — **中身が同じ塊を 1 つにまとめる。論理 32MiB 以上のときだけ。**
+  //  上のループ（パス 1）は実体でしかまとめない。コマの複製（cloneFrame）は深いコピーなので、
+  //  同じ絵でも別々に書かれる（作者の作品は 63,500 枚のうち違う中身が 2,587 枚＝96% がコピーだった）。
+  //  ⚠ 小さい作品（論理 32MiB 未満）は**まとめない＝出力はいままでと1バイトも同じ**。
+  //   配っている v1.6.0〜v1.8.0 の読み手は、小さい作品を一括の道で開いて**同じ塊を同じ実体**にする。
+  //   まとめたファイルをそこで開くと、1 コマに描いた線が同じ塊だった別のコマにも出る。
+  //   論理 32MiB 以上はどの版でも遅延の道（コマごとに別の実体）で開くので安全。
+  //  判定は読み手と**同じ関数・同じ配列**（pv6LogicalRaw / pv6OpensLazily）。参照を全部数えるので、
+  //  まとめても論理サイズは1バイトも変わらない＝まとめた結果が 32MiB を割り込んで一括で開かれる形は無い
+  const sframes = frames as unknown as Pv6SerializedFrame[];
+  const logicalRaw = pv6LogicalRaw(sframes, metas);
+  let merged = 0;
+  if (pv6OpensLazily(logicalRaw)) {
+    const r = await mergeSameContent(blobs, metas, sframes, pv6SharedIds(p.layerDefs), opts);
+    if (!r) return null;
+    off = r.off;
+    merged = r.merged;
+  }
+
   // ヘッダ。★キー順（magic/version/width/height 先頭・blobs は frames の後）は互換の要件。
   // 中身のフィールドは serialize.ts の encodeProjectHead と同じ列挙（未知キーを増やさない）
   const doc: Record<string, unknown> = {
@@ -373,8 +399,90 @@ export async function encodePV6(
       blobSectionLen: off,
       reusedSleepZ: reused,
       compressedAwake: compressed,
+      logicalRaw,
+      contentMerged: merged,
     },
   };
+}
+
+/** V177 (A-75): パス 2 — 中身が同じ塊を 1 つにまとめる（論理 32MiB 以上のときだけ呼ばれる）。
+ *
+ *  - 候補は (n, c, b, r) が全部一致するものだけ。c は `crc32(z)`＝**パス 1 で計算済み**（新しく計算しない）
+ *  - そのうえで**全バイトを比べて一致したときだけ**同じ塊にする（crc の衝突で別の絵がまざらない）
+ *  - ★**📌 が参照する塊はまとめない**（まとめる側にも、まとめ先にもならない）。読み手は 📌 を
+ *    塊 idx ごとのキャッシュで展開する（v1.6.0〜v1.8.0 も遅延の道で同じ）ので、同じ中身の 📌 が
+ *    2 枚ある（空の 📌 どうし等）ときに塊を 1 つにすると、2 枚が**同じ実体**になって片方に描いた線が
+ *    もう片方に出る。📌 は 1 枚につき塊 1 個（パス 1 が実体でまとめる）なので、外しても大きさは変わらない
+ *  - 塊は**最初に現れた順**に残す（その場で詰める）。o は先頭から振り直し、各コマの layers[id] を付け替える。
+ *    r / b / n / c は同じ中身なら同じ値なので、論理サイズ（pv6LogicalRaw）は変わらない（D-12）
+ *
+ *  戻り値: 詰めたあとの塊セクションの長さ・まとめて減った数／null＝中断（aborted） */
+async function mergeSameContent(
+  blobs: Uint8Array[],
+  metas: Pv6BlobMeta[],
+  frames: ReadonlyArray<{ layers: Record<string, number> }>,
+  sharedIds: ReadonlySet<string>,
+  opts: EncodeInterruptOpts | undefined
+): Promise<{ off: number; merged: number } | null> {
+  // 📌 が参照する塊（まとめない）
+  const pinned = new Uint8Array(blobs.length);
+  for (const sf of frames)
+    for (const [id, idx] of Object.entries(sf.layers)) if (sharedIds.has(id)) pinned[idx] = 1;
+  const remap = new Int32Array(blobs.length);
+  // 鍵 "n:c:b:r" → 詰めたあとの塊 idx（📌 以外。crc が同じでも中身が違う塊は同じ鍵に並ぶ）
+  const byContent = new Map<string, number[]>();
+  let w = 0;
+  let off = 0;
+  let merged = 0;
+  let sliceStart = opts?.yieldNow ? performance.now() : 0;
+  for (let i = 0; i < blobs.length; i++) {
+    if (opts?.aborted?.()) return null;
+    const z = blobs[i];
+    const m = metas[i];
+    const key = `${m.n}:${m.c}:${m.b}:${m.r}`;
+    let to = -1;
+    if (!pinned[i]) {
+      const cands = byContent.get(key);
+      if (cands) for (const j of cands) if (sameBytes(blobs[j], z)) { to = j; break; }
+    }
+    if (to >= 0) {
+      merged++; // 先に書く同じ中身の塊へ寄せる（この塊は書かない）
+    } else {
+      // 新しい塊として残す。0..w-1 は詰め終わった塊・w..i-1 はもう読まない位置なので上書きしてよい
+      to = w++;
+      m.o = off; // 位置だけ振り直す（キーの並び o,n,b,r,c は変わらない）
+      off += m.n;
+      blobs[to] = z;
+      metas[to] = m;
+      if (!pinned[i]) {
+        const list = byContent.get(key);
+        if (list) list.push(to);
+        else byContent.set(key, [to]);
+      }
+    }
+    remap[i] = to;
+    if (opts?.yieldNow && performance.now() - sliceStart > 8) {
+      await opts.yieldNow();
+      sliceStart = performance.now();
+    }
+  }
+  blobs.length = w;
+  metas.length = w;
+  // 各コマの参照を付け替える（既存キーへの代入だけ＝キーの並びは変わらない）
+  for (const sf of frames) {
+    const layers = sf.layers;
+    for (const id of Object.keys(layers)) layers[id] = remap[layers[id]];
+  }
+  return { off, merged };
+}
+
+/** V177: 2 つの塊が同じバイト列か（crc の衝突で別の絵をまとめないための全バイト比較）。
+ *  遅延読みの眠り控えは、同じ塊を**ファイルへの同じ位置のビュー**で持つ——そこは比べずに同じ */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  if (a.buffer === b.buffer && a.byteOffset === b.byteOffset) return true;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 /** PV6 か（先頭 1f 8b ＋ 末尾トレーラの magic）。PV1〜5 の gzip 末尾（CRC32+ISIZE の
@@ -492,17 +600,15 @@ function cleanFrameColors(v: unknown): Record<string, string> | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-/** 塊 idx → IndexBuf（読み側の幅 `bits` へ広げて返す。同じ idx は**同じ実体**＝📌 の復元）。 */
+/** 塊 idx → IndexBuf（読み側の幅 `bits` へ広げて返す）。**呼ぶたびに新しい実体**を返す。
+ *  同じ実体を配るかどうかは呼び出し側（decodePv6）が決める——配るのは 📌 だけ（V177）。 */
 async function inflateBlob(
   bytes: Uint8Array,
   blobBase: number,
   doc: Pv6Doc,
   idx: number,
-  bits: 8 | 16,
-  cache: Map<number, IndexBuf>
+  bits: 8 | 16
 ): Promise<IndexBuf> {
-  const hit = cache.get(idx);
-  if (hit) return hit;
   const m = doc.blobs[idx] as Pv6BlobMeta;
   let raw: Uint8Array;
   try {
@@ -522,7 +628,6 @@ async function inflateBlob(
     wide.set(raw);
     buf = wide;
   }
-  cache.set(idx, buf);
   return buf;
 }
 
@@ -530,11 +635,50 @@ async function inflateBlob(
  *  小さい作品はいままでと同じ姿で開く）。editor.ts の SLEEP_MIN_BYTES と同じ 32 MiB。 */
 export const PV6_EAGER_MAX_RAW = 32 * 1024 * 1024;
 
+/** V177 (A-75): 論理サイズ（生なら何バイトか）。コマ × レイヤーの**参照を全部**数える（塊の数ではない）。
+ *  だから中身でまとめても値は1バイトも変わらない（D-12）。
+ *  ★書き手（中身でまとめるか）と読み手（遅延か一括か）が**この1本を呼ぶ**（書き写さない＝R-1） */
+export function pv6LogicalRaw(
+  frames: ReadonlyArray<{ layers: Record<string, number> }>,
+  metas: ReadonlyArray<Pv6BlobMeta>
+): number {
+  let logicalRaw = 0;
+  for (const sf of frames)
+    for (const idx of Object.values(sf.layers)) logicalRaw += metas[idx].r;
+  return logicalRaw;
+}
+
+/** V177 (A-75): この論理サイズの作品を読み手が**遅延の道**（コマごとに別の実体）で開くか。
+ *  ★v1.6.0 / v1.7.0 / v1.8.0 の読み手（pv6.ts はタグ3本とも同一）も `>= 32MiB` で遅延にする。
+ *  書き手が中身でまとめてよいのは、**配った全版が遅延で開く**ときだけ——一括の道は同じ塊を
+ *  同じ実体にするので、まとめたファイルを一括で開くと、1 コマに描いた線が別のコマにも出る。
+ *  この式か PV6_EAGER_MAX_RAW を変えるときは、配った版の読み手との関係を必ず読み直すこと
+ * （上げるのは安全側・下げると旧版で線が伝染する。v177_smoke [S-1] が境界を固定している） */
+export function pv6OpensLazily(logicalRaw: number): boolean {
+  return logicalRaw >= PV6_EAGER_MAX_RAW;
+}
+
+/** 📌 共通レイヤー（`shared === true`）の id。書き手（まとめない塊）と読み手（同じ実体で配る層）が
+ *  **この1本を呼ぶ**（V177）。読み込み中は未知の形も通すので緩く受ける */
+function pv6SharedIds(layerDefs: unknown): Set<string> {
+  const sharedIds = new Set<string>();
+  if (Array.isArray(layerDefs)) {
+    for (const ld of layerDefs) {
+      if (ld && typeof ld === "object" && (ld as { shared?: unknown }).shared === true) {
+        sharedIds.add((ld as { id: string }).id);
+      }
+    }
+  }
+  return sharedIds;
+}
+
 export interface Pv6Decoded {
   doc: Pv6Doc;
   frames: Frame[];
   /** true = 眠り控え（z ビュー）で返した。呼び出し側（serialize）が窓を起こす */
   lazy: boolean;
+  /** V177: 遅延/一括を決めた論理サイズ（書き手の `Pv6Stats.logicalRaw` と同じ関数で数えた値） */
+  logicalRaw: number;
 }
 
 /** PV6 を読む（serialize.projectFromBytes が isPV6 で振り分けて呼ぶ）。
@@ -573,25 +717,24 @@ export async function decodePv6(
     }
   }
 
-  // 論理サイズ（生なら何バイトか）で遅延/一括を決める
-  let logicalRaw = 0;
-  for (const sf of sfs)
-    for (const idx of Object.values(sf.layers)) logicalRaw += metas[idx].r;
-  const lazy = logicalRaw >= PV6_EAGER_MAX_RAW;
+  // 論理サイズ（生なら何バイトか）で遅延/一括を決める。★書き手（V177 の中身でまとめる判定）と同じ関数
+  const logicalRaw = pv6LogicalRaw(sfs, metas);
+  const lazy = pv6OpensLazily(logicalRaw);
 
   // 📌 共通レイヤー（shared===true）は遅延でも**先に1回だけ**展開して全コマ同一実体にする。
   // 手で壊されたファイル（コマごとに違う塊を指す）でも、塊 idx ごとのキャッシュなので
   // 「違う実体」がそのまま現れ、serialize 側の shared 裁定（全コマ一致か）が正しく効く
-  const sharedIds = new Set<string>();
-  if (Array.isArray(doc.layerDefs)) {
-    for (const ld of doc.layerDefs) {
-      if (ld && typeof ld === "object" && (ld as { shared?: unknown }).shared === true) {
-        sharedIds.add((ld as { id: string }).id);
-      }
-    }
-  }
+  const sharedIds = pv6SharedIds(doc.layerDefs);
 
-  const cache = new Map<number, IndexBuf>();
+  // ★V177 (A-75): 同じ実体を配るのは **📌 だけ・同じレイヤーの中だけ**（鍵＝塊 idx とレイヤー id）。
+  //  - 📌 でない層は、同じ塊を指していても**参照ごとに展開する＝コマごとに別の実体**。キャッシュを
+  //    読みも書きもしない。中身でまとめたファイル（V177 の書き手は論理 32MiB 以上だけ＝遅延の道）や、
+  //    手で作ったファイル・将来の書き手を一括の道で開いても、1 コマに描いた線が別のコマへ伝染しない。
+  //    書き込みも 📌 だけなのが要点——📌 でない層が先に置いた実体を 📌 が掴むと、📌 が普通の層と繋がる
+  //  - 鍵にレイヤー id を含める: 同じ塊を指す別々の 📌（手で作ったファイル）も、別々の実体になる
+  //  一括の道は論理 32MiB 未満だけで、そこは中身でまとめていない＝同じ塊を指す 📌 でない層は
+  //  実際にはまず来ない（従来の書き手も実体でしかまとめない）。展開の回数は従来と同じ
+  const pinnedBufs = new Map<string, IndexBuf>();
   const frames: Frame[] = [];
   for (let i = 0; i < sfs.length; i++) {
     const sf = sfs[i];
@@ -614,14 +757,24 @@ export async function decodePv6(
           bits: m.b === 16 ? 16 : 8,
           live: null,
         };
+      } else if (sharedIds.has(id)) {
+        // 📌: （塊 idx・レイヤー id）ごとに1回だけ展開し、そのレイヤーの全コマへ同じ実体
+        const key = `${idx}:${id}`;
+        let buf = pinnedBufs.get(key);
+        if (!buf) {
+          buf = await inflateBlob(bytes, blobBase, doc, idx, bits);
+          pinnedBufs.set(key, buf);
+        }
+        f.layers[id] = buf;
       } else {
-        f.layers[id] = await inflateBlob(bytes, blobBase, doc, idx, bits, cache);
+        // 📌 でない層: 参照ごとに展開する＝**コマごとに別の実体**
+        f.layers[id] = await inflateBlob(bytes, blobBase, doc, idx, bits);
       }
     }
     frames.push(f);
     onFrame?.(frames.length);
   }
-  return { doc, frames, lazy };
+  return { doc, frames, lazy, logicalRaw };
 }
 
 /** V163 (W-6 の後継): 保存した PV6 バイト列の検証。

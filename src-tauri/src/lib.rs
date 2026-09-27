@@ -121,6 +121,24 @@ fn recover_project(lib_root: String, rel_path: String) -> Result<String, String>
     pclib::recover_project(&lib_root, &rel_path)
 }
 
+/// V173 (A-65): クラウド経由で末尾に `.gz` が付いて見えなくなっている作品を探す（**読むだけ**）。
+#[tauri::command]
+fn scan_renamed_projects(lib_root: String) -> Result<Vec<String>, String> {
+    pclib::scan_renamed_projects(&lib_root)
+}
+
+/// V173 (A-65): `.gz` を外して元の名前へ戻す（中身に触れない・同名があれば飛ばす）。
+#[tauri::command]
+fn fix_renamed_projects(lib_root: String) -> Result<pclib::FixRenamedResult, String> {
+    pclib::fix_renamed_projects(&lib_root)
+}
+
+/// V173 (A-65): 利用者が選んだ 1 個が作品かを中身で見る（先頭 2B と末尾 16B だけ）。
+#[tauri::command]
+fn probe_project_file(path: String) -> Result<pclib::ProbeResult, String> {
+    pclib::probe_project_file(&path)
+}
+
 /// アルバム一覧。
 #[tauri::command]
 fn list_albums(lib_root: String) -> Result<Vec<String>, String> {
@@ -679,6 +697,9 @@ pub fn run() {
             library_stamp,
             list_recoverable,
             recover_project,
+            scan_renamed_projects,
+            fix_renamed_projects,
+            probe_project_file,
             open_log_folder,
             list_albums,
             create_album,

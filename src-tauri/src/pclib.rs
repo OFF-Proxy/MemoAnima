@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -1114,6 +1115,184 @@ pub fn rename_album(lib_root: &str, old: &str, new: &str) -> Result<String, Stri
     }
     save_index(lib, &index)?;
     Ok(new_s)
+}
+
+// ---------------- V173 (A-65): クラウド経由の改名（`.gz`）からの復帰 ----------------
+//
+// ★何が起きているか: クラウド（共有リンク・同期フォルダ）を経由すると、作品ファイルの名前の末尾に
+//  `.gz` が付いて返ってくることがある。PV6 の器は**先頭が `1f 8b`＝gzip に見える**ため、
+//  転送側が「これは gzip だ」と判断して拡張子を足す。**中身は 1 バイトも変わっていない。**
+//
+// ★なぜアルバムが 0 件に見えるか: `scan_library` のディスク走査は `p.extension()` が
+//  `"gz"` になった時点で `is_project_ext` に落ちる。`.kwz` / `.ppm` は索引の行から出るので無事＝
+//  **`.memoanima` だけが消えて見える**（Finder には PNG サムネが見えるのに、アプリでは 0 件）。
+//
+// ★直し方の作法（改名は**元に戻せない操作**なので、条件を 1 つも落とさない）:
+//   - 名前が `.memoanima.gz` / `.animemo.gz` で終わる（大小無視）
+//   - `.gz` を外した名前の**実体が無い**（あるなら別物。触らない）
+//   - **先頭 2 バイトが `1f 8b`**（中身はこれ以上読まない）
+//  の 3 つを**すべて**満たすものだけを改名し、**既に同名があれば飛ばす（上書きしない）**。
+//  1 件ごとに独立＝途中で失敗しても、それまでの改名は有効。失敗は `errors` に積んでフロントがログへ。
+//  `is_app_sidecar` に `.gz` を**足さない**こと（足すと「作品 0 件のアルバム」と一緒に消える。`v173_smoke` [S-5]）。
+
+/// クラウドが付ける拡張子。
+const GZ_SUFFIX: &str = ".gz";
+
+/// `.memoanima.gz` / `.animemo.gz` なら、`.gz` を外した名前を返す。それ以外は `None`。
+/// **`.png.gz` は対象外**（サイドカーのサムネは作品ではない）。
+fn gz_renamed_target(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    let hit = lower.ends_with(&format!(".{PROJECT_EXT}{GZ_SUFFIX}"))
+        || lower.ends_with(&format!(".{PROJECT_EXT_LEGACY}{GZ_SUFFIX}"));
+    if !hit {
+        return None;
+    }
+    Some(name[..name.len() - GZ_SUFFIX.len()].to_string())
+}
+
+/// その名前が**既に使われている**か。`exists()` ではなく `symlink_metadata` を使うのは、
+/// **壊れたシンボリックリンク**（リンク先が無い）も「既にある」として扱うため
+/// （`exists()` はリンクを辿るので false を返し、上書きの判断を誤る。Codex 指摘・優先度 高）。
+fn path_taken(p: &Path) -> bool {
+    fs::symlink_metadata(p).is_ok()
+}
+
+/// 先頭 2 バイトが gzip の magic（`1f 8b`）か。**中身はこれ以上読まない。**
+fn is_gzip_magic(p: &Path) -> bool {
+    let Ok(mut f) = fs::File::open(p) else {
+        return false;
+    };
+    let mut head = [0u8; 2];
+    f.read_exact(&mut head).is_ok() && head == [0x1f, 0x8b]
+}
+
+/// 改名の候補を 1 件ずつ渡す（`scan_renamed_projects` と `fix_renamed_projects` で**同じ条件**を使う）。
+fn for_each_renamed(lib_root: &str, mut f: impl FnMut(&str, &str, &Path, &Path)) -> Result<(), String> {
+    let lib = Path::new(lib_root);
+    if !lib.is_dir() {
+        return Err(format!("ライブラリフォルダが見つかりません: {lib_root}"));
+    }
+    for album in list_albums(lib_root)? {
+        let dir = lib.join(&album);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for ent in entries.flatten() {
+            let p = ent.path();
+            if !p.is_file() {
+                continue;
+            }
+            let fname = ent.file_name().to_string_lossy().to_string();
+            let Some(target) = gz_renamed_target(&fname) else {
+                continue;
+            };
+            let dest = dir.join(&target);
+            // 条件②: `.gz` を外した名前が既に使われているなら、それは別のファイル。触らない
+            if path_taken(&dest) {
+                continue;
+            }
+            // 条件③: 中身が gzip（＝PV6 の器）に見えるものだけ
+            if !is_gzip_magic(&p) {
+                continue;
+            }
+            f(&album, &fname, &p, &dest);
+        }
+    }
+    Ok(())
+}
+
+/// V173 (A-65): `.gz` が付いて見えなくなっている作品を探す。**読むだけ**（改名はしない）。
+/// 戻りは `アルバム/ファイル名`。フロントは**件数だけ**を使う（W-10: 作品名をログに書かない）。
+pub fn scan_renamed_projects(lib_root: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for_each_renamed(lib_root, |album, fname, _p, _dest| {
+        out.push(format!("{album}/{fname}"));
+    })?;
+    Ok(out)
+}
+
+/// V173 (A-65) の結果。`skipped` は「同名が既にあるので飛ばした」件数。
+#[derive(Debug, Serialize)]
+pub struct FixRenamedResult {
+    pub renamed: u32,
+    pub skipped: u32,
+    pub errors: Vec<String>,
+}
+
+/// V173 (A-65): `.gz` を外して元の名前に戻す。**中身には一切触れない**。
+/// - 既に同名があれば**飛ばす**（上書きしない・`skipped`）
+/// - 1 件ごとに独立（1 件失敗しても、それまでの改名は有効・残りも試す）
+/// - `errors` の文には**作品名を入れない**（W-10。理由だけ）
+///
+/// ★**`fs::rename` を使わない**（Codex 指摘・優先度 高）: `rename` は宛先が在っても**黙って置き換える**
+///  （Windows も Unix も）。`lock_lib()` はアプリ内のロックなので、**クラウドの同期クライアントや
+///  エクスプローラー**が「見てから改名するまで」の隙に同じ名前を作ると、**上書きしてしまう**——
+///  そもそもこの事故を起こしているのが同期クライアントなので、この隙は現実に踏み得る。
+///  代わりに **`hard_link`（宛先が在れば必ず失敗する＝OS が保証）→ 元を消す**の 2 手で行う。
+///  ハードリンクを作れないファイルシステム（FAT32 / exFAT など）では**改名せず `errors` に積む**
+///  ——「直せませんでした」で済ませるほうが、上書きの危険を残すより安全。
+pub fn fix_renamed_projects(lib_root: &str) -> Result<FixRenamedResult, String> {
+    let _guard = lock_lib();
+    let mut renamed = 0u32;
+    let mut skipped = 0u32;
+    let mut errors: Vec<String> = Vec::new();
+    for_each_renamed(lib_root, |_album, _fname, p, dest| {
+        // 安い門番（この時点で在れば、そもそも試さない）
+        if path_taken(dest) {
+            skipped += 1;
+            return;
+        }
+        // ★本当の保証はこちら: 宛先が在れば `hard_link` は AlreadyExists で失敗する（原子的）
+        match fs::hard_link(p, dest) {
+            Ok(()) => {
+                // 実体は 1 つのまま。古い名前（`.gz`）を外す
+                if let Err(e) = fs::remove_file(p) {
+                    // リンクは張れたが古い名前が消せない＝**両方の名前が同じ中身を指している**。
+                    // 作品は見えるようになるので実害は小さいが、跡が残るのでログに残す
+                    errors.push(format!("old name left: {e}"));
+                }
+                renamed += 1;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => skipped += 1,
+            Err(e) => errors.push(format!("link failed: {e}")),
+        }
+    })?;
+    Ok(FixRenamedResult {
+        renamed,
+        skipped,
+        errors,
+    })
+}
+
+/// V173 (A-65 案 4): 利用者が**明示的に選んだ 1 個**のファイルが作品かどうかを、名前ではなく中身で見る。
+/// **先頭 2 バイト（gzip の magic）と末尾 16 バイト（PV6 のトレーラ `AMPV6END`）だけ**を読む。
+/// ファイル全体は読まない（`v173_smoke` [S-4]）。走査（`scan_library`）からは呼ばない。
+#[derive(Debug, Serialize)]
+pub struct ProbeResult {
+    pub gzip: bool,
+    pub pv6: bool,
+    pub size: u64,
+}
+
+pub fn probe_project_file(path: &str) -> Result<ProbeResult, String> {
+    let p = Path::new(path);
+    let meta = fs::metadata(p).map_err(|e| format!("確認失敗: {e}"))?;
+    if !meta.is_file() {
+        return Err("ファイルではありません".into());
+    }
+    let size = meta.len();
+    let mut f = fs::File::open(p).map_err(|e| format!("確認失敗: {e}"))?;
+    let mut head = [0u8; 2];
+    let gzip = f.read_exact(&mut head).is_ok() && head == [0x1f, 0x8b];
+    // PV6 のトレーラ: "AMPV6END"(8) + u32LE headerGzLen + u32LE blobSectionLen ＝ 16 バイト
+    let mut pv6 = false;
+    if size >= 16 {
+        let mut tail = [0u8; 16];
+        if f.seek(SeekFrom::End(-16)).is_ok() && f.read_exact(&mut tail).is_ok() {
+            pv6 = &tail[..8] == b"AMPV6END";
+        }
+    }
+    Ok(ProbeResult { gzip, pv6, size })
 }
 
 /// M11-1: 作品ファイル（利用者の作品そのもの）か。これが1件でもあるアルバムは削除しない。

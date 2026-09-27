@@ -22,6 +22,8 @@ import { projectToBytes, projectFromBytes, PROJECT_VERSION, PV5_VERSION } from "
 import { computeMixPlan, ExportMixSpec, pcmS16ToWav } from "../src/editor/audio";
 import { makeClip, buildFramesFromClip } from "../src/editor/frameClip";
 import { setLang } from "../src/i18n";
+// V176b: ログにライブラリのパスと作品名を出さないための伏せ字（src/library.ts と同じ道具）
+import { importLogSafe, logSafeFileLabel } from "../src/gzname";
 
 // M12-1a: 文言を pin しているので表示言語を ja に固定する（既定は環境依存の detectLang）
 setLang("ja");
@@ -427,15 +429,49 @@ if (libRoot) {
   let seSample = 0;
   let bgmSample = 0;
   let checkedPlacement = false;
+  // V176b: 実データのライブラリには**開けない .kwz** が混ざり得る（0 バイト・途中で切れた・読めない）。
+  //  以前はここで例外がそのまま上がり、**この先の検査ごとプロセスが死んでいた**。
+  //  ⚠ **黙って continue しない**——開けなかったものは下で **NG として数えて理由を出す**。
+  //  ⚠ 理由の文にはパスが混ざり得るので `importLogSafe` を通す（W-10 と同じ作法）。
+  //  `.kwz` の名前は 3DS が付ける英数字のハッシュ＝作品名ではないので、**名前だけは出してよい**。
+  const unreadable: string[] = [];
+  let scanned = 0;
   for (const f of files) {
     if (seSample >= 3 && bgmSample >= 3) break;
-    const nodeBuf = readFileSync(f);
-    const ab = nodeBuf.buffer.slice(nodeBuf.byteOffset, nodeBuf.byteOffset + nodeBuf.byteLength);
-    const note: any = await parse(ab.slice(0));
-    const hasBgm = note.hasAudioTrack?.(0) === true;
-    const seSlots = [1, 2, 3, 4].filter((n) => note.hasAudioTrack?.(n) === true);
-    if (!hasBgm && seSlots.length === 0) continue;
-    const { project } = await importFlipnote(ab.slice(0), f);
+    scanned++;
+    // ★try で囲むのは「**開く**」ところだけ。この下の照合まで囲むと、こちら側が壊れたときに
+    //  「開けなかった」として数えてしまい、本物の不具合が 1 行の注記に化ける
+    let opened: {
+      note: any;
+      project: Awaited<ReturnType<typeof importFlipnote>>["project"];
+      hasBgm: boolean;
+      seSlots: number[];
+    } | null = null;
+    try {
+      const nodeBuf = readFileSync(f);
+      const ab = nodeBuf.buffer.slice(nodeBuf.byteOffset, nodeBuf.byteOffset + nodeBuf.byteLength);
+      const note: any = await parse(ab.slice(0));
+      const hasBgm = note.hasAudioTrack?.(0) === true;
+      const seSlots = [1, 2, 3, 4].filter((n) => note.hasAudioTrack?.(n) === true);
+      // 音の無い作品はここでは用が無い（開けてはいるので NG ではない）
+      if (!hasBgm && seSlots.length === 0) continue;
+      const { project } = await importFlipnote(ab.slice(0), f);
+      opened = { note, project, hasBgm, seSlots };
+    } catch (e) {
+      let size = -1;
+      try {
+        size = statSync(f).size;
+      } catch {
+        /* 走っている最中に消えた等。大きさは分からないが、開けなかったことは記録する */
+      }
+      const why =
+        size === 0 ? "中身が空" : importLogSafe(String((e as Error)?.message ?? e), [f]);
+      unreadable.push(
+        `${logSafeFileLabel(f) || "(名前不明)"}: ${why}（${size < 0 ? "大きさ不明" : `${size} バイト`}）`
+      );
+    }
+    if (!opened) continue;
+    const { note, project, hasBgm, seSlots } = opened;
     const a = project.audio;
     if (hasBgm) {
       bgmSample++;
@@ -476,6 +512,10 @@ if (libRoot) {
     }
   }
   console.log(`kwz sampled: bgm=${bgmSample} se=${seSample} (${files.length} files scanned)`);
+  // ★0 件でも必ず出す（出さないと「見ていない」のか「無かった」のか読む側に分からない）
+  console.log(`開けなかった .kwz: ${unreadable.length} 件 / 見た ${scanned} 件中${unreadable.length ? "（NG）" : ""}`);
+  for (const u of unreadable) console.log(`  - ${u}`);
+  check("開けない .kwz が 0 件", unreadable.length === 0, `${unreadable.length} 件`);
   if (seSample === 0) console.log("  ⚠ SEありの .kwz が見つからなかったため配置検証はスキップ");
 } else {
   console.log("（.kwz 分離取込の実データ検証はライブラリパス引数を付けて実行）");

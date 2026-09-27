@@ -14,6 +14,14 @@
 @font-face { font-family: "MA Maru";    src: url("../assets/fonts/maru-bold.woff2") format("woff2"); font-weight: 700; font-display: block; }
 @font-face { font-family: "MA Pop";     src: url("../assets/fonts/pop.woff2") format("woff2"); font-weight: 400; font-display: block; }
 @font-face { font-family: "MA Mincho";  src: url("../assets/fonts/mincho.woff2") format("woff2"); font-weight: 400; font-display: block; }
+/* A-71（V176）で追加した5書体。★太字は同梱しないので weight 700 を足さないこと
+   （足すとブラウザが合成ボールドを作ってドットのグリッドを壊す）。
+   family 名は src/editor/fonts.ts の cssFamily と一字一句合わせる */
+@font-face { font-family: "MA Kaku";     src: url("../assets/fonts/kaku.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Dot16";    src: url("../assets/fonts/dot16.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Tegaki";   src: url("../assets/fonts/tegaki.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Shippori"; src: url("../assets/fonts/shippori.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Reggae";   src: url("../assets/fonts/reggae.woff2") format("woff2"); font-weight: 400; font-display: block; }
 
 /* ★V158 (C-1): 色は**すべてここ（変数）に集める**。個別セレクタに色を直書きしない。
    `:root[data-theme="dark"]`（下）は**変数だけ**を上書きするので、配色を足しても
@@ -3156,6 +3164,24 @@ input[type="text"] {
 #ii-invert.on {
   background: var(--ink);
   color: var(--panel);
+}
+/* V179 (A-73): プレビューをドラッグして取り込む範囲を動かす。ペン・タッチのドラッグをスクロールに取られない。
+   カーソルは動かせるとき（はみ出している軸がある）だけ grab */
+#ii-cv {
+  touch-action: none;
+}
+#ii-cv.ii-movable {
+  cursor: grab;
+}
+#ii-cv.ii-movable.ii-grabbing {
+  cursor: grabbing;
+}
+.ii-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0.75;
+  text-align: center;
 }
 @media (max-width: 1000px) {
   .imgimp {

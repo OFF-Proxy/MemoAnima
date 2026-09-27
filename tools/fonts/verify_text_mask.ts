@@ -14,18 +14,37 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createCanvas, GlobalFonts } from "@napi-rs/canvas";
+import { FONTS as APP_FONTS, type FontKey } from "../../src/editor/fonts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..", "..");
 const FONT_DIR = path.join(ROOT, "assets", "fonts");
 
-/** src/editor/fonts.ts の FONTS と対応させること */
+/** ★`kind` は書かない——**正は `src/editor/fonts.ts`**（書体定義の唯一の置き場所）。
+ *  ここに書き写すと、アプリの描き方と検査の描き方が黙ってズレる（V176 で dot16 が
+ *  "dot" → "outline" に変わったとき、この表だけ古いままになりかけた）。
+ *  sizes は「その書体で代表的に確かめたい 3 つ」なので、ここに置いてよい。 */
+function kindOf(key: string): "dot" | "outline" {
+  const def = APP_FONTS.find((f) => f.key === (key as FontKey));
+  if (!def) {
+    console.error(`FATAL: src/editor/fonts.ts に書体 "${key}" がありません`);
+    process.exit(1);
+  }
+  return def.kind;
+}
+
 const FONTS = [
-  { key: "misaki", file: "misaki.woff2", family: "MA Misaki", kind: "dot", sizes: [8, 16, 24] },
-  { key: "pixel12", file: "pixel12.woff2", family: "MA Pixel12", kind: "dot", sizes: [12, 24, 36] },
-  { key: "maru", file: "maru.woff2", family: "MA Maru", kind: "outline", sizes: [12, 16, 24] },
-  { key: "pop", file: "pop.woff2", family: "MA Pop", kind: "outline", sizes: [12, 16, 24] },
-  { key: "mincho", file: "mincho.woff2", family: "MA Mincho", kind: "outline", sizes: [12, 16, 24] },
+  { key: "misaki", file: "misaki.woff2", family: "MA Misaki", sizes: [8, 16, 24] },
+  { key: "pixel12", file: "pixel12.woff2", family: "MA Pixel12", sizes: [12, 24, 36] },
+  { key: "maru", file: "maru.woff2", family: "MA Maru", sizes: [12, 16, 24] },
+  { key: "pop", file: "pop.woff2", family: "MA Pop", sizes: [12, 16, 24] },
+  { key: "mincho", file: "mincho.woff2", family: "MA Mincho", sizes: [12, 16, 24] },
+  // A-71（V176）。sizes は fonts.ts で採用した候補のうち代表3つ
+  { key: "kaku", file: "kaku.woff2", family: "MA Kaku", sizes: [12, 16, 24] },
+  { key: "dot16", file: "dot16.woff2", family: "MA Dot16", sizes: [12, 16, 24] },
+  { key: "tegaki", file: "tegaki.woff2", family: "MA Tegaki", sizes: [16, 20, 24] },
+  { key: "shippori", file: "shippori.woff2", family: "MA Shippori", sizes: [20, 24, 32] },
+  { key: "reggae", file: "reggae.woff2", family: "MA Reggae", sizes: [12, 16, 24] },
 ] as const;
 
 export const SAMPLE = "あいうえお アイウエオ 漢字 ABC 123";
@@ -85,7 +104,7 @@ function textToMask(text: string, px: number, family: string, kind: "dot" | "out
 const refs: Record<string, { w: number; h: number; bits: string }> = {};
 for (const f of FONTS) {
   for (const px of f.sizes) {
-    const m = textToMask(SAMPLE, px, f.family, f.kind);
+    const m = textToMask(SAMPLE, px, f.family, kindOf(f.key));
     if (!m) continue;
     refs[`${f.key}@${px}`] = { w: m.w, h: m.h, bits: Array.from(m.data).join("") };
   }

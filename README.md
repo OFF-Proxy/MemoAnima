@@ -2,7 +2,7 @@
 
 **English** | [日本語](#日本語)
 
-A Windows tool for importing the flipbook animations you made on a Nintendo 3DS (`.kwz` / `.ppm`), editing them with a pen tablet, and exporting to **MP4 / GIF / APNG / a PNG sequence**. Everything runs on your PC.
+A Windows and Mac tool for importing the flipbook animations you made on a Nintendo 3DS (`.kwz` / `.ppm`), editing them with a pen tablet, and exporting to **MP4 / GIF / APNG / a PNG sequence**. Everything runs on your PC.
 
 > ⚠️ This is an unofficial, non-commercial fan tool made by one person. It has no connection to Nintendo Co., Ltd. or its affiliates, and is not licensed, sponsored, endorsed or otherwise approved by them.
 >
@@ -87,7 +87,7 @@ npx tsx scripts/make_release.ts   # dist-release/MemoAnima_v<version>_win64.zip
 
 ## メモアニマ (MemoAnima)
 
-ニンテンドー3DSで作ったお絵かきアニメ作品（`.kwz` / `.ppm`）をPCに取り込み、ペンタブ・液タブで編集して **MP4 / GIF / APNG / PNG連番** に書き出せる Windows 向けツール（PC完結型）。
+ニンテンドー3DSで作ったお絵かきアニメ作品（`.kwz` / `.ppm`）をPCに取り込み、ペンタブ・液タブで編集して **MP4 / GIF / APNG / PNG連番** に書き出せる Windows・Mac 向けツール（PC完結型）。
 
 > ⚠️ 本ソフトは個人制作の非公式・非営利ファンツールです。任天堂株式会社およびその関連会社とは一切関係がなく、許諾・後援・提携・推奨を受けたものではありません。
 >

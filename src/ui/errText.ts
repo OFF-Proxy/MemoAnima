@@ -13,6 +13,28 @@ export function errText(e: unknown): string {
   return String(e);
 }
 
+/** V173b: 解析ライブラリ（`flipnote.js`）が「このファイルは読めない」と言ったか。
+ *
+ *  ★なぜ**この印だけ**を見るのか: あのライブラリの失敗は**必ず** `err()` を通り、
+ *  メッセージの頭に **`flipnote.js error: `** が付く（`dist/flipnote.js` の実装）。
+ *  再生器（`Player`）経由でさらに包まれた文にも、この印はそのまま残る。
+ *  ＝**1 つの印で全部拾える**。実機で出ていたのはこれ:
+ *
+ *      読み込みエラー: Error loading … : flipnote.js error: Could not identify source as a valid …
+ *
+ *  ⚠ 「invalid」「could not」のような**英単語で判定してはいけない**。
+ *   en / es / pt-BR の辞書には、それらの語を含む**正しい訳文**がある
+ *   （例: "This animation could not be unpacked. …"）。英単語で判定すると、
+ *   利用者が読むべき自前の説明まで「読めませんでした」に化ける。
+ *   `scripts/v173b_smoke.ts` の [S-20] が **7 言語の訳文を全部通して誤爆 0** を固定している。
+ *
+ *  戻り値が true のとき、**画面には訳文（`lib.open.unreadable.msg`）を出し、ログには原文を残す**
+ *  ——画面と用途が違う（原因を追うのはこちら側）。DOM 非依存＝Node の smoke が直接叩く。 */
+const PARSER_ERROR_MARK = "flipnote.js error:";
+export function isUnreadableSource(msg: string): boolean {
+  return msg.toLowerCase().includes(PARSER_ERROR_MARK);
+}
+
 /** V169 (B-3): Rust の門番（`read_file_raw` の `max_bytes`）が返す `TOO_LARGE:<実サイズ>` から
  *  バイト数を取り出す。**門番に当たった失敗だけ** `number`、それ以外（読み込み失敗・壊れている等）は `null`
  *  ＝呼ぶ側は `null` なら従来の文言をそのまま出す（他の失敗の文言は変えない）。

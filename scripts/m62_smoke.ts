@@ -7,6 +7,8 @@ import { newProject, PIXELS } from "../src/editor/model";
 import { projectToBytes, projectFromBytes } from "../src/editor/serialize";
 import { importFlipnote } from "../src/editor/kwzImport";
 import { pcmS16ToWav } from "../src/editor/audio";
+// V176b: ログにライブラリのパスと作品名を出さないための伏せ字（src/library.ts と同じ道具）
+import { importLogSafe, logSafeFileLabel } from "../src/gzname";
 import { setLang } from "../src/i18n";
 
 // M12-1a: 文言を pin しているので表示言語を ja に固定する（既定は環境依存の detectLang）
@@ -63,12 +65,38 @@ function b64(bytes: Uint8Array): string {
   let withAudio = 0;
   let wavOk = 0;
   let roundtripOk = 0;
+  // V176b: 実データのライブラリには**開けない .kwz** が混ざり得る（0 バイト・途中で切れた・読めない）。
+  //  以前はここで例外がそのまま上がり、**この先の検査ごとプロセスが死んでいた**。
+  //  ⚠ **黙って continue しない**——開けなかったものは下で **NG として数えて理由を出す**。
+  //  ⚠ 理由の文にはパスが混ざり得るので `importLogSafe` を通す（W-10 と同じ作法）。
+  //  `.kwz` の名前は 3DS が付ける英数字のハッシュ＝作品名ではないので、**名前だけは出してよい**。
+  const unreadable: string[] = [];
   for (const f of samples) {
-    const nb = readFileSync(f);
-    const { project } = await importFlipnote(
-      nb.buffer.slice(nb.byteOffset, nb.byteOffset + nb.byteLength),
-      f
-    );
+    // ★try で囲むのは「**開く**」ところだけ。この下の往復検査まで囲むと、保存形式が壊れたときに
+    //  「開けなかった」として数えてしまい、本物の不具合が 1 行の注記に化ける
+    let project: Awaited<ReturnType<typeof importFlipnote>>["project"] | null = null;
+    try {
+      const nb = readFileSync(f);
+      project = (
+        await importFlipnote(
+          nb.buffer.slice(nb.byteOffset, nb.byteOffset + nb.byteLength),
+          f
+        )
+      ).project;
+    } catch (e) {
+      let size = -1;
+      try {
+        size = statSync(f).size;
+      } catch {
+        /* 走っている最中に消えた等。大きさは分からないが、開けなかったことは記録する */
+      }
+      const why =
+        size === 0 ? "中身が空" : importLogSafe(String((e as Error)?.message ?? e), [f]);
+      unreadable.push(
+        `${logSafeFileLabel(f) || "(名前不明)"}: ${why}（${size < 0 ? "大きさ不明" : `${size} バイト`}）`
+      );
+    }
+    if (!project) continue;
     if (project.audio) {
       withAudio++;
       // M5-1: 分離取込後は bgm/se の複数トラック。WAV 判定は全トラックで
@@ -121,10 +149,16 @@ function b64(bytes: Uint8Array): string {
       if (same) roundtripOk++;
     }
   }
-  console.log(`kwz audio: ${withAudio}/${samples.length} 作品に音声, WAV=${wavOk}, roundtrip=${roundtripOk}`);
+  // ★母数は「**開けた件数**」。開けなかったぶんは下の検査で別に数える
+  const opened = samples.length - unreadable.length;
+  console.log(`kwz audio: ${withAudio}/${opened} 作品に音声, WAV=${wavOk}, roundtrip=${roundtripOk}`);
+  // ★0 件でも必ず出す（出さないと「見ていない」のか「無かった」のか読む側に分からない）
+  console.log(`開けなかった .kwz: ${unreadable.length} 件 / ${samples.length} 件中${unreadable.length ? "（NG）" : ""}`);
+  for (const u of unreadable) console.log(`  - ${u}`);
   check("音声付きkwzが存在（実データ検証の前提）", withAudio > 0);
   check("抽出音声はWAV", wavOk === withAudio);
   check("v3往復で音声設定＋バイト完全一致", roundtripOk === withAudio);
+  check("開けない .kwz が 0 件", unreadable.length === 0, `${unreadable.length} 件`);
 }
 
 // ---- 設定変更（ミュート/音量/トリム/syncMode/差し替え）が往復保持 ----

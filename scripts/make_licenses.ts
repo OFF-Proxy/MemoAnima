@@ -328,16 +328,27 @@ ${readBundledLicense("GPL-2.0")}`);
     ["maru-bold.woff2", "Zen Maru Gothic Bold", "", "https://github.com/googlefonts/zen-marugothic"],
     ["pop.woff2", "Dela Gothic One", "", "https://github.com/syakuzen/DelaGothic"],
     ["mincho.woff2", "Zen Antique", "", "https://github.com/googlefonts/zen-antique"],
+    // A-71（V176）で追加した5書体。すべて OFL 1.1
+    ["kaku.woff2", "Zen Kaku Gothic New", "", "https://github.com/googlefonts/zen-kakugothic"],
+    ["dot16.woff2", "DotGothic16", "", "https://github.com/fontworks-fonts/DotGothic16"],
+    ["tegaki.woff2", "Yomogi", "", "https://github.com/satsuyako/YomogiFont"],
+    ["shippori.woff2", "Shippori Mincho", "", "https://github.com/fontdasu/ShipporiMincho"],
+    ["reggae.woff2", "Reggae One", "", "https://github.com/fontworks-fonts/Reggae"],
   ];
 
-  // OFL 3書体の copyright 行は、保存した OFL.txt の1行目をそのまま使う
+  // OFL 8書体の copyright 行は、保存した OFL.txt の1行目をそのまま使う
   const oflCopyright = [
     "OFL-1.1_ZenMaruGothic.txt",
     "OFL-1.1_DelaGothicOne.txt",
     "OFL-1.1_ZenAntique.txt",
+    "OFL-1.1_ZenKakuGothicNew.txt",
+    "OFL-1.1_DotGothic16.txt",
+    "OFL-1.1_Yomogi.txt",
+    "OFL-1.1_ShipporiMincho.txt",
+    "OFL-1.1_ReggaeOne.txt",
   ].map((f) => readFontLicense(f).split("\n")[0].trim());
 
-  // OFL 1.1 の条文本体は3書体で完全に同一なので、1回だけ掲載する
+  // OFL 1.1 の条文本体は8書体で完全に同一なので、1回だけ掲載する
   // （copyright 行だけが書体ごとに違う。差は末尾改行の有無のみであることを確認済み）
   const oflRef = readFontLicense("OFL-1.1_ZenMaruGothic.txt");
   const oflBody = oflRef.slice(oflRef.indexOf("This Font Software is licensed")).trim();
@@ -361,6 +372,11 @@ ${FONT_FILES.map(
   - Zen Maru Gothic Regular / Bold  (maru.woff2 / maru-bold.woff2)
   - Dela Gothic One                 (pop.woff2)
   - Zen Antique                     (mincho.woff2)
+  - Zen Kaku Gothic New             (kaku.woff2)
+  - DotGothic16                     (dot16.woff2)
+  - Yomogi                          (tegaki.woff2)
+  - Shippori Mincho                 (shippori.woff2)
+  - Reggae One                      (reggae.woff2)
 
 各書体の著作権表示（配布元の OFL.txt 記載のまま）:
 
@@ -399,7 +415,7 @@ ${readFontLicense("M+_FONT_LICENSE_J.txt")}
    アプリで使う文字（ASCII・かな・カタカナ・約物・常用漢字）だけを残し、
    それ以外のグリフを取り除いています。元の書体データそのものではありません。
 
-2. 上記 SIL OFL 1.1 の3書体は、**著作権表示に Reserved Font Name（予約フォント名）の
+2. 上記 SIL OFL 1.1 の8書体は、**著作権表示に Reserved Font Name（予約フォント名）の
    宣言がありません**。配布元の OFL.txt を確認したうえで同梱しています。
    したがって OFL 1.1 第3条の改名義務は発生せず、サブセット版を元の名称のまま
    同梱しています。
@@ -411,7 +427,7 @@ ${readFontLicense("M+_FONT_LICENSE_J.txt")}
 
 Note on the bundled fonts (English summary):
    The bundled font files are subsetted (modified) versions containing only the
-   glyphs this application needs. None of the three OFL fonts above declares a
+   glyphs this application needs. None of the eight OFL fonts above declares a
    Reserved Font Name in its copyright statement, so the renaming requirement of
    OFL 1.1 clause 3 does not apply. As stated in clause 5 of the OFL, documents
    and artwork created with these fonts are NOT covered by the license.`);

@@ -25,6 +25,13 @@ $sources = @(
     @{ Url = "https://github.com/googlefonts/zen-marugothic/raw/main/fonts/ttf/ZenMaruGothic-Bold.ttf";    File = "ZenMaruGothic-Bold.ttf" }
     @{ Url = "https://github.com/syakuzen/DelaGothic/raw/master/fonts/ttf/DelaGothicOne-Regular.ttf";      File = "DelaGothicOne-Regular.ttf" }
     @{ Url = "https://github.com/googlefonts/zen-antique/raw/main/fonts/ttf/ZenAntique-Regular.ttf";       File = "ZenAntique-Regular.ttf" }
+    # A-71（V176）で追加した5書体。すべて OFL 1.1・一次配布元（各プロジェクトのリポジトリ）から
+    @{ Url = "https://github.com/googlefonts/zen-kakugothic/raw/main/fonts/ttf/ZenKakuGothicNew-Regular.ttf"; File = "ZenKakuGothicNew-Regular.ttf" }
+    @{ Url = "https://github.com/fontworks-fonts/DotGothic16/raw/master/fonts/ttf/DotGothic16-Regular.ttf";   File = "DotGothic16-Regular.ttf" }
+    # ⚠ Yomogi だけ既定ブランチが master でも main でもなく **ver3.00**（V176 で 404 を踏んで判明）
+    @{ Url = "https://github.com/satsuyako/YomogiFont/raw/ver3.00/fonts/ttf/Yomogi-Regular.ttf";             File = "Yomogi-Regular.ttf" }
+    @{ Url = "https://github.com/fontdasu/ShipporiMincho/raw/master/fonts/ttf/ShipporiMincho-Regular.ttf";    File = "ShipporiMincho-Regular.ttf" }
+    @{ Url = "https://github.com/fontworks-fonts/Reggae/raw/master/fonts/ttf/ReggaeOne-Regular.ttf";          File = "ReggaeOne-Regular.ttf" }
 )
 
 # --- OFL 条文（各リポジトリの一次情報） ---
@@ -32,6 +39,12 @@ $licenses = @(
     @{ Url = "https://github.com/googlefonts/zen-marugothic/raw/main/OFL.txt"; File = "OFL-1.1_ZenMaruGothic.txt" }
     @{ Url = "https://github.com/syakuzen/DelaGothic/raw/master/OFL.txt";      File = "OFL-1.1_DelaGothicOne.txt" }
     @{ Url = "https://github.com/googlefonts/zen-antique/raw/main/OFL.txt";    File = "OFL-1.1_ZenAntique.txt" }
+    # A-71（V176）。★条文は**本体と同じリポジトリ**から取る（まとめサイトの写しは使わない）
+    @{ Url = "https://github.com/googlefonts/zen-kakugothic/raw/main/OFL.txt";  File = "OFL-1.1_ZenKakuGothicNew.txt" }
+    @{ Url = "https://github.com/fontworks-fonts/DotGothic16/raw/master/OFL.txt"; File = "OFL-1.1_DotGothic16.txt" }
+    @{ Url = "https://github.com/satsuyako/YomogiFont/raw/ver3.00/OFL.txt";     File = "OFL-1.1_Yomogi.txt" }
+    @{ Url = "https://github.com/fontdasu/ShipporiMincho/raw/master/OFL.txt";   File = "OFL-1.1_ShipporiMincho.txt" }
+    @{ Url = "https://github.com/fontworks-fonts/Reggae/raw/master/OFL.txt";    File = "OFL-1.1_ReggaeOne.txt" }
 )
 
 function Get-Remote($url, $dest) {

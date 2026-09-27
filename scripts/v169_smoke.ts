@@ -143,7 +143,14 @@ const SRC = listSrc();
   // 開く3か所は readProjectRaw を呼んでいる（正の確認）
   const open = main.slice(main.indexOf("async function openEditorWithProject("), main.indexOf("function newNote("));
   check("2 openEditorWithProject は readProjectRaw を呼ぶ", /await readProjectRaw\(item\.path\)/.test(open));
-  const sel = lib.slice(lib.indexOf("async select(it: LibraryView)"), lib.indexOf("showLoadError(msg: string)"));
+  // V173b: ★ここにも同じ穴があった——終わりを**署名の字面**で探していたので、引数が増えた瞬間に
+  // `indexOf` が -1 になり、`slice(selStart, -1)` が **select の中ではなくファイル末尾まで**広がっていた
+  //（検査が名前どおりのものを見なくなる＝黙る）。両端とも「定義の行頭」で探し、
+  // 見つからなければ**黙って通さず**に赤くする
+  const selStart = lib.search(/\n\s{2}async select\(it: LibraryView\)/);
+  const selEnd = lib.search(/\n\s{2}showLoadError\(/);
+  check("2 select と showLoadError の定義が見つかる（切り出しが空振りしていない）", selStart >= 0 && selEnd > selStart, `select@${selStart} showLoadError@${selEnd}`);
+  const sel = selStart < 0 || selEnd <= selStart ? "" : lib.slice(selStart, selEnd);
   check("2 ライブラリの select（open.preview の project 枝）は readProjectRaw を呼ぶ", /await readProjectRaw\(it\.path\)/.test(sel));
   const thumbIdx = lib.indexOf("frameToPngBlob(project, project.thumbFrame");
   check("2 サムネの予備道（サイドカー PNG が無いとき）は readProjectRaw を呼ぶ", thumbIdx > 0 && /await readProjectRaw\(it\.path\)/.test(lib.slice(Math.max(0, thumbIdx - 400), thumbIdx)));
@@ -177,7 +184,12 @@ const SRC = listSrc();
     check("4 '読み込み失敗: …' → null（他の失敗は触らない）", fn("読み込み失敗: The system cannot find the file") === null);
     check("4 'TOO_LARGE:' だけ → null（数字が無ければ生の文のまま）", fn("TOO_LARGE:") === null);
   }
-  const sle = lib.slice(lib.indexOf("showLoadError(msg: string)"), lib.indexOf("private renderMeta("));
+  // V173b: 切り出しを**署名の字面**（`showLoadError(msg: string)`）で探していたため、引数が増えた瞬間に
+  // `indexOf` が -1 を返し、`slice(-1, …)` で**ほぼ空の切れ端**を見て 4 件が赤になった（不変条件は壊れていない）。
+  // 定義の行頭だけを見る形にし、見つからなければ**黙って通さず**に赤くする
+  const sleStart = lib.search(/\n\s{2}showLoadError\(/);
+  check("4 showLoadError の定義が見つかる（切り出しが空振りしていない）", sleStart >= 0);
+  const sle = sleStart < 0 ? "" : lib.slice(sleStart, lib.indexOf("private renderMeta("));
   check("4 ★showLoadError は TOO_LARGE を人が読める文（lib.open.tooLarge.msg）に置き換える", /tooLargeBytes\(msg\)/.test(sle) && /t\("lib\.open\.tooLarge\.msg"/.test(sle));
   check("4 それ以外の失敗は従来の文言（lib.meta.loadError.label）のまま", /t\("lib\.meta\.loadError\.label", \{ err: msg \}\)/.test(sle));
   check("4 上限の数字は門番の定数から作る（別の数字を手で書かない）", /IMPORT_MAX_BYTES/.test(sle));
@@ -235,7 +247,11 @@ check("6 ★`[V167 C] alt unbalanced` の行が残っている", /\[V167 C\] alt
   check("7 B-4: read_file_bytes の Rust 実装は変わっていない（1行）", /fn read_file_bytes\(path: String\) -> Result<Vec<u8>, String> \{\n    fs::read\(&path\)\.map_err\(\|e\| format!\("読み込み失敗: \{e\}"\)\)\n\}/.test(rs));
   check("7 A-3: inputlog の keydown/keyup 行に dp=（defaultPrevented）がある", /repeat=\$\{e\.repeat \? 1 : 0\} dp=\$\{e\.defaultPrevented \? 1 : 0\}/.test(edRaw));
   check("7 B-5: perf の open.preview / open.project は従来の1か所ずつ（新しい行を足していない）", (main.match(/runWithBusy\("open\.project"/g) ?? []).length === 1 && (lib.match(/runWithBusy\("open\.preview"/g) ?? []).length === 1);
-  check("7 [V154b] open failed のログ行は従来どおり（size と理由だけ）", /\[V154b\] open failed size=\$\{item\.size\} \$\{String\(e\)\}/.test(mainRaw));
+  // V173b: この行は `showLoadError` の 1 行へ畳んだ（同じ失敗で 2 行出ていた・こちらだけ伏せ字の外だった）。
+  // **意図は同じ**——開く失敗のログは「大きさと理由だけ」で、作品名もパスも書かない
+  // ⚠ **コメントを落とした側**（`main`）で見る——説明文の中に旧い行の引用が残っているため
+  check("7 開く失敗のログは大きさと理由だけ（size は showLoadError の logNote へ畳んだ）", /showLoadError\(errText\(e\), \[item\.path\], false, `size=\$\{item\.size\}`\)/.test(main));
+  check("7 ★理由を素の String(e) でログへ書く道が開く経路に無い（伏せ字の外を通らない）", !/open failed/.test(main));
 }
 
 console.log(`v169 smoke: pass=${pass} fail=${fail}`);

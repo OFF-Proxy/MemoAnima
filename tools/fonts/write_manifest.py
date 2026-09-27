@@ -35,6 +35,23 @@ ENTRIES = [
     ("Zen Antique Regular",
      "https://github.com/googlefonts/zen-antique/raw/main/fonts/ttf/ZenAntique-Regular.ttf",
      "ZenAntique-Regular.ttf", "mincho.woff2"),
+    # A-71（V176）で追加した5書体
+    ("Zen Kaku Gothic New Regular",
+     "https://github.com/googlefonts/zen-kakugothic/raw/main/fonts/ttf/ZenKakuGothicNew-Regular.ttf",
+     "ZenKakuGothicNew-Regular.ttf", "kaku.woff2"),
+    ("DotGothic16 Regular",
+     "https://github.com/fontworks-fonts/DotGothic16/raw/master/fonts/ttf/DotGothic16-Regular.ttf",
+     "DotGothic16-Regular.ttf", "dot16.woff2"),
+    # ⚠ Yomogi だけ既定ブランチが ver3.00（master / main は 404）
+    ("Yomogi Regular",
+     "https://github.com/satsuyako/YomogiFont/raw/ver3.00/fonts/ttf/Yomogi-Regular.ttf",
+     "Yomogi-Regular.ttf", "tegaki.woff2"),
+    ("Shippori Mincho Regular",
+     "https://github.com/fontdasu/ShipporiMincho/raw/master/fonts/ttf/ShipporiMincho-Regular.ttf",
+     "ShipporiMincho-Regular.ttf", "shippori.woff2"),
+    ("Reggae One Regular",
+     "https://github.com/fontworks-fonts/Reggae/raw/master/fonts/ttf/ReggaeOne-Regular.ttf",
+     "ReggaeOne-Regular.ttf", "reggae.woff2"),
 ]
 
 ARCHIVES = [
@@ -48,6 +65,11 @@ LICENSES = [
     ("OFL-1.1_ZenMaruGothic.txt", "https://github.com/googlefonts/zen-marugothic/raw/main/OFL.txt"),
     ("OFL-1.1_DelaGothicOne.txt", "https://github.com/syakuzen/DelaGothic/raw/master/OFL.txt"),
     ("OFL-1.1_ZenAntique.txt", "https://github.com/googlefonts/zen-antique/raw/main/OFL.txt"),
+    ("OFL-1.1_ZenKakuGothicNew.txt", "https://github.com/googlefonts/zen-kakugothic/raw/main/OFL.txt"),
+    ("OFL-1.1_DotGothic16.txt", "https://github.com/fontworks-fonts/DotGothic16/raw/master/OFL.txt"),
+    ("OFL-1.1_Yomogi.txt", "https://github.com/satsuyako/YomogiFont/raw/ver3.00/OFL.txt"),
+    ("OFL-1.1_ShipporiMincho.txt", "https://github.com/fontdasu/ShipporiMincho/raw/master/OFL.txt"),
+    ("OFL-1.1_ReggaeOne.txt", "https://github.com/fontworks-fonts/Reggae/raw/master/OFL.txt"),
     ("M+_FONT_LICENSE_E.txt", "PixelMplus-20130602.zip 内 mplus_bitmap_fonts/LICENSE_E"),
     ("M+_FONT_LICENSE_J.txt", "PixelMplus-20130602.zip 内 mplus_bitmap_fonts/LICENSE_J"),
     ("misaki_readme_ja.txt", "misaki_ttf_2021-05-05.zip 内 misaki.txt（ライセンス条項を含む同梱文書）"),

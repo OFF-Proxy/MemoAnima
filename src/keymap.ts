@@ -16,8 +16,15 @@
 //     この形にしておくと `scripts/m1201_i18n_check.ts` の検査4 が動的キーを見られる。
 //   - 文字列を返す関数（`reservedReason` / `bindingCaveat` / `codeLabel`）は**関数の中で `t()` を呼ぶ**。
 //     「キーを返して呼び出し側で訳す」形にすると、キーが検査から見えなくなるため。
+//
+// V181 (A-25): **Mac でだけ ⌘ を Ctrl として扱う**（G-1）。判定・修飾キーの読み・表記の規則は
+//   `platform.ts` の 1 か所（`isMacPlatform` / `primaryMod` / `unfoldedMeta` / `platformKeys`）。
+//   照合（`eventKey` / `pointerEventKey`）・登録（`bindingFrom*`）・単体タップ（`tapModOf`）・表記（`keyLabel` /
+//   `modLabel`）は全部それを通す。**保存される形は今と同じ `ctrl: true`**（settings.json の形は変えない）。
+//   Windows は 1 か所も変わらない（`v181_smoke` [S-2] がこの回の前とビット一致を見る）。
 import { t } from "./i18n";
 import { customPresetBaseName } from "./i18n/defaults";
+import { isMacPlatform, platformKeys, primaryMod, unfoldedMeta } from "./platform";
 
 export interface KeyBinding {
   /** KeyboardEvent.code（"KeyP" / "BracketLeft" / "Delete" …）。
@@ -40,7 +47,8 @@ export interface KeyBinding {
 }
 
 /** V165 (D-4): 単体タップを取れる修飾キー（`KeyboardEvent.key` の値そのもの＝左右を区別しない）。
- *  Meta（Windows キー）は OS が持っていくので入れない（`captureKey` も従来から拒否している）。 */
+ *  Meta（Windows キー）は OS が持っていくので入れない（`captureKey` も従来から拒否している）。
+ *  V181: Mac の ⌘（`key` は同じ "Meta"）は `tapModOf` が "Control" に畳む（保存の値はこの 3 つのまま）。 */
 export type TapMod = "Control" | "Shift" | "Alt";
 
 const TAP_MODS = new Set<string>(["Control", "Shift", "Alt"]);
@@ -48,6 +56,61 @@ const TAP_MODS = new Set<string>(["Control", "Shift", "Alt"]);
 /** V165 (D-4): `KeyboardEvent.key` が単体タップの対象か */
 export function isTapMod(key: string): key is TapMod {
   return TAP_MODS.has(key);
+}
+
+/** V181 (G-1): 押された修飾キー（`KeyboardEvent.key`）を、単体タップとして数えるときの修飾キーへ。
+ *  **Mac の ⌘ の単押しは Control のタップ**（⌘Z を Ctrl+Z として扱うのと同じ折り畳み）。
+ *  Windows の Meta（Win キー）は今までどおり対象外（null）。修飾キー以外も null。
+ *  ★**設定画面の取得（main.ts の captureKey）と実行側（`ModTapWatcher`）の両方がこれを使う**——
+ *   取れる操作と発動する操作が食い違うと「登録できたのに動かない」になる（`MOD_TAP_MS` と同じ考え方）。 */
+export function tapModOf(key: string): TapMod | null {
+  const k = key === "Meta" && isMacPlatform() ? "Control" : key;
+  return isTapMod(k) ? k : null;
+}
+
+/** V183 (A-82): keydown の修飾キーのフラグ（`KeyboardEvent` をそのまま渡せる形） */
+export interface ModFlags {
+  ctrlKey?: boolean;
+  shiftKey?: boolean;
+  altKey?: boolean;
+  metaKey?: boolean;
+}
+
+/** V183 (A-82): この keydown で、単体タップの候補を**新しく立てるなら**その修飾キー（立てないなら null）。
+ *
+ *  ★**実行側（`ModTapWatcher.down`）と設定画面の取得（main.ts の `captureKey`）の両方が、これ 1 つで決める**
+ *   （`tapModOf`・`MOD_TAP_MS` と同じ考え方＝取れる操作と発動する操作を食い違わせない）。
+ *
+ *  候補にしないもの:
+ *   - 修飾キーではない（＝組み合わせ）・Windows の Win キー（`tapModOf` が null）
+ *   - 押しっぱなしのくり返し（`repeat`）・止められている状態（`blocked`＝描画中・ダイアログ中・文字入力中・IME）
+ *   - もう候補が立っている（`pending`＝2 つ目の修飾キー。同じ修飾キーの左右を続けて押した形もここで落ちる）
+ *   - ★**ほかの修飾キーが 1 つでも押されている**（A-82）。以前は「2 つ目で候補を捨てる」だけだったので、捨てたあとに
+ *     押した修飾キーで新しい候補が立ち、⇧＋⌥ を押したまま Ctrl をトンでタップが動いた（3 つ重ね。⇧ を押したまま
+ *     Ctrl を 2 回トンの 2 回目・Win を押したまま Ctrl をトンも同じ形）。押されているかは**イベントのフラグ**で見る
+ *     （覚えた状態は keyup の取りこぼしでずれる）。**押したキー自身のフラグは除く**（Ctrl の keydown は ctrlKey が立って
+ *     届く）。Win / ⌘ も「ほかの修飾キー」に数える（Mac の ⌘ のタップは `tapModOf` が Control に畳む）。 */
+export function tapCandidateOf(
+  key: string,
+  o: { repeat?: boolean; blocked?: boolean; pending?: boolean; mods?: ModFlags }
+): TapMod | null {
+  const k = tapModOf(key);
+  if (!k || o.repeat || o.blocked || o.pending || otherModHeld(key, o.mods)) return null;
+  return k;
+}
+
+/** V183 (A-82): 押した修飾キー（`KeyboardEvent.key`）の**ほか**に、修飾キーのフラグが立っているか。
+ *  自分のフラグ（Control → ctrlKey・Shift → shiftKey・Alt → altKey・Meta → metaKey）は数えない。
+ *  ★ctrlKey と metaKey を**畳まずに別々に**読む（`primaryMod` を使わない）: Mac の ⌘ の keydown では自分の metaKey を除き、
+ *   control は「ほかの修飾キー」に数える必要がある（`v181_smoke` [S-5] の直読みの表にこの 2 読みを載せてある） */
+function otherModHeld(key: string, f: ModFlags | undefined): boolean {
+  if (!f) return false;
+  return (
+    (key !== "Control" && Boolean(f.ctrlKey)) ||
+    (key !== "Shift" && Boolean(f.shiftKey)) ||
+    (key !== "Alt" && Boolean(f.altKey)) ||
+    (key !== "Meta" && Boolean(f.metaKey))
+  );
 }
 
 /** V169 (A): このキーの既定動作を**アプリの生存中ずっと**止めるか。
@@ -77,7 +140,7 @@ export const MOD_TAP_MS = 250;
  *  ★**編集画面と設定画面とホーム画面で同じ実体を使う**（同じ条件・同じしきい値）。
  *   Node から import できるので、条件の抜けはスモークが直接叩いて見張れる。
  *
- *  使い方: keydown で `down()`／keyup で `up()`（発動するなら修飾キーを返す）／
+ *  使い方: keydown で `down()`（**イベントのフラグを `mods` に渡す**）／keyup で `up()`（発動するなら修飾キーを返す）／
  *  pointerdown・blur・画面離脱で `cancel()`。 */
 export class ModTapWatcher {
   private cand: { key: TapMod; at: number } | null = null;
@@ -85,25 +148,30 @@ export class ModTapWatcher {
   constructor(private now: () => number = () => performance.now()) {}
 
   /** keydown。候補を立てる／壊す。**`blocked` が真の間は候補を立てない**
-   *  （描画中・ダイアログ中・文字入力中・IME 変換中＝Codex 指摘①）。 */
-  down(key: string, opts: { repeat?: boolean; blocked?: boolean } = {}): void {
-    if (!isTapMod(key)) {
-      this.cand = null; // 修飾キー以外が押された＝組み合わせ
-      return;
-    }
-    // 押しっぱなしのリピート・同じキーの2度目・2つ目の修飾キー・止められている状態では候補にしない
-    if (opts.repeat || opts.blocked || this.cand) {
-      this.cand = null;
-      return;
-    }
-    this.cand = { key, at: this.now() };
+   *  （描画中・ダイアログ中・文字入力中・IME 変換中＝Codex 指摘①）。
+   *  V183 (A-82): **ほかの修飾キーが押されている間も立てない**（`mods`＝その keydown のフラグ）。立てるかどうかは
+   *  設定画面の取得と同じ `tapCandidateOf` が決める。
+   *  ★型では `mods` を必須にしてある（アプリの呼び出し元が渡し忘れたら build が落ちる）。実行時は無くても動く
+   *   （＝フラグを見ない旧来の判定。修飾キーだけを並べて叩く既存の検査のため） */
+  down(key: string, opts: { repeat?: boolean; blocked?: boolean; mods: ModFlags }): void;
+  down(key: string, opts: { repeat?: boolean; blocked?: boolean; mods?: ModFlags } = {}): void {
+    // 修飾キー以外（＝組み合わせ）・押しっぱなしのリピート・同じキーの2度目・2つ目の修飾キー・止められている状態・
+    // ほかの修飾キーが押されている（V183）では候補にしない（立っていた候補も捨てる）。V181: Mac の ⌘ は Control
+    const k = tapCandidateOf(key, {
+      repeat: opts.repeat,
+      blocked: opts.blocked,
+      pending: this.cand !== null,
+      mods: opts.mods,
+    });
+    this.cand = k ? { key: k, at: this.now() } : null;
   }
 
   /** keyup。条件がそろっていれば修飾キーを返す（＝発動してよい）。候補は必ず畳む。 */
   up(key: string): TapMod | null {
     const cand = this.cand;
     this.cand = null;
-    if (!cand || !isTapMod(key) || cand.key !== key) return null;
+    const k = tapModOf(key);
+    if (!cand || !k || cand.key !== k) return null;
     return this.now() - cand.at <= MOD_TAP_MS ? cand.key : null;
   }
 
@@ -330,7 +398,8 @@ function normCode(code: string): string {
 /** 引き当て表のキー（修飾キー込みの正規化文字列）。
  *  Windows キー（metaKey）は **Ctrl とは別物**として扱う（M11-5 の「Win+H で手のひらにしない」と同じ考え方。
  *  折り畳むと Win+Z が Ctrl+Z と一致して元に戻ってしまう）。割り当て側は meta を持てないので、
- *  Win を押しながらの打鍵は**どのコマンドにも一致しない**＝従来どおり何も起きない */
+ *  Win を押しながらの打鍵は**どのコマンドにも一致しない**＝従来どおり何も起きない。
+ *  V181 (G-1): **Mac の ⌘ だけは Ctrl に畳む**（`eventKey` 側で "C" に数える）。割り当て側は今までどおり ctrl だけ */
 export function bindingKey(b: KeyBinding): string {
   // V165 (D-4): 単体タップは修飾を持たない（それ自体が修飾キーなので）。**先に見る**
   if (b.tap) return tapEventKey(b.tap);
@@ -340,15 +409,18 @@ export function bindingKey(b: KeyBinding): string {
   return `${mods}|${normCode(b.code)}`;
 }
 
-/** KeyboardEvent から引き当て表のキーを作る */
+/** KeyboardEvent から引き当て表のキーを作る。
+ *  V181 (G-1): Ctrl は `primaryMod`（Mac なら ⌘ も・ctrl と ⌘ の両方でも "C" は 1 つ）。
+ *  "M" は Ctrl に畳んでいない meta（Windows の Win キー）だけ＝Mac では立たない */
 export function eventKey(e: KeyboardEvent): string {
-  return `${e.ctrlKey ? "C" : ""}${e.shiftKey ? "S" : ""}${e.altKey ? "A" : ""}${
-    e.metaKey ? "M" : ""
+  return `${primaryMod(e) ? "C" : ""}${e.shiftKey ? "S" : ""}${e.altKey ? "A" : ""}${
+    unfoldedMeta(e) ? "M" : ""
   }|${normCode(e.code)}`;
 }
 
 /** M16 (K-4): pointerdown から引き当て表のキーを作る（ポインタ割り当ての照合用）。
- *  meta（Win）は割り当て側が持てないので M を混ぜて**わざと一致させない**（eventKey と同じ考え方）。 */
+ *  meta（Win）は割り当て側が持てないので M を混ぜて**わざと一致させない**（eventKey と同じ考え方）。
+ *  V181 (G-1): Mac の ⌘＋クリックは Ctrl＋クリックに一致する（eventKey と同じ折り畳み） */
 export function pointerEventKey(e: {
   ctrlKey: boolean;
   shiftKey: boolean;
@@ -356,30 +428,33 @@ export function pointerEventKey(e: {
   metaKey: boolean;
   button: number;
 }): string {
-  return `${e.ctrlKey ? "C" : ""}${e.shiftKey ? "S" : ""}${e.altKey ? "A" : ""}${
-    e.metaKey ? "M" : ""
+  return `${primaryMod(e) ? "C" : ""}${e.shiftKey ? "S" : ""}${e.altKey ? "A" : ""}${
+    unfoldedMeta(e) ? "M" : ""
   }|B${e.button}`;
 }
 
-/** KeyboardEvent → KeyBinding（設定画面のキー取得用）。Windows キーは無視する（登録できない） */
+/** KeyboardEvent → KeyBinding（設定画面のキー取得用）。Windows キーは無視する（登録できない）。
+ *  V181 (G-1): **Mac の ⌘ は Ctrl として登録**（保存される形は今と同じ `ctrl: true`＝settings.json の形は不変） */
 export function bindingFromEvent(e: KeyboardEvent): KeyBinding {
   const b: KeyBinding = { code: normCode(e.code) };
-  if (e.ctrlKey) b.ctrl = true;
+  if (primaryMod(e)) b.ctrl = true;
   if (e.shiftKey) b.shift = true;
   if (e.altKey) b.alt = true;
   return b;
 }
 
 /** M16 (K-4): PointerEvent → KeyBinding（設定画面の修飾キー＋クリック取得用）。
- *  code は "" にして button を実体にする。**素の左クリック（無修飾 button=0）は呼び出し側が渡さない**（弾く）。 */
+ *  code は "" にして button を実体にする。**素の左クリック（無修飾 button=0）は呼び出し側が渡さない**（弾く）。
+ *  V181 (G-1): Mac の ⌘＋クリックは Ctrl＋クリックとして登録（`metaKey` を渡さない呼び方は従来どおり） */
 export function bindingFromPointer(e: {
   ctrlKey: boolean;
   shiftKey: boolean;
   altKey: boolean;
+  metaKey?: boolean;
   button: number;
 }): KeyBinding {
   const b: KeyBinding = { code: "", button: (e.button === 1 ? 1 : e.button === 2 ? 2 : 0) as 0 | 1 | 2 };
-  if (e.ctrlKey) b.ctrl = true;
+  if (primaryMod(e)) b.ctrl = true;
   if (e.shiftKey) b.shift = true;
   if (e.altKey) b.alt = true;
   return b;
@@ -446,6 +521,13 @@ function pointerLabel(button: 0 | 1 | 2): string {
 
 export function keyLabel(b: KeyBinding | null | undefined): string {
   if (!b) return "";
+  // V181 (G-3): Mac では ⌘ ⌥ ⇧（「Ctrl+Shift+S」→「⇧⌘S」・「Alt+クリック」→「⌥+クリック」・「Ctrl（タップ）」→「⌘（タップ）」）。
+  //  辞書の文言と**同じ 1 関数・同じ規則**（`platformKeys`）を、Windows の表記にそのまま当てる＝Windows は 1 文字も変わらない
+  return platformKeys(keyLabelText(b));
+}
+
+/** keyLabel の中身（Windows の表記）。Mac の表記はこれに `platformKeys` を当てたもの */
+function keyLabelText(b: KeyBinding): string {
   // V165 (D-4): 「Alt（タップ）」。キーの刻印そのもの（Ctrl/Shift/Alt）は訳さず、注記だけ訳す
   //（`codeLabel` の「記号・英数は刻印なので訳さない」と同じ考え方）。
   // Codex 指摘⑦: `KeyboardEvent.key` は "Control" だが、この画面と案内文の表記は "Ctrl" なので揃える
@@ -680,6 +762,13 @@ const LEGACY_BINDINGS: { id: CommandId; b: KeyBinding }[] = [
   { id: "app.settings", b: { code: "Comma", ctrl: true } },
 ];
 
+/** V181 (G-2): **Mac でだけ**足す固定キー。Mac のやり直しは ⇧⌘Z でも（⌘Y は ⌘→Ctrl の折り畳みで Ctrl+Y として効く）。
+ *  ⌘ は Ctrl に畳むので、割り当ての形は Ctrl+Shift+Z。固定キーと同じく**プリセット側の割り当てが勝つ**
+ *  （利用者が Ctrl+Shift+Z を別の命令に使っていればそちらが効く）。**Windows には足さない**（1 か所も変えない） */
+const MAC_LEGACY_BINDINGS: { id: CommandId; b: KeyBinding }[] = [
+  { id: "edit.redo", b: { code: "KeyZ", ctrl: true, shift: true } },
+];
+
 /** 「道具」グループのコマンドか（M11-15: 同キー巡回の対象）。
  *  M12-1c-1: 比較先は**識別子** TOOL_GROUP（旧: 表示名の "道具" と同じ文字列だった） */
 export function isToolCommand(id: string): boolean {
@@ -720,7 +809,9 @@ export function buildLookup(preset: Preset): Map<string, CommandId[]> {
     m.set(key, [id]);
   };
   // 先に固定キーを入れ、プリセット側で同じキーが使われていれば上書きさせる
-  for (const l of LEGACY_BINDINGS) put(bindingKey(l.b), l.id);
+  // V181 (G-2): Mac では ⇧⌘Z（やり直し）も固定キーに入る（表を作る時点の判定で決まる）
+  const legacy = isMacPlatform() ? [...LEGACY_BINDINGS, ...MAC_LEGACY_BINDINGS] : LEGACY_BINDINGS;
+  for (const l of legacy) put(bindingKey(l.b), l.id);
   for (const [id, b] of Object.entries(preset.bindings)) {
     if (!b) continue;
     if (RESERVED_CODES.has(b.code)) continue;
@@ -837,9 +928,10 @@ export function modifierClashMates(preset: Preset, id: CommandId): CommandId[] {
     .sort((x, y) => (COMMAND_ORDER.get(x) ?? 0) - (COMMAND_ORDER.get(y) ?? 0));
 }
 
-/** V167: 修飾キーの表示名。画面と案内文は "Ctrl" 表記で揃える（`keyLabel` と同じ規則）。 */
+/** V167: 修飾キーの表示名。画面と案内文は "Ctrl" 表記で揃える（`keyLabel` と同じ規則）。
+ *  V181 (G-3): Mac では ⌘ / ⇧ / ⌥（`keyLabel` と同じ `platformKeys` を通す） */
 export function modLabel(m: TapMod): string {
-  return m === "Control" ? "Ctrl" : m;
+  return platformKeys(m === "Control" ? "Ctrl" : m);
 }
 
 /** M11-15: そのプリセットで、この道具コマンドと同じキーを共有している道具（自分を除く・定義順）。

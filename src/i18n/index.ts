@@ -14,6 +14,8 @@ import ptBR from "./pt-BR";
 import ko from "./ko";
 import zhHans from "./zh-Hans";
 import zhHant from "./zh-Hant";
+// V181 (A-25): Mac のときだけキーの表記を ⌘ ⌥ ⇧ へ（辞書は変えない・判定と規則は platform.ts の 1 か所）
+import { platformKeysForDict } from "../platform";
 
 /** 対応言語（master §0 の5言語 ＋ L-2 で `zh-Hans` ＋ V152 で `zh-Hant`）。
  *  **言語を1つ足す作業は、ここと `DICTS` と `detectLang()` の3箇所**（`sanitizeLang` は `LANGS` を見る）。 */
@@ -131,6 +133,11 @@ function fill(tpl: string, vars?: Record<string, unknown>): string {
 /**
  * M12-1a: 翻訳。**HTML は返さない**（呼び出し側が textContent / title / placeholder に入れる）。
  * 未知キーでも例外を投げず `[key]` を返す（起動不能にしない）。
+ *
+ * V181 (A-25・G-3): 引いた訳文は**表示へ渡す直前に** `platformKeysForDict` を通す＝Mac のときだけ
+ * 「Ctrl+Z」→「⌘Z」のようにキーの表記を記号へ（**辞書は 1 文字も変えない**・Windows は素通し）。
+ * 画面へ出る辞書の文言はすべてここを通る（`applyI18n` の静的 DOM も）ので、置き換え漏れが起きない。
+ * `{…}` を埋める**前**に当てる＝差し込む値（利用者が付けた名前など）は置き換えない。
  */
 export function t(key: string, vars?: Record<string, unknown>): string {
   // 複数形: { count } があり `キー_other` が在るときだけ解決する（master §3-d・乱用しない）
@@ -140,11 +147,11 @@ export function t(key: string, vars?: Record<string, unknown>): string {
     //（"zh-Hans" / "zh-Hant" は言語＋文字体系の正しい形。地域の "zh-CN" / "zh-TW" ではない）
     const cat = new Intl.PluralRules(current).select(vars.count);
     const v = lookup(`${key}_${cat}`) ?? lookup(`${key}_other`);
-    if (v !== undefined) return fill(v, vars);
+    if (v !== undefined) return fill(platformKeysForDict(key, v), vars);
   }
   const raw = lookup(key);
   if (raw === undefined) return `[${key}]`;
-  return fill(raw, vars);
+  return fill(platformKeysForDict(key, raw), vars);
 }
 
 /**

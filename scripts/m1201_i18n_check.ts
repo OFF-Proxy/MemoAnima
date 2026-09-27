@@ -1120,6 +1120,9 @@ function jaLiterals(
     ["release-assets/README.txt", /その他の名称は|商標または登録商標/, 1],
     // `"Nintendo 3DS", "Flipnote Studio" and other such names are trademarks or`
     ["release-assets/README_en.txt", /other such names are trademarks|trademarks or registered trademarks/, 1],
+    // V190b: Mac 版の説明書（zip には入らないが、.dmg と並べて BOOTH / Release で配る）。
+    // 「はありません。「ニンテンドー3DS」「うごくメモ帳」「Flipnote Studio」」＝「商標または登録商標」は次の行
+    ["release-assets/README_mac.txt", /「うごくメモ帳」「Flipnote Studio」|商標または登録商標/, 1],
     // README.md は英語ブロックと日本語ブロックで各1行（どちらも1行に収まっている）
     ["README.md", /trademarks or registered trademarks|商標または登録商標/, 2],
     // HK1 (A-23): BOOST 支援者メッセージ。zip にも公開リポにも入らないが**支援者へ届く配布文書**。

@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createCanvas, GlobalFonts, type SKRSContext2D } from "@napi-rs/canvas";
+import { FONTS as APP_FONTS } from "../../src/editor/fonts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..", "..");
@@ -23,26 +24,51 @@ const OUT_PNG = path.join(HERE, "sample_sheet.png");
 
 const SAMPLE = "あいうえお アイウエオ 漢字混じりの見本 ABC 123";
 
-/** 書体定義。sizes は HANDOFF P-4 の指定。dot=設計グリッドを持つドット系 */
+/** ★ドット系かどうかの**正は `src/editor/fonts.ts` の `kind`**（書体定義の唯一の置き場所）。
+ *
+ *  ここに `dot: true/false` を書き写していたせいで、V176 で**アプリは dot で描くのに
+ *  検査だけ outline と言う**（＝嘘）状態を作りかけた。表を2か所に持つとまたズレるので、
+ *  この道具は**アプリの定義を読む**。`-bold` はウェイト違いなので元の書体の kind に従う。
+ *  `scripts/v176_smoke.ts` [S-14] が「2か所に書き分けていない」ことを固定している。 */
+function isDot(key: string): boolean {
+  const base = key.replace(/-bold$/, "");
+  const def = APP_FONTS.find((f) => f.key === base);
+  if (!def) {
+    console.error(`FATAL: src/editor/fonts.ts に書体 "${base}" がありません（この道具の表と食い違っています）`);
+    process.exit(1);
+  }
+  return def.kind === "dot";
+}
+
 interface FontDef {
   key: string;
   label: string;
   file: string;
   family: string;
   sizes: number[];
-  dot: boolean;
-  /** 期待する中間調割合の上限（%）。超えたら異常として報告する */
+  /** 期待する中間調割合の上限（%）。**ドット系のときだけ**使う（超えたら異常として報告する） */
   maxMidTone: number;
 }
 
 const FONTS: FontDef[] = [
-  { key: "misaki", label: "美咲ゴシック", file: "misaki.woff2", family: "M10Misaki", sizes: [8, 16, 24], dot: true, maxMidTone: 0 },
-  { key: "pixel12", label: "PixelMplus12 R", file: "pixel12.woff2", family: "M10Pixel12", sizes: [12, 24, 36], dot: true, maxMidTone: 0.5 },
-  { key: "pixel12-bold", label: "PixelMplus12 B", file: "pixel12-bold.woff2", family: "M10Pixel12B", sizes: [12, 24, 36], dot: true, maxMidTone: 0.5 },
-  { key: "maru", label: "Zen Maru Gothic R", file: "maru.woff2", family: "M10Maru", sizes: [8, 12, 16, 24], dot: false, maxMidTone: 100 },
-  { key: "maru-bold", label: "Zen Maru Gothic B", file: "maru-bold.woff2", family: "M10MaruB", sizes: [8, 12, 16, 24], dot: false, maxMidTone: 100 },
-  { key: "pop", label: "Dela Gothic One", file: "pop.woff2", family: "M10Pop", sizes: [8, 12, 16, 24], dot: false, maxMidTone: 100 },
-  { key: "mincho", label: "Zen Antique", file: "mincho.woff2", family: "M10Mincho", sizes: [8, 12, 16, 24], dot: false, maxMidTone: 100 },
+  { key: "misaki", label: "美咲ゴシック", file: "misaki.woff2", family: "M10Misaki", sizes: [8, 16, 24], maxMidTone: 0 },
+  { key: "pixel12", label: "PixelMplus12 R", file: "pixel12.woff2", family: "M10Pixel12", sizes: [12, 24, 36], maxMidTone: 0.5 },
+  { key: "pixel12-bold", label: "PixelMplus12 B", file: "pixel12-bold.woff2", family: "M10Pixel12B", sizes: [12, 24, 36], maxMidTone: 0.5 },
+  { key: "maru", label: "Zen Maru Gothic R", file: "maru.woff2", family: "M10Maru", sizes: [8, 12, 16, 24], maxMidTone: 100 },
+  { key: "maru-bold", label: "Zen Maru Gothic B", file: "maru-bold.woff2", family: "M10MaruB", sizes: [8, 12, 16, 24], maxMidTone: 100 },
+  { key: "pop", label: "Dela Gothic One", file: "pop.woff2", family: "M10Pop", sizes: [8, 12, 16, 24], maxMidTone: 100 },
+  { key: "mincho", label: "Zen Antique", file: "mincho.woff2", family: "M10Mincho", sizes: [8, 12, 16, 24], maxMidTone: 100 },
+  // A-71（V176）で追加した5書体。sizes は src/editor/fonts.ts で採用した候補の下のほう
+  // （＝**潰れるかどうかが決まる境目**）を並べている。上のサイズは潰れないので見なくてよい
+  { key: "kaku", label: "Zen Kaku Gothic New", file: "kaku.woff2", family: "M10Kaku", sizes: [12, 16, 20, 24], maxMidTone: 100 },
+  // ★DotGothic16 は **outline** に切り替わった（作者決定 2026-09-22・設計グリッドが無いことの実測を受けて）。
+  //   dot かどうかは上の isDot() が fonts.ts から読むので、ここには書かない。
+  //   ⚠ V176 で一度、アプリは dot のまま**この表だけ** outline にして緑にしかけた（Codex が指摘）。
+  //   いまは**アプリ自身が outline で描く**ので、検査がそれに従うのが正しい
+  { key: "dot16", label: "DotGothic16", file: "dot16.woff2", family: "M10Dot16", sizes: [12, 16, 20, 24, 32, 48], maxMidTone: 100 },
+  { key: "tegaki", label: "Yomogi", file: "tegaki.woff2", family: "M10Tegaki", sizes: [16, 20, 24], maxMidTone: 100 },
+  { key: "shippori", label: "Shippori Mincho", file: "shippori.woff2", family: "M10Shippori", sizes: [20, 24, 32], maxMidTone: 100 },
+  { key: "reggae", label: "Reggae One", file: "reggae.woff2", family: "M10Reggae", sizes: [12, 16, 20, 24], maxMidTone: 100 },
 ];
 
 for (const f of FONTS) {
@@ -105,8 +131,9 @@ for (const f of FONTS) {
     const stat = midToneRatio(img.alpha);
     rows.push({ font: f, px, img, stat });
     const ok = stat.pct <= f.maxMidTone;
-    if (f.dot && !ok) failed = true;
-    const verdict = f.dot ? (ok ? "OK" : "NG ← 設計グリッドが壊れている") : "(アウトライン系＝正常)";
+    const dot = isDot(f.key);
+    if (dot && !ok) failed = true;
+    const verdict = dot ? (ok ? "OK" : "NG ← 設計グリッドが壊れている") : "(アウトライン系＝正常)";
     console.log(
       `${f.label.padEnd(20)}${String(px).padStart(3)}px ${String(stat.drawn).padStart(9)} ${String(stat.mid).padStart(9)}  ${stat.pct.toFixed(2).padStart(6)}%  ${verdict}`
     );

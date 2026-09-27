@@ -13,6 +13,8 @@ import {
 import { compositeFrame } from "../src/editor/render";
 import { projectToBytes, projectFromBytes } from "../src/editor/serialize";
 import { importFlipnote } from "../src/editor/kwzImport";
+// V176b: ログにライブラリのパスと作品名を出さないための伏せ字（src/library.ts と同じ道具）
+import { importLogSafe, logSafeFileLabel } from "../src/gzname";
 // M12-1c-2: 文言の pin が言語に左右されないよう ja に固定する（pin の文字列は変えていない）
 import { setLang } from "../src/i18n";
 setLang("ja");
@@ -185,13 +187,43 @@ function b64(bytes: Uint8Array): string {
   const samples = files.filter((_, i) => i % step === 0);
   const { parse } = await import("flipnote.js");
   let ok = 0;
+  // V176b: 実データのライブラリには**開けない .kwz** が混ざり得る（0 バイト・途中で切れた・読めない）。
+  //  以前はここで例外がそのまま上がり、**残りの検査ごとプロセスが死んでいた**（このブロックは
+  //  スモークの最後尾なので、`pass=` の行すら出ないまま終わっていた）。
+  //  ⚠ **黙って continue しない**——開けなかったものは下で **NG として数えて理由を出す**。
+  //  ⚠ 理由の文にはパスが混ざり得るので `importLogSafe` を通す（W-10 と同じ作法）。
+  //  `.kwz` の名前は 3DS が付ける英数字のハッシュ＝作品名ではないので、**名前だけは出してよい**。
+  const unreadable: string[] = [];
   for (const f of samples) {
-    const nb = readFileSync(f);
-    const ab = nb.buffer.slice(nb.byteOffset, nb.byteOffset + nb.byteLength);
-    const note: any = await parse(ab.slice(0));
-    const { project } = await importFlipnote(ab.slice(0), f);
+    // ★try で囲むのは「**開く**」ところだけ。この下の照合まで囲むと、こちら側の描画が壊れたときに
+    //  「開けなかった」として数えてしまい、本物の不具合が 1 行の注記に化ける
+    let opened: {
+      note: any;
+      project: Awaited<ReturnType<typeof importFlipnote>>["project"];
+    } | null = null;
+    try {
+      const nb = readFileSync(f);
+      const ab = nb.buffer.slice(nb.byteOffset, nb.byteOffset + nb.byteLength);
+      const note: any = await parse(ab.slice(0));
+      const { project } = await importFlipnote(ab.slice(0), f);
+      opened = { note, project };
+    } catch (e) {
+      let size = -1;
+      try {
+        size = statSync(f).size;
+      } catch {
+        /* 走っている最中に消えた等。大きさは分からないが、開けなかったことは記録する */
+      }
+      const why =
+        size === 0 ? "中身が空" : importLogSafe(String((e as Error)?.message ?? e), [f]);
+      unreadable.push(
+        `${logSafeFileLabel(f) || "(名前不明)"}: ${why}（${size < 0 ? "大きさ不明" : `${size} バイト`}）`
+      );
+    }
+    if (!opened) continue;
+    const { note, project } = opened;
     if (project.indexBits !== 8) {
-      check("N2-7 import 8bit", false, f);
+      check("N2-7 import 8bit", false, logSafeFileLabel(f));
       continue;
     }
     const ours = compositeFrame(project, 0);
@@ -203,9 +235,16 @@ function b64(bytes: Uint8Array): string {
         break;
       }
     if (same) ok++;
-    else check("N2-7 pixel match", false, f);
+    else check("N2-7 pixel match", false, logSafeFileLabel(f));
   }
-  check(`N2-7 ${ok}/${samples.length} 一致`, ok === samples.length);
+  // ★一致の母数は「**開けた件数**」。開けなかったぶんは下の検査で別に数える
+  //  （`opened > 0` を付けているのは、全部開けなかったときに `0/0 一致` で**黙って緑**になるのを防ぐため）
+  const opened = samples.length - unreadable.length;
+  check(`N2-7 ${ok}/${opened} 一致`, ok === opened && opened > 0);
+  // ★0 件でも必ず出す（出さないと「見ていない」のか「無かった」のか読む側に分からない）
+  console.log(`開けなかった .kwz: ${unreadable.length} 件 / ${samples.length} 件中${unreadable.length ? "（NG）" : ""}`);
+  for (const u of unreadable) console.log(`  - ${u}`);
+  check("N2-7 開けない .kwz が 0 件", unreadable.length === 0, `${unreadable.length} 件`);
 }
 
 console.log(`n2 smoke: pass=${pass} fail=${fail}`);

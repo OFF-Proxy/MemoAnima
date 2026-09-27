@@ -1,5 +1,5 @@
 メモアニマ 同梱フォント MANIFEST
-生成: tools/fonts/write_manifest.py / 2026-07-31
+生成: tools/fonts/write_manifest.py / 2026-09-22
 
 後から同一物を取り直せるようにするための記録。すべて一次配布元から取得している
 （ミラー・フォントまとめサイトは使わない）。取得は tools/fonts/fetch_fonts.ps1。
@@ -83,24 +83,89 @@ Zen Antique Regular
     size    : 646,864 bytes
     sha256  : 1de89c8f6cf3d64a2a8a77819a75bf39e413db47c299cc58e633407a4779f28d
 
+Zen Kaku Gothic New Regular
+  URL       : https://github.com/googlefonts/zen-kakugothic/raw/main/fonts/ttf/ZenKakuGothicNew-Regular.ttf
+  原本      : download/ZenKakuGothicNew-Regular.ttf
+    size    : 2,360,248 bytes
+    sha256  : b840cd07a67d89cacca44249ae49aa99ee7640eb5ce623be8d8983d6aabac801
+  サブセット: assets/fonts/kaku.woff2
+    size    : 320,028 bytes
+    sha256  : 8dfe700e20d1f2086b99e3c7099ba0fd27dc9eca4d8e539a4991ffe0d18d63f4
+
+DotGothic16 Regular
+  URL       : https://github.com/fontworks-fonts/DotGothic16/raw/master/fonts/ttf/DotGothic16-Regular.ttf
+  原本      : download/DotGothic16-Regular.ttf
+    size    : 2,069,236 bytes
+    sha256  : 155da8f318553c11d9dffc2affbc7c2114c6a46f9740bcf639ed5568af92be71
+  サブセット: assets/fonts/dot16.woff2
+    size    : 137,044 bytes
+    sha256  : a3b549c9206d62097ae5952eed6998c5bf550bd735992bf6ec7f91252f6a4be3
+
+Yomogi Regular
+  URL       : https://github.com/satsuyako/YomogiFont/raw/ver3.00/fonts/ttf/Yomogi-Regular.ttf
+  原本      : download/Yomogi-Regular.ttf
+    size    : 4,045,904 bytes
+    sha256  : ec280f473a03187292905618f24fdb08a6dcbf8620b52637e3b589fe745259b9
+  サブセット: assets/fonts/tegaki.woff2
+    size    : 547,152 bytes
+    sha256  : 16fa41af88eeb27ecc6c718162bec08d175c20106c9e02ee2bcb74817db57157
+
+Shippori Mincho Regular
+  URL       : https://github.com/fontdasu/ShipporiMincho/raw/master/fonts/ttf/ShipporiMincho-Regular.ttf
+  原本      : download/ShipporiMincho-Regular.ttf
+    size    : 19,552,772 bytes
+    sha256  : 743f95a923387d9c5d0709b08e98adf706f871bfa7ccaa21ebdf5526ba080476
+  サブセット: assets/fonts/shippori.woff2
+    size    : 451,872 bytes
+    sha256  : 5748c2d4f8784fb37e470f61c4b89faf5a60a8516f6b533f3eb8de52e5c06793
+
+Reggae One Regular
+  URL       : https://github.com/fontworks-fonts/Reggae/raw/master/fonts/ttf/ReggaeOne-Regular.ttf
+  原本      : download/ReggaeOne-Regular.ttf
+    size    : 2,153,256 bytes
+    sha256  : aebe62598732d76036f30ec11bb0ec5f68938e373a06d1b4ceb6b9cf1abf3db2
+  サブセット: assets/fonts/reggae.woff2
+    size    : 271,888 bytes
+    sha256  : bb8a951f9fcc4629cab845615ff0e7af9f2deb05332e9657e05d1c38d365e965
+
 ==============================================================================
 ■ ライセンス条文（tools/fonts/licenses/）
 ==============================================================================
 OFL-1.1_ZenMaruGothic.txt
   出典   : https://github.com/googlefonts/zen-marugothic/raw/main/OFL.txt
-  sha256 : 2a20cf7ce1909d8ee1e949095d340f7d7656705f7c810a2d6faf56800ad0cb3d
+  sha256 : a27426d5fda44497bae318e8ecec721ae7c1681ceaec0c6de1d74e5fee4fb6a7
 
 OFL-1.1_DelaGothicOne.txt
   出典   : https://github.com/syakuzen/DelaGothic/raw/master/OFL.txt
-  sha256 : 30879094bb985ac783855bedd83ffe99c7ab6a90c137367852b6652fa97e81fc
+  sha256 : fc4c10042252a2478404a18369b4d1eebb9489743ddf492cb3e1b7aa65ad4117
 
 OFL-1.1_ZenAntique.txt
   出典   : https://github.com/googlefonts/zen-antique/raw/main/OFL.txt
-  sha256 : c76594cc8f4af2ea35d1e05278b1911b22cc6227bc3b0ad404f68be03fe3f107
+  sha256 : 48ff7c6e8b154a8ce263850609dfb7bf6053042c135c713b901bd485d0cfaaf9
+
+OFL-1.1_ZenKakuGothicNew.txt
+  出典   : https://github.com/googlefonts/zen-kakugothic/raw/main/OFL.txt
+  sha256 : 0fac78a235c98d640cb06332eb5362c211d86fa03c011df438c35005d22ad2c7
+
+OFL-1.1_DotGothic16.txt
+  出典   : https://github.com/fontworks-fonts/DotGothic16/raw/master/OFL.txt
+  sha256 : b6630c61ea078cacd7fabe37d14ffe557a0b45b06683374a9aa9e24262993e33
+
+OFL-1.1_Yomogi.txt
+  出典   : https://github.com/satsuyako/YomogiFont/raw/ver3.00/OFL.txt
+  sha256 : bc0330d5973ab1f200553f51b4cb4ef11b81187fdcd0249f7f83992726c02a48
+
+OFL-1.1_ShipporiMincho.txt
+  出典   : https://github.com/fontdasu/ShipporiMincho/raw/master/OFL.txt
+  sha256 : 41fba056279be5f45ff9a99e44b7b53897b42732f5806d8e666e0ab49ac6bd38
+
+OFL-1.1_ReggaeOne.txt
+  出典   : https://github.com/fontworks-fonts/Reggae/raw/master/OFL.txt
+  sha256 : 2756c3dcd85ad997b742330f91332fb478afad302708d4149f7bcd4600543ce2
 
 M+_FONT_LICENSE_E.txt
   出典   : PixelMplus-20130602.zip 内 mplus_bitmap_fonts/LICENSE_E
-  sha256 : 907e9f5ac24cba6ce2523cd2a66d6ba143e082c685344dfa8d30ef12f67410a0
+  sha256 : 9ca61a989bcc8d84817fe3d1ee0b67212f0acb6f93486d659a113d41f7043c15
 
 M+_FONT_LICENSE_J.txt
   出典   : PixelMplus-20130602.zip 内 mplus_bitmap_fonts/LICENSE_J
@@ -108,12 +173,12 @@ M+_FONT_LICENSE_J.txt
 
 misaki_readme_ja.txt
   出典   : misaki_ttf_2021-05-05.zip 内 misaki.txt（ライセンス条項を含む同梱文書）
-  sha256 : 82929cc3b34c79b6a67f21fe137c7bb165589c9e34ba1441611e493afd67dfca
+  sha256 : e95236a31c5934bc00a4b6e87c5f77b9073f971622e9f37c144795d8c7d96562
 
 ==============================================================================
 ■ サブセット条件
 ==============================================================================
 文字集合 : tools/fonts/subset_charset.txt（2580 字・うち常用漢字 2,136 字）
-  sha256 : 94ad61483a23dbd04dfe2d3c731a9392931dfe93ed321e9fc2c6821fba9ebe65
+  sha256 : 3aeef4ae84b8b7f64a68e20c57348bc4b52ce2937b87bc986521f7a7185032c8
 コマンド : python tools/fonts/subset.py
            （pyftsubset --flavor=woff2 --layout-features= --no-hinting）

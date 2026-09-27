@@ -186,6 +186,90 @@ export function footprintEdges(size: number): FootprintEdge[] {
 }
 
 /**
+ * ★V178 (A-72): 全レイヤー消しゴムの「二重線」の**外側の線**（物理 px で 1px の横帯の並び）。
+ *
+ * 輪（`footprintEdges`＝消える範囲の外周）は**そのまま**残し、その外側に g 物理 px 離してもう 1 本引く
+ * （消える範囲は変わらないので、太さの輪は動かさない）。形は「消えるドットの集合を g だけ太らせた領域
+ * （チェビシェフ）の、4 近傍で外に接する 1px」。
+ *
+ * 辺ごとに平行移動するだけだと、低い倍率（1 ドット＝2〜3px）で段の角がつぶれて線が乱れるので、
+ * **物理 px の行ごとに区間で**求める。`penFootprint` の形はどのドット行も中心の列（dx=0）を含む
+ * ＝太らせた領域も各行 1 本の区間になる（`scripts/v178_smoke.ts` [S-10] が物差しと総当たりで突き合わせる）。
+ *
+ * @param L ドット相対 x → 物理 px（`paintCursorLayer` と**同じ式**を渡す。輪と 1px もずれないように）
+ * @param T ドット相対 y → 物理 px
+ * @param g 輪からの間隔（物理 px）
+ */
+export function outerRingRuns(
+  size: number,
+  L: (dx: number) => number,
+  T: (dy: number) => number,
+  g: number
+): { x: number; y: number; w: number }[] {
+  // ドット行ごとの横の範囲 [a, b]
+  const rows = new Map<number, { a: number; b: number }>();
+  for (const c of penFootprint(size)) {
+    const r = rows.get(c.dy);
+    if (!r) rows.set(c.dy, { a: c.dx, b: c.dx });
+    else {
+      r.a = Math.min(r.a, c.dx);
+      r.b = Math.max(r.b, c.dx);
+    }
+  }
+  // 太らせた領域の、物理 px の行 y での区間 [lo, hi)（その行に無ければ null）
+  const span = (y: number): [number, number] | null => {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const [dy, r] of rows) {
+      if (y < T(dy) - g || y >= T(dy + 1) + g) continue;
+      lo = Math.min(lo, L(r.a) - g);
+      hi = Math.max(hi, L(r.b + 1) + g);
+    }
+    return lo < hi ? [lo, hi] : null;
+  };
+  let top = Infinity;
+  let bottom = -Infinity;
+  for (const dy of rows.keys()) {
+    top = Math.min(top, T(dy) - g);
+    bottom = Math.max(bottom, T(dy + 1) + g);
+  }
+  const out: { x: number; y: number; w: number }[] = [];
+  for (let y = top; y < bottom; y++) {
+    const cur = span(y);
+    if (!cur) continue;
+    const [lo, hi] = cur;
+    // この行で外に接する画素 = 左右の端 ＋ 上の行・下の行の区間からはみ出した所
+    const marks: [number, number][] = [
+      [lo, lo + 1],
+      [hi - 1, hi],
+    ];
+    for (const nb of [span(y - 1), span(y + 1)]) {
+      if (!nb) {
+        marks.push([lo, hi]);
+        continue;
+      }
+      if (nb[0] > lo) marks.push([lo, Math.min(hi, nb[0])]);
+      if (nb[1] < hi) marks.push([Math.max(lo, nb[1]), hi]);
+    }
+    // 重なり・隣り合いをまとめて帯にする
+    marks.sort((a, b) => a[0] - b[0]);
+    let s = marks[0][0];
+    let e = marks[0][1];
+    for (let i = 1; i < marks.length; i++) {
+      const [ms, me] = marks[i];
+      if (ms <= e) e = Math.max(e, me);
+      else {
+        out.push({ x: s, y, w: e - s });
+        s = ms;
+        e = me;
+      }
+    }
+    out.push({ x: s, y, w: e - s });
+  }
+  return out;
+}
+
+/**
  * 黒/白の交互（マーチングアンツと同じ流儀・`editor.ts` の `redrawOverlay` に合わせる）。
  * 4ドット周期。どんな背景でも必ずどちらかが見える。アニメーションはしない。
  */

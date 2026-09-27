@@ -7,7 +7,18 @@
 // ピクセルパーフェクトになる」ため（美咲=8px設計 / PixelMplus12=12px設計）。
 // 全書体共通のサイズ表は使えない。
 
-export type FontKey = "misaki" | "pixel12" | "maru" | "pop" | "mincho";
+export type FontKey =
+  | "misaki"
+  | "pixel12"
+  | "maru"
+  | "pop"
+  | "mincho"
+  // A-71（V176）で追加した5書体。**既存の後ろに足す**（並びと既定値は変えない）
+  | "kaku"
+  | "dot16"
+  | "tegaki"
+  | "shippori"
+  | "reggae";
 
 export interface FontDef {
   key: FontKey;
@@ -33,6 +44,27 @@ export const FONTS: FontDef[] = [
   // （要件定義書 §2.4 の推奨 12〜48px に合わせる）
   { key: "pop", labelKey: "ed.text.font.pop.label", cssFamily: "MA Pop", kind: "outline", sizes: [12, 16, 20, 24, 32, 48], hasBold: false },
   { key: "mincho", labelKey: "ed.text.font.mincho.label", cssFamily: "MA Mincho", kind: "outline", sizes: [12, 16, 20, 24, 32, 48], hasBold: false },
+  // ---- A-71（V176）で追加した5書体 ----
+  // ★sizes は**実際に焼いて**決めた（推測で書かない）。画数の多い常用漢字を1字ずつ
+  //   2値化し、「字の中の白い穴」が 48px に対して何割残るかを既存の同梱書体と比べている。
+  //   すべて hasBold: false ＝ 太字を同梱しない（true にすると合成ボールドでグリッドが壊れる）。
+  { key: "kaku", labelKey: "ed.text.font.kaku.label", cssFamily: "MA Kaku", kind: "outline", sizes: [12, 16, 20, 24, 32, 48], hasBold: false },
+  // ★DotGothic16 は **outline** 扱い（作者決定 2026-09-22）。
+  //   名前と見た目から「16px 設計のドット書体」と決めて入れたが、実測すると設計グリッドが無い:
+  //   16px で焼くと中間調 82%（美咲は 0%）・原本の座標の 99.6% が 16px 格子から外れている
+  //   （`verify_outlines` は 2535/2535 一致＝サブセットのせいではなく、原本がそういう書体）。
+  //   dot 扱い（等倍＋単純閾値）に得は無いので、3倍で描いて平均する outline に切り替えた。
+  //   → 16 の整数倍という縛りも外れるので、焼き直して読めるサイズを決め直してある。
+  //   表示名も「ドット（大）」→「ドット風」にした（ピクセルパーフェクトではないため）。
+  { key: "dot16", labelKey: "ed.text.font.dot16.label", cssFamily: "MA Dot16", kind: "outline", sizes: [12, 16, 20, 24, 32, 48], hasBold: false },
+  // Yomogi は細い鉛筆書き。12px は画数の多い字が線ごと消えるので落とした
+  { key: "tegaki", labelKey: "ed.text.font.tegaki.label", cssFamily: "MA Tegaki", kind: "outline", sizes: [16, 20, 24, 32, 48], hasBold: false },
+  // ★Shippori Mincho は横画が髪の毛のように細い**正統派の明朝**。12px と 16px では
+  //   横画が閾値で丸ごと消え、字の骨格が残らなかった（同じ役目の mincho より明確に悪い）ので落とした
+  { key: "shippori", labelKey: "ed.text.font.shippori.label", cssFamily: "MA Shippori", kind: "outline", sizes: [20, 24, 32, 48], hasBold: false },
+  // ★Reggae One は装飾だが、12px でも同じ役目の pop（Dela Gothic One・出荷済み）より
+  //   はっきり読める（pop は 12px で真っ黒の塊になる）ので 12px を残した
+  { key: "reggae", labelKey: "ed.text.font.reggae.label", cssFamily: "MA Reggae", kind: "outline", sizes: [12, 16, 20, 24, 32, 48], hasBold: false },
 ];
 
 export const DEFAULT_TEXT = { family: "maru" as FontKey, size: 16, bold: true };

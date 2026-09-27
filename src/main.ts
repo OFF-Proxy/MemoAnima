@@ -30,10 +30,14 @@ import {
   DEFAULT_CONVERT,
   convertToProject,
   frameToRgba,
+  CROP_ZOOM_MAX,
+  CROP_ZOOM_STEPS,
+  canvasPlacement,
+  createCropPreview,
   type ConvertOptions,
   type SourceImage,
 } from "./editor/imageConvert";
-import { createSlider } from "./ui/slider";
+import { createSlider, type SliderHandle } from "./ui/slider";
 import {
   FrameSource,
   ExportFormat,
@@ -54,6 +58,8 @@ import {
   formatBytes,
 } from "./editor/exporter";
 import { mimeFromExt, setAudioLogSink, type AudioPick } from "./editor/audio";
+// V173 (A-65): クラウド経由で末尾に付く `.gz` の扱い（純関数・Node からも叩ける＝`v173_smoke` [S-10]）
+import { importBaseName, importLogSafe, isProjectLikeName } from "./gzname";
 // M12-1a: i18n（自前・依存なし）。設計は docs/REQ_M12_i18n_master.md §3
 import { t, setLang, getLang, sanitizeLang, detectLang, applyI18n, HIDDEN_LANGS, type Lang } from "./i18n";
 // M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
@@ -92,7 +98,10 @@ import {
   modifierClashPartners,
   modLabel,
   // V165 (D-4): 単体タップ（条件としきい値は keymap.ts の1か所）
-  isTapMod,
+  // V181: 候補の判定は `tapModOf`（Mac の ⌘ の単押しは Control のタップ・実行側と同じ関数）。以前の `isTapMod` はその中
+  tapModOf,
+  // V183 (A-82): 押したときに候補を立てるかは `tapCandidateOf`（実行側の ModTapWatcher と同じ関数）
+  tapCandidateOf,
   tapEventKey,
   isLoneAltKey, // V169 (A): Alt 単独の既定動作を止める判定（純関数）
   isHoldOnlyCommand,
@@ -104,6 +113,8 @@ import {
   type Preset,
   type TapMod,
 } from "./keymap";
+// V181 (A-25): Mac では ⌘ を Ctrl として扱う（判定と修飾キーの読みは platform.ts の 1 か所）
+import { primaryMod, unfoldedMeta } from "./platform";
 
 /** M7-2b: ディスプレイ設定（settings.json に永続化・起動時復元） */
 type DisplaySettings = {
@@ -378,7 +389,7 @@ const hiddenAutosaveHandler = () => {
  *  引き当ては `keymap.ts` の表をそのまま使うので、**利用者が割り当てを変えればそれで開く**。 */
 const homeKeyHandler = (e: KeyboardEvent) => {
   if (homeKeyBlocked(e)) return;
-  homeModTap.down(e.key, { repeat: e.repeat, blocked: false }); // V165 (D-4)
+  homeModTap.down(e.key, { repeat: e.repeat, blocked: false, mods: e }); // V165 (D-4)・V183 (A-82): フラグも渡す
   const ids = homeLookup.get(eventKey(e));
   if (!ids || !ids.includes("app.settings")) return;
   e.preventDefault();
@@ -1767,11 +1778,12 @@ function openImageImportDialog(
   defaultTitle: string,
   editorCtx?: EditorImportCtx
 ) {
+  // V179: 倍率・位置（o.zoom / o.center）は持たずに始める＝出発点。**覚えない**（settings に書かない・開くたびに出発点から）
   const o: ConvertOptions = { ...DEFAULT_CONVERT, title: defaultTitle };
   let page = 0;
   let busy = false;
   let transparentPaper = true; // M8-2: 紙色を透過（既定ON）
-  return modal((close) => {
+  return modal((close, onClose) => {
     const box = document.createElement("div");
     box.classList.add("imgimp-box");
     const inkSwatches = Object.values(UGO_COLORS);
@@ -1791,6 +1803,7 @@ function openImageImportDialog(
       <div class="imgimp">
         <div class="imgimp-left">
           <canvas id="ii-cv" width="${W}" height="${H}"></canvas>
+          <p class="ii-hint">${iconHtml("hand")} <span id="ii-drag-hint"></span></p>
           <div class="imgimp-pager" id="ii-pager" ${images.length > 1 ? "" : "hidden"}>
             <button class="minibtn" id="ii-prev" type="button">${iconHtml("prev")}</button>
             <span id="ii-pageno">1 / ${images.length}</span>
@@ -1836,6 +1849,7 @@ function openImageImportDialog(
             <button type="button" class="lv on" data-f="cover">${t("img.fit.cover.btn")}</button>
             <button type="button" class="lv" data-f="contain">${t("img.fit.contain.btn")}</button>
           </div></div>
+          <div class="modal-field"><span>${t("img.zoom.label")} <b id="ii-zoom-v">×1</b></span><div class="ii-sl" id="ii-zoom"></div><button type="button" class="minibtn" id="ii-zoom-reset">${t("img.zoomReset.btn")}</button></div>
           <div class="modal-field"><span>${t("img.paper.label")}</span><div class="ii-swatches" id="ii-paper">
             ${paperSwatches.map((c) => `<button type="button" class="ii-sw${c === o.paper ? " on" : ""}" data-c="${c}" style="background:${c}"></button>`).join("")}
             <input type="color" id="ii-paper-custom" value="${o.paper}">
@@ -1874,6 +1888,7 @@ function openImageImportDialog(
       const el = box.querySelector("#ii-transparent") as HTMLElement | null;
       if (el) el.title = t("img.transparent.title");
     }
+    q("#ii-zoom-reset").title = t("img.zoomReset.title");
     const cv = q<HTMLCanvasElement>("#ii-cv");
     const cctx = cv.getContext("2d")!;
 
@@ -1883,19 +1898,88 @@ function openImageImportDialog(
     // その場合パレットは近似（確定時は従来どおり全ページ共通で量子化）——ヘッダの「{n}枚 → {n}コマ」の
     // とおり設定は全枚共通なので、プレビューの役目（設定の当たりを付ける）には足りる。
     const PREVIEW_EXACT_MAX = 8;
-    let timer: number | undefined;
-    const render = () => {
-      const exact = images.length <= PREVIEW_EXACT_MAX;
-      const proj = exact
-        ? convertToProject(images, o)
-        : convertToProject([images[Math.min(page, images.length - 1)]], o);
-      const rgba = frameToRgba(proj, exact ? Math.min(page, proj.frames.length - 1) : 0);
-      cctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), W, H), 0, 0);
-      q("#ii-pageno").textContent = `${page + 1} / ${images.length}`;
+    // V179 (A-73): 取り込む範囲の操作（ドラッグ・倍率・ホイール・位置を戻す・2 択）。中身は imageConvert.ts の
+    // DOM に触らない部品（v179_smoke が本物を動かす）。createCropPreview 1 つで、操作を作り・プレビューに受け口を付け
+    // （ホイールは passive: false）・スライダーの口を作る。★触っている間は変換しない関所 `crop.gate` を、
+    // 設定を変えたとき（schedule）・開いた直後とページ送り（render）も必ず通す。
+    // 変換済みの絵を描く処理（下の convert）は関所の中からしか呼ばれない（名前を付けて外に置かない）。
+    // 位置と倍率は o.zoom / o.center に持つ＝全ページ共通（連番は全コマ同じ構図・決-3）
+    const { ctl: crop, slider: zoomSliderIo } = createCropPreview(o, {
+      image: () => images[curPage()],
+      drawRaw: () => drawRaw(),
+      convert: () => {
+        const exact = images.length <= PREVIEW_EXACT_MAX;
+        const proj = exact
+          ? convertToProject(images, o)
+          : convertToProject([images[Math.min(page, images.length - 1)]], o);
+        const rgba = frameToRgba(proj, exact ? Math.min(page, proj.frames.length - 1) : 0);
+        cctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), W, H), 0, 0);
+        q("#ii-pageno").textContent = `${page + 1} / ${images.length}`;
+      },
+      sync: () => syncCropUi(),
+      setTimer: (fn, ms) => window.setTimeout(fn, ms),
+      clearTimer: (h) => window.clearTimeout(h as number),
+    }, cv, "ii-grabbing", window);
+    const render = () => crop.gate.now();
+    const schedule = (ms?: number) => crop.gate.schedule(ms);
+
+    // ---- V179 (A-73): 素の縮小画（ドラッグ中・倍率を変えている最中に毎回描く） ----
+    // 量子化もディザもしない＝drawImage 1 回。置き場所は変換と同じ canvasPlacement（離したときの絵と同じ所に来る）。
+    // 元画像は 8 倍まで拡大しても足りる大きさに縮めて、表示中のページの 1 枚だけ持つ（ページを替えたら作り直す）
+    let rawSrc: { page: number; cv: HTMLCanvasElement } | null = null;
+    const dropRaw = () => {
+      if (!rawSrc) return;
+      rawSrc.cv.width = rawSrc.cv.height = 0; // 大きい画像の控えを手放す
+      rawSrc = null;
     };
-    const schedule = () => {
-      if (timer !== undefined) clearTimeout(timer);
-      timer = window.setTimeout(render, 100);
+    const curPage = () => Math.min(page, images.length - 1);
+    const rawFor = (pi: number): HTMLCanvasElement => {
+      if (rawSrc && rawSrc.page === pi) return rawSrc.cv;
+      dropRaw();
+      const img = images[pi];
+      const full = document.createElement("canvas");
+      full.width = img.w;
+      full.height = img.h;
+      const px =
+        img.data instanceof Uint8ClampedArray
+          ? img.data
+          : new Uint8ClampedArray(img.data.buffer, img.data.byteOffset, img.data.byteLength);
+      full.getContext("2d")!.putImageData(new ImageData(px, img.w, img.h), 0, 0);
+      const k = Math.min(1, Math.max(W / img.w, H / img.h) * CROP_ZOOM_MAX);
+      const sw = Math.max(1, Math.round(img.w * k));
+      const sh = Math.max(1, Math.round(img.h * k));
+      let src = full;
+      if (sw < img.w || sh < img.h) {
+        src = document.createElement("canvas");
+        src.width = sw;
+        src.height = sh;
+        const sctx = src.getContext("2d")!;
+        sctx.imageSmoothingQuality = "high";
+        sctx.drawImage(full, 0, 0, sw, sh);
+        full.width = full.height = 0;
+      }
+      rawSrc = { page: pi, cv: src };
+      return src;
+    };
+    const drawRaw = () => {
+      const img = images[curPage()];
+      const P = canvasPlacement(img.w, img.h, o.fit, o.zoom, o.center);
+      cctx.fillStyle = o.paper; // 全体を入れるの余白＝紙（変換後と同じ）
+      cctx.fillRect(0, 0, W, H);
+      cctx.fillStyle = "#000000"; // 透明な画素は、変換では RGB のまま（黒）になる
+      cctx.fillRect(P.dx0, P.dy0, P.dw, P.dh);
+      cctx.imageSmoothingEnabled = P.dw <= img.w; // 拡大は最近傍（取り込んだ結果と同じにじまない見え方）
+      cctx.imageSmoothingQuality = "high";
+      cctx.drawImage(rawFor(curPage()), P.dx0, P.dy0, P.dw, P.dh);
+    };
+    /** 倍率の表示・スライダーの位置・カーソル（動かせるときだけ grab）・案内の 1 行を、いまの状態に合わせる */
+    const syncCropUi = () => {
+      q("#ii-zoom-v").textContent = `×${CROP_ZOOM_STEPS[crop.zoomIndex()]}`;
+      zoomSl.set(crop.zoomIndex());
+      const P = crop.placement();
+      const movable = P.movableX || P.movableY;
+      cv.classList.toggle("ii-movable", movable);
+      q("#ii-drag-hint").textContent = movable ? t("img.drag.hint") : t("img.dragZoom.hint");
     };
 
     // ---- モードタブ・セクション表示 ----
@@ -1922,7 +2006,8 @@ function openImageImportDialog(
     bindGroup("#ii-mode", "m", (v) => (o.mode = v as ConvertOptions["mode"]));
     bindGroup("#ii-pal", "p", (v) => (o.palette = v as ConvertOptions["palette"]));
     bindGroup("#ii-dither", "d", (v) => (o.dither = v as ConvertOptions["dither"]));
-    bindGroup("#ii-fit", "f", (v) => (o.fit = v as ConvertOptions["fit"]));
+    // V179: 2 択を切り替えたら倍率と位置は出発点へ（「画面いっぱい」での位置を「全体」へ持ち越すと意味が変わる）
+    bindGroup("#ii-fit", "f", (v) => crop.setFit(v as ConvertOptions["fit"]));
     bindGroup("#ii-fps", "fps", (v) => (o.fps = Number(v)));
 
     // ---- スライダー（共通部品） ----
@@ -1953,6 +2038,25 @@ function openImageImportDialog(
     addSlider("#ii-edge", "#ii-edge-v", 0, 100, o.edge, (v) => (o.edge = v));
     addSlider("#ii-br", "#ii-br-v", -100, 100, o.brightness, (v) => (o.brightness = v));
     addSlider("#ii-ct", "#ii-ct-v", -100, 100, o.contrast, (v) => (o.contrast = v));
+
+    // ---- V179 (A-73): 倍率（スライダーが本線＝液タブ・ペンにはホイールが無い）・ドラッグ・ホイール ----
+    // つまみを掴んでいる間は変換しない（離した時点で変換済みの絵へ）。値が変わらずに離しても窓の pointerup で解く
+    const zoomSl: SliderHandle = createSlider({
+      min: 0,
+      max: CROP_ZOOM_STEPS.length - 1,
+      value: 0,
+      step: 1,
+      ...zoomSliderIo,
+    });
+    zoomSl.root.style.flex = "1";
+    q("#ii-zoom").appendChild(zoomSl.root);
+    q("#ii-zoom-reset").addEventListener("click", () => {
+      if (crop.reset()) schedule(); // もう出発点なら何もしない
+    });
+    onClose(() => {
+      crop.gate.close();
+      dropRaw();
+    });
 
     // ---- 色スウォッチ（インク/紙） ----
     const bindSwatches = (host: string, custom: string, fn: (c: string) => void) => {
@@ -1993,13 +2097,14 @@ function openImageImportDialog(
     }
 
     // ---- ページ送り ----
+    // V179: 倍率・位置は全ページ共通のまま（連番は全コマ同じ構図）。動かせるかはページの大きさで変わり得るので表示だけ合わせる
     q("#ii-prev").addEventListener("click", () => {
       page = (page - 1 + images.length) % images.length;
-      render();
+      crop.pageChanged(); // 表示をそのページに合わせて変換（触っている間なら離すまで持ち越す）
     });
     q("#ii-next").addEventListener("click", () => {
       page = (page + 1) % images.length;
-      render();
+      crop.pageChanged();
     });
 
     // ---- 取り込む → エディタ: 現在ページへ浮動配置 ／ ライブラリ: F-4ピッカー → 新規メモ ----
@@ -2073,6 +2178,7 @@ function openImageImportDialog(
     q("#ii-cancel").addEventListener("click", () => close(null));
 
     syncSections();
+    syncCropUi();
     render();
     return box;
   });
@@ -2310,7 +2416,9 @@ async function openEditorWithNote(item: LibraryView) {
       });
     });
   } catch (e) {
-    library.showLoadError(errText(e)); // V154b: 帯に1か所だけ（下の openEditorWithProject と同じ）
+    // V154b: 帯に1か所だけ（下の openEditorWithProject と同じ）
+    // V173b: パスを渡す＝ログの伏せ字が効く（.kwz はファイル名が残り、フォルダは消える）
+    library.showLoadError(errText(e), [item.path]);
   }
 }
 
@@ -2323,7 +2431,8 @@ async function openEditorWithProject(item: LibraryView) {
   try {
     await runWithBusy("open.project", t("ed.busy.loading.label"), async () => {
       // V169 (B-1): 生バイトで読む。JSON 配列（read_file_bytes）は 128MiB 超でレンダラが致命停止し、
-      // ここの catch にも `[V154b] open failed` にも届かなかった（項目21・画面が真っ白）。
+      // ここの catch にも、当時の失敗ログ（V173b で `[open]` の 1 行へ畳んだ）にも届かなかった
+      //（項目21・画面が真っ白）。
       // 512MiB 超は読む前に Rust が弾き（TOO_LARGE）、その断りは showLoadError が人の文にする
       const bytes = await readProjectRaw(item.path);
       const project = await projectFromBytes(bytes, {
@@ -2344,16 +2453,18 @@ async function openEditorWithProject(item: LibraryView) {
   } catch (e) {
     // V154b (W-10): 開けなかったことをログに残す。**大きさ（バイト数）と理由だけ**——
     // 作品名もパスも書かない。「開けません」と言われた人から送ってもらったとき、
-    // 「大きすぎた」のか「本当に壊れていた」のかがこの1行で分かる
-    invoke("append_log", {
-      text: `[${new Date().toISOString()}] [V154b] open failed size=${item.size} ${String(e)}`,
-    }).catch(() => {});
+    // 「大きすぎた」のか「本当に壊れていた」のかがこの1行で分かる。
+    // ★V173b: ここは `append_log` を直に呼び、理由を `String(e)` で**素のまま**書いていた
+    //  ＝伏せ字（`importLogSafe`）の外にある唯一の「開く」経路で、しかも下の `showLoadError` と
+    //  **同じ失敗で 2 行**出ていた。大きさは `showLoadError` に渡して**1 行に畳む**
     // V154b: **帯（プレビューの meta）に1か所だけ出す。**
     // 以前は同じ文言を帯とトーストの両方に出していて、しかもトーストは 3.2 秒で消える。
     // 残るほうへ寄せる（開けなかったのだからライブラリ画面のままで、帯は必ず見える）。
     // `Error: ` は付けない——「読み込みエラー: Error: …」だと「エラー」が2回続いて、
     // 肝心の「ファイルは壊れていません」が埋もれる
-    library.showLoadError(errText(e));
+    // V173b: パスを渡す＝ログの伏せ字が効く（.memoanima は名前＝作品名なので名前ごと伏せる）。
+    // 第4引数はログにだけ添える手掛かり（画面には出ない）
+    library.showLoadError(errText(e), [item.path], false, `size=${item.size}`);
   }
 }
 
@@ -3218,9 +3329,13 @@ function captureKey(): { promise: Promise<KeyBinding | null>; cancel: () => void
       //   Ctrl+○○ が一切割り当てられなくなる（V165 D-4 の設計の前提）。
       //   V165: 代わりに「**離したとき**の道」を下の onKeyUp に足した
       if (e.key === "Control" || e.key === "Shift" || e.key === "Alt" || e.key === "Meta") {
-        // 単体タップの候補を立てる（Meta は割り当てられないので候補にしない）。
-        // 押しっぱなし（repeat）・2つ目の修飾キーは候補を壊す＝組み合わせとして扱う
-        tapCand = !e.repeat && !tapCand && isTapMod(e.key) ? { key: e.key, at: performance.now() } : null;
+        // 単体タップの候補を立てる（Windows の Meta は割り当てられないので候補にしない）。
+        // V181 (G-1): Mac の ⌘ の単押しは Control のタップとして取る（実行側と同じ `tapModOf`）。
+        // 押しっぱなし（repeat）・2つ目の修飾キーは候補を壊す＝組み合わせとして扱う。
+        // V183 (A-82): ほかの修飾キーが押されている間に押した修飾キーも候補にしない（イベントのフラグで見る）。
+        //   判定は実行側（ModTapWatcher.down）と同じ `tapCandidateOf`＝取れる操作と発動する操作が食い違わない
+        const tk = tapCandidateOf(e.key, { repeat: e.repeat, pending: tapCand !== null, mods: e });
+        tapCand = tk ? { key: tk, at: performance.now() } : null;
         return;
       }
       tapCand = null; // 他のキーが来た＝組み合わせ（この直後 finish するので実質は保険）
@@ -3234,7 +3349,8 @@ function captureKey(): { promise: Promise<KeyBinding | null>; cancel: () => void
     const onKeyUp = (e: KeyboardEvent) => {
       const cand = tapCand;
       tapCand = null;
-      if (!cand || !isTapMod(e.key) || cand.key !== e.key) return;
+      const tk = tapModOf(e.key); // V181: Mac の ⌘ は Control（押したときと同じ畳み方）
+      if (!cand || !tk || cand.key !== tk) return;
       if (performance.now() - cand.at > MOD_TAP_MS) return; // 長押しは受けない（実行側と同じ値）
       e.preventDefault();
       e.stopPropagation();
@@ -3242,11 +3358,12 @@ function captureKey(): { promise: Promise<KeyBinding | null>; cancel: () => void
     };
     // M16 (K-4): 修飾キー＋クリックも取る。**素の左クリック（無修飾 button=0）は待ち続ける**
     //（描画と衝突するので割り当て不可＝そのクリックは素通しさせて「変更」を続けられる）。
-    // Win（meta）＋クリックも登録不可なので待ち続ける
+    // Win（meta）＋クリックも登録不可なので待ち続ける。
+    // V181 (G-1): Mac の ⌘＋クリックは Ctrl＋クリックとして取る（`primaryMod`・保存の形は ctrl: true）
     const onPointer = (e: PointerEvent) => {
       tapCand = null; // V165 (D-4): クリックが挟まったら単体タップではない
-      const mods = e.ctrlKey || e.altKey || e.shiftKey;
-      if (e.metaKey) return; // Win は登録できない
+      const mods = primaryMod(e) || e.altKey || e.shiftKey;
+      if (unfoldedMeta(e)) return; // Win は登録できない（Mac の ⌘ は Ctrl に畳んだのでここに来ない）
       if (e.button === 0 && !mods) return; // 素の左クリックは割り当て不可（待機継続）
       e.preventDefault();
       e.stopPropagation();
@@ -3793,7 +3910,9 @@ async function importDroppedProjects(paths: string[]) {
         const blob = await frameToPngBlob(project, project.thumbFrame ?? 0);
         const thumb = blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
         // 「名前 (2)」方式（同時ドロップ内の衝突も used に積んで回避）
-        const base = stripExt(fname) || untitledTitle();
+        // V173 (A-65): **先に `.gz` を外してから**拡張子を落とす。外し忘れると保存側が `.memoanima` を
+        // 足して `foo.memoanima.gz.memoanima` になる（`save_project_impl` は「.memoanima で終わらなければ足す」）
+        const base = importBaseName(fname) || untitledTitle();
         let name = base;
         for (let k = 2; used.has(name.toLowerCase()); k++) name = `${base} (${k})`;
         used.add(name.toLowerCase());
@@ -3807,8 +3926,12 @@ async function importDroppedProjects(paths: string[]) {
         });
         okCount++;
         if (paths.length === 1) toast(t("lib.drop.imported.toast", { album, name }));
-      } catch {
-        toast(t("err.file.open.toast"));
+      } catch (e) {
+        // V173 (A-66): ここは**束縛の無い `catch {`** で、「開けませんでした」だけを出していた
+        //（理由も残らない＝こちらからは永久に見えない）。理由つきのトースト＋ログにする。
+        // ★ログに**作品名（＝ファイル名）は書かない**。`.memoanima` の名前は作品名そのもの（W-10）
+        logError("import", `drop: ${importLogSafe(errText(e), [p, fname])}`);
+        toast(t("err.file.open.detail.toast", { err: errText(e) }));
       }
     }
   } finally {
@@ -3842,10 +3965,30 @@ async function handleDroppedPaths(paths: string[]) {
   // M10-14: .kwz/.ppm は従来どおり即取り込み、.memoanima/.animemo は選択ダイアログへ
   const projPaths: string[] = [];
   const notePaths: string[] = [];
+  const unknown: string[] = [];
   for (const p of paths) {
     const lower = p.toLowerCase();
     if (lower.endsWith(".kwz") || lower.endsWith(".ppm")) notePaths.push(p);
     else if (lower.endsWith(".memoanima") || lower.endsWith(".animemo")) projPaths.push(p);
+    else unknown.push(p);
+  }
+  // V173 (A-65 案 4): 名前で分からないものは**中身で見る**（`probe_project_file` は先頭 2B と
+  // 末尾 16B だけを読む。ファイル全体は読まない）。これまでは**黙って捨てて**いたので、
+  // クラウド経由で `.gz` が付いた作品はドロップしても何も起きなかった。
+  // ⚠ **`gzip` だけでは通さない**——ふつうの `.gz` / `.tar.gz` をドロップしただけで取り込みが
+  //   始まるのは副作用が大きい（R-8）。`pv6`（中身が作品と確定）か、`gzip` かつ**作品らしい名前**のときだけ
+  for (const p of unknown) {
+    const fname = p.split(/[\\/]/).pop() ?? p;
+    try {
+      const pr = await invoke<{ gzip: boolean; pv6: boolean; size: number }>(
+        "probe_project_file",
+        { path: p }
+      );
+      if (pr.pv6 || (pr.gzip && isProjectLikeName(fname))) projPaths.push(p);
+    } catch (e) {
+      // フォルダのドロップなど（＝作品ではない）もここに来る。黙って捨てない（A-66）
+      logError("import", `probe: ${importLogSafe(errText(e), [p, fname])}`);
+    }
   }
   if (notePaths.length > 0) {
     // M11-6: この経路は `showLibrary()` を直に呼んでいて、**未保存の確認が無かった**
@@ -3884,6 +4027,8 @@ async function handleDroppedPaths(paths: string[]) {
       }
       showEditor(project, null);
     } catch (e) {
+      // V173 (A-66): トーストは従来どおり（理由つき）。**ログが無かった**ので足す
+      logError("import", `drop open: ${importLogSafe(errText(e), projPaths)}`);
       toast(t("err.file.open.detail.toast", { err: errText(e) }));
     }
   }
@@ -5431,6 +5576,12 @@ const libraryCallbacks = {
   // V154b (W-10): 節目のログ（復元の件数など）。エディタと同じ流し先
   appendLog: (text: string) =>
     invoke("append_log", { text: `[${new Date().toISOString()}] ${text}` }).catch(() => {}),
+  // V173 (A-66): 取り込みの失敗のログ。**パスと作品名を落としてから**書く（W-10）。
+  // `known` には分かっているパスを渡してもらう（完全一致で先に消す＝名前に空白があっても残らない）
+  logError: (kind: string, detail: string, known?: string[]) =>
+    logError(kind, importLogSafe(detail, known ?? [])),
+  // V173 (A-66): 失敗の理由を見せる（閉じるだけのダイアログ）
+  notice: noticeDialog,
   // M10-20: 並び順は変えた瞬間に保存（文字設定と同じ流儀）
   onShelfSortChange: (v: "manual" | "name" | "date") => {
     settings.shelfSort = v;

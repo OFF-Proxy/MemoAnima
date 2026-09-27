@@ -120,6 +120,39 @@ export function moveTargetLayerIds(
   );
 }
 
+/**
+ * ★V178 (A-72): 全レイヤー消しゴムの対象（白リスト・規則は 1 つ）。
+ *
+ * そのコマの `layerDefs` のうち、**実効の 👁 が true かつ実効の 🔒 が false** のものだけ。
+ * `opacity` と `clip` は見ない——規則を「👁 と 🔒 の 2 つだけ」にすると利用者が説明できる
+ * （「👁 で消えている絵は消えない・🔒 のレイヤーは守られる」）。
+ *
+ * ★可視とロックの判定は `effectiveLayerStates()` だけで行う（`ld.visible` / `ld.locked` を自分で見ない）。
+ *   親フォルダが非表示・ロックのとき、中のレイヤーも対象から外すため（`moveTargetLayerIds` と同じ理由）。
+ *
+ * ⚠ M11-2 の「消す」コマンド（非表示も消す）とは方針が**逆**。あちらは「まとめて空にする」ので
+ *   *見えないから残った、のほうが事故*。こちらは「見えている絵をなぞって消す」ので
+ *   *なぞってもいない絵が消えるほうが事故*（作者決定 2026-09-23・要件 §3-1）。
+ *
+ * @returns `ids` = そのコマに絵がある対象（下→上）。
+ *          `asleep` = 規則は満たすのに、そのコマでまだ眠っている（起きていない）もの。
+ *          呼び出し側は `asleep` が 1 枚でもあれば**描かない**（半分だけ消えた状態を作らない）。
+ */
+export function eraseAllTargets(p: Project, frameIndex: number): { ids: string[]; asleep: string[] } {
+  const eff = effectiveLayerStates(p);
+  const frame = p.frames[frameIndex];
+  const ids: string[] = [];
+  const asleep: string[] = [];
+  if (!frame) return { ids, asleep };
+  for (const ld of p.layerDefs) {
+    const e = eff.get(ld.id);
+    if (e?.visible !== true || e.locked === true) continue;
+    if (frame.layers[ld.id]) ids.push(ld.id);
+    else if (frame.sleep?.[ld.id]) asleep.push(ld.id);
+  }
+  return { ids, asleep };
+}
+
 /** ドロップ先 parent（gap の親 or intoフォルダ）に対する循環チェック。true=循環で不可 */
 export function wouldCycle(p: Project, ids: string[], targetParent: string | undefined): boolean {
   if (!targetParent) return false;

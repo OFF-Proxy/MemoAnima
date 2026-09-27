@@ -36,6 +36,11 @@ export interface ConvertOptions {
   palette: "auto" | "ugo" | "retro";
   dither: "fs" | "ordered" | "none";
   fit: "cover" | "contain";
+  /** V179 (A-73): 出発点（fit の大きさ）に掛ける倍率。1〜8 に収めて使う。**省略＝1（明示の 1 と 1 画素も同じ）** */
+  zoom?: number;
+  /** V179 (A-73): 枠の中心に来る元画像の点（元画像の幅・高さに対する割合 0〜1）。**省略＝中央**。
+   *  割合で持つ＝大きさの違うページにも同じ構図で効く（連番は全ページ共通） */
+  center?: CropCenter;
   /** 紙色 #rrggbb（contain の余白・tone/lineart の地） */
   paper: string;
   /** 複数ページ時の速度（FPS_TABLE の最近傍へ丸め） */
@@ -104,33 +109,562 @@ export function applyBC(img: SourceImage, brightness: number, contrast: number):
   return { w: img.w, h: img.h, data: out };
 }
 
-/** 320×240 へリサイズ（面積平均）。cover=中央クロップ / contain=余白は alpha=0（=紙が透ける） */
-export function resizeToCanvas(img: SourceImage, fit: "cover" | "contain"): SourceImage {
+// ---------------- V179 (A-73): 取り込む範囲（倍率・位置） ----------------
+
+/** V179: 倍率の範囲。1＝出発点（fit の大きさ）のまま。
+ *  上限 8 の理由: 320×240 の 1/8 は 40×30 画素＝それ以上は元画像の数画素を引き伸ばすだけになる */
+export const CROP_ZOOM_MIN = 1;
+export const CROP_ZOOM_MAX = 8;
+/** V179: 倍率スライダーの段（ホイール 1 ノッチ＝1 段）。先頭の 1 がスライダーの既定＝出発点（倍率を使わないときと同じ絵）。
+ *  隣どうしの比は 1.14〜1.25 倍（ペンでも狙った段に止めやすく、顔のアップなども刻みすぎずに寄れる） */
+export const CROP_ZOOM_STEPS: readonly number[] = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4, 5, 6, 7, 8];
+
+/** V179: 枠の中心に来る元画像の点（元画像の幅・高さに対する割合 0〜1） */
+export interface CropCenter {
+  x: number;
+  y: number;
+}
+
+/** V179: 倍率を 1〜8 に収める（数でない・NaN は 1＝既定） */
+export function clampCropZoom(z: number | undefined): number {
+  if (typeof z !== "number" || Number.isNaN(z)) return CROP_ZOOM_MIN;
+  return Math.min(CROP_ZOOM_MAX, Math.max(CROP_ZOOM_MIN, z));
+}
+
+/** center の 1 軸（数でない・NaN は 0.5＝中央・0〜1 に収める） */
+function cropAxis(c: number | undefined): number {
+  return typeof c === "number" && !Number.isNaN(c) ? Math.min(1, Math.max(0, c)) : 0.5;
+}
+
+/** 1 軸ぶんの置き場所（左上）。枠より小さい（か同じ）軸は**いまどおり中央に固定**。
+ *  枠より大きい軸は center の点が枠の真ん中に来る位置を、**隙間ができない範囲 [frame − d, 0]** に収める。
+ *  ★丸めは今の式（floor）に合わせる: c = 0.5 のとき floor(frame/2 − d/2) = floor((frame − d)/2)。
+ *   round にすると frame − d が奇数のとき 1 ずれる＝既定値でこの回の前と違う絵になる（v179_smoke [S-1]） */
+function placeAxis(frame: number, d: number, c: number): number {
+  if (d <= frame) return Math.floor((frame - d) / 2);
+  return Math.min(0, Math.max(frame - d, Math.floor(frame / 2 - c * d)));
+}
+
+/** V179: 元画像を枠のどこに・どの大きさで置くか（出力画素）。
+ *  **変換（resizeToCanvas）と、プレビューの素の絵（ドラッグ中の drawImage）が同じこの式を使う**
+ *  ＝離したときの絵と取り込んだ結果が同じ所に来る（v179_smoke [S-8]） */
+export interface CanvasPlacement {
+  /** 置いた大きさ */
+  dw: number;
+  dh: number;
+  /** 置いた左上（枠からはみ出すと負） */
+  dx0: number;
+  dy0: number;
+  /** その軸が枠より大きい＝ドラッグで動かせる */
+  movableX: boolean;
+  movableY: boolean;
+}
+export function canvasPlacement(
+  w: number,
+  h: number,
+  fit: "cover" | "contain",
+  zoom?: number,
+  center?: CropCenter
+): CanvasPlacement {
+  const s0 = fit === "cover" ? Math.max(W / w, H / h) : Math.min(W / w, H / h);
+  const scale = s0 * clampCropZoom(zoom);
+  const dw = Math.max(1, Math.round(w * scale));
+  const dh = Math.max(1, Math.round(h * scale));
+  return {
+    dw,
+    dh,
+    dx0: placeAxis(W, dw, cropAxis(center?.x)),
+    dy0: placeAxis(H, dh, cropAxis(center?.y)),
+    movableX: dw > W,
+    movableY: dh > H,
+  };
+}
+
+/** 動かせる軸の center を、隙間ができない範囲 [frame/2d, 1 − frame/2d] に収める（動かせない軸はそのまま） */
+function clampCenterAxis(frame: number, d: number, c: number): number {
+  if (d <= frame) return c;
+  const m = frame / (2 * d);
+  return Math.min(1 - m, Math.max(m, c));
+}
+
+/** V179: ドラッグ。絵を (dx, dy) 出力画素だけ動かしたあとの center。
+ *  端より先へは動かない（行き過ぎをため込まない＝端から戻すとすぐ動く）・動かせない軸は変えない */
+export function panCropCenter(
+  w: number,
+  h: number,
+  fit: "cover" | "contain",
+  zoom: number | undefined,
+  center: CropCenter | undefined,
+  dx: number,
+  dy: number
+): CropCenter {
+  const p = canvasPlacement(w, h, fit, zoom, center);
+  // 先に「いまの絵の位置」へ収め直してから動かす（別のページで範囲の外になっていた center を持ち越さない）
+  const cx = clampCenterAxis(W, p.dw, cropAxis(center?.x));
+  const cy = clampCenterAxis(H, p.dh, cropAxis(center?.y));
+  return {
+    x: p.movableX ? clampCenterAxis(W, p.dw, cx - dx / p.dw) : cx,
+    y: p.movableY ? clampCenterAxis(H, p.dh, cy - dy / p.dh) : cy,
+  };
+}
+
+/** V179: 倍率を変えたあとの center。`anchor`（出力画素の点）を渡すと、その点の下にある元画像の点が動かない
+ *  （ホイールはカーソルの位置）。渡さなければ center のまま、新しい倍率で収まる範囲へ収め直すだけ（スライダー） */
+export function zoomCropCenter(
+  w: number,
+  h: number,
+  fit: "cover" | "contain",
+  zoomFrom: number | undefined,
+  zoomTo: number | undefined,
+  center: CropCenter | undefined,
+  anchor?: { x: number; y: number }
+): CropCenter {
+  const cx = cropAxis(center?.x);
+  const cy = cropAxis(center?.y);
+  const to = canvasPlacement(w, h, fit, zoomTo, center);
+  if (!anchor)
+    return {
+      x: clampCenterAxis(W, to.dw, cx),
+      y: clampCenterAxis(H, to.dh, cy),
+    };
+  const from = canvasPlacement(w, h, fit, zoomFrom, center);
+  const u = Math.min(1, Math.max(0, (anchor.x - from.dx0) / from.dw));
+  const v = Math.min(1, Math.max(0, (anchor.y - from.dy0) / from.dh));
+  return {
+    x: to.movableX ? clampCenterAxis(W, to.dw, (W / 2 - anchor.x) / to.dw + u) : cx,
+    y: to.movableY ? clampCenterAxis(H, to.dh, (H / 2 - anchor.y) / to.dh + v) : cy,
+  };
+}
+
+// ---------------- V179 (A-73): 取り込みダイアログの操作（DOM に触らない＝v179_smoke で本物を動かせる） ----------------
+// ダイアログ（main.ts）は出来事を流し、描く・変換する・表示を合わせるのはここから渡された口で行う。
+// ★プレビューの変換（量子化＋ディザ）を呼ぶのは関所 `CropPreviewGate` だけ＝触っている間は走らない。
+
+/** V179: 離してから変換済みの絵へ描き替えるまでの待ち（ms）＝設定を変えたときと同じ */
+export const CROP_CONVERT_DELAY_MS = 100;
+/** V179: ホイールで倍率を変えたあと、変換済みの絵へ描き替えるまでの待ち（ms）。
+ *  回し続けている間（ノッチの間隔はふつう 100ms 以下）に変換が割り込まないよう、離したときより長く待つ */
+export const CROP_WHEEL_SETTLE_MS = 250;
+/** V179: ホイールの 1 ノッチの量（px・deltaMode 0）。1 ノッチ＝倍率 1 段。
+ *  半ノッチ（50）たまったら 1 段進める＝タッチパッドの少しずつの動きもためて 1 段。
+ *  まとめて届いた量（回している途中で重なると -300 のように 1 回で届く）は、ノッチの数だけ進める */
+export const CROP_WHEEL_NOTCH_PX = 100;
+
+/** V179: プレビューの関所。**触っている間（ドラッグ・倍率スライダー）は変換しない**
+ *  （変換は重く、動かすたびに走らせると絵が止まって見える）。そのあいだは素の縮小画を描き、
+ *  離したら 100ms 後に変換済みの絵へ描き替える */
+export interface CropPreviewGate {
+  /** 変換を ms 後に予約する（設定を変えたとき・ホイール）。触っている間なら、離すまで持ち越す */
+  schedule(ms?: number): void;
+  /** いますぐ変換する（開いた直後・ページ送り）。触っている間なら、離すまで持ち越す */
+  now(): void;
+  /** ドラッグの始まり。前のドラッグの「離した」が届いていなくても、ここで取り直す（触ったまま止まらない） */
+  dragStart(pointerId: number): void;
+  /** いまドラッグしているポインタか */
+  dragging(pointerId: number): boolean;
+  /** 絵が動いた（ドラッグ・倍率）: 素の縮小画を描く。変換は離してから */
+  moved(): void;
+  /** ドラッグの終わり（ほかのポインタの終わりは無視） */
+  dragEnd(pointerId: number): void;
+  /** 倍率スライダーを掴んだ／離した */
+  slideStart(): void;
+  slideEnd(): void;
+  /** ダイアログを閉じた: 予約を捨て、以後は何も描かない */
+  close(): void;
+}
+export function createCropPreviewGate(io: {
+  drawRaw: () => void;
+  convert: () => void;
+  setTimer: (fn: () => void, ms: number) => unknown;
+  clearTimer: (h: unknown) => void;
+}): CropPreviewGate {
+  let drag: number | null = null;
+  let sliding = false;
+  /** 触っている間に変換を頼まれた（か絵が動いた）＝離したら変換する */
+  let pending = false;
+  let closed = false;
+  let timer: unknown = null;
+  const touching = () => drag !== null || sliding;
+  const cancel = () => {
+    if (timer !== null) io.clearTimer(timer);
+    timer = null;
+  };
+  const run = () => {
+    timer = null;
+    if (closed) return;
+    if (touching()) {
+      pending = true;
+      return;
+    }
+    pending = false;
+    io.convert();
+  };
+  const schedule = (ms = CROP_CONVERT_DELAY_MS) => {
+    if (closed) return;
+    cancel();
+    timer = io.setTimer(run, ms);
+  };
+  const release = () => {
+    if (!touching() && pending) schedule(CROP_CONVERT_DELAY_MS);
+  };
+  return {
+    schedule,
+    now() {
+      cancel();
+      run();
+    },
+    dragStart(pointerId) {
+      drag = pointerId;
+    },
+    dragging: (pointerId) => drag === pointerId,
+    moved() {
+      if (closed) return;
+      pending = true;
+      io.drawRaw();
+    },
+    dragEnd(pointerId) {
+      if (drag !== pointerId) return;
+      drag = null;
+      release();
+    },
+    slideStart() {
+      sliding = true;
+    },
+    slideEnd() {
+      sliding = false;
+      release();
+    },
+    close() {
+      closed = true;
+      cancel();
+    },
+  };
+}
+
+/** V179: ダイアログから受け取る口 */
+export interface CropIo {
+  /** いま表示しているページの元画像の大きさ */
+  image(): { w: number; h: number };
+  /** 素の縮小画を描く（量子化もディザもしない＝drawImage 1 回・置き場所は canvasPlacement） */
+  drawRaw(): void;
+  /** 変換済みの絵を描く（量子化＋ディザ・重い）。関所からしか呼ばれない */
+  convert(): void;
+  /** 倍率の表示・スライダーの位置・カーソル・案内を、いまの状態に合わせる */
+  sync(): void;
+  setTimer(fn: () => void, ms: number): unknown;
+  clearTimer(h: unknown): void;
+}
+/** V179: 取り込む範囲の操作。位置と倍率は渡された `o`（o.zoom / o.center）に書く＝全ページ共通（決-3）。
+ *  **覚えない**（ダイアログを開くたびに新しく作る＝出発点から） */
+export interface CropController {
+  readonly gate: CropPreviewGate;
+  /** いまの倍率の段（CROP_ZOOM_STEPS の添字） */
+  zoomIndex(): number;
+  /** いま表示しているページの置き場所 */
+  placement(): CanvasPlacement;
+  /** 倍率を段 i へ（anchor＝枠の画素の点。その下の絵を動かさない）。変わったら素の縮小画を描いて true */
+  zoomTo(i: number, anchor?: { x: number; y: number }): boolean;
+  /** 絵を (dx, dy) 枠の画素だけ動かす（1 画素未満もためる）。絵が動いたら素の縮小画を描いて true */
+  panBy(dx: number, dy: number): boolean;
+  /** 「位置を戻す」: 出発点（倍率 1・中央）へ。表示を合わせ、素の縮小画をすぐ描く（変換は呼び出し側の予約で）。
+   *  もう出発点なら何もせず false */
+  reset(): boolean;
+  /** 2 択（画面いっぱい／全体を入れる）の切り替え。違うときだけ切り替えて出発点へ（持ち越すと意味が変わる）。
+   *  表示を合わせ、素の縮小画をすぐ描く */
+  setFit(fit: "cover" | "contain"): void;
+  /** ページ送り: 表示（動かせるか・案内）をそのページに合わせ、変換する（触っている間なら離すまで持ち越す）。
+   *  倍率と位置は全ページ共通のまま */
+  pageChanged(): void;
+  /** ホイールの 1 回分。1 段ぶんたまったら倍率を 1 段変え、少し待ってから変換する */
+  wheel(deltaY: number, deltaMode: number, anchor: { x: number; y: number }): void;
+}
+export function createCropController(o: ConvertOptions, io: CropIo): CropController {
+  const gate = createCropPreviewGate(io);
+  let zoomIdx = 0;
+  let wheelAcc = 0;
+  const placement = () => {
+    const im = io.image();
+    return canvasPlacement(im.w, im.h, o.fit, o.zoom, o.center);
+  };
+  const toStart = () => {
+    o.zoom = CROP_ZOOM_STEPS[0];
+    o.center = { x: 0.5, y: 0.5 };
+    zoomIdx = 0;
+    wheelAcc = 0;
+  };
+  const ctl: CropController = {
+    gate,
+    zoomIndex: () => zoomIdx,
+    placement,
+    zoomTo(i, anchor) {
+      if (typeof i !== "number" || !Number.isFinite(i)) return false;
+      const ni = Math.max(0, Math.min(CROP_ZOOM_STEPS.length - 1, Math.round(i)));
+      if (ni === zoomIdx) return false;
+      const im = io.image();
+      o.center = zoomCropCenter(im.w, im.h, o.fit, CROP_ZOOM_STEPS[zoomIdx], CROP_ZOOM_STEPS[ni], o.center, anchor);
+      o.zoom = CROP_ZOOM_STEPS[ni];
+      zoomIdx = ni;
+      io.sync();
+      gate.moved();
+      return true;
+    },
+    panBy(dx, dy) {
+      const before = placement();
+      const im = io.image();
+      o.center = panCropCenter(im.w, im.h, o.fit, o.zoom, o.center, dx, dy);
+      const after = placement();
+      if (after.dx0 === before.dx0 && after.dy0 === before.dy0) return false; // 端・動かせない軸・1 画素未満
+      gate.moved();
+      return true;
+    },
+    reset() {
+      const c = o.center;
+      if (zoomIdx === 0 && (!c || (c.x === 0.5 && c.y === 0.5))) return false;
+      toStart();
+      io.sync();
+      gate.moved(); // 表示と絵を揃える（倍率の表示だけ先に変わって絵が古いまま、を作らない）
+      return true;
+    },
+    setFit(fit) {
+      if (o.fit === fit) return;
+      o.fit = fit;
+      toStart();
+      io.sync();
+      gate.moved();
+    },
+    pageChanged() {
+      io.sync();
+      gate.now();
+    },
+    wheel(deltaY, deltaMode, anchor) {
+      // 行単位（deltaMode 1）は 1 行 40px 相当（3 行＝1 ノッチ）・ページ単位（2）は 1 ページ＝1 ノッチ
+      const d = deltaMode === 1 ? deltaY * 40 : deltaMode === 2 ? deltaY * CROP_WHEEL_NOTCH_PX : deltaY;
+      if (!d) return;
+      if (Math.sign(d) !== Math.sign(wheelAcc)) wheelAcc = 0; // 向きが変わったらためた分を捨てる
+      wheelAcc += d;
+      if (Math.abs(wheelAcc) < CROP_WHEEL_NOTCH_PX / 2) return;
+      const steps = Math.max(1, Math.floor(Math.abs(wheelAcc) / CROP_WHEEL_NOTCH_PX));
+      const dir = wheelAcc < 0 ? 1 : -1; // 奥へ回す＝拡大
+      wheelAcc = 0;
+      if (ctl.zoomTo(zoomIdx + dir * steps, anchor)) gate.schedule(CROP_WHEEL_SETTLE_MS);
+    },
+  };
+  return ctl;
+}
+
+/** V179: プレビューの canvas が受ける出来事（DOM の PointerEvent / WheelEvent の形だけ借りる＝スモークで偽物を渡せる） */
+export interface CropPointerEvent {
+  pointerId: number;
+  button: number;
+  buttons: number;
+  clientX: number;
+  clientY: number;
+  preventDefault(): void;
+}
+export interface CropWheelEvent {
+  deltaY: number;
+  deltaMode: number;
+  clientX: number;
+  clientY: number;
+  preventDefault(): void;
+}
+export type CropPointerType = "pointerdown" | "pointermove" | "pointerup" | "pointercancel" | "lostpointercapture";
+/** V179: プレビューの canvas との口（main.ts が canvas の addEventListener 等をそのまま渡す） */
+export interface CropCanvasPort {
+  onPointer(type: CropPointerType, fn: (e: CropPointerEvent) => void): void;
+  /** ★`{ passive: false }` で付けること（preventDefault でダイアログのスクロールを止めるため） */
+  onWheel(fn: (e: CropWheelEvent) => void): void;
+  capture(pointerId: number): void;
+  /** クライアント座標 → 枠の画素（表示の倍率・枠線を除いて） */
+  toCanvas(clientX: number, clientY: number): { x: number; y: number };
+  /** 掴んでいる間のカーソル（grabbing） */
+  grabbing(on: boolean): void;
+}
+/** V179: ドラッグ（pointer events＝マウス・ペン・タッチを同じ道で・捕捉）とホイールをプレビューに付ける */
+export function bindCropCanvas(port: CropCanvasPort, ctl: CropController): void {
+  let last = { x: 0, y: 0 };
+  port.onPointer("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    try {
+      port.capture(e.pointerId);
+    } catch {
+      /* 捕捉できなくてもドラッグは続けられる（キャンバスの外へ出ると止まるだけ） */
+    }
+    last = port.toCanvas(e.clientX, e.clientY);
+    ctl.gate.dragStart(e.pointerId); // 前のドラッグの「離した」が届いていなくても、ここで取り直す
+    port.grabbing(true);
+  });
+  const end = (e: CropPointerEvent) => {
+    if (!ctl.gate.dragging(e.pointerId)) return;
+    ctl.gate.dragEnd(e.pointerId); // 動いていたら 100ms 後に変換済みの絵へ
+    port.grabbing(false);
+  };
+  port.onPointer("pointermove", (e) => {
+    if (!ctl.gate.dragging(e.pointerId)) return;
+    // ボタンが離れているのに「離した」が届いていない（窓の外で離した等）→ ここで終える（触ったまま止まらない）
+    if (e.buttons === 0) {
+      end(e);
+      return;
+    }
+    const p = port.toCanvas(e.clientX, e.clientY);
+    const dx = p.x - last.x;
+    const dy = p.y - last.y;
+    last = p;
+    ctl.panBy(dx, dy); // 絵は指についてくる・端より先へは動かない
+  });
+  port.onPointer("pointerup", end);
+  port.onPointer("pointercancel", end);
+  port.onPointer("lostpointercapture", end);
+  // ホイール: プレビューの上でだけ効く（ここで既定の動き＝ダイアログのスクロールを止める。外には付けない）。
+  // 1 ノッチ＝スライダー 1 段・カーソルの下の絵が動かないように拡大する
+  port.onWheel((e) => {
+    e.preventDefault();
+    ctl.wheel(e.deltaY, e.deltaMode, port.toCanvas(e.clientX, e.clientY));
+  });
+}
+/** V179: 倍率スライダー（createSlider）に渡す口。掴んでいる間は変換しない。値が変わらずに離しても、窓の pointerup で必ず解く */
+export function cropSliderHandlers(
+  ctl: CropController,
+  win: {
+    addEventListener(type: "pointerup" | "pointercancel", fn: () => void): void;
+    removeEventListener(type: "pointerup" | "pointercancel", fn: () => void): void;
+  }
+): { onDown: () => void; onInput: (i: number) => void; onChange: () => void } {
+  return {
+    onDown: () => {
+      ctl.gate.slideStart();
+      const up = () => {
+        win.removeEventListener("pointerup", up);
+        win.removeEventListener("pointercancel", up);
+        ctl.gate.slideEnd();
+      };
+      win.addEventListener("pointerup", up);
+      win.addEventListener("pointercancel", up);
+    },
+    onInput: (i) => {
+      ctl.zoomTo(i);
+    },
+    // キーボード（矢印キー）は押すたびに change が来る＝そのつど予約（掴んでいる間なら関所が持ち越す）
+    onChange: () => ctl.gate.schedule(),
+  };
+}
+
+/** V179: プレビューの canvas 要素の形（DOM の型は使わない＝形だけ借りる。スモークで偽物を渡せる） */
+export interface CropCanvasElementLike {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  addEventListener(type: string, fn: (e: any) => void, opts?: { passive?: boolean }): void;
+  setPointerCapture(pointerId: number): void;
+  getBoundingClientRect(): { left: number; top: number };
+  readonly clientLeft: number;
+  readonly clientTop: number;
+  readonly clientWidth: number;
+  readonly clientHeight: number;
+  readonly classList: { toggle(token: string, force?: boolean): boolean };
+}
+/** V179: canvas 要素から `bindCropCanvas` の口を作る。ホイールは **`passive: false`**（preventDefault でダイアログの
+ *  スクロールを止めるため）。座標は枠線（clientLeft/Top）を除いた描画域の幅・高さで割る＝2 倍表示でも幅いっぱいでも同じ */
+export function cropCanvasPort(cv: CropCanvasElementLike, grabbingClass: string): CropCanvasPort {
+  return {
+    onPointer: (type, fn) => cv.addEventListener(type, fn),
+    onWheel: (fn) => cv.addEventListener("wheel", fn, { passive: false }),
+    capture: (pointerId) => cv.setPointerCapture(pointerId),
+    toCanvas: (clientX, clientY) => {
+      const r = cv.getBoundingClientRect();
+      return {
+        x: ((clientX - r.left - cv.clientLeft) * W) / (cv.clientWidth || W),
+        y: ((clientY - r.top - cv.clientTop) * H) / (cv.clientHeight || H),
+      };
+    },
+    grabbing: (on) => {
+      cv.classList.toggle(grabbingClass, on);
+    },
+  };
+}
+/** V179: ダイアログのプレビューに、取り込む範囲の操作一式を付けて返す。**main.ts はこれ 1 つを呼ぶ**
+ *  （操作を作る・canvas に受け口を付ける・スライダーの口を作る、を 1 か所で＝付け忘れが起きない） */
+export function createCropPreview(
+  o: ConvertOptions,
+  io: CropIo,
+  cv: CropCanvasElementLike,
+  grabbingClass: string,
+  win: {
+    addEventListener(type: "pointerup" | "pointercancel", fn: () => void): void;
+    removeEventListener(type: "pointerup" | "pointercancel", fn: () => void): void;
+  }
+): { ctl: CropController; slider: { onDown: () => void; onInput: (i: number) => void; onChange: () => void } } {
+  const ctl = createCropController(o, io);
+  bindCropCanvas(cropCanvasPort(cv, grabbingClass), ctl);
+  return { ctl, slider: cropSliderHandlers(ctl, win) };
+}
+
+/** V179: 1 軸ぶん、出力の画素 k（from ≤ k < to）が平均する元画像の画素の範囲 [lo, hi]（2 つずつ並べる）。
+ *  d = 置いた大きさ・s = 元画像の大きさ */
+function sourceSpans(d: number, s: number, from: number, to: number, zoomed: boolean): Int32Array {
+  const spans = new Int32Array(Math.max(0, to - from) * 2);
+  for (let k = from; k < to; k++) {
+    let lo: number, hi: number;
+    if (!zoomed) {
+      // 倍率 1（既定）: V182 (A-79) で、下の縮小の枝と同じ整数の割り算にした（拡大・縮小どちらも）。
+      //（前の (k / d) * s は浮動小数の丸めで、1:1・2 倍・半分でも隣の画素を拾って混ぜることがあった＝v182_smoke [S-1]）
+      // 等倍でない拡大（256×192 など）は面積平均のまま＝境目の画素は混ざる（最近傍にはしない・作者決定 G-2・[S-3]）
+      // (k + 1)·s が 2^53 を超える極端な大きさ（CLI・MCP だけで届く。画面の取り込みは長辺 4096 で届かない）は、
+      // 掛け算そのものが丸まって範囲が 1 画素ずれるので BigInt で求める（例 24,333,387×7・v182_smoke [S-4]）
+      if ((k + 1) * s <= Number.MAX_SAFE_INTEGER) {
+        lo = Math.floor((k * s) / d);
+        hi = Math.min(s - 1, Math.max(lo, Math.ceil(((k + 1) * s) / d) - 1));
+      } else {
+        const S = BigInt(s);
+        const D = BigInt(d);
+        lo = Number((BigInt(k) * S) / D);
+        hi = Math.min(s - 1, Math.max(lo, Number((BigInt(k + 1) * S + D - 1n) / D) - 1));
+      }
+    } else if (d > s) {
+      // 拡大: 最近傍＝出力の画素の中心に乗る元の 1 画素（にじまない・素の絵の drawImage と同じ画素）
+      lo = hi = Math.min(s - 1, Math.floor(((2 * k + 1) * s) / (2 * d)));
+    } else {
+      // 縮小（と 1:1）: 面積平均。範囲は整数の割り算で求める
+      //（前の式は (k / d) * s の丸めで、1:1 や 2 分の 1 でも隣の画素を拾って 3 画素の平均になることがある）
+      lo = Math.floor((k * s) / d);
+      hi = Math.min(s - 1, Math.max(lo, Math.ceil(((k + 1) * s) / d) - 1));
+    }
+    spans[(k - from) * 2] = lo;
+    spans[(k - from) * 2 + 1] = hi;
+  }
+  return spans;
+}
+
+/** 320×240 へリサイズ（面積平均）。cover=中央クロップ / contain=余白は alpha=0（=紙が透ける）
+ *  V179 (A-73): `zoom`・`center`（省略可）で「どこを切り取るか」を動かす。**省略＝倍率 1・中央（明示の既定値と 1 画素も同じ）**。
+ *  倍率を上げたときは、拡大の軸（元画像の 1 画素が出力の 1 画素より大きい）が**最近傍＝にじまない**
+ *  （面積平均のままだと、整数倍でない拡大で境目の画素が 2 色の平均になる）。倍率 1 は面積平均のまま
+ *  （V182: 範囲は整数の割り算＝1:1・整数倍・整数分の 1 がぴったり入る。等倍でない拡大は境目が混ざる） */
+export function resizeToCanvas(
+  img: SourceImage,
+  fit: "cover" | "contain",
+  zoom?: number,
+  center?: CropCenter
+): SourceImage {
   const out = new Uint8Array(W * H * 4);
-  const scale =
-    fit === "cover" ? Math.max(W / img.w, H / img.h) : Math.min(W / img.w, H / img.h);
-  const dw = Math.max(1, Math.round(img.w * scale));
-  const dh = Math.max(1, Math.round(img.h * scale));
-  const dx0 = Math.floor((W - dw) / 2);
-  const dy0 = Math.floor((H - dh) / 2);
-  for (let dy = 0; dy < dh; dy++) {
-    const oy = dy0 + dy;
-    if (oy < 0 || oy >= H) continue;
-    const sy0 = (dy / dh) * img.h;
-    const sy1 = ((dy + 1) / dh) * img.h;
-    for (let dx = 0; dx < dw; dx++) {
-      const ox = dx0 + dx;
-      if (ox < 0 || ox >= W) continue;
-      const sx0 = (dx / dw) * img.w;
-      const sx1 = ((dx + 1) / dw) * img.w;
+  const { dw, dh, dx0, dy0 } = canvasPlacement(img.w, img.h, fit, zoom, center);
+  const zoomed = clampCropZoom(zoom) > 1;
+  // 枠に入る範囲だけ回す（枠の外の画素は従来も continue で何もしていない＝出力は同じ。拡大で dw が大きくても速い）
+  const dxS = Math.max(0, -dx0);
+  const dyS = Math.max(0, -dy0);
+  const xs = sourceSpans(dw, img.w, dxS, Math.min(dw, W - dx0), zoomed);
+  const ys = sourceSpans(dh, img.h, dyS, Math.min(dh, H - dy0), zoomed);
+  for (let j = 0; j < ys.length; j += 2) {
+    const oy = dy0 + dyS + j / 2;
+    const yA = ys[j];
+    const yB = ys[j + 1];
+    for (let i = 0; i < xs.length; i += 2) {
+      const ox = dx0 + dxS + i / 2;
       let r = 0,
         g = 0,
         b = 0,
         n = 0;
-      const yA = Math.floor(sy0);
-      const yB = Math.min(img.h - 1, Math.max(yA, Math.ceil(sy1) - 1));
-      const xA = Math.floor(sx0);
-      const xB = Math.min(img.w - 1, Math.max(xA, Math.ceil(sx1) - 1));
+      const xA = xs[i];
+      const xB = xs[i + 1];
       for (let sy = yA; sy <= yB; sy++)
         for (let sx = xA; sx <= xB; sx++) {
           const si = (sy * img.w + sx) * 4;
@@ -149,9 +683,9 @@ export function resizeToCanvas(img: SourceImage, fit: "cover" | "contain"): Sour
   return { w: W, h: H, data: out };
 }
 
-/** 前処理一括: BC → 320×240（GUI/CLI/シートで共用） */
+/** 前処理一括: BC → 320×240（GUI/CLI/シートで共用）。V179: 倍率・位置（省略可）も通す */
 export function prepareCanvas(img: SourceImage, o: ConvertOptions): SourceImage {
-  return resizeToCanvas(applyBC(img, o.brightness, o.contrast), o.fit);
+  return resizeToCanvas(applyBC(img, o.brightness, o.contrast), o.fit, o.zoom, o.center);
 }
 
 // ---------------- color モード（median-cut 量子化＋ディザ） ----------------

@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.8.0
+ MemoAnima v1.9.0
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -9,12 +9,43 @@ Japanese: see README.txt in this folder.
 == WHAT MEMOANIMA IS ==
 Import the flipbook animations you made on a Nintendo 3DS (.kwz / .ppm) onto
 your PC, edit them, and export to MP4 / GIF / APNG / a PNG sequence.
-Windows only.
+Windows and Mac. (This README covers the Windows version.)
 - An unofficial, non-commercial fan tool made by one person.
 - It is a tool for editing animation data you created yourself, on your own PC.
 - Your source data (the SD card and so on) is only ever READ. Nothing is
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
+
+== CHANGED IN v1.9.0 ==
+- [Brush, pen and eraser strokes are smoother] Diagonal lines now line up about
+  as cleanly as with the line tool.
+- [The text tool now has 10 typefaces instead of 5] The new ones are Sans,
+  Pixel-style, Handwritten, Serif (standard) and Poster (decorative).
+- [The eraser has a new "All layers" option] What you trace is erased from
+  every visible layer (one Ctrl+Z undoes it). While it is on, pressing a key or
+  a button in the middle of a stroke ends the stroke there.
+- [Drag to choose the import area] When importing an image, you can now drag
+  the preview to choose the area, and zoom in with the slider to import just a
+  part of it.
+- [Large projects with many identical frames now save to smaller files] Open
+  and save again to shrink them; the drawings do not change.
+- [Reasons are shown when importing or opening fails] When a file can't be
+  imported or a project can't be opened, the reason is now shown and written to
+  the log. Projects hidden because a cloud service added ".gz" to their names
+  can be restored.
+- [Fixed undo issues] Undoing a warp could overwrite a different frame, undo
+  could silently fail for distant frames in large projects, and undoing a layer
+  move could skip autosave.
+- [Fixed some pixels mixing with their neighbours on image import] It happened
+  with images of exactly 320x240 (or 2x / half that size). Pixel art keeps its
+  exact shape.
+- [Fixed a modifier-key tap shortcut firing by mistake] It happened while
+  another modifier key was held.
+- [Mac] The app is now signed and notarized, so the "unidentified developer"
+  warning no longer appears on first launch. Shortcuts use the ⌘ (command) key,
+  and are shown as ⌘ ⌥ ⇧. The Mac version does not have in-app updates yet;
+  please get new versions from the download page.
+- The project file format is the same as v1.6.0 and later.
 
 == CHANGED IN v1.8.0 ==
 - [Emoji on tools and buttons replaced with our own line-art icons] All 86 of
@@ -399,7 +430,8 @@ opens as it is, and your settings and shortcuts carry over.
 3. Follow the first-run guide: choose a library folder -> import -> edit -> export
 Note: layers are shared across every frame (the standard way animation tools
 work). Adding a frame gives you a blank frame with the same layer structure.
-Note: there is also an installer (MemoAnima_1.5.4_x64-setup.exe). Just
+Note: there is also an installer (named like MemoAnima_1.9.0_x64-setup.exe,
+with the version number in it). Just
 double-click it; no administrator rights are needed. IMPORTANT: this portable
 (zip) version cannot update in place - accepting an update installs the
 installer version instead (see ABOUT NETWORK ACCESS below). Moving from the

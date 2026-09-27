@@ -86,8 +86,9 @@ const FORBIDDEN: (readonly [string, RegExp])[] = [
   if (folder !== product) FORBIDDEN.push([`作業フォルダ名（${folder}）`, reOf(folder, "")]);
 }
 
-/** 版数を表題に書いた配布文書。`tauri.conf.json` の version と**一致していること** */
-const VERSIONED_DOCS = ["release-assets/README.txt", "release-assets/README_en.txt"];
+/** 版数を表題に書いた配布文書。`tauri.conf.json` の version と**一致していること**
+ *  （V190: `README_mac.txt` は zip に入れない＝Mac の .dmg と並べて BOOTH / Release に付ける。ここで見るのは版だけ） */
+const VERSIONED_DOCS = ["release-assets/README.txt", "release-assets/README_en.txt", "release-assets/README_mac.txt"];
 
 function preflight() {
   console.log("== A-5 自己検査（ビルド前） ==");

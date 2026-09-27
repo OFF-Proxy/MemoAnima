@@ -17,7 +17,8 @@ import { FrameSource, ExportAudioSource, noteSource, projectSource, formatSize }
 import { AudioPreview, pcmS16ToWav, bgmPlaybackRate, renderExportMix } from "./editor/audio";
 import type { BgmTrack } from "./editor/model";
 import { t, getLang } from "./i18n";
-import { errText, tooLargeBytes } from "./ui/errText"; // V169 (B-3): 門番の TOO_LARGE を人が読める文へ
+import { errText, tooLargeBytes, isUnreadableSource } from "./ui/errText"; // V169 (B-3): 門番の TOO_LARGE を人が読める文へ／V173b: 解析ライブラリの英語を画面に出さない
+import { importLogSafe, logSafeFileLabel } from "./gzname"; // V173b (W-10): ログへ書く前にパスと作品名を伏せる
 import { icon, setIconLabel } from "./icons"; // V171: 線画アイコン（絵文字は OS で絵が変わる）
 // V159 (G-3): 長くかかりうる処理の共通入口（読み込み中の表示・遅延・計測はここに1つ）
 import { runWithBusy } from "./ui/busy";
@@ -69,6 +70,12 @@ export interface LibraryCallbacks {
   toast: (msg: string) => void;
   /** V154b (W-10): 節目のログ（`memoanima.log`）。**作品名・パスは書かない** */
   appendLog?: (text: string) => void;
+  /** V173 (A-66): 取り込みの**失敗**をログへ（`memoanima.log`）。
+   *  呼び出し側（`main.ts`）が**パスと作品名を落としてから**書く。`.kwz`/`.ppm` のファイル名は残る。
+   *  @param known この失敗に関係するパス（分かっていれば渡す＝完全一致で先に消される） */
+  logError?: (kind: string, detail: string, known?: string[]) => void;
+  /** V173 (A-66): 理由を見せる（閉じるだけのダイアログ）。件数だけでは次に何をすればいいか分からない */
+  notice?: (msg: string) => Promise<void>;
   /** M10-20: 並び順の変更を設定へ保存する（文字設定と同じ「変えた瞬間に保存」の流儀） */
   onShelfSortChange?: (v: "manual" | "name" | "date") => void;
   /** M11-3: アルバム選択ダイアログ（「📁 移動」の代替導線）。null=キャンセル */
@@ -193,6 +200,50 @@ export class LibraryScreen {
     // V154 (W-1): 一覧を出したあとで「保存の途中で止まった作品」を拾って尋ねる
     //（一覧より先に出すと、何の画面か分からないまま質問される）
     await this.checkRecoverable();
+    // V173 (A-65): 続けて「クラウド経由で `.gz` が付いて見えなくなっている作品」を拾って尋ねる。
+    // 復元（保存の途中で止まった＝失う側）のほうが急ぐので、そのあとに出す
+    await this.checkRenamedProjects();
+  }
+
+  /** V173 (A-65): クラウド経由で受け取ると、作品の名前の末尾に `.gz` が付いて
+   *  **アルバムが 0 件に見える**ことがある（中身は 1 バイトも変わっていない）。拾って**直すか尋ねる**。
+   *
+   *  - 尋ねるのは**1セッションに1回**（`checkRecoverable` と同じ作法）
+   *  - ★**W-10: 見つかった作品の名前は使わない**（`list` は件数だけ見る）。ログにも書かない
+   *  - 改名は Rust 側が「対の実体が無い・先頭が gzip」の 2 条件を満たすものだけに行い、**上書きしない** */
+  private gzAsked = false;
+  private async checkRenamedProjects() {
+    if (this.gzAsked || !this.libRoot) return;
+    this.gzAsked = true;
+    let list: string[] = [];
+    try {
+      list = await invoke<string[]>("scan_renamed_projects", { libRoot: this.libRoot });
+    } catch {
+      return; // 拾えなくてもライブラリは普通に使える（提案が出ないだけ）
+    }
+    if (list.length === 0) return;
+    const ok = await this.cb.confirm(t("lib.gz.found.msg", { count: list.length }), {
+      yes: t("lib.gz.fix.btn"),
+      no: t("lib.gz.later.btn"),
+    });
+    if (!ok) return; // 何も動かさない（次に開いたらまた尋ねる）
+    try {
+      const r = await invoke<{ renamed: number; skipped: number; errors: string[] }>(
+        "fix_renamed_projects",
+        { libRoot: this.libRoot }
+      );
+      // 失敗は A-66 と同じ道でログへ（Rust 側は理由だけを積む＝作品名は入らない）
+      for (const e of r.errors) this.cb.logError?.("import", `gz fix: ${e}`);
+      await this.refresh();
+      this.cb.toast(
+        r.skipped > 0
+          ? t("lib.gz.skipped.toast", { count: r.renamed, skipped: r.skipped })
+          : t("lib.gz.done.toast", { count: r.renamed })
+      );
+    } catch (e) {
+      this.cb.logError?.("import", `gz fix failed: ${errText(e)}`);
+      this.cb.toast(t("lib.import.error.toast", { err: errText(e) }));
+    }
   }
 
   /** V154 (W-1): 保存の窓（本体→控え→書き込み確定）で終了した跡を拾い、**戻すかどうか尋ねる**。
@@ -487,11 +538,18 @@ export class LibraryScreen {
     const footer = $("#import-footer");
     footer.hidden = false;
     setIconLabel($("#import-label"), "import", t("imp.progress.label")); // V171: 📥 → import
+    // V173 (A-66): 失敗の理由。Rust は `result.errors` に積んでいたのに、**フロントは一度も読んでいなかった**
+    //（作者の Mac で「.kwz が一部開けない」を調べようとログを 2 回取って、失敗の行が 1 行も無かったのがこれ）
+    let failed: string[] = [];
     try {
       const res = await invoke<any>("import_flipnotes", {
         srcRoot: src,
         libRoot: this.libRoot,
       });
+      // W-10: ここの理由は `<.kwz/.ppm のファイル名>: <理由>`。3DS の kwz は英数字のハッシュ名で
+      // **作品名ではない**ので、ファイル名ごと残してよい（`.memoanima` は名前＝作品名なので書かない）
+      failed = Array.isArray(res.errors) ? (res.errors as string[]) : [];
+      for (const e of failed) this.cb.logError?.("import", `bulk: ${e}`);
       // M12-1c-1: 「完了: …」＋「/ 失敗 …件」の連結をやめ、状態ごとの完全文にした
       const msg = res.cancelled
         ? t("lib.import.cancelled.toast", { imported: res.imported })
@@ -504,10 +562,22 @@ export class LibraryScreen {
           : t("lib.import.done.toast", { imported: res.imported, skipped: res.skipped });
       this.cb.toast(msg);
     } catch (e) {
+      this.cb.logError?.("import", `bulk failed: ${errText(e)}`);
       this.cb.toast(t("lib.import.error.toast", { err: errText(e) }));
     } finally {
       footer.hidden = true;
       await this.refresh();
+    }
+    // V173 (A-66): 失敗が 1 件でもあれば**理由の先頭 3 件**を見せる（残りは件数だけ＋ログへ誘導）。
+    // 画面を戻してから出す（進捗の帯が消えたあと・`finally` の refresh のあと）
+    if (failed.length > 0) {
+      // 行頭の記号も訳文側に置く（`lib.recover.item.msg` と同じ作法・m1201 検査5）
+      const lines = failed.slice(0, 3).map((e) => t("lib.import.failedItem.msg", { reason: e }));
+      if (failed.length > lines.length)
+        lines.push(t("lib.import.failedMore.msg", { count: failed.length - lines.length }));
+      await this.cb.notice?.(
+        t("lib.import.failedDetail.msg", { count: failed.length }) + "\n\n" + lines.join("\n")
+      );
     }
   }
 
@@ -549,6 +619,9 @@ export class LibraryScreen {
       if (item) await this.select(item);
       else this.cb.toast(t("lib.openFile.imported.toast", { path: destPath }));
     } catch (e) {
+      // V173 (A-66): トーストは従来どおり（理由つき）。**ログが無かった**ので足す
+      //（`.kwz`/`.ppm` はファイル名を残す＝どれが失敗したかの手掛かり。フォルダは落とされる）
+      this.cb.logError?.("import", `single: ${errText(e)}`, path ? [path] : []);
       this.cb.toast(t("lib.import.error.toast", { err: errText(e) }));
     }
   }
@@ -1143,8 +1216,10 @@ export class LibraryScreen {
         }
       } catch (e) {
         // V154b: `Error: ` を出さない（中身だけ）。文言は serialize が決めている
-        // V159: 古い読み込みの失敗は出さない（新しく選んだメモの帯に前のメモのエラーが出る）
-        if (!stale()) this.showLoadError(errText(e));
+        // V159: 古い読み込みの失敗は**画面に**出さない（新しく選んだメモの帯に前のメモのエラーが出る）
+        // V173b: ただし**ログには残す**（第3引数 = ログだけ）。棚を続けてクリックしている最中の失敗も
+        //        「見えない失敗」にしない——A-66 の目的はこちらから見えること
+        this.showLoadError(errText(e), [it.path], stale());
       }
     });
   }
@@ -1153,8 +1228,29 @@ export class LibraryScreen {
    *
    *  以前は同じ文言が「帯」と「トースト」の2か所に出ていた。トーストは 3.2 秒で消えるうえ、
    *  長い文だと省略記号で切られるので、**残るほうの帯に一本化**する。
-   *  ここは選択したときのプレビュー失敗と、開こうとして失敗したとき（`main.ts`）の共通の出口。 */
-  showLoadError(msg: string) {
+   *  ここは選択したときのプレビュー失敗と、開こうとして失敗したとき（`main.ts`）の共通の出口。
+   *
+   *  ★V173b: **この 1 か所で「開けなかった理由」がログに残る**（`[open] …` を 1 行）。
+   *   V173 で塞いだのは「取り込み」の失敗で、実機で実際に起きていた**開くときの失敗**は
+   *   帯に出るだけ・ログには 1 行も残らなかった（作者の Mac のログにも実際に無かった）。
+   *   ここは選択とエディタ起動の**共通の出口**なので、1 か所で両方が塞がる。
+   *
+   *  @param known この失敗に関係するパス（**必ず渡す**）。W-10: `.memoanima` は名前＝作品名なので
+   *    ログから名前ごと伏せ、`.kwz` はフォルダだけ落としてファイル名を残す（3DS のハッシュ名＝作品名ではない）
+   *  @param logOnly true なら**ログだけ**で画面には出さない（V159: 古い読み込みの失敗を新しい帯に出さない）
+   *  @param logNote ログにだけ添える手掛かり（**画面には出ない**）。数値だけの決められた語にすること
+   *    ——V154b の `size=<バイト数>`（「大きすぎた」のか「本当に壊れていた」のか）をここへ畳んだ */
+  showLoadError(msg: string, known: string[] = [], logOnly = false, logNote = "") {
+    // ★まずログへ。**画面より先**に書くので、下のどの分岐へ進んでも 1 行は必ず残る。
+    // 原文（解析ライブラリの英語）はそのまま残す——画面と用途が違い、原因を追うのはこちら側。
+    // Codex 指摘（低）: 解析には `ArrayBuffer` を渡すので理由にファイル名が入らない。
+    // `.kwz` / `.ppm` のときだけ**頭に名前を付ける**＝壊れたものが複数あっても見分けがつく
+    const label = known.map(logSafeFileLabel).find(Boolean);
+    this.cb?.logError?.(
+      "open",
+      [label ? `${label}:` : "", logNote, importLogSafe(msg, known)].filter(Boolean).join(" ")
+    );
+    if (logOnly) return;
     // V169 (B-3): 512MiB の門番（`readProjectRaw`）に当たったときは、生の `TOO_LARGE:<bytes>` ではなく
     // 人が読める文にする——「約 X MB・上限 Y MB・ファイルは壊れていない・コマを減らして保存し直した版を開く」。
     // 上限の数字は門番の定数からそのまま作る（別の数字を手で書かない）。**それ以外の失敗の文言は従来どおり**
@@ -1166,7 +1262,12 @@ export class LibraryScreen {
             mb: String(Math.ceil(tooLarge / 1024 / 1024)),
             max: String(IMPORT_MAX_BYTES / 1024 / 1024),
           })
-        : t("lib.meta.loadError.label", { err: msg });
+        : // V173b: 解析ライブラリの英語（`flipnote.js error: Could not identify source …`）を
+          // そのまま帯に出していた。利用者には読めないので、**訳文の一文**に置き換える。
+          // 原文は上でログへ入れてある
+          isUnreadableSource(msg)
+          ? t("lib.open.unreadable.msg")
+          : t("lib.meta.loadError.label", { err: msg });
     this.renderMeta([text]);
     // 失敗の文は長い（「…ファイルは壊れていません（中身: 約2.1GB／…）」）。
     // チップは既定で縮まない（flex の min-width:auto）ので、**この1つだけ折り返せる**ようにする
