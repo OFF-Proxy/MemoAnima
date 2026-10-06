@@ -17,11 +17,10 @@ Windows and Mac. (This README covers the Windows version.)
 - Editing happens on an independent copy inside your PC library.
 
 == CHANGED IN v1.9.5 ==
-- 1px pen and eraser strokes no longer thicken at corners and now connect cleanly. Strokes 2px or wider, the brush and the line tool are unchanged. The previous 1px stroke shape cannot be restored.
-- Tones such as checkerboard patterns no longer lose colors or break up in library thumbnails, the frame list and the small preview. Fine patterns are shown in the color they appear from a distance.
-- The library player now fills its frame at any window size without cutting off the edges of the project.
+- 1px pen and eraser strokes no longer look rough and now connect cleanly. Strokes 2px or wider, the brush and the line tool are unchanged.
+- Tones such as checkerboard patterns no longer lose colors or break up in library thumbnails, the frame list and the small preview. Fine patterns are shown in their averaged color.
 - When zoomed in, you can now move the corners of the canvas to the center of the window. Nothing changes when the picture fits in the window. The hide button at the top right now also hides the rotate, flip and zoom buttons.
-- You can now remove a color from the palette strip by right-clicking it. Colors used anywhere in the project cannot be removed, and removing a color never changes the picture.
+- You can now remove a color registered in the color palette by right-clicking it. Colors used anywhere in the project cannot be removed, and removing a color never changes the original picture.
 - Your Discord profile can now show "Playing メモアニマ(MemoAnima)". MemoAnima only talks to the Discord app on the same computer and never sends project names or contents. Turn it off in Settings with "Show activity on Discord".
 - Fixed an issue where pressing play after a non-looping project finished playing played only the last frame (library and editor).
 - Fixed an issue in the editor where selecting or stepping to another frame during playback moved the picture while the sound kept playing out of sync. Changing frames now stops playback.
