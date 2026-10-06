@@ -7,7 +7,11 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Player, parse } from "flipnote.js";
 import { Project, FPS_TABLE } from "./editor/model";
-import { compositeFrame, presentToCanvas, frameToPngBlob } from "./editor/render";
+import { compositeFrame, frameToPngBlob } from "./editor/render";
+import { playStartFrame } from "./editor/playStart"; // V195 (A-96): ▶ を押したときに始めるコマ（編集画面と同じ 1 つ）
+// V192 (A-93): 320×240 を画面に出すときは「実際の画素」で——縮めるときは面積平均・広げるときは整数倍（表示だけ）
+import { presentFit, fitFor, fitKey, watchFit, rgbaOf, contentBox, currentDpr, decodeImageRgba, releaseCanvas, type DisplayFit } from "./editor/scaledView";
+import { fitDisplay } from "./editor/downscale";
 // V163 (A-40): PV6 の遅延読みは窓の外のコマが**眠って**届く（V156 の控えの形）。
 // compositeFrame は眠りを知らない（`if (!lb) continue` で白紙になる）ので、
 // プレビューと書き出しはここで起こしてから使う
@@ -131,12 +135,34 @@ export class LibraryScreen {
   // ノート描画のバッファ再利用（毎フレーム確保しない）
   private noteFrameBuf: Uint32Array | null = null;
   private notePaletteBuf: Uint32Array | null = null;
+  /** V192 (R-2): 再生画面の出す大きさ（元の大きさごと）。枠・dpr が変わったら捨てる＝毎コマ測らない */
+  private previewFitCache: { src: string; fit: DisplayFit } | null = null;
+  /** V192 (R-1): サムネの棚の 1 枚の枠（CSS の px）。棚の大きさ・dpr が変わったら測り直す */
+  private thumbBox: { w: number; h: number } | null = null;
+  /** V192 (R-1): サムネの元（320×240 の PNG・.ppm は 256×192）。大きさが変わったらここから縮め直す */
+  private thumbSrc = new WeakMap<HTMLCanvasElement, Blob>();
+  /** V192 (R-1): いま出している大きさ（fitKey）。違えば描き直す */
+  private thumbPainted = new WeakMap<HTMLCanvasElement, string>();
+  /** V192 (R-1): 見えている（＋上下 200px）サムネ。大きさが変わったらこれだけすぐ描き直し、ほかは見えたときに */
+  private thumbVis = new Set<HTMLCanvasElement>();
+  private thumbVisObs: IntersectionObserver | null = null;
+  private fitWatchBound = false;
 
   async mount(libRoot: string, cb: LibraryCallbacks) {
     this.libRoot = libRoot;
     this.cb = cb;
     this.bindHeader();
     this.bindAlbumOps();
+    if (!this.fitWatchBound) {
+      // V192 (R-1・R-2): 枠の大きさか devicePixelRatio が変わったら作り直す（画面の実際の画素で出しているので）。
+      // ライブラリは閉じずに裏へ回るだけ（エディタを開くと hidden）＝アプリの間ずっと持つ
+      this.fitWatchBound = true;
+      watchFit($("#preview-host").parentElement!, () => {
+        this.previewFitCache = null;
+        this.redrawPreviewFrame();
+      });
+      watchFit($("#shelf-grid"), () => this.refitThumbs());
+    }
     if (!this.unlistenProgress) {
       this.unlistenProgress = await listen<ImportProgress>("import-progress", (e) =>
         this.updateProgress(e.payload)
@@ -682,6 +708,30 @@ export class LibraryScreen {
   private renderShelf() {
     const grid = $("#shelf-grid");
     grid.innerHTML = "";
+    // V192 (R-1): 見えているサムネを追う。的は .pic（canvas は描くまで 0×0 なので的にしない）。
+    // 見えなくなった（上下 200px の外）サムネは**バッキングを手放す**——<img> と違って canvas の画素は
+    // ブラウザが捨ててくれないので、持ち続けると「棚で一度でも見た枚数」ぶん増える（dpr 2 で 1 枚 約 225KB）。
+    // 元の PNG（thumbSrc の Blob）は残るので、見えたらまた描く＝メモリは見えている枚数で頭打ち（コマ一覧の F-0 と同じ）
+    this.thumbVis.clear();
+    this.thumbVisObs?.disconnect();
+    this.thumbVisObs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          const cv = (e.target as HTMLElement).querySelector("canvas");
+          if (!cv) continue;
+          if (!e.isIntersecting) {
+            this.thumbVis.delete(cv);
+            this.thumbPainted.delete(cv);
+            releaseCanvas(cv);
+            continue;
+          }
+          this.thumbVis.add(cv);
+          if (this.thumbSrc.has(cv) && this.thumbPainted.get(cv) !== this.thumbKeyFor(cv))
+            this.enqueueThumb(() => this.paintThumb(cv));
+        }
+      },
+      { root: grid, rootMargin: "200px" }
+    );
     const list = this.shelfItems();
     $("#shelf-title").textContent = this.search
       ? t("lib.shelf.searching.label", { query: this.search })
@@ -693,10 +743,15 @@ export class LibraryScreen {
         "thumb" + (this.selected && this.selected.path === it.path ? " active" : "");
       const pic = document.createElement("div");
       pic.className = "pic";
-      const img = document.createElement("img");
-      img.alt = it.name;
-      // M11-3: <img> は既定でネイティブのドラッグ対象。放置すると画像ドラッグが始まって
-      // 以降の pointermove を奪い、pointer ドラッグが「掴めているのに動かない」状態になる
+      // V192 (R-1): <img> を CSS で縮める（最近傍＝一松柄の色が消える）のをやめ、<canvas> に実画素で面積平均して出す。
+      // 元の PNG（320×240）はそのまま（保存も読み込みも変えない）。最初は 0×0（描くまで何も占めない）
+      const img = document.createElement("canvas");
+      img.width = 0;
+      img.height = 0;
+      img.setAttribute("role", "img");
+      img.setAttribute("aria-label", it.name);
+      // M11-3: <img> は既定でネイティブのドラッグ対象だった（canvas はならないが、明示しておく）。
+      // 画像ドラッグが始まると以降の pointermove を奪い、pointer ドラッグが「掴めているのに動かない」状態になる
       //（実 exe でサムネが表示された作品だけ再現した。dev では気づけない類の不具合）
       img.draggable = false;
       pic.appendChild(img);
@@ -726,6 +781,7 @@ export class LibraryScreen {
       // ネイティブのドラッグ（画像・テキスト選択）が始まると pointermove が止まるので塞ぐ
       card.addEventListener("dragstart", (e) => e.preventDefault());
       grid.appendChild(card);
+      this.thumbVisObs.observe(pic);
       this.loadThumb(img, it);
     }
   }
@@ -1008,7 +1064,7 @@ export class LibraryScreen {
     this.thumbRunning = false;
   }
 
-  private loadThumb(img: HTMLImageElement, it: LibraryView) {
+  private loadThumb(img: HTMLCanvasElement, it: LibraryView) {
     const obs = new IntersectionObserver((entries) => {
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
@@ -1020,9 +1076,7 @@ export class LibraryScreen {
                 const bytes = await invoke<number[]>("read_file_bytes", {
                   path: it.thumb_path,
                 });
-                img.src = URL.createObjectURL(
-                  new Blob([new Uint8Array(bytes)], { type: "image/png" })
-                );
+                await this.showThumb(img, new Blob([new Uint8Array(bytes)], { type: "image/png" }));
                 return;
               } catch {
                 // サイドカーが読めない → 下の生成フォールバックへ
@@ -1037,7 +1091,7 @@ export class LibraryScreen {
               const project = await projectFromBytes(bytes);
               const blob = await frameToPngBlob(project, project.thumbFrame ?? 0);
               if (!blob) return;
-              img.src = URL.createObjectURL(blob);
+              await this.showThumb(img, blob);
               const ab = await blob.arrayBuffer();
               await invoke("save_project_thumb", {
                 libRoot: this.libRoot,
@@ -1054,9 +1108,7 @@ export class LibraryScreen {
             hash: it.hash,
           });
           if (cached && cached.length > 0) {
-            img.src = URL.createObjectURL(
-              new Blob([new Uint8Array(cached)], { type: "image/png" })
-            );
+            await this.showThumb(img, new Blob([new Uint8Array(cached)], { type: "image/png" }));
             return;
           }
           const bytes = await invoke<number[]>("read_file_bytes", { path: it.path });
@@ -1078,7 +1130,7 @@ export class LibraryScreen {
             canvas.toBlob(res, "image/png")
           );
           if (!blob) return;
-          img.src = URL.createObjectURL(blob);
+          await this.showThumb(img, blob);
           const ab = await blob.arrayBuffer();
           await invoke("save_thumb", {
             libRoot: this.libRoot,
@@ -1088,7 +1140,62 @@ export class LibraryScreen {
         });
       }
     });
-    obs.observe(img);
+    // V192: 的は .pic（canvas は描くまで 0×0）。前の <img> は枠いっぱいの大きさがあった
+    obs.observe(img.parentElement ?? img);
+  }
+
+  /** V192 (R-1): サムネの元の PNG を覚えて、棚の大きさで出す。**投げない**（読めない PNG は何も出さないまま＝
+   *  前の <img> が壊れた画像のまま何もしなかったのと同じ。ここで投げると .memoanima のサイドカーの道が
+   *  「その場で作り直して保存する」側へ落ちてしまう＝保存の挙動が変わる） */
+  private async showThumb(cv: HTMLCanvasElement, png: Blob): Promise<void> {
+    this.thumbSrc.set(cv, png);
+    try {
+      await this.paintThumb(cv);
+    } catch {
+      // 読めない PNG は空のまま。元を忘れる＝見えるたびに読み直して失敗し続けない
+      this.thumbSrc.delete(cv);
+    }
+  }
+
+  /** 棚の 1 枚の枠（CSS の px）。どのサムネも同じ大きさ（2 列の格子）なので 1 回だけ測る */
+  private measureThumbBox(): { w: number; h: number } | null {
+    if (this.thumbBox) return this.thumbBox;
+    const pic = document.querySelector("#shelf-grid .thumb .pic");
+    this.thumbBox = pic ? contentBox(pic) : null;
+    return this.thumbBox;
+  }
+
+  /** そのサムネをいまの枠で出すときの鍵（元の大きさは描いたときに覚えたもの） */
+  private thumbKeyFor(cv: HTMLCanvasElement): string {
+    const b = this.measureThumbBox();
+    const src = cv.dataset.src; // "320x240" / "256x192"
+    if (!b || !src) return "";
+    const [sw, sh] = src.split("x").map(Number);
+    return fitKey(fitDisplay(b.w, b.h, currentDpr(), sw, sh));
+  }
+
+  /** ★V192 (R-1): サムネを 1 枚描く。元の PNG を 1:1 で読み、**面積平均**で枠の実画素へ（presentFit）。
+   *  CSS では引き伸ばさない。PNG とその保存は 1 バイトも変えない */
+  private async paintThumb(cv: HTMLCanvasElement): Promise<void> {
+    const png = this.thumbSrc.get(cv);
+    if (!png || !cv.isConnected) return;
+    const b = this.measureThumbBox();
+    if (!b) return; // 棚が見えていない（エディタの裏）→ 見えたときに refitThumbs が描く
+    const { rgba, w, h } = await decodeImageRgba(png);
+    if (!cv.isConnected) return;
+    const fit = fitDisplay(b.w, b.h, currentDpr(), w, h);
+    presentFit(cv, rgba, w, h, fit);
+    cv.dataset.src = `${w}x${h}`;
+    this.thumbPainted.set(cv, fitKey(fit));
+  }
+
+  /** V192 (R-1): 棚の大きさか dpr が変わった → 見えているサムネだけすぐ描き直す（ほかは見えたときに） */
+  private refitThumbs() {
+    this.thumbBox = null;
+    if (!this.measureThumbBox()) return; // 棚が見えていない（0×0）
+    for (const cv of this.thumbVis)
+      if (this.thumbSrc.has(cv) && this.thumbPainted.get(cv) !== this.thumbKeyFor(cv))
+        this.enqueueThumb(() => this.paintThumb(cv));
   }
 
   // ---------------- 中央: ビューア ----------------
@@ -1100,13 +1207,16 @@ export class LibraryScreen {
       // 理由: Player 内部は useDpi=true 固定で、OSスケーリング(dpr 1.25等)だと
       // resize(320,240) でもバッキングが 400×300 になり内部補間のボケが焼き込まれるため、
       // 「ネイティブ 320×240 → CSS pixelated の一段スケール」を自前キャンバスで保証する。
+      // V192 (A-93): その一段も CSS に任せなくなった（presentFit が実画素で描く・drawNoteFrame）。
+      // V192b: 大きさは枠いっぱい（半端な倍率は境目を面積平均で混ぜる・ちょうど整数倍は最近傍）。
       this.player = new Player("#player-host", 320, 240);
       (this.player as any).on?.("frameupdate", () => this.drawNoteFrame());
     }
     return this.player;
   }
 
-  /** 現在フレームをネイティブ解像度で #preview-host に描く（nearest-neighbor はCSSに一任） */
+  /** 現在フレームを #preview-host に描く。V192 (R-2): 実画素で・CSS の object-fit・引き伸ばしには任せない（presentFit）。
+   *  V192b: 枠いっぱい（半端な倍率は境目を混ぜる・ちょうど整数倍は最近傍・枠が元より小さければ面積平均で縮める） */
   private drawNoteFrame() {
     if (this.stageMode !== "note" || !this.player) return;
     const note: any = (this.player as any).note;
@@ -1114,10 +1224,8 @@ export class LibraryScreen {
     const w: number = note.imageWidth;
     const h: number = note.imageHeight;
     const cv = $("#preview-host") as unknown as HTMLCanvasElement;
-    if (cv.width !== w || cv.height !== h) {
-      cv.width = w;
-      cv.height = h;
-    }
+    const fit = this.previewFit(w, h);
+    if (!fit) return; // 枠が見えていない → 見えたら watchFit が描き直す
     if (!this.noteFrameBuf || this.noteFrameBuf.length < w * h)
       this.noteFrameBuf = new Uint32Array(w * h);
     if (!this.notePaletteBuf) this.notePaletteBuf = new Uint32Array(32);
@@ -1127,13 +1235,27 @@ export class LibraryScreen {
       this.noteFrameBuf,
       this.notePaletteBuf
     );
-    const ctx = cv.getContext("2d")!;
-    const img = new ImageData(
-      new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, w * h * 4),
-      w,
-      h
-    );
-    ctx.putImageData(img, 0, 0);
+    presentFit(cv, rgbaOf(pixels, w, h), w, h, fit);
+  }
+
+  /** V192 (R-2): 再生画面の出す大きさ。枠（.screen-view の中身）× dpr の実画素で数える。
+   *  ★V192b（決-2 の改め）: **枠いっぱい**（fill＝縦横比を保って入るいちばん大きい大きさ・はみ出さない）。
+   *  半端な倍率は境目を面積平均で混ぜる（presentFit の "fill"）・ちょうど整数倍なら最近傍（"up"）。
+   *  前の #preview-host の padding 6px（余白）は取らない。毎コマは測らない（watchFit が捨てたときだけ測り直す） */
+  private previewFit(sw: number, sh: number): DisplayFit | null {
+    const src = `${sw}x${sh}`;
+    if (this.previewFitCache?.src === src) return this.previewFitCache.fit;
+    const host = ($("#preview-host") as HTMLElement).parentElement;
+    const fit = host ? fitFor(host, sw, sh, true) : null;
+    this.previewFitCache = fit ? { src, fit } : null;
+    return fit;
+  }
+
+  /** V192 (R-2): 枠・dpr が変わったら今のコマを描き直す（再生していなくても大きさが追従する） */
+  private redrawPreviewFrame() {
+    if (($("#preview-host") as HTMLElement).hidden) return;
+    if (this.stageMode === "note") this.drawNoteFrame();
+    else if (this.previewProject) this.drawPreview();
   }
 
   /** L-2: 選択ハイライトは棚を再構築せずクラス切替のみ（スクロール位置を保つ） */
@@ -1525,9 +1647,40 @@ export class LibraryScreen {
   togglePreviewPlayback() {
     if (this.selected?.kind === "project") {
       if (this.previewPlaying) this.stopPreview();
-      else void this.startPreview();
+      else {
+        // ★V195 (A-96・BUG-003): ループしない作品が終端で止まると `previewFrame` は最後のコマのまま残る。
+        //  そこから ▶ を押すと最後のコマを 1 回出してすぐ止まっていた。**最後のコマの ▶ は先頭から**
+        //  （判断は編集画面・.kwz と同じ `playStartFrame`）。音は startPreview が `previewFrame / fps`（＝0 秒）から鳴らす
+        const pp = this.previewProject;
+        if (pp) {
+          const at = playStartFrame(this.previewFrame, pp.frames.length, pp.loop);
+          if (at !== this.previewFrame) {
+            this.previewFrame = at;
+            this.drawPreview();
+          }
+        }
+        void this.startPreview();
+      }
     } else if (this.player) {
-      this.player.paused ? this.player.play() : this.player.pause();
+      if (this.player.paused) {
+        // ★V195 (A-96): .kwz/.ppm も同じ決まり。flipnote.js の Player は**終端まで再生して止まった**ときは
+        //  `_hasEnded` で先頭へ戻すが、◀▶ で最後のコマへ送ってから ▶ だと最後の 1 コマで止まっていた
+        //  （stepPreviewFrame が `_hasEnded` を下ろす）。止まっている間の `setCurrentFrame(0)` は
+        //  再生位置も 0 秒にするので、play() が音も頭から鳴らす（Player の playAudio は currentTime から）
+        const p = this.player as any;
+        try {
+          const n: number = p.frameCount ?? 0;
+          const cur = Number(p.currentFrame ?? 0) || 0;
+          const at = playStartFrame(cur, n, p.loop === true);
+          if (at !== cur) {
+            p.setCurrentFrame(at);
+            if (p._hasEnded) p._hasEnded = false;
+          }
+        } catch {
+          /* ノート未ロード等。従来どおり play() に任せる */
+        }
+        this.player.play();
+      } else this.player.pause();
     }
     this.updatePlayButton();
   }
@@ -1617,12 +1770,11 @@ export class LibraryScreen {
     }
     this.prewakePreview();
     const cv = $("#preview-host") as unknown as HTMLCanvasElement;
-    // ノート表示（.ppm=256×192等）でバッキングが変わっている可能性があるため 320×240 に戻す
-    if (cv.width !== 320 || cv.height !== 240) {
-      cv.width = 320;
-      cv.height = 240;
-    }
-    presentToCanvas(compositeFrame(this.previewProject, this.previewFrame), cv);
+    // V192 (R-2)・V192b: 枠いっぱい（previewFit）。バッキングと CSS の大きさは presentFit が fit で揃える
+    //（ノート表示＝.ppm 256×192 から戻ったときの大きさの違いもここで吸収される）
+    const fit = this.previewFit(320, 240);
+    if (!fit) return;
+    presentFit(cv, rgbaOf(compositeFrame(this.previewProject, this.previewFrame)), 320, 240, fit);
     // M11-16: 透明の紙は canvas の背景で薄い市松にする（データには触れない・実色の紙と見分けるため）
     cv.classList.toggle("paper-clear", this.previewProject.frames[this.previewFrame]?.paper === 0);
   }

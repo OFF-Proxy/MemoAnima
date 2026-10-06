@@ -1,6 +1,7 @@
 // M11-22 スモーク: 倍率の正規化・説明文言・GIF 固定パレットの実使用色の数え方（純関数）
 // 引数不要:  npx tsx scripts/m1122_smoke.ts
 // ※ 実ファイル（GIF 完全一致・全コマ同一パレット・×N nearest）は scripts/m1121_export_check.mts（tauri:dev が要る）
+import { readFileSync } from "node:fs";
 import { W, H, PIXELS } from "../src/editor/model";
 // M12-1c-2: 文言が t() 経由になったので**言語を ja に固定**してから読む（pin の文字列は1文字も変えていない）
 import { setLang } from "../src/i18n";
@@ -36,7 +37,17 @@ check("×1 の用途に「拡大」が出てこない", !/拡大/.test(scaleNote
 // （形式名 GIF は注意文が出る場所＝GIF を選んでいるときだけなので本文からは落とした）
 check("GIF×8 の注意文がある（容量と代替が読める）", /MB/.test(gifX8Warning()) && /×4|MP4/.test(gifX8Warning()), gifX8Warning());
 // M11-24: 常時表示は短く（UI_TEXT_guide 4: 目安 30 字）。超えたら削れないか考える合図
-check("常時表示の文言が 30 字以内（用途の一言・GIF×8 の注意）", EXPORT_SCALES.every((n) => [...scaleNote(n).use].length <= 30) && [...gifX8Warning()].length <= 30, `${EXPORT_SCALES.map((n) => [...scaleNote(n).use].length).join("/")} ・警告 ${[...gifX8Warning()].length}`);
+// A-94: 画面の姿で数える＝`{icon:…}` は iconizeText が 1 つのアイコンにするので **1 文字**（置き換え記号の 11 文字ではない）。
+// 形は src/icons/index.ts の PLACEHOLDER をそのまま読む（export されていない・写しを持つと食い違っても黙るため）。
+const ICON_PLACEHOLDER = (() => {
+  const src = readFileSync(new URL("../src/icons/index.ts", import.meta.url), "utf8");
+  const m = /^const PLACEHOLDER = \/(.+)\/g;\s*$/m.exec(src);
+  if (!m) throw new Error("src/icons/index.ts の PLACEHOLDER が見つからない（m1122 の数え方が働かない）");
+  return new RegExp(m[1], "g");
+})();
+const shownLen = (s: string) => [...s.replace(ICON_PLACEHOLDER, "□")].length;
+check("PLACEHOLDER の読み取り: `{icon:warn}` を 1 文字に数える", shownLen("{icon:warn} ab") === 4, String(shownLen("{icon:warn} ab")));
+check("常時表示の文言が 30 字以内（用途の一言・GIF×8 の注意）", EXPORT_SCALES.every((n) => shownLen(scaleNote(n).use) <= 30) && shownLen(gifX8Warning()) <= 30, `${EXPORT_SCALES.map((n) => shownLen(scaleNote(n).use)).join("/")} ・警告 ${shownLen(gifX8Warning())}`);
 
 // ---------- GIF 固定パレット ----------
 // V168 (E-1): 供給元は async（Promise を返す）。同期版は残さない＝ここも型を寄せる

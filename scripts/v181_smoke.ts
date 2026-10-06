@@ -853,14 +853,16 @@ function symOrderOk(s: string): boolean {
 }
 
 // ★辞書の「Ctrl」「Alt」「Shift」を含む文言の件数（2026-09-25・54cfbf5 の辞書を数えた）。**増減したら分類し直す**
+// V195（2026-10-05）: 7 言語とも +3（`ed.color.delete.msg`・`ed.color.deleted.toast`・`ed.color.usedHistory.toast`。
+//   どれも「Ctrl+Z」＝キーの表記として ⌘Z に置き換わる側＝NON_KEY_EXPECTED には入れない。置き換えの検査は緑のまま）
 const DICT_COUNTS: Record<string, { entries: number; Ctrl: number; Alt: number; Shift: number }> = {
-  ja: { entries: 14, Ctrl: 11, Alt: 2, Shift: 8 },
-  en: { entries: 15, Ctrl: 11, Alt: 2, Shift: 9 },
-  es: { entries: 14, Ctrl: 11, Alt: 2, Shift: 8 },
-  "pt-BR": { entries: 14, Ctrl: 11, Alt: 2, Shift: 8 },
-  ko: { entries: 14, Ctrl: 11, Alt: 2, Shift: 8 },
-  "zh-Hans": { entries: 14, Ctrl: 11, Alt: 2, Shift: 8 },
-  "zh-Hant": { entries: 14, Ctrl: 11, Alt: 2, Shift: 8 },
+  ja: { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
+  en: { entries: 18, Ctrl: 14, Alt: 2, Shift: 9 },
+  es: { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
+  "pt-BR": { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
+  ko: { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
+  "zh-Hans": { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
+  "zh-Hant": { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
 };
 /** キーではない語として「Ctrl / Alt / Shift」を含む訳文（言語・辞書のキー）。Mac でも置き換えない */
 const NON_KEY_EXPECTED = ["en ed.tone.ditherShift.label"];

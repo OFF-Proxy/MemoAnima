@@ -8,9 +8,13 @@
 //! - `scan_library`         : PCライブラリの索引一覧（M2）
 //! - `load_thumb`/`save_thumb` : サムネイルPNGのディスクキャッシュ（M2）
 //! - `load_settings`/`save_settings` : アプリ設定の永続化（M2・ライブラリフォルダ等）
+//! - `discord_presence_set` : Discord のプレイ状況を出す／消す（V193・デスクトップだけ・積むだけで待たない）
 
 pub mod library;
 pub mod pclib;
+// V193 (A-95): Discord にプレイ状況を表示する。**デスクトップだけ**（モバイルには入れない）
+#[cfg(desktop)]
+mod discord;
 
 use std::fs;
 use std::path::Path;
@@ -579,6 +583,17 @@ fn open_log_folder(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("フォルダを開けません: {e}"))
 }
 
+/// V193 (A-95): Discord のプレイ状況を出す／消す（起動時・⚙・言語の切り替えでフロントから）。
+/// **積むだけで待たない**（接続は discord.rs の専用スレッドが持つ・失敗はそこで握りつぶす）。
+/// 渡せるのは「オンか」と「固定の 1 文（UI の言語）」だけ＝作品名・パスが入る口は無い
+#[tauri::command]
+fn discord_presence_set(enabled: bool, details: String) {
+    #[cfg(desktop)]
+    discord::set(enabled, details);
+    #[cfg(not(desktop))]
+    let _ = (enabled, details);
+}
+
 #[tauri::command]
 fn append_log(app: tauri::AppHandle, text: String) -> Result<(), String> {
     let dir = log_dir(&app)?;
@@ -670,7 +685,10 @@ fn migrate_old_config_dir(new_dir: &Path) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // V193 (A-95): 起動時刻を覚えるだけ（Discord の「経過時間」の起点。通信はしない）
+    #[cfg(desktop)]
+    discord::note_start();
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -683,6 +701,16 @@ pub fn run() {
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
+            // V193 (A-95): Discord の表示のログの書き先を渡す**だけ**（ここではつながない＝起動を待たせない）。
+            // つなぐのは、フロントが設定を読んでから呼ぶ discord_presence_set（オンのときだけスレッドが立つ）
+            #[cfg(desktop)]
+            if let Ok(dir) = app.path().app_config_dir() {
+                let logs = dir.join("logs");
+                discord::set_logger(move |line| {
+                    let _ = fs::create_dir_all(&logs);
+                    let _ = append_log_line(&logs, line);
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -724,8 +752,20 @@ pub fn run() {
             save_settings,
             library_health,
             dir_exists,
-            append_log
+            append_log,
+            discord_presence_set
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running tauri application");
+    // V193 (A-95): `.run(generate_context!())` を `.build(…)` ＋ `.run(|…|)` に分けただけ。
+    // 閉じ方・アップデーター・終了の流れは変えない（イベントは見るだけ）。終わる瞬間に Discord の表示を消して切る
+    //（待つのは discord::EXIT_WAIT まで。Discord 側も接続が閉じれば表示を消すので、これは念のため）
+    app.run(|_app, event| {
+        #[cfg(desktop)]
+        if let tauri::RunEvent::Exit = event {
+            discord::shutdown();
+        }
+        #[cfg(not(desktop))]
+        let _ = event;
+    });
 }

@@ -532,6 +532,9 @@ button:disabled {
 .screen-view {
   flex: 1;
   min-height: 0;
+  /* V192b: 再生画面は枠いっぱい（縦か横が中身ちょうど）。角の丸み（中は半径 10px）と overflow: hidden で
+     絵の四隅が切れないよう、中身を 3px 内側へ（10 × (1 − 1/√2) ≒ 2.93）。大きさは JS が padding を引いて数える */
+  padding: 3px;
   background: var(--panel);
   border: 4px solid var(--line);
   border-radius: 14px;
@@ -546,18 +549,18 @@ button:disabled {
 }
 
 /* M3.5: Player のキャンバスは表示しない（再生制御＋音声のみに使用）。
-   映像はネイティブ解像度バッキングの #preview-host に自前描画し、
-   拡大は CSS pixelated（nearest-neighbor）の一段スケールに限定する（ボケ根絶） */
+   映像は #preview-host に自前描画する。
+   V192 (A-93・R-2): 拡大は CSS に任せない（object-fit: contain は 3.97 倍のような半端な倍率でドットの幅が 3 と 4 で混ざる）。
+   JS（presentFit）が**実画素**でバッキングを作り、CSS の大きさ＝実画素 ÷ dpr（1:1）を style に入れる。
+   V192b（決-2 の改め）: 大きさは枠いっぱい（はみ出さない）。半端な倍率は境目を面積平均で混ぜる・ちょうど整数倍は最近傍。
+   枠が小さければ面積平均で縮める。真ん中に置くのは .screen-view の flex */
 #player-host {
   display: none !important;
 }
 
 #preview-host {
-  width: 100% !important;
-  height: 100% !important;
-  padding: 6px;
-  object-fit: contain;
-  image-rendering: pixelated !important;
+  flex: 0 0 auto; /* 大きさは style（1:1）。flex で縮めない */
+  image-rendering: pixelated; /* 1:1 なので効かない（念のため・バッキングがずれても補間しない） */
   background: transparent;
 }
 
@@ -732,13 +735,14 @@ button:disabled {
   padding-top: 75%; /* 4:3 */
 }
 
-.thumb .pic img {
+/* V192 (A-93・R-1): サムネは <canvas>。320×240 の PNG を JS（presentFit）が**面積平均**で枠の実画素へ縮めて描く
+   （CSS の最近傍で縮めると一松柄の色が消える・大きな市松に化ける）。大きさは style（1:1）・真ん中に置くだけ
+   （transform は使わない＝合成で補間されない） */
+.thumb .pic canvas {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  image-rendering: pixelated;
+  margin: auto;
+  image-rendering: pixelated; /* 1:1 なので効かない（念のため） */
 }
 
 .thumb .cap {
@@ -1182,6 +1186,30 @@ svg.icon {
   padding: 10px;
 }
 
+/* V195 (A-98・REQ-006): 拡大中（全体表示でないとき・大画面でないとき）は、絵の周りに窓の幅・高さの半分ずつの
+   余白を取り、絵のどの点でも（四隅も）窓の真ん中まで動かせるようにする。スクロールの範囲を決めるのは
+   変形しない箱 #ed-cvpan の大きさだけ（幅・高さは editor.ts の layoutPan が入れる）。絵の箱は absolute で
+   箱の真ん中に置く（表示の回転の transform をスクロールの中身にしない＝回転しても範囲が崩れない）。
+   余白は今の斜線の背景のまま（.stage の背景が透けて見える）。全体表示では .pan が付かない＝今までと同じ */
+.cv-pan {
+  display: none;
+}
+
+.stage-scroll.pan {
+  display: block;
+  padding: 0;
+}
+
+.stage-scroll.pan .cv-pan {
+  display: block;
+  pointer-events: none;
+}
+
+.stage-scroll.pan .cvwrap {
+  position: absolute;
+  margin: 0;
+}
+
 .cvwrap {
   position: relative;
   flex: 0 0 auto;
@@ -1332,6 +1360,12 @@ svg.icon {
   font-size: 14px;
 }
 
+/* V195 (A-98b): 「隠す」（#ed-mini-toggle）で列も畳み、戻すボタン 1 つだけ残す。クラスで畳むので
+   四隅変形の muteFloatingOverlays（列のインラインの pointer-events / opacity）とは別の線で衝突しない */
+.cvright.hud-collapsed > :not(#ed-mini-toggle) {
+  display: none;
+}
+
 .zoominfo {
   position: absolute;
   bottom: 14px;
@@ -1405,10 +1439,13 @@ svg.icon {
   z-index: 2;
 }
 
+/* V192 (A-93・R-4): 大きさは JS（presentFit）が枠の実画素で決める（小さい窓は面積平均・大画面〔swapped〕と
+   収納は整数倍）。CSS で引き伸ばさない（1:1）・真ん中に置くだけ */
 .mini canvas {
-  width: 100%;
-  height: 100%;
-  image-rendering: pixelated;
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  image-rendering: pixelated; /* 1:1 なので効かない（念のため） */
 }
 
 /* プレビュー大画面（比率反転） */
@@ -2399,8 +2436,9 @@ input[type="text"] {
      計算する。100% にすると帯自身の横スクロールバーの有無で高さが変わり、サムネ幅→バーの有無→
      高さ…の往復で「動かない横バー」が残る（レビュー指摘）。見出し高はステージ幅で決まりサムネの
      大きさに依存しないので、この計算はループしない。横バーぶんは常に確保（保守的）。
-     上限は**2倍（117px 高）**＝バッキングは 80×60 のまま（F-0 のメモリ制約）なのでそれ以上は
-     粗くなるだけ。下限 58.5 は「帯がそれより低くても縮めない」（=既定の見た目を変えない。
+     上限は**2倍（117px 高）**（M11-17 の当時はバッキングが 80×60 固定だったため。V192 からバッキングは
+     枠の実画素で面積平均＝大きくしても粗くならないが、見えている枚数ぶんのメモリと描き直しの量のため上限は据え置き。
+     F-0 は「見えなくなったら手放す」で守る＝editor.ts の rebuildFilm）。下限 58.5 は「帯がそれより低くても縮めない」（=既定の見た目を変えない。
      1280×800 の既定では見出し2行で帯 42px なので従来どおり少しはみ出す）。幅は aspect-ratio から */
   width: auto;
   height: clamp(
@@ -2449,10 +2487,14 @@ input[type="text"] {
   z-index: 2;
 }
 
+/* V192 (A-93・R-3): コマ一覧のサムネは JS（presentFit）が**面積平均**で枠の実画素へ縮めて描く
+   （前は 80×60 に最近傍で縮めてから CSS で 78〜156px に引き伸ばしていた＝一松柄の片方の色しか残らない）。
+   大きさは style（1:1）・真ん中に置くだけ */
 .fr canvas {
-  width: 100%;
-  height: 100%;
-  image-rendering: pixelated;
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  image-rendering: pixelated; /* 1:1 なので効かない（念のため） */
 }
 
 .fradd {
@@ -2795,18 +2837,28 @@ input[type="text"] {
   min-width: 0;
 }
 
-/* M6-4 P-4: パネル最上部の大プレビュー（320×240バッキング＋pixelated・4:3維持）
-   M6-6 R-5: クリックで再生⇄一時停止 */
+/* M6-4 P-4: パネル最上部の大プレビュー（4:3維持）
+   M6-6 R-5: クリックで再生⇄一時停止
+   V192 (A-93・R-5): .ap-big は**枠**（div）。中の <canvas id="ap-mini"> は JS（presentFit）が枠の実画素で描く
+   （枠が 320×240 の実画素より小さければ面積平均・大きければ整数倍）。CSS で引き伸ばさない（1:1） */
 .ap-big {
   display: block;
+  position: relative;
+  overflow: hidden;
   width: 62%;
   aspect-ratio: 4 / 3;
   margin: 0 auto 12px;
   background: var(--panel);
   border: 3px solid var(--line);
   border-radius: 10px;
-  image-rendering: pixelated;
   cursor: pointer;
+}
+
+.ap-big canvas {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  image-rendering: pixelated; /* 1:1 なので効かない（念のため） */
 }
 
 .ap-wave {

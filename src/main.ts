@@ -115,6 +115,8 @@ import {
 } from "./keymap";
 // V181 (A-25): Mac では ⌘ を Ctrl として扱う（判定と修飾キーの読みは platform.ts の 1 か所）
 import { primaryMod, unfoldedMeta } from "./platform";
+// V193 (A-95): Discord のプレイ状況（フロントが渡せるのは「オンか」と「固定の 1 文」だけ）
+import { discordPresenceArgs, discordPresenceEnabled } from "./discordPresence";
 
 /** M7-2b: ディスプレイ設定（settings.json に永続化・起動時復元） */
 type DisplaySettings = {
@@ -199,6 +201,13 @@ type Settings = {
    *  `guideDone` とは別にしている——既存利用者は `guideDone: true` を持っているので、
    *  それを流用すると**更新確認のことを一度も知らされないまま**になる */
   updateNoticeShown?: boolean;
+  /** V193 (A-95): Discord にプレイ状況を表示するか。**未設定＝オン**（`!== false` で見る・`discordPresenceEnabled`）。
+   *  **オフでも他の機能は一切制限しない**（`COLLAB_PROTOCOL` §1-b 例外 2 の義務）。追加のみ・`PROJECT_VERSION` には無関係 */
+  discordPresence?: boolean;
+  /** V193 の旧キー（初回の知らせを出したか）。V193b で知らせそのものを外した（作者決定 2026-10-04：本体で案内しない・
+   *  Discord 側でもオフにできる）ので**読み捨て**（値があっても無視・今後書かない）。V193 は未出荷＝配った設定には無いが、
+   *  開発ビルドで試した設定に残っていても壊れない。型に残しているのは「知らないキーとして落とさない」ためだけ（`miniHidden` と同じ） */
+  discordNoticeShown?: boolean;
   /** V163: 「旧形式（v1.5系）で保存する」を選んだ保存先（`"アルバム/ファイル名"`）。追加のみ。
    *  ★これが無いと、旧形式で渡した作品を**開き直して Ctrl+S しただけで黙って新形式に化ける**
    *  （Codex V163 指摘②）。保存のたびにチェック状態で追加/削除し、開くとき・オートセーブ復元の
@@ -2819,6 +2828,13 @@ async function updateNoticeOnce(): Promise<void> {
   });
 }
 
+/** V193 (A-95): Discord の表示を設定に合わせる（起動時・⚙ の切り替え・言語の切り替え）。
+ *  **待たない・失敗は握りつぶす**——Rust 側はチャンネルに積むだけで、接続は専用のスレッドが持つ。
+ *  渡すのは discordPresenceArgs の 2 つだけ（作品の情報を渡す口が無い・v193_smoke [S-1]） */
+function syncDiscordPresence(): void {
+  invoke("discord_presence_set", discordPresenceArgs(settings)).catch(() => {});
+}
+
 /** M7-2b: ⚙ 設定メニュー（エクスプローラー直結を廃止し、ここから各設定へ） */
 async function openSettingsMenu() {
   await modal((close, onClose) => {
@@ -2870,6 +2886,13 @@ async function openSettingsMenu() {
           <button class="minibtn" id="set-update-now">${t("set.update.checkNow.btn")}</button>
         </div>
         <p class="hintline">${tHtml("set.update.check.hint")}</p>
+      </div>
+      <!-- V193 (A-95): Discord のプレイ状況。更新確認のすぐ下＝**上のほう**に置く（V193b で初回の知らせを外した＝
+           利用者がこの切り替えを知るのは ⚙ と README だけなので、スクロールしないと見つからない位置にしない） -->
+      <div class="set-sec">
+        <b>${iconHtml("play")} ${t("set.discord.label")}</b>
+        <div class="modal-field"><div class="sw2" id="set-discord-sw"></div></div>
+        <p class="hintline">${tHtml("set.discord.hint")}</p>
       </div>
       <div class="set-sec">
         <b>${iconHtml("display")} ${t("set.display.label")}</b>
@@ -3141,6 +3164,7 @@ async function openSettingsMenu() {
         setLang(l);
         settings.lang = l;
         invoke("save_settings", { settings }).catch(() => {});
+        syncDiscordPresence(); // V193: Discord の 1 文も新しい言語で出し直す（オフなら何もしない）
         applyI18n(document); // index.html の静的 DOM（data-i18n / -title / -placeholder）
         applyIcons(document); // V171: applyI18n が textContent を書いたあとに data-icon の SVG を差し直す
         close(null);
@@ -3191,6 +3215,19 @@ async function openSettingsMenu() {
         } finally {
           nowBtn.disabled = false;
         }
+      });
+    }
+    // V193 (A-95): Discord のプレイ状況のトグル（`#set-update-sw` と同じ `.sw2` の作法・既定オン）。
+    // 押したその場で出す／消す（再起動なし）。**オフにしても他の機能は一切制限しない**（§1-b 例外 2 の義務）
+    {
+      const sw = box.querySelector("#set-discord-sw") as HTMLElement;
+      const syncSw = () => sw.classList.toggle("on", discordPresenceEnabled(settings));
+      syncSw();
+      sw.addEventListener("click", () => {
+        settings.discordPresence = !discordPresenceEnabled(settings);
+        syncSw();
+        invoke("save_settings", { settings }).catch(() => {});
+        syncDiscordPresence();
       });
     }
     // M13-2a (A-4): コマ削除の確認トグル（`#set-update-sw` と同じ `.sw2` の作法・既定オン）。
@@ -5451,6 +5488,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   // **確認が始まってすらいない**状態になる（実測で判明したので、投げる場所を前へ出した）。
   // オフの人はここで何もしない＝通信そのものが起きない
   beginStartupUpdateCheck();
+  // V193 (A-95): Discord のプレイ状況。**待たない**（Rust はチャンネルに積むだけ・つなぐのは専用のスレッド）。
+  // 言語が決まってから呼ぶ（details は UI の言語の 1 文）。オフの人は enabled: false を渡すだけ＝スレッドも立たない
+  syncDiscordPresence();
   // 動的に書き換わるノード（data-i18n を振っていない）の初期値。どちらも起動時は hidden
   setIconLabel($("#ed-title"), "pen", t("ed.title.newNote.label")); // V171: ✏ → pen
   setIconLabel($("#import-label"), "import", t("imp.progress.label")); // V171: 📥 → import
@@ -5532,6 +5572,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   // **await しない**＝この先どれだけ待たされても起動処理は完了している
   //（ネットワークが無い / 遅い環境で体感が変わらないこと・REQ §4 非機能要件）
   if (updateCheckEnabled()) await updateNoticeOnce(); // 初回だけ一言（オフの人には出さない）
+  // V193b: Discord のプレイ状況の初回の知らせは**出さない**（作者決定 2026-10-04・本体で案内しない・Discord 側でもオフにできる）
   void finishStartupUpdateCheck();
 });
 

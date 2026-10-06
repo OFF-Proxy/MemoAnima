@@ -3,7 +3,40 @@
 // 幅不変条件: indexBits は昇格で増える方向にしか変わらないため、`live.set(before)` は
 // 常に「同幅コピー」か「8bit→16bit の widening（値保存）」のどちらか。narrowing は発生しない。
 
-import type { IndexBuf } from "./model";
+import type { IndexBuf, Frame } from "./model";
+
+/** ★V195 (A-99): 履歴のエントリが抱えている「色の番号」の在りか。
+ *
+ *  上の色の帯から色を消すとき、**取り消し・やり直しで作品へ戻ってくる絵**がその色を指していたら消さない
+ *  （消した色の番号を指す画素が Ctrl+Z で出てくると、その画素は色を失う）。`undo` / `redo` はクロージャなので
+ *  中身を外から辿れない——`bytes` と同じく**作った側が申告する**（`bufferChangeEntry` / `multiBufferChangeEntry` は自動）。
+ *
+ *  - `bufs`   … 画素の索引バッファ（before / after の写しなど）。**選択マスクは入れない**（0/1 なので色 1 と区別できない）
+ *  - `frames` … コマ（紙の色・起きているレイヤー・眠っている控えを全部見る）。挿入・削除したコマなど
+ *  - `papers` … 紙の色の番号（紙色の変更・複写・ページ貼り付けの前後）
+ *
+ *  ⚠ 画素を抱えているのに申告の無いエントリ（`bytes` 等の合計が 1 画面ぶん以上）は「どの色を抱えているか
+ *  分からない」として、そのエントリが履歴にある間は**どの色も消さない**（網・`colorRefsUnknown`）。
+ *  色を 1 つも抱えないエントリ（メタデータ・選択マスク・音だけ）は `NO_COLOR_REFS` を申告する。 */
+export interface HistoryColorRefs {
+  bufs?: readonly (IndexBuf | null | undefined)[];
+  frames?: readonly Frame[];
+  papers?: readonly number[];
+}
+
+/** V195 (A-99): 色の番号を 1 つも抱えていないエントリの申告（メタデータ・選択マスク・音だけ） */
+export const NO_COLOR_REFS = (): HistoryColorRefs => ({});
+
+/** V195 (A-99): 網。画素を抱えているはずなのに `colorRefs` を申告していないエントリか。
+ *  申告の量（`bytes` / `bytesIfUndone` / `bytesIfApplied` の合計）が 1 画面ぶん（8bit で 76,800 B）以上なら
+ *  画素を抱えている見込み＝どの色を持っているか分からない。小さい申告（ロックの 64 B 等）は画素ではない */
+export function colorRefsUnknown(e: HistoryEntry): boolean {
+  if (e.colorRefs) return false;
+  const n = (e.bytes ?? 0) + (e.bytesIfUndone ?? 0) + (e.bytesIfApplied ?? 0);
+  return n >= COLOR_NET_BYTES;
+}
+/** 網のしきい値＝8bit の 1 面（320×240） */
+const COLOR_NET_BYTES = 320 * 240;
 
 export interface HistoryEntry {
   label: string;
@@ -35,6 +68,9 @@ export interface HistoryEntry {
    *  `undo`/`redo` は同期なので待てない——そこで「待つのは呼び出し側」に分けた。
    *  `History` 自身は同期のまま（`undo()`/`redo()` の契約は変えていない）。 */
   prepare?: () => Promise<void>;
+  /** ★V195 (A-99): このエントリが抱えている色の番号の在りか（上の `HistoryColorRefs`）。
+   *  取り消し済み・適用済みのどちらの状態でも、抱えているものを全部返す（作品側にあるものも返してよい） */
+  colorRefs?: () => HistoryColorRefs;
 }
 
 /** V156 (P-2 / A-32 段1): 64 → **200**。
@@ -135,6 +171,12 @@ export class History {
     return this.pos;
   }
 
+  /** ★V195 (A-99): いま抱えているエントリ全部（取り消し済みも含む・読むだけ）。
+   *  色の帯から色を消す前に「取り消し・やり直しで戻ってくる絵」を調べるのに使う */
+  entriesForScan(): readonly HistoryEntry[] {
+    return this.stack;
+  }
+
   /** V156: 次に `undo()` が動かすエントリ（`prepare` を先に走らせるため）。 */
   peekUndo(): HistoryEntry | null {
     return this.canUndo ? this.stack[this.pos - 1] : null;
@@ -184,6 +226,7 @@ export function bufferChangeEntry(
   return {
     label,
     bytes: entryBytes(before, after), // V154: 抱えている量を自動で申告
+    colorRefs: () => ({ bufs: [before, after] }), // V195 (A-99): 抱えている画素も自動で申告
     undo() {
       resolve()?.set(before);
       onApply?.();
@@ -216,6 +259,7 @@ export function multiBufferChangeEntry(
   return {
     label,
     bytes: entryBytes(before, after), // V154: 同じ実体を2回数えない（📌 共通レイヤー対策）
+    colorRefs: () => ({ bufs: [...Object.values(before), ...Object.values(after)] }), // V195 (A-99)
     undo() {
       for (const id of Object.keys(before)) resolve(id)?.set(before[id]);
       onApply?.();

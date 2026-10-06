@@ -1651,7 +1651,11 @@ const S12: Check = (_IC, ctx) => {
   if (shadowed.length) bad.push(`main.ts の中で部品と同じ名前を作って差し替えている: ${shadowed.join("・")}`);
   // (d) CSS: #ii-cv に touch-action: none
   const css = fs.readFileSync(path.join(ctx.dir, "src/styles.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-  const cvRules = [...css.matchAll(/(^|\})\s*([^{}]+)\{([^}]*)\}/g)].filter((m) => m[2].split(",").some((sel) => sel.trim() === "#ii-cv"));
+  // V192: 前の形 `(^|\})` は前の規則の `}` を**食べる**ので、matchAll が規則を 1 つおきにしか見ていなかった
+  //（V192 で styles.css に規則を 1 つ足したら偶奇がずれ、touch-action の規則が飛ばされて**誤って**赤になった）。
+  // `}` は見るだけ（後読み）にして全部の規則を見る。見落としていた規則も見るようになり、誤った赤が消えた——
+  // 検査の中身（#ii-cv に touch-action: none があるか）は同じで、厳しくも緩くもしていない（前に緑だった所は今も緑）
+  const cvRules = [...css.matchAll(/(^|(?<=\}))\s*([^{}]+)\{([^}]*)\}/g)].filter((m) => m[2].split(",").some((sel) => sel.trim() === "#ii-cv"));
   if (!cvRules.some((m) => /(^|;|\s)touch-action\s*:\s*none\s*(;|$)/.test(m[3].trim())))
     bad.push("styles.css の #ii-cv に touch-action: none が無い（ペン・タッチのドラッグがスクロールに取られる）");
   return bad;

@@ -130,6 +130,10 @@
         <!-- 中央: キャンバス（M3.9 H-1: スクロールは #ed-scroll に限定し、HUDは stage 直下で固定） -->
         <div class="card stage" id="ed-stage">
           <div class="stage-scroll" id="ed-scroll">
+            <!-- V195 (A-98): 拡大中（全体表示でないとき）のスクロールの中身。見た目の絵＋窓の幅・高さの大きさの
+                 変形しない箱で、これだけがスクロールの範囲を決める（絵の四隅を窓の真ん中まで動かせる・それより外へは行かない）。
+                 全体表示と大画面では display:none＝今までと同じ形 -->
+            <div class="cv-pan" id="ed-cvpan" aria-hidden="true"></div>
             <div class="cvwrap" id="ed-cvwrap">
               <canvas id="ed-canvas" width="320" height="240"></canvas>
               <canvas id="ed-overlay" width="320" height="240"></canvas>
@@ -158,7 +162,8 @@
             <button class="ic" id="ed-zoom-in" type="button" data-i18n-title="ed.zoom.in.title">＋</button>
             <button class="ic" id="ed-zoom-out" type="button" data-i18n-title="ed.zoom.out.title">−</button>
             <!-- M11-13→M11-16: プレビュー・コマ番号・倍率をまとめて隠す/出す（統合トグル）。
-                 **隠す対象の外＝この列**に置く（隠したあとに戻す手段が消えないように） -->
+                 **隠す対象の外＝この列**に置く（隠したあとに戻す手段が消えないように）。
+                 V195 (A-98b): 隠すとこの列も畳む（.cvright.hud-collapsed）が、**このボタンだけは残す**＝戻す手段は消えない -->
             <button class="ic" id="ed-mini-toggle" type="button" data-i18n-title="ed.mini.toggle.title" data-icon="image"></button>
             <!-- M11-18: キャンバス集中（3パネルを一括で畳む/戻す）。つまみは畳んでも見えるので戻す手段は消えない -->
             <button class="ic" id="ed-focus-toggle" type="button" data-i18n-title="ed.focus.toggle.title" data-icon="focus"></button>

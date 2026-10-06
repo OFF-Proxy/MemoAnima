@@ -628,8 +628,27 @@ async function checkS4c(T: Tree): Promise<V> {
 // ================= [S-5] オフのときは、この回の前とビット単位で同じ =================
 /** この回の前の editor.ts（コミット 952c321 の blob）。★生きた旧版との照合に使う */
 const OLD_EDITOR_BLOB = "f4f3eadea90e7b9a3fc6a302b2811dbd7d3ec9f5";
-/** ★この回の前の editor.ts で [S-5] の筋書きを走らせて得た値（2026-09-23・V178 の実装前に測った） */
-const GOLDEN_S5 = "39ac411bf68c854f4b1928a408ffd62362b299b19af9dcbb932dc73baf9c5b31";
+/** ★この回の前の editor.ts で [S-5] の筋書きを走らせて得た値（2026-09-23・V178 の実装前に測った）。
+ *  ★V191 (A-89) で取り直した: 太さ 1 の線の形を**意図して**変えた（置き換え・設定なし）ので、太さ 1 の行だけ
+ *  画素のハッシュを伏せた形（`maskV191`）のハッシュ。伏せる前の元の値は 39ac411bf68c854f4b1928a408ffd62362b299b19af9dcbb932dc73baf9c5b31。
+ *  [S-5r] が、取り出した V178 の前の editor.ts の出力を同じように伏せたものと一致することを確かめる */
+const GOLDEN_S5 = "db09ccd24fcf955f38b9d52efa5edcfb8e675a2a2ecc08219afae846d0c8d021";
+/** ★V191 (A-89): 太さ 1 の行（`eraser/1/…` 等）は**画素のハッシュだけ**伏せる。履歴の数と「取り消しで戻る」は見続ける。
+ *  太さ 1 の画素の形は v191_smoke（[S-3]〜[S-6]・[S-10]）が見る。太さ 2 以上の行は今までどおり画素まで照合する。
+ *  ⚠ 伏せた行が 1 行も無ければ赤（筋書きの形が変わって、伏せたつもりで何も伏せていない状態を作らない） */
+function maskV191(rows: string): string {
+  let n = 0;
+  const out = rows
+    .split("\n")
+    .map((r) => {
+      if (!/^[a-z]+\/1\//.test(r)) return r;
+      n++;
+      return r.replace(/:[0-9a-f]{64}:/, ":(V191):");
+    })
+    .join("\n");
+  if (n !== 1) throw new Error(`★太さ 1 の行が ${n} 行（1 行のはず）`);
+  return out;
+}
 function mulberry32(a: number) {
   return () => {
     a |= 0;
@@ -1396,7 +1415,7 @@ for (const c of CHECKS) {
 // [S-5]
 {
   const cur = await safe(async () => {
-    const rows = await scenarioS5(REAL);
+    const rows = maskV191(await scenarioS5(REAL));
     return { ok: true, why: rows };
   });
   const curRows = cur.ok ? cur.why : "";
@@ -1424,7 +1443,7 @@ for (const c of CHECKS) {
       path.join(dir, "src/editor/editor.ts"),
       execFileSync("git", ["cat-file", "blob", OLD_EDITOR_BLOB], { cwd: root, maxBuffer: 64 * 1024 * 1024 })
     );
-    const old = await safe(async () => ({ ok: true, why: await scenarioS5(await loadTree(dir, "旧版")) }));
+    const old = await safe(async () => ({ ok: true, why: maskV191(await scenarioS5(await loadTree(dir, "旧版"))) }));
     const oldSha = crypto.createHash("sha256").update(old.ok ? old.why : "").digest("hex");
     check("[S-5r] 取り出した旧版で筋書きが最後まで走った", old.ok, old.why);
     check(
@@ -1826,7 +1845,7 @@ for (const m of MUTS) {
   }
   let v: V;
   if (m.target === "S-5") {
-    const r = await safe(async () => ({ ok: true, why: await scenarioS5(tree) }));
+    const r = await safe(async () => ({ ok: true, why: maskV191(await scenarioS5(tree)) }));
     const s = crypto.createHash("sha256").update(r.ok ? r.why : "").digest("hex");
     v = r.ok ? (s === GOLDEN_S5 ? ok() : ng("固定値と違う")) : r;
   } else v = await safe(() => byId(m.target).run(tree));

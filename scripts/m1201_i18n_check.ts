@@ -65,6 +65,17 @@ const KEYED_FILES: readonly (readonly [string, string])[] = [
   ["src/editor/cursor.ts", read("src/editor/cursor.ts")],
   // M17: マイ柄（純関数・画面文言なし）。cursor.ts と同じ理由で載せる（検査5・9 の被覆を欠かさない）
   ["src/editor/customTone.ts", read("src/editor/customTone.ts")],
+  // V191 (A-89): 1px の線（純関数・画面文言なし）。cursor.ts / customTone.ts と同じ理由で載せる
+  ["src/editor/line1px.ts", read("src/editor/line1px.ts")],
+  // V192 (A-93): 縮め方・広げ方（downscale.ts は純関数・scaledView.ts は表示の共通の出口。どちらも画面文言なし）。同じ理由で載せる
+  ["src/editor/downscale.ts", read("src/editor/downscale.ts")],
+  ["src/editor/scaledView.ts", read("src/editor/scaledView.ts")],
+  // V193 (A-95): Discord のプレイ状況（純関数・details のキーを `*Key: "…"` で持つ＝検査4 がここで拾う）
+  ["src/discordPresence.ts", read("src/discordPresence.ts")],
+  // V195 (A-96・A-98・A-99): ▶ の始めるコマ・拡大の余白・色の帯から消す前の調べ（どれも純関数・画面文言なし）。同じ理由で載せる
+  ["src/editor/playStart.ts", read("src/editor/playStart.ts")],
+  ["src/editor/stagePan.ts", read("src/editor/stagePan.ts")],
+  ["src/editor/colorUsage.ts", read("src/editor/colorUsage.ts")],
 ];
 
 /** 検査4・6・7 が舐めるソース一式（main / editor ＋ キー化済みファイル） */
@@ -173,6 +184,9 @@ const LIMIT_OVERRIDE: Record<string, number> = {
   //（`ed.spec.label` と同じ流儀。増やしたくなった回に、増やす理由とセットで上限を動かす）
   "set.legal.scope.msg": 176, // 法務文（非営利・非公式の説明）
   "set.legal.license.msg": 135, // 法務文（GPL の入手先）
+  // V193 (A-95): ⚙ の項目名は**作者決定の文言そのまま**（指示書 §0「Discord にプレイ状況を表示する」・REQ_discord_rpc 決-2）。
+  // ja の実測ちょうど＝これ以上増やさない（`ed.spec.label` と同じ流儀）
+  "set.discord.label": 19,
 };
 
 /**

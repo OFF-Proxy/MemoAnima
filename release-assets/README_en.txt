@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.9.0
+ MemoAnima v1.9.5
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -16,36 +16,29 @@ Windows and Mac. (This README covers the Windows version.)
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
 
+== CHANGED IN v1.9.5 ==
+- 1px pen and eraser strokes no longer thicken at corners and now connect cleanly. Strokes 2px or wider, the brush and the line tool are unchanged. The previous 1px stroke shape cannot be restored.
+- Tones such as checkerboard patterns no longer lose colors or break up in library thumbnails, the frame list and the small preview. Fine patterns are shown in the color they appear from a distance.
+- The library player now fills its frame at any window size without cutting off the edges of the project.
+- When zoomed in, you can now move the corners of the canvas to the center of the window. Nothing changes when the picture fits in the window. The hide button at the top right now also hides the rotate, flip and zoom buttons.
+- You can now remove a color from the palette strip by right-clicking it. Colors used anywhere in the project cannot be removed, and removing a color never changes the picture.
+- Your Discord profile can now show "Playing メモアニマ(MemoAnima)". MemoAnima only talks to the Discord app on the same computer and never sends project names or contents. Turn it off in Settings with "Show activity on Discord".
+- Fixed an issue where pressing play after a non-looping project finished playing played only the last frame (library and editor).
+- Fixed an issue in the editor where selecting or stepping to another frame during playback moved the picture while the sound kept playing out of sync. Changing frames now stops playback.
+- The project file format is unchanged and remains compatible with v1.6.0 and later.
+
 == CHANGED IN v1.9.0 ==
-- [Brush, pen and eraser strokes are smoother] Diagonal lines now line up about
-  as cleanly as with the line tool.
-- [The text tool now has 10 typefaces instead of 5] The new ones are Sans,
-  Pixel-style, Handwritten, Serif (standard) and Poster (decorative).
-- [The eraser has a new "All layers" option] What you trace is erased from
-  every visible layer (one Ctrl+Z undoes it). While it is on, pressing a key or
-  a button in the middle of a stroke ends the stroke there.
-- [Drag to choose the import area] When importing an image, you can now drag
-  the preview to choose the area, and zoom in with the slider to import just a
-  part of it.
-- [Large projects with many identical frames now save to smaller files] Open
-  and save again to shrink them; the drawings do not change.
-- [Reasons are shown when importing or opening fails] When a file can't be
-  imported or a project can't be opened, the reason is now shown and written to
-  the log. Projects hidden because a cloud service added ".gz" to their names
-  can be restored.
-- [Fixed undo issues] Undoing a warp could overwrite a different frame, undo
-  could silently fail for distant frames in large projects, and undoing a layer
-  move could skip autosave.
-- [Fixed some pixels mixing with their neighbours on image import] It happened
-  with images of exactly 320x240 (or 2x / half that size). Pixel art keeps its
-  exact shape.
-- [Fixed a modifier-key tap shortcut firing by mistake] It happened while
-  another modifier key was held.
-- [Mac] The app is now signed and notarized, so the "unidentified developer"
-  warning no longer appears on first launch. Shortcuts use the ⌘ (command) key,
-  and are shown as ⌘ ⌥ ⇧. The Mac version does not have in-app updates yet;
-  please get new versions from the download page.
-- The project file format is the same as v1.6.0 and later.
+- Reduced uneven steps in brush, pen and eraser strokes. Diagonal strokes now have more consistent spacing, similar to the line tool.
+- Added five typefaces to the text tool: Sans, Pixel-style, Handwritten, Serif (standard) and Poster (decorative). There are now 10 to choose from.
+- Added an "All layers" eraser option to erase across all visible layers at once. A single undo restores the entire stroke. Pressing a key or button while erasing ends the current stroke when this option is enabled.
+- You can now drag the image import preview to adjust the crop. Use the zoom slider to select a smaller area of the image.
+- Reduced file sizes for large projects with many identical frames. Save an existing project again to apply the reduction without changing its contents.
+- Import and project-loading errors now show a reason and record it in the log. You can also restore projects missing from the library after a cloud service added ".gz" to their filenames.
+- Fixed three undo issues: undoing a warp could overwrite another frame; operations on distant frames in large projects could fail to undo; and undoing a layer move could prevent autosave from running.
+- Fixed unwanted color blending between neighboring pixels when importing images at 320×240, twice or half that size, and similar sizes.
+- Fixed shortcuts assigned to a modifier-key tap triggering while another modifier key was held.
+- The Mac app is now signed and notarized, removing the "unidentified developer" warning on first launch. Shortcuts now use Command, with key labels shown as ⌘, ⌥ and ⇧. In-app updates are not yet available on Mac; download new versions from the download page.
+- The project file format is unchanged and remains compatible with v1.6.0 and later.
 
 == CHANGED IN v1.8.0 ==
 - [Emoji on tools and buttons replaced with our own line-art icons] All 86 of
@@ -454,8 +447,9 @@ Drawing, editing and exporting are done entirely on your own device. Every
 feature works with no internet connection. The video encoder (ffmpeg.wasm) is
 bundled, so everything works offline.
 
-In this version there is exactly one thing the app does on its own: it checks
-whether a newer version has been released.
+In this version the app does two things on its own.
+
+1. It checks whether a newer version has been released.
 - It checks once, at startup. It only reads a small file at a fixed address that
   says which version is current; it sends nothing about you. The comparison
   happens inside the app on your machine.
@@ -468,6 +462,26 @@ whether a newer version has been released.
   stays at the old version. Use the installer version from then on (your
   library, settings and autosave carry over; you can delete the zip folder
   afterwards).
+
+2. It shows on Discord that you are using the app.
+- If Discord is running on your PC, your Discord profile shows
+  "Playing メモアニマ(MemoAnima)" and how long the app has been open.
+- The app only talks to the Discord app on the same PC. MemoAnima itself does
+  not go out to the internet for this (it is the Discord app that passes the
+  status on to Discord's servers).
+- All it passes on is the app's name and icon, one fixed sentence ("Drawing a
+  flipbook animation") and the time the app started. It never passes on the
+  names of your animations, file names, album names, folders or what you are
+  working on.
+- Who can see the status is up to your Discord settings.
+- You can also stop it from Discord itself (for example "Display current
+  activity as a status message" under Settings -> Activity Privacy; the name
+  and place of this option can change between Discord versions).
+- It is on by default. Turn it off any time with "Show activity on Discord" in
+  the gear icon; the status disappears at once. Turning it off does not limit
+  any other feature.
+- If Discord is not running or cannot be reached, nothing is shown and
+  everything keeps working.
 
 Apart from animations you choose to publish, your animation data is never sent
 anywhere, and the author never collects a record of which features you use.
