@@ -39,12 +39,55 @@ export function detectMacFrom(nav: NavigatorLike | null | undefined): boolean {
 let forced: boolean | null = null;
 let detected: boolean | null = null;
 
-/** V181 [A]: Mac で動いているか。**判定はここだけ**（`v181_smoke` [S-A] が「navigator の platform / userAgent を
- *  読むのはこのファイルだけ」を構文木で見張る）。一度読んだら覚える（navigator は途中で変わらない）。 */
-export function isMacPlatform(): boolean {
-  if (forced !== null) return forced;
+// ================= 4 つの OS（V201・M-1a・要件 docs/REQ_mobile_m1_base.md §4-6） =================
+//
+// ★PC（Windows・Mac）は今までどおり navigator から決める（`detectMacFrom`。入口は何も渡さない＝結果は今と同じ）。
+// ★モバイルの入口（M-1b で作る）は、Rust の `app_info` の `os` を受け取って `setPlatformOs` で渡す。UA は使わない
+//  （iPad の UA は Mac の形・iPhone の UA の OS の版は止まっている＝V184c）。
+// ★判定は同期で読める値で作られ、最初に読んだ判定を覚え、キーの表（keymap の引き当て表）・辞書の表記もその判定で作る。
+//  なので入口は **OS を渡してから** editor.ts（と辞書・キーの表）を動的 import で読むこと。
+//  覚えたあと（`isMacPlatform`・`platformOs` を 1 回でも読んだあと）に渡すのは間違いとして止める（例外）。
+//  検査の `setMacPlatformForTest` はこの縛りに入れない（v181・v183 が覚えたあとでも切り替える）。
+// ★判定の順は「検査の forced → 入口が渡した OS → 今の判定」。iOS（iPadOS を含む）は Mac と同じ扱い（⌘ の表記・⌘ を Ctrl に畳む）・
+//  Android は Windows と同じ Ctrl の形
+
+/** アプリが動いている OS。PC は windows か macos。ios は iPadOS を含む */
+export type PlatformOs = "windows" | "macos" | "ios" | "android";
+const PLATFORM_OS: readonly PlatformOs[] = ["windows", "macos", "ios", "android"];
+/** モバイルの入口が渡した OS（PC は渡さない＝null のまま） */
+let entryOs: PlatformOs | null = null;
+/** 判定を 1 回でも読んだか（読んだあとに入口が渡すのは止める） */
+let latched = false;
+
+/** V201: モバイルの入口が OS を渡す（Rust の `app_info.os`）。**判定を読む前に**呼ぶ（読んだあとは例外）。PC は呼ばない */
+export function setPlatformOs(os: PlatformOs): void {
+  if (!PLATFORM_OS.includes(os)) throw new Error(`setPlatformOs: unknown os "${String(os)}"`);
+  if (latched) throw new Error("setPlatformOs: the platform was already read (pass the OS before loading the editor)");
+  entryOs = os;
+}
+
+/** navigator から決めた「Mac か」（一度読んだら覚える。navigator は途中で変わらない） */
+function detectedMac(): boolean {
   if (detected === null) detected = detectMacFrom(typeof navigator === "undefined" ? undefined : navigator);
   return detected;
+}
+
+/** V201: 4 つのどれで動いているか。PC は今の判定から windows か macos */
+export function platformOs(): PlatformOs {
+  latched = true;
+  if (forced !== null) return forced ? "macos" : "windows";
+  if (entryOs) return entryOs;
+  return detectedMac() ? "macos" : "windows";
+}
+
+/** V181 [A]: Mac で動いているか。**判定はここだけ**（`v181_smoke` [S-A] が「navigator の platform / userAgent を
+ *  読むのはこのファイルだけ」を構文木で見張る）。一度読んだら覚える（navigator は途中で変わらない）。
+ *  V201: 入口が渡した OS が ios（iPadOS を含む）でも true（キーの作法は macOS と同じ）・android は false */
+export function isMacPlatform(): boolean {
+  latched = true;
+  if (forced !== null) return forced;
+  if (entryOs) return entryOs === "macos" || entryOs === "ios";
+  return detectedMac();
 }
 
 /** 検査用: 「Mac のふり」（true）／「Windows のふり」（false）／本来の判定に戻す（null）。

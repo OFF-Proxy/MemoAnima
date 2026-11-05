@@ -12,19 +12,23 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { runGuide, GuideStep } from "./guide";
 import { LibraryScreen, LibraryView, readProjectRaw } from "./library"; // V169 (B-2): .memoanima を読む唯一の道
-import { Editor, EditorSaveContext, sanitizeMiniDock } from "./editor/editor";
+import { Editor, EditorSaveContext, sanitizeMiniDock, type SaveTargetStatus, type WorkFileRef } from "./editor/editor";
+// V199 (A-106): オートセーブの復元の知らせの名前（保存先が分かればファイルの名前）
+import { autosaveNoticeTitle, baseFromSavedPath } from "./editor/workTitle";
+// V201 (P-3): オートセーブの封筒（生のバイト列）を分ける（保存とオートセーブの共通の部品）
+import { readAutosaveEnvelope } from "./editor/saveCore";
 import { sanitizeCursor } from "./editor/cursor";
 import { newProject, UGO_COLORS, W, H, type Project } from "./editor/model";
 import { importFlipnote } from "./editor/kwzImport";
-import { projectFromBytes, projectToBytes } from "./editor/serialize";
+import { projectFromBytes } from "./editor/serialize";
 import { errText, tooLargeBytes } from "./ui/errText"; // V170 (G-2): 画像の門番の TOO_LARGE を人の文へ
 // V171: 線画アイコン（絵文字は OS で絵が変わる）。ラベル先頭は呼び出し側が id を指定・文中は {icon:xxx} を tHtml/iconizeText で
-import { iconHtml, iconLabelHtml, setIconLabel, iconizeText, tHtml, applyIcons } from "./icons";
+import { iconHtml, iconLabelHtml, setIconLabel, iconizeText, tHtml, applyIcons, type IconId } from "./icons";
 // V158 (C-3): 配色（明るい／夜の紙）。`<html>` の data-theme を付け替えるだけ
 import { applyTheme, sanitizeTheme } from "./ui/theme";
 // V159 (G-1/G-3): 性能ログと「長い処理の共通入口」。**ログには操作名と数値しか書かない**
-import { setPerfSink, startLongTaskWatch, flush as perfFlush } from "./perf";
-import { runWithBusy, setBusyImpl, withBusyHidden } from "./ui/busy";
+import { setPerfSink, startLongTaskWatch, flush as perfFlush, perfNow, perfDone } from "./perf";
+import { runWithBusy, setBusyImpl, withBusyHidden, yieldToPaint } from "./ui/busy";
 import { frameToPngBlob, frameToImageBlob } from "./editor/render";
 import {
   DEFAULT_CONVERT,
@@ -59,7 +63,20 @@ import {
 } from "./editor/exporter";
 import { mimeFromExt, setAudioLogSink, type AudioPick } from "./editor/audio";
 // V173 (A-65): クラウド経由で末尾に付く `.gz` の扱い（純関数・Node からも叩ける＝`v173_smoke` [S-10]）
-import { importBaseName, importLogSafe, isProjectLikeName } from "./gzname";
+import { importBaseName, importLogSafe, isProjectLikeName, logSafeFileLabel } from "./gzname";
+// V200 (A-100): アルバムの 3DS 作品をまとめて .memoanima に（決まりと段取り＝純関数・Node からも叩ける＝`v200_smoke`）
+import {
+  NOTE_READ_MAX_BYTES,
+  batchCandidates,
+  convertNote,
+  failReason,
+  noteBaseName,
+  planBatch,
+  planCounts,
+  runBatch,
+  type BatchResult,
+  type PlanRow,
+} from "./kwzBatch";
 // M12-1a: i18n（自前・依存なし）。設計は docs/REQ_M12_i18n_master.md §3
 import { t, setLang, getLang, sanitizeLang, detectLang, applyI18n, HIDDEN_LANGS, type Lang } from "./i18n";
 // M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
@@ -114,9 +131,20 @@ import {
   type TapMod,
 } from "./keymap";
 // V181 (A-25): Mac では ⌘ を Ctrl として扱う（判定と修飾キーの読みは platform.ts の 1 か所）
-import { primaryMod, unfoldedMeta } from "./platform";
+// V175: isMacPlatform は更新のあと Mac でだけ開き直すため（presentUpdate）
+import { isMacPlatform, primaryMod, unfoldedMeta } from "./platform";
 // V193 (A-95): Discord のプレイ状況（フロントが渡せるのは「オンか」と「固定の 1 文」だけ）
 import { discordPresenceArgs, discordPresenceEnabled } from "./discordPresence";
+// V198 (A-104): ギャラリーへの入口（URL は galleryEntry.ts の定数 1 か所・設定の読み書きもあちら）
+import {
+  GALLERY_URL,
+  GALLERY_POST_URL,
+  galleryGuideShown,
+  toggleGalleryGuide,
+  hideGalleryAfterExport,
+  mergeEditorHiddenConfirms,
+  scrubUrls,
+} from "./galleryEntry";
 
 /** M7-2b: ディスプレイ設定（settings.json に永続化・起動時復元） */
 type DisplaySettings = {
@@ -171,7 +199,7 @@ type Settings = {
    *  v1.3.0 から上がってきた人も既定オン。**オフでも他の機能は一切制限しない**
    *  （`COLLAB_PROTOCOL` §1-b 条件1 の義務）。追加のみ・`PROJECT_VERSION` には無関係 */
   updateCheck?: boolean;
-  /** M13-2a (A-2): 範囲選択の色付け表示。**未設定＝オン**（`!== false` で見る）。追加のみ */
+  /** M13-2a (A-2): 範囲選択の色付け表示。V208 (A-119): **未設定＝オフ**（`=== true` で見る・作者の決定 2026-10-24）。追加のみ */
   selMask?: boolean;
   /** M13-2a (A-4): コマを消すときに確認を出すか。**未設定＝オン**（＝従来どおり）。追加のみ。
    *  効くのはコマの削除だけ（レイヤー・フォルダ・ライブラリの削除の確認には無関係） */
@@ -195,8 +223,14 @@ type Settings = {
    *  **プロジェクトの保存形式には無関係** */
   favoriteColors?: string[];
   /** V151 (E-8): 「次回から表示しない」にした確認の id（"clearFrame" | "layerDelete" | "folderDelete"）。
-   *  未設定＝[]（全部出す）。⚙ の「確認ダイアログ」節でいつでも戻せる。追加のみ */
+   *  未設定＝[]（全部出す）。⚙ の「確認ダイアログ」節でいつでも戻せる。追加のみ。
+   *  V198 (A-104 E-2): 書き出しのあとのギャラリーの案内の「次回から表示しない」も同じ一覧に "galleryAfterExport" で入る
+   *  （戻すのは ⚙ の「ギャラリーの案内を表示する」＝S-1）。エディタは自分の 3 つしか知らないので、
+   *  エディタからの書き戻しは `mergeEditorHiddenConfirms` を通す（そのまま代入すると galleryAfterExport が消える） */
   hiddenConfirms?: string[];
+  /** V198 (A-104 S-1): 書き出しのあとのギャラリーの案内を出すか。**未設定＝オン**（`!== false` で見る・`galleryGuideShown`）。
+   *  オフでもライブラリの「ギャラリー」ボタン（E-1）はそのまま使える。追加のみ・`PROJECT_VERSION` には無関係 */
+  galleryGuide?: boolean;
   /** U-1: 「起動時に更新を確認します（⚙ でオフにできます）」の初回案内を出したか。
    *  `guideDone` とは別にしている——既存利用者は `guideDone: true` を持っているので、
    *  それを流用すると**更新確認のことを一度も知らされないまま**になる */
@@ -208,34 +242,13 @@ type Settings = {
    *  Discord 側でもオフにできる）ので**読み捨て**（値があっても無視・今後書かない）。V193 は未出荷＝配った設定には無いが、
    *  開発ビルドで試した設定に残っていても壊れない。型に残しているのは「知らないキーとして落とさない」ためだけ（`miniHidden` と同じ） */
   discordNoticeShown?: boolean;
-  /** V163: 「旧形式（v1.5系）で保存する」を選んだ保存先（`"アルバム/ファイル名"`）。追加のみ。
-   *  ★これが無いと、旧形式で渡した作品を**開き直して Ctrl+S しただけで黙って新形式に化ける**
-   *  （Codex V163 指摘②）。保存のたびにチェック状態で追加/削除し、開くとき・オートセーブ復元の
-   *  ときに `EditorSaveContext.legacy` へ復元する。メモの移動/リネームには追従しない
-   *  （その場合は新形式に戻る＝保存先ピッカーで再選択できる）。上限は設けない——1件は
-   *  数十バイトで、旧形式を選ぶ操作自体がまれ */
-  legacyTargets?: string[];
+  /** V163 の旧キー（「旧形式（v1.5系）で保存する」を選んだ保存先 `"アルバム/ファイル名"` の一覧）。
+   *  ★V197 (A-103・作者決定 2026-10-07): 旧形式で保存する道をなくしたので**読み捨て**（値があっても無視・
+   *  今後書き換えない・エラーにも知らせにもしない）。保存はいつも PV6。消さずに素通しにしているのは、
+   *  v1.9.5 へ戻したときにその版の記憶がそのまま効くようにするため（設定は丸ごと書き戻すので、
+   *  触らなければ値は残る）。型に残しているのは「知らないキーとして落とさない」ためだけ（`discordNoticeShown` と同じ） */
+  legacyTargets?: unknown;
 };
-
-/** V163: 旧形式の保存先キー。アルバム名に `/` は使えない（Windows のフォルダ名）ので区切りに使う */
-function legacyTargetKey(album: string, baseName: string): string {
-  return `${album}/${baseName}`;
-}
-function isLegacyTarget(album: string | null | undefined, baseName: string | null | undefined): boolean {
-  if (!album || !baseName) return false;
-  // 壊れた値（配列でない・文字列など）は「記録なし」に倒す（設定破損で挙動を変えない）
-  if (!Array.isArray(settings.legacyTargets)) return false;
-  return settings.legacyTargets.includes(legacyTargetKey(album, baseName));
-}
-/** 保存の確定時に呼ぶ（チェック状態を保存先ごとに覚える）。settings の書き出しは
- *  呼び出し側（saveProject の lastAlbum 記憶）に相乗りする＝ここでは触るだけ */
-function rememberLegacyTarget(album: string, baseName: string, legacy: boolean): void {
-  const key = legacyTargetKey(album, baseName);
-  const list = Array.isArray(settings.legacyTargets) ? settings.legacyTargets : [];
-  const has = list.includes(key);
-  if (legacy && !has) settings.legacyTargets = [...list, key];
-  else if (!legacy && has) settings.legacyTargets = list.filter((k) => k !== key);
-}
 
 /** M7-2b: クレジット（後で差し替えやすいよう**この定数1箇所**に集約）。
  *  ★本名不使用（厳守・M7-2b改訂）: 配布物のどこにも本名を入れない。作者表記は「アルカナ (arcana)」のみ
@@ -418,7 +431,7 @@ function homeKeyBlocked(e: KeyboardEvent): boolean {
   );
 }
 
-/** V165 (D-4・Codex 指摘⑤): ホーム画面でも**単体タップ**を拾う。
+/** V165 (D-4・独立レビューの指摘⑤): ホーム画面でも**単体タップ**を拾う。
  *
  *  設定画面では `app.settings` にタップを割り当てられるのに、ホームでは keydown しか
  *  見ていなかったので**登録できるのに効かない**面ができていた（⚙ が画面外に出たときの
@@ -470,17 +483,185 @@ if (import.meta.env.DEV) {
 
 // ---------------- モーダル / トースト ----------------
 
-function toast(msg: string) {
+/** V198 (A-104 E-2): トーストの中に置けるボタン。押すとそのトーストは閉じる */
+type ToastAction = { label: string; run: () => void };
+/** V198: ふつうのトーストが出ている時間（今までと同じ） */
+const TOAST_MS = 3200;
+/** V198 (E-2): ボタンを置いたトーストが出ている時間。読んでから押しに行ける長さ。
+ *  マウスが乗っている間・ボタンにフォーカスがある間は消さず、離れてから TOAST_MS で消える */
+const TOAST_ACT_MS = 8000;
+/** V198 (E-2): 出た直後はボタンを押しても動かない時間。トーストは前触れなく画面の下に出るので、
+ *  その場所にあった物（タイムラインのコマ等）を押すつもりの 1 押しでブラウザやフォルダを開かない */
+const TOAST_ACT_ARM_MS = 400;
+/** V198 (E-2): いま出ているボタン付きトーストを閉じる口（ダイアログを開くとき＝modal() が呼ぶ） */
+const actToastClosers = new Set<() => void>();
+function closeActToasts() {
+  for (const close of [...actToastClosers]) close();
+}
+
+/** `extra` を渡したときだけ、1 行目（今までの文）の下に 1 行とボタンを足す（V198 E-2）。
+ *  渡さなければ**今までと同じ**（同じ DOM・同じ 3.2 秒・クリックは素通し）。新しい種類の窓は作らない */
+function toast(msg: string, extra?: { text: string; actions: ToastAction[] }) {
   const host = $("#toast-host");
   const el = document.createElement("div");
   el.className = "toast";
   el.innerHTML = iconizeText(msg); // V171: 文の先頭の {icon:warn} 等を線画に（それ以外は escape）
   host.appendChild(el);
   setTimeout(() => el.classList.add("show"), 10);
-  setTimeout(() => {
+  let closed = false;
+  const hide = () => {
+    if (closed) return;
+    closed = true;
     el.classList.remove("show");
     setTimeout(() => el.remove(), 300);
-  }, 3200);
+  };
+  let timer = setTimeout(hide, extra ? TOAST_ACT_MS : TOAST_MS);
+  if (!extra) return;
+  // ---- V198 (E-2): 1 行目は今までの文のまま（1 行・はみ出しは …）。その下に案内の 1 行とボタン ----
+  const shownAt = performance.now();
+  // 閉じ方は 4 つ: 時間・ボタン・**外か本文を押す**（何もせずに閉じる＝描き始めれば消える）・ダイアログを開く（modal()）。
+  // どれで閉じても、外を見張る口と閉じる口の登録を外す
+  const onDownAnywhere = (e: PointerEvent) => {
+    const target = e.target as Element | null;
+    if (target && el.contains(target) && target.closest("button")) return; // ボタンは click で動かす
+    hideAct();
+  };
+  // modal() を通らずに `.modal-back` を自分で足すダイアログ（エディタの音声・ゆらゆら・まとめて追加・画像の
+  // 読み込みの進捗）も、出た時点で閉じる。足す先は body の直下か #modal-root の直下だけ（子孫までは見ない）
+  const onBackAdded = new MutationObserver((recs) => {
+    for (const r of recs)
+      for (const n of r.addedNodes)
+        if (n instanceof HTMLElement && n.classList.contains("modal-back")) return hideAct();
+  });
+  const hideAct = () => {
+    clearTimeout(timer);
+    window.removeEventListener("pointerdown", onDownAnywhere, true);
+    onBackAdded.disconnect();
+    actToastClosers.delete(hideAct);
+    hide();
+  };
+  window.addEventListener("pointerdown", onDownAnywhere, true);
+  onBackAdded.observe(document.body, { childList: true });
+  const modalRoot = document.getElementById("modal-root");
+  if (modalRoot) onBackAdded.observe(modalRoot, { childList: true });
+  actToastClosers.add(hideAct);
+  clearTimeout(timer); // 時間で閉じるときも登録を外す（hide ではなく hideAct で閉じる）
+  timer = setTimeout(hideAct, TOAST_ACT_MS);
+  el.classList.add("toast-act");
+  const head = document.createElement("div");
+  head.className = "toast-head";
+  head.innerHTML = el.innerHTML;
+  el.innerHTML = "";
+  const more = document.createElement("div");
+  more.className = "toast-more";
+  more.textContent = extra.text;
+  const acts = document.createElement("div");
+  acts.className = "toast-acts";
+  const buttons: HTMLButtonElement[] = [];
+  for (const a of extra.actions) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "minibtn";
+    b.textContent = a.label;
+    // 「出た直後の 1 押し」は**押し始めた時刻**で見る（click は離したときに来るので、出た直後に押し始めて
+    // 0.4 秒を過ぎてから離すと抜ける）。キーで押した click（pointerdown が無い）はその時刻で見る
+    let downAt = -1;
+    b.addEventListener("pointerdown", () => {
+      downAt = performance.now();
+    });
+    // マウスで押してもフォーカスを移さない（無視した押しのあとにボタンにフォーカスが残ると、時間で消えなくなり、
+    // エディタの Enter〔再生〕がこのボタンへ行ってしまう）。キーボードの Tab では今までどおり入れる
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+    b.addEventListener("click", () => {
+      if (closed) return;
+      const pressedAt = downAt >= 0 ? downAt : performance.now();
+      downAt = -1;
+      if (pressedAt - shownAt < TOAST_ACT_ARM_MS) return; // 出た直後の 1 押しは別の物を押すつもりだった
+      // 押したらすぐ閉じる。消えるまでの 0.3 秒にキーで押し直されないよう、先に使えなくしてフォーカスを外す
+      for (const x of buttons) x.disabled = true;
+      b.blur();
+      hideAct();
+      a.run();
+    });
+    buttons.push(b);
+    acts.appendChild(b);
+  }
+  el.append(head, more, acts);
+  // マウスが乗っている間・フォーカスがある間は消さない（離れたら TOAST_MS で消える）
+  let hovered = false;
+  let focused = false;
+  const hold = () => clearTimeout(timer);
+  const release = () => {
+    if (hovered || focused || closed) return;
+    clearTimeout(timer);
+    timer = setTimeout(hideAct, TOAST_MS);
+  };
+  el.addEventListener("pointerenter", () => {
+    hovered = true;
+    hold();
+  });
+  el.addEventListener("pointerleave", () => {
+    hovered = false;
+    release();
+  });
+  el.addEventListener("focusin", () => {
+    focused = true;
+    hold();
+  });
+  el.addEventListener("focusout", () => {
+    focused = false;
+    release();
+  });
+}
+
+/** V198 (A-104 E-2): 書き出しのあとの「保存先を開く」が指す作品。保存と同じ組み立て（Rust の
+ *  `pclib::existing_project_file`）に渡す 3 つ＝**フルパスは持たない**。`name` は保存に渡すのと同じ名前
+ *  （エディタは baseName・ライブラリはファイル名そのもの） */
+type GalleryWorkRef = { libRoot: string; album: string; name: string };
+
+/** V198 (E-1・E-2): ギャラリーを既定のブラウザで開く。開けなくても画面には何も出さない（ログに理由を 1 行・URL は書かない） */
+function openGalleryUrl(url: string) {
+  void openUrl(url).catch((e) => logError("gallery", `open browser failed: ${scrubUrls(errText(e))}`));
+}
+
+/** V198 (E-2): 作品の .memoanima を OS のファイラーで選んだ状態で開く。開けなければログに 1 行（パスは書かない） */
+function revealWork(w: GalleryWorkRef) {
+  invoke("reveal_project_file", { libRoot: w.libRoot, album: w.album, name: w.name }).catch((e) =>
+    logError("gallery", `reveal failed: ${importLogSafe(scrubUrls(errText(e)), [w.libRoot])}`)
+  );
+}
+
+/** V198 (A-104 E-2): 書き出し（と 1 コマの画像の保存）の完了のトースト。
+ *  案内を出すとき（S-1 がオン・「次回から表示しない」を押していない）だけ、1 行とボタンを足す。
+ *  出さないときは今までどおりの 1 行。「保存先を開く」は作品の .memoanima がいま在るときだけ */
+async function exportDoneToast(msg: string, work: GalleryWorkRef | null) {
+  if (!galleryGuideShown(settings)) {
+    toast(msg);
+    return;
+  }
+  const canReveal =
+    !!work &&
+    (await invoke<boolean>("project_file_exists", { libRoot: work.libRoot, album: work.album, name: work.name }).catch(
+      () => false
+    )) === true;
+  const actions: ToastAction[] = [{ label: t("export.gallery.post.btn"), run: () => openGalleryUrl(GALLERY_POST_URL) }];
+  if (canReveal && work) actions.push({ label: t("export.gallery.reveal.btn"), run: () => revealWork(work) });
+  actions.push({
+    label: t("common.dontShowAgain.label"),
+    run: () => {
+      hideGalleryAfterExport(settings);
+      invoke("save_settings", { settings }).catch(() => {});
+    },
+  });
+  toast(msg, { text: t("export.gallery.msg"), actions });
+}
+
+/** V198 (E-2): エディタで開いている作品の「保存先」。まだ保存先が決まっていない（新規・保存先を聞く状態）なら null。
+ *  ファイルが本当に在るかは書き出しのあとに Rust が見る（.kwz を開いて一度も保存していない作品は、そこで無いと分かる） */
+function editorWorkRef(): GalleryWorkRef | null {
+  const c = editor.saveCtx;
+  if (!c || editor.askSaveTarget) return null;
+  return { libRoot: c.libRoot || settings.libraryDir || "", album: c.album, name: c.baseName };
 }
 
 /** M11-10: `build` の第2引数 `onClose` に後始末を登録できる（window に張ったリスナー等）。
@@ -489,6 +670,9 @@ function toast(msg: string) {
 function modal(
   build: (close: (v: any) => void, onClose: (fn: () => void) => void) => HTMLElement
 ): Promise<any> {
+  // V198 (A-104 E-2): ボタン付きのトーストはダイアログより上（#toast-host は z-index 200）にいるので、
+  // ダイアログを開くときに閉じる（ダイアログの下の方を押したつもりでトーストのボタンを押さない）
+  closeActToasts();
   return new Promise((resolve) => {
     const root = $("#modal-root");
     const back = document.createElement("div");
@@ -693,7 +877,7 @@ function busyOverlay(msg: string): () => void {
     (box.querySelector(".busy-msg") as HTMLElement).textContent = msg;
     const hint = box.querySelector(".busy-hint") as HTMLElement;
     hint.textContent = t("ed.busy.hint");
-    // Codex レビュー（優先度 中）: 900コマ級で数十秒待たされると、「少しお待ちください」だけでは
+    // 独立レビュー（優先度 中）: 900コマ級で数十秒待たされると、「少しお待ちください」だけでは
     // **重いのか壊れたのか**が分からない。10秒を超えたら**経過を秒で出す**。
     // 「％が動かないと固まって見える」（要件 W-8）の逆で、**経過は必ず動く**ので生きている証拠になる。
     // 動きを減らす設定（prefers-reduced-motion）で帯が静止する人にも、これが効く
@@ -967,7 +1151,8 @@ function openExportDialog(
   baseName: string,
   defaultRange?: { a: number; b: number } | null,
   audioSrc?: ExportAudioSource | null,
-  onSyncModeChange?: (m: "audioToAnim" | "animToAudio") => void
+  onSyncModeChange?: (m: "audioToAnim" | "animToAudio") => void,
+  work: GalleryWorkRef | null = null // V198 (E-2): 書き出しのあとの「保存先を開く」が指す作品（無ければ出さない）
 ) {
   let running = false;
   return modal((close) => {
@@ -1215,7 +1400,7 @@ function openExportDialog(
         }
         // M11-23: 実行直前の見積もり（コマ数・倍率・形式・GIF は実使用色数）。**危険域のときだけ**確認を出す。
         // 見積もりの色数は書き出しと同じ `collectGifPalette`（>256色＝null は従来の NeuQuant 経路）
-        // V168（Codex 指摘・中）: この走査は眠ったコマを起こして戻すので、大きい作品では数秒かかる。
+        // V168（独立レビューの指摘・中）: この走査は眠ったコマを起こして戻すので、大きい作品では数秒かかる。
         // 固まった印象にしないよう、数えている間はその旨を出す（書き出し本体では同じ段階の文言を再利用）
         if (format === "gif") {
           phaseEl.textContent = exportPhaseLabel("countColors");
@@ -1296,7 +1481,7 @@ function openExportDialog(
           whiteBg,
           // M16 (X-1): MP4 のみ・1〜10。既定1（=従来と同一入力）。見積もりと同じ loops を使う
           loopCount: loops,
-          // V168（Codex 指摘・中）: GIF は見積りで数えたパレットをそのまま渡す（全コマの再走査を省く）
+          // V168（独立レビューの指摘・中）: GIF は見積りで数えたパレットをそのまま渡す（全コマの再走査を省く）
           gifPalette: format === "gif" ? gifPal : undefined,
           onProgress: (done, total, phase) => {
             bar.style.width = `${Math.round((done / Math.max(1, total)) * 100)}%`;
@@ -1325,7 +1510,7 @@ function openExportDialog(
         }
         phaseEl.textContent = t("export.progress.writeFile.hint");
         await saveBlobToPath(path, blob);
-        toast(t("export.done.toast", { path }));
+        void exportDoneToast(t("export.done.toast", { path }), work); // V198 (E-2): 案内の 1 行はこの中だけ
         close(true);
       } catch (e) {
         toast(t("err.export.failed.toast", { err: errText(e) }));
@@ -1348,7 +1533,7 @@ function openExportDialog(
  *  **アニメの書き出し（openExportDialog）とは別のダイアログ**にしている。あちらは
  *  範囲・音声・長さ合わせ・進捗という「動画/連番のための UI」で構成されていて、
  *  1枚書き出しには要らないものばかり。同じ箱に入れると半分を隠すことになり分かりにくい。 */
-function openImageExportDialog(p: Project, frameIndex: number, baseName: string) {
+function openImageExportDialog(p: Project, frameIndex: number, baseName: string, work: GalleryWorkRef | null = null) {
   return modal((close) => {
     const box = document.createElement("div");
     // M11-22: 既定は前回選んだ値（settings.imageSaveScale・アニメ書き出しとは別に記憶）・無ければ ×4。×4 に「おすすめ」
@@ -1449,7 +1634,7 @@ function openImageExportDialog(p: Project, frameIndex: number, baseName: string)
         });
         if (!blob) throw new Error(t("err.image.render.msg"));
         await saveBlobToPath(path, blob);
-        toast(t("export.image.saved.toast", { path }));
+        void exportDoneToast(t("export.image.saved.toast", { path }), work); // V198 (E-2): アニメの書き出しと同じ 1 行
         close(true);
       } catch (e) {
         toast(t("err.image.save.toast", { err: errText(e) }));
@@ -1523,10 +1708,8 @@ async function pickAlbum(
  *  引数を null 許容にして、**意図を型で表す**ようにした＝訳文を比較する経路がゼロになる。 */
 async function pickSaveTarget(
   album: string | null,
-  defaultName: string,
-  // V163（作者決定②）: 旧形式（PV5）チェックの初期値。保存先ごとに editor が覚えている
-  legacyDefault: boolean
-): Promise<{ album: string; baseName: string; legacy: boolean } | null> {
+  defaultName: string
+): Promise<{ album: string; baseName: string } | null> {
   let albums: string[] = [];
   try {
     albums = await invoke<string[]>("list_albums", { libRoot: settings.libraryDir });
@@ -1539,6 +1722,8 @@ async function pickSaveTarget(
       ? settings.lastAlbum
       : (album ?? defaultAlbumName());
   if (!albums.includes(def)) albums.unshift(def);
+  // ★V216b (A-126 §2-1 の 6): 名前の既定は、そのアルバムで空いている名前（在る・控えだけなら `名前 (2)`〜。決めるのは Rust）
+  let suggested = await freeProjectName(def, defaultName);
   return modal((close) => {
     const box = document.createElement("div");
     box.innerHTML = `
@@ -1550,8 +1735,6 @@ async function pickSaveTarget(
         <button class="minibtn" id="ps-newalbum" type="button">${t("common.saveTarget.newFolder.btn")}</button>
       </div>
       <div class="modal-field"><span>${t("common.saveTarget.fileName.label")}</span><input id="ps-name" type="text" /></div>
-      <label class="confirm-skip"><input type="checkbox" id="ps-legacy"${legacyDefault ? " checked" : ""}> <span>${t("common.saveTarget.legacy.msg")}</span></label>
-      <p class="modal-path" id="ps-fmtnote"></p>
       <p class="modal-path" id="ps-path"></p>
       <div class="modal-actions">
         <button class="btn primary" id="ps-ok">${t("common.save.btn")}</button>
@@ -1564,19 +1747,26 @@ async function pickSaveTarget(
       o.value = albums[i];
     });
     const nameInput = box.querySelector("#ps-name") as HTMLInputElement;
-    nameInput.value = defaultName;
-    // V163: 形式の断り書き（textContent 代入＝エスケープ不要の作法）。
-    // 文言は「新形式は旧版で開けない」ことの告知を兼ねる（REQ_format_pv6 §4）
-    const legacyCheck = box.querySelector("#ps-legacy") as HTMLInputElement;
-    (box.querySelector("#ps-fmtnote") as HTMLElement).textContent = t(
-      "common.saveTarget.legacyNote.msg"
-    );
+    nameInput.value = suggested;
+    // ★V197 (A-103): 「以前のバージョン（v1.5系）でも開ける形式で保存する」のチェックと注記はなくした。
+    //  保存はいつも PV6（editor の runBackgroundSave）。旧形式の作品を**開く**のは今までどおり
     const pathEl = box.querySelector("#ps-path") as HTMLElement;
     const updatePath = () => {
       const nm = (nameInput.value.trim() || defaultName).replace(/\.(memoanima|animemo)$/i, "");
       pathEl.textContent = t("common.saveTarget.path.hint", { dir: settings.libraryDir ?? "", album: sel.value, name: nm });
     };
     sel.addEventListener("change", updatePath);
+    // V216b: アルバムを替えたら、名前を書き換えていないときだけ、そのアルバムで空いている名前に案を替える
+    sel.addEventListener("change", () => {
+      const album = sel.value;
+      const before = suggested;
+      void freeProjectName(album, defaultName).then((n) => {
+        if (sel.value !== album || nameInput.value !== before) return;
+        suggested = n;
+        nameInput.value = n;
+        updatePath();
+      });
+    });
     nameInput.addEventListener("input", updatePath);
     updatePath();
     (box.querySelector("#ps-newalbum") as HTMLElement).addEventListener("click", async () => {
@@ -1599,13 +1789,37 @@ async function pickSaveTarget(
     });
     (box.querySelector("#ps-ok") as HTMLElement).addEventListener("click", () => {
       const baseName = (nameInput.value.trim() || defaultName).replace(/\.(memoanima|animemo)$/i, "");
-      close({ album: sel.value, baseName, legacy: legacyCheck.checked });
+      close({ album: sel.value, baseName });
     });
     (box.querySelector("#ps-cancel") as HTMLElement).addEventListener("click", () =>
       close(null)
     );
     return box;
   });
+}
+
+/** V216b (A-126): そのアルバムで空いている名前の案（Rust の free_project_name）。聞けなければ渡した名前のまま */
+async function freeProjectName(album: string, name: string): Promise<string> {
+  try {
+    const r = await invoke<string | null>("free_project_name", { libRoot: settings.libraryDir ?? "", album, name });
+    return typeof r === "string" && r !== "" ? r : name; // 答えが文字列でなければ渡した名前のまま（"null" を名前に出さない）
+  } catch {
+    return name;
+  }
+}
+
+/** V216b (A-126 §2-1 の 8): その作品のファイルの大きさと更新時刻（Rust の work_file_stamp・ライブラリの中の .memoanima だけ）。
+ *  分からなければ null（オートセーブの印を書かない＝戻すと「無い」＝確かめが出る安全側） */
+async function readWorkFileStamp(path: string): Promise<{ size: number; mtimeUs: number } | null> {
+  try {
+    const r = await invoke<{ size: number; mtime_us: number } | null>("work_file_stamp", {
+      libRoot: settings.libraryDir ?? "",
+      path,
+    });
+    return r && typeof r.size === "number" && typeof r.mtime_us === "number" ? { size: r.size, mtimeUs: r.mtime_us } : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------- M8-1: 📷 画像を取り込む（さつえいGUI） ----------------
@@ -1762,7 +1976,7 @@ async function openImageImportFlowForEditor(path?: string | string[]) {
     layerName: info.layerName,
     frameNo: info.frameNo,
     onPlace: (proj, transparentPaper) => editor.placeConvertedImage(proj, transparentPaper),
-    // V166: 漏斗を通すので非同期になった。★Codex 指摘（中）: `void` で投げっぱなしにすると
+    // V166: 漏斗を通すので非同期になった。★独立レビューの指摘（中）: `void` で投げっぱなしにすると
     //  配置中の例外が下の try/catch に捕まらない（利用者に何も出ない）。Promise を返して待たせる
     onPlaceFrames: (proj, transparentPaper) => editor.placeConvertedFrames(proj, transparentPaper),
   });
@@ -2147,15 +2361,20 @@ function openImageImportDialog(
         }
         return;
       }
-      // M12-D: おまかせ。V163: この経路（DEV限定の画像取り込み）は旧形式（PV5）のまま書くので
-      // 形式チェックの初期値は false（チェックされても projectToBytes 固定＝値は使わない）
-      const target = await pickSaveTarget(null, o.title || defaultTitle, false);
+      // M12-D: おまかせ。
+      // ★V197 (A-103): この経路（DEV 限定の画像取り込み・`__animemo.imageImport` からだけ届く）も
+      //  **PV6 で書く**（編集画面の保存と同じ書き手）。前は PV5（projectToBytes）で書いていた——
+      //  製品のコードから PV5 の書き手を呼ぶ所を 0 本にする（v197_smoke [B-4][B-6]）
+      const target = await pickSaveTarget(null, o.title || defaultTitle);
       if (!target) return;
       busy = true;
       (q("#ii-ok") as HTMLButtonElement).disabled = true;
       try {
         const proj = convertToProject(images, { ...o, title: target.baseName });
-        const bytes = await projectToBytes(proj);
+        const { encodePV6 } = await import("./editor/pv6");
+        const enc = await encodePV6(proj); // opts なし＝中断しない（null は返らない）
+        if (!enc) throw new Error("encodePV6 returned null without abort opts");
+        const bytes = enc.bytes;
         // サムネ（1ページ目・320×240 PNG）
         const tcv = document.createElement("canvas");
         tcv.width = W;
@@ -2226,7 +2445,9 @@ function packRawSave(meta: Record<string, unknown>, parts: Uint8Array[]): Uint8A
 function showEditor(
   project: ReturnType<typeof newProject>,
   ctx: EditorSaveContext | null,
-  opts: { askSaveTarget?: boolean } = {}
+  // V199 (A-106): fileName＝保存先は無いが名前の分かるファイル（ドロップ→「編集」）。左上・既定の名前に使う
+  // V216b (A-126): workFile＝その作品のファイル（ライブラリで開いた .memoanima・その項目つきのオートセーブ）
+  opts: { askSaveTarget?: boolean; fileName?: string; workFile?: WorkFileRef | null } = {}
 ) {
   // M11-6: 二重 mount を構造的に不可能にする。ウィンドウへのドロップ →「編集」は
   // showLibrary() を通らずにここへ来るため、mount() が二重に走り、
@@ -2255,7 +2476,7 @@ function showEditor(
   editor.restoreSideFold(settings.sideFold); // V158 (L-1): 右パネルの段ごとの畳み
   // M12-C: カーソル（点/十字/矢印・輪・ドット枠）。無い・不正値は既定（点＋輪 ON・枠 OFF）
   editor.restoreCursor(settings.cursor);
-  // M13-2a: 選択範囲の色付け（false 以外はオン）／コマ削除の確認（false 以外はオン＝従来どおり）
+  // M13-2a: 選択範囲の色付け（V208 A-119: true のときだけオン）／コマ削除の確認（false 以外はオン＝従来どおり）
   editor.restoreSelMaskShow(settings.selMask);
   editor.restoreFrameDeleteConfirm(settings.frameDeleteConfirm);
   // M14 (S-3): トーン一覧の折りたたみ（true 以外は閉＝既定）
@@ -2314,7 +2535,8 @@ function showEditor(
       // V151 (E-8): 「次回から表示しない」チェックつき確認＋非表示一覧の保存（同じ流儀）
       confirmSkippable: confirmSkippableDialog,
       onHiddenConfirmsChange: (ids) => {
-        settings.hiddenConfirms = ids;
+        // V198: エディタが渡すのは自分の 3 つだけ。ギャラリーの案内の「次回から表示しない」を落とさない
+        settings.hiddenConfirms = mergeEditorHiddenConfirms(settings.hiddenConfirms, ids);
         invoke("save_settings", { settings }).catch(() => {});
       },
       // M14 (S-3): トーン一覧の開閉も同じ流儀（ヘッダを押した瞬間に保存）
@@ -2349,23 +2571,41 @@ function showEditor(
       },
       // V163: V161-B の Rust 側 gzip（gz_begin/gz_chunk/gz_abort/save_project_gz）は撤去。
       // PV6 は Worker が完成品を返すので、下の saveProject（1回の raw ボディ）だけで足りる
-      saveProject: async (c, data, thumb) => {
+      saveProject: async (c, data, thumb, guard) => {
         const libRoot = c.libRoot || settings.libraryDir!;
         c.libRoot = libRoot;
         // M10-23: number[] JSON をやめ raw ボディで送る（保存処理そのものは Rust 側の
         // 既存 pclib::save_project がそのまま担う）
+        // ★V216b (A-126): その作品のファイルと［置き換える］を渡す（比べて決めるのは Rust の save_project_checked）
         const path = await invoke<string>(
           "save_project_raw",
-          packRawSave({ libRoot, album: c.album, name: c.baseName }, [data, thumb])
+          packRawSave(
+            {
+              libRoot,
+              album: c.album,
+              name: c.baseName,
+              workFile: guard?.workFile ?? null,
+              replace: guard?.replace === true,
+            },
+            [data, thumb]
+          )
         );
         // 最後に使ったアルバムを記憶（次回ピッカーの既定に）
         settings.lastAlbum = c.album;
-        // V163: 形式の選択も保存先ごとに記憶（旧形式の保存先を開き直して Ctrl+S しても化けない）
-        rememberLegacyTarget(c.album, c.baseName, c.legacy === true);
+        // V197 (A-103): 保存先ごとの形式の記憶（V163 の legacyTargets）はやめた。保存はいつも PV6
         invoke("save_settings", { settings }).catch(() => {});
         return path;
       },
       pickSaveTarget,
+      // V216b (A-126): 書く前の空きの判定と、その作品のファイルの大きさ・更新時刻（どちらも読むだけ）
+      saveTargetStatus: (c, workFile) =>
+        invoke<SaveTargetStatus>("save_target_status", {
+          libRoot: c.libRoot || settings.libraryDir || "",
+          album: c.album,
+          name: c.baseName,
+          workFile,
+        }),
+      workFileStamp: (path) => readWorkFileStamp(path),
       autosave: async (data, meta) => {
         // M10-23: raw ボディ（AMAS1 の組み立て・原子的置換は Rust 側の既存実装のまま）
         await invoke("save_autosave_raw", packRawSave(meta, [data]));
@@ -2373,11 +2613,12 @@ function showEditor(
       clearAutosave: async () => {
         await invoke("clear_autosave");
       },
+      // V198 (E-2): 書き出しのあとの「保存先を開く」は、いま開いている作品の保存先（editorWorkRef）を指す
       openExport: (source, baseName, defaultRange, audio, onSyncModeChange) =>
-        void openExportDialog(source, baseName, defaultRange, audio, onSyncModeChange),
+        void openExportDialog(source, baseName, defaultRange, audio, onSyncModeChange, editorWorkRef()),
       // M11-11: 1コマだけの画像書き出し（アニメの書き出しとは別ダイアログ）
       openImageExport: (proj, frameIndex, baseName) =>
-        void openImageExportDialog(proj, frameIndex, baseName),
+        void openImageExportDialog(proj, frameIndex, baseName, editorWorkRef()),
       pickAudioFile,
       readAudioFile, // V172: ダイアログと読みを分けた（読みは呼び出し元の「読み込み中」の中）
       confirm: confirmDialog,
@@ -2443,6 +2684,10 @@ async function openEditorWithProject(item: LibraryView) {
       // ここの catch にも、当時の失敗ログ（V173b で `[open]` の 1 行へ畳んだ）にも届かなかった
       //（項目21・画面が真っ白）。
       // 512MiB 超は読む前に Rust が弾き（TOO_LARGE）、その断りは showLoadError が人の文にする
+      // ★V216b (A-126): その作品のファイル＝開いた .memoanima（.animemo は持たない＝保存すると隣の .memoanima へ書くので確かめる）。
+      //  大きさと更新時刻は読む前に控える（読んでいる間に変わっても、控えた時点のもの＝戻すと違えば「無い」の安全側）
+      const isMemo = /\.memoanima$/i.test(item.name);
+      const stamp = isMemo ? await readWorkFileStamp(item.path) : null;
       const bytes = await readProjectRaw(item.path);
       const project = await projectFromBytes(bytes, {
         // 1コマごとに書き換えると描き直しが増えるので、32コマに1回だけ
@@ -2450,14 +2695,16 @@ async function openEditorWithProject(item: LibraryView) {
           if (n % 32 === 0) setBusyMsg(t("ed.busy.loading.frames.label", { n }));
         },
       });
-      showEditor(project, {
-        libRoot: settings.libraryDir!,
-        album: item.album,
-        baseName: stripExt(item.name),
-        // V163: 旧形式を選んだ保存先なら Ctrl+S も旧形式のまま（Codex 指摘②:
-        // 再起動をまたいでも settings の記録から復元する）
-        legacy: isLegacyTarget(item.album, stripExt(item.name)),
-      });
+      showEditor(
+        project,
+        {
+          libRoot: settings.libraryDir!,
+          album: item.album,
+          baseName: stripExt(item.name),
+          // V197 (A-103): 旧形式（PV1〜PV5）の作品も開いて保存すると PV6 になる（設定の legacyTargets は読まない）
+        },
+        { workFile: isMemo ? { path: item.path, size: stamp?.size ?? null, mtimeUs: stamp?.mtimeUs ?? null } : null }
+      );
     });
   } catch (e) {
     // V154b (W-10): 開けなかったことをログに残す。**大きさ（バイト数）と理由だけ**——
@@ -2499,16 +2746,19 @@ function newNote(album: string) {
 
 /** F-3: 起動時にオートセーブがあれば復元を提案する */
 async function checkAutosave() {
-  let payload: { meta: any; data: number[]; path: string } | null = null;
+  // V201 (P-3): オートセーブは生のバイト列の封筒で受け取る（数の配列にしない＝大きい作品のオートセーブで起動のたびに落ちない）。
+  //  空の本体＝オートセーブが無い。分けるのは共通の部品の readAutosaveEnvelope（作品のバイト列は写さずにビューのまま）
+  let payload: { meta: any; data: Uint8Array; path: string } | null = null;
   try {
-    payload = await invoke("load_autosave");
+    payload = readAutosaveEnvelope(await invoke<ArrayBuffer>("load_autosave"));
   } catch {
     return;
   }
   if (!payload) return;
-  const title = payload.meta?.title ?? untitledTitle();
+  // ★V199 (A-106): 保存先が分かっていれば**ファイルの名前**（作品の中の題名は作ったときのままのことがある）
+  const title = autosaveNoticeTitle(payload.meta, untitledTitle());
   // 3値: "restore" / "discard" / null（背面クリック等）。
-  // null では絶対に消さない（誤クリックで唯一の復元データを失わない — Codexレビュー指摘#5）
+  // null では絶対に消さない（誤クリックで唯一の復元データを失わない — 独立レビューの指摘#5）
   const choice = await modal((close) => {
     const box = document.createElement("div");
     // M12-1a: 文中に作品名が入る箇所は、{title} に**空の span** を差して DOM をそのまま保ち、
@@ -2537,10 +2787,10 @@ async function checkAutosave() {
   }
   if (choice !== "restore") return; // 「あとで」/背面クリック → 何もしない（次回起動時に再提示）
   try {
-    const project = await projectFromBytes(new Uint8Array(payload.data));
+    const project = await projectFromBytes(payload.data);
     const meta = payload.meta ?? {};
     // ライブラリフォルダが当時と違う場合は保存先を信用せず、ピッカーを必ず出す
-    // （別ライブラリの同名ファイルへの上書きを防ぐ — Codexレビュー指摘#2）
+    // （別ライブラリの同名ファイルへの上書きを防ぐ — 独立レビューの指摘#2）
     const libMatches = !meta.libRoot || meta.libRoot === settings.libraryDir;
     const ctx =
       meta.album && meta.baseName && libMatches
@@ -2548,17 +2798,36 @@ async function checkAutosave() {
             libRoot: settings.libraryDir!,
             album: String(meta.album),
             baseName: String(meta.baseName),
-            // V163: 旧形式を選んでいた保存先はオートセーブ復元後も旧形式のまま（Codex 指摘②）
-            legacy: isLegacyTarget(String(meta.album), String(meta.baseName)),
           }
         : null;
     showEditor(project, ctx, {
       askSaveTarget: ctx == null ? true : (meta.askSaveTarget ?? false),
+      // V199 (A-106): 保存先の無いファイル（ドロップで開いた作品）を戻すときは、そのファイルの名前（知らせに出した名前と同じ）
+      fileName: ctx == null && typeof meta.fileBase === "string" && meta.fileBase ? meta.fileBase : undefined,
+      // ★V216b (A-126 §2-1 の 8): その作品のファイルは、項目が有り・ライブラリが当時と同じ・ファイルが在り・大きさと更新時刻が同じときだけ
+      workFile: await restoredWorkFile(meta),
     });
     editor.dirty = true; // 復元直後から未保存扱い（オートセーブ継続）
   } catch (e) {
     toast(t("err.autosaveRestore.toast", { err: errText(e) }));
   }
+}
+
+/** ★V216b (A-126 §2-1 の 8): オートセーブの印から、その作品のファイルを戻す。項目が無い（前の版のオートセーブ）・ライブラリが当時と
+ *  違う（libRoot が無いのも違う扱い）・ファイルが無い・大きさか更新時刻が違う（「あとで」の間に作品の移動などで同じパスに別の作品が来た）
+ *  なら null＝保存すると確かめが出る（安全側） */
+async function restoredWorkFile(
+  meta: Record<string, unknown>,
+  stampOf: (path: string) => Promise<{ size: number; mtimeUs: number } | null> = readWorkFileStamp,
+  libraryDir: string | null | undefined = settings.libraryDir
+): Promise<WorkFileRef | null> {
+  const w = meta.workFile as { path?: unknown; size?: unknown; mtimeUs?: unknown } | null | undefined;
+  if (!w || typeof w !== "object") return null;
+  if (typeof w.path !== "string" || typeof w.size !== "number" || typeof w.mtimeUs !== "number") return null;
+  if (!meta.libRoot || !libraryDir || meta.libRoot !== libraryDir) return null;
+  const now = await stampOf(w.path);
+  if (!now || now.size !== w.size || now.mtimeUs !== w.mtimeUs) return null;
+  return { path: w.path, size: w.size, mtimeUs: w.mtimeUs };
 }
 
 // ---------------- M7-2b: ディスプレイ設定・設定メニュー ----------------
@@ -2689,7 +2958,7 @@ async function runUpdateCheck(mode: "startup" | "manual"): Promise<Update | null
     // これは**仕様どおりの空振り**で、エラーではない。起動時はログ 1 行だけ（`logError` にしない）、
     // 手動は「この版では自動更新に対応していません」と言う。
     // Windows の正当な失敗（通信できない・feed が無い・署名が合わない）は下の従来どおり。
-    // Codex 指摘（中）: 語だけで分岐すると、万一 Windows 向け feed から windows の項目が消えても
+    // 独立レビューの指摘（中）: 語だけで分岐すると、万一 Windows 向け feed から windows の項目が消えても
     // 「Mac テスト版」扱いで飲み込む。無かった platform が `darwin-…` のときだけ静かにする
     const msg = String(e);
     if (msg.includes("None of the fallback platforms") && msg.includes("darwin-")) {
@@ -2756,6 +3025,16 @@ async function presentUpdate(up: Update): Promise<void> {
       nowBtn.disabled = true;
       laterBtn.disabled = true;
       prog.hidden = false;
+      // ★V216b (A-130): ダウンロードを始めたら背景を押しても閉じない（取り込みの進み具合の窓と同じ形＝modal 共通の
+      //  pointerdown より先に capture で止める。modal() は変えない・Esc は前から閉じない）
+      const back = box.parentElement;
+      back?.addEventListener(
+        "pointerdown",
+        (e) => {
+          if (e.target === back) e.stopImmediatePropagation();
+        },
+        { capture: true }
+      );
       let total = 0;
       let got = 0;
       try {
@@ -2769,6 +3048,25 @@ async function presentUpdate(up: Update): Promise<void> {
           phase.textContent = total > 0 ? `${pct}%` : "";
         });
         // ここへ戻ってこないのが正常（Windows はインストーラ起動時にアプリを終了させる）
+        // V175 (REQ §10-2): Mac は .app を置き換えるだけで、閉じも開き直しもしない（Tauri の作法）。
+        // そのままだと 100% のまま押せない窓が残るので、Mac のときだけ開き直す（窓の文は前から「アプリが一度閉じます」）。
+        // 開き直せなくても更新は済んでいる＝ログに 1 行と窓を閉じるだけ（次の起動で新しい版。失敗のトーストは出さない）
+        if (isMacPlatform()) {
+          // ★V216b (A-130): 開き直す前に、エディタが開いていれば保存を待ち、未保存なら確かめる（ダウンロードの間に描いた分）。
+          //  キャンセルなら開き直さない＝窓を閉じて「次に起動したときから新しい版」と知らせる
+          if (editorOpen) await editor.waitForSave();
+          if (editorOpen && editor.dirty && !(await confirmDialog(t("set.quit.dirty.msg")))) {
+            close(null);
+            toast(t("set.update.restartLater.toast"));
+            return;
+          }
+          try {
+            await invoke("restart_after_update");
+          } catch (e) {
+            logError("update", `restart failed: ${e}`);
+            close(null);
+          }
+        }
       } catch (e) {
         logError("update", `install failed: ${e}`);
         toast(t("set.update.failed.toast"));
@@ -2962,6 +3260,14 @@ async function openSettingsMenu() {
         <div class="modal-field"><div class="sw2" id="set-conf-folderDelete"></div><span class="tog">${t("set.confirms.folderDelete.label")}</span></div>
         <div class="modal-field"><div class="sw2" id="set-framedel-sw"></div><span class="tog">${iconLabelHtml("trash", t("set.frameDeleteConfirm.label"))}</span></div>
         <p class="hintline">${t("set.confirms.hint")}</p>
+      </div>
+      <!-- V198 (A-104 S-1): ギャラリーの案内（書き出しのあとの 1 行）。「確認ダイアログ」の**すぐ下**（Discord の節と同じ作り）。
+           スイッチは 1 つ: 書き出しのあとの「次回から表示しない」を押すとオフに見え、オンに戻すとまた出る。
+           ライブラリの「ギャラリー」ボタンはこの設定に関係なく出る -->
+      <div class="set-sec">
+        <b>${iconHtml("gallery")} ${t("set.galleryGuide.label")}</b>
+        <div class="modal-field"><div class="sw2" id="set-gallery-sw"></div></div>
+        <p class="hintline">${t("set.galleryGuide.hint")}</p>
       </div>
       <div class="set-sec">
         <b>${iconHtml("keyboard")} ${t("set.keys.label")}</b>
@@ -3258,6 +3564,18 @@ async function openSettingsMenu() {
         invoke("save_settings", { settings }).catch(() => {});
       });
     }
+    // V198 (A-104 S-1): ギャラリーの案内のスイッチ（`.sw2` の作法・既定オン）。見た目は「いま案内が出るか」。
+    // オフ→オンで書き出しのあとの「次回から表示しない」も解く（要件 A-4）。E-1 のボタンには関係しない
+    {
+      const sw = box.querySelector("#set-gallery-sw") as HTMLElement;
+      const syncSw = () => sw.classList.toggle("on", galleryGuideShown(settings));
+      syncSw();
+      sw.addEventListener("click", () => {
+        toggleGalleryGuide(settings);
+        syncSw();
+        invoke("save_settings", { settings }).catch(() => {});
+      });
+    }
     (box.querySelector("#set-keys-cur") as HTMLElement).textContent =
       t("set.keys.current.label", { name: presetName(activePreset(keys)) });
     (box.querySelector("#set-keys") as HTMLElement).addEventListener("click", () => {
@@ -3406,7 +3724,7 @@ function captureKey(): { promise: Promise<KeyBinding | null>; cancel: () => void
       e.stopPropagation();
       finish(bindingFromPointer(e));
     };
-    // V165（Codex 指摘⑥）: 割り当て待ちの最中にフォーカスが移ったら候補を捨てる
+    // V165（独立レビューの指摘⑥）: 割り当て待ちの最中にフォーカスが移ったら候補を捨てる
     //（Alt+Tab・リモートデスクトップ・スクリーンキーボードで、戻ってきた瞬間に
     //  「Alt のタップ」として拾ってしまうのを防ぐ。実行側の blur と同じ考え方）
     const onBlur = () => {
@@ -3540,7 +3858,7 @@ async function openKeymapSettings() {
           render();
           return;
         }
-        // V165 (D-4・Codex 指摘④): 「押している間だけ」の操作は単体タップに割り当てられない
+        // V165 (D-4・独立レビューの指摘④): 「押している間だけ」の操作は単体タップに割り当てられない
         //（離した瞬間に発動する仕組みなので、押しっぱなしの意味を持てない）。**複製の前に断る**
         if (b.tap && isHoldOnlyCommand(cmd)) {
           await confirmDialog(t("keys.tap.holdOnly.msg", { cmd: commandLabel(cmd) }));
@@ -3548,12 +3866,12 @@ async function openKeymapSettings() {
           return;
         }
       }
-      // ★V165（Codex 指摘②）: **衝突の確認は複製より先**。あとにすると、
+      // ★V165（独立レビューの指摘②）: **衝突の確認は複製より先**。あとにすると、
       //  「置き換えますか？→ いいえ」で何も変えなかったのに**あなた用の組み合わせだけが残る**
       //  （「勝手に作られた」に見える）。組み込みと複製は中身が同じなので、
       //  衝突は複製前の実体で判定して構わない
       let conflict: CommandId | null = null;
-      // V167（Codex 指摘・低）: 取り合いの相手は複数あり得るので、消す相手をここで覚える
+      // V167（独立レビューの指摘・低）: 取り合いの相手は複数あり得るので、消す相手をここで覚える
       let clashAll: CommandId[] = [];
       if (b) {
         // M11-15: 道具どうしは衝突ではなく**共存**（同キー巡回）。findConflict は道具どうしなら null
@@ -3566,7 +3884,7 @@ async function openKeymapSettings() {
           const other = currentPreset().bindings[conflict];
           const clash = other ? modifierClash(b, other as KeyBinding) : null;
           if (clash) {
-            // ★Codex 指摘（低）: 取り合う相手は**1つとは限らない**。
+            // ★独立レビューの指摘（低）: 取り合う相手は**1つとは限らない**。
             //  古い設定に `Alt（タップ）` と `Alt＋左クリック` と `Alt＋右クリック` が
             //  同居していると、1つ消しただけでは**直ったように見えて取り合いが残る**。
             //  取り合いのときは**相手を全部**挙げて、全部消す
@@ -3739,9 +4057,12 @@ function guideSteps(): GuideStep[] {
       target: "#stage-meta .chip.export",
     },
     // V151 (③): v1.4〜v1.5 系で増えた主要機能の紹介（target なし＝中央表示。既存5ステップの後ろに1節）
+    // V198 (A-104 E-3): 先頭にギャラリーの 1 文（新しいステップは作らない）。別のキーにして改行でつなぐ＝
+    // 既存の guide.recent.msg は 7 言語とも 1 文字も変えない（吹き出しの文は white-space: pre-line）。
+    // 出るのは初回ガイド（guideDone が無い）と ⚙ からの見直しだけ＝今までと同じ（版を上げた人に出す仕組みは作らない）
     {
       title: t("guide.recent.label"),
-      text: t("guide.recent.msg"),
+      text: t("guide.recent.gallery.msg") + "\n" + t("guide.recent.msg"),
     },
   ];
 }
@@ -3846,8 +4167,13 @@ let importRunning = false;
 // 取り込み（M10-16）・読み戻し（V154 W-6）・ドロップの即編集・開く（V169）の全部が同じ門番を通る
 
 /** M10-16: 取り込み進捗モーダル。実行中は背景クリック（capture で先取り）でも
- *  Escape（modal() は元々 Esc を持たない）でも閉じない。閉じるのは finish() だけ。 */
-function openImportProgressModal(total: number): {
+ *  Escape（modal() は元々 Esc を持たない）でも閉じない。閉じるのは finish() だけ。
+ *  V200 (A-100): `labels` で見出し・印・止めるボタンの文字だけ差し替えられる（まとめ変換が同じ箱を使う。
+ *  省略したときはドロップ取り込みの今までどおり＝1 文字も変わらない） */
+function openImportProgressModal(
+  total: number,
+  labels?: { title: string; icon: IconId; cancel: string }
+): {
   setStage: (fileIdx: number, name: string, stage: 0 | 1 | 2) => void;
   finish: () => void;
   cancelRequested: () => boolean;
@@ -3858,11 +4184,11 @@ function openImportProgressModal(total: number): {
   void modal((close) => {
     closeFn = close;
     const box = document.createElement("div");
-    box.innerHTML = `<p class="modal-msg"><b>${iconHtml("import")} ${t("imp.progress.label")}</b></p>
+    box.innerHTML = `<p class="modal-msg"><b>${iconHtml(labels?.icon ?? "import")} ${labels?.title ?? t("imp.progress.label")}</b></p>
       <div class="bar"><i id="ip-bar" style="width:0%"></i></div>
       <p class="modal-path" id="ip-text"></p>
       <div class="modal-actions">
-        <button class="btn" id="ip-cancel">${t("common.cancel.btn")}</button>
+        <button class="btn" id="ip-cancel">${labels?.cancel ?? t("common.cancel.btn")}</button>
       </div>`;
     // 実行中は背面クリックで閉じない（modal 共通の pointerdown ハンドラより先に capture で止める）
     setTimeout(() => {
@@ -3962,7 +4288,9 @@ async function importDroppedProjects(paths: string[]) {
           thumbPng: Array.from(thumb),
         });
         okCount++;
-        if (paths.length === 1) toast(t("lib.drop.imported.toast", { album, name }));
+        // ★V216b (A-126 §2-1 の 7): 知らせの名前は Rust が決めた名前（在る・控えだけなら `名前 (2)`〜に替わる）
+        if (paths.length === 1)
+          toast(t("lib.drop.imported.toast", { album, name: baseFromSavedPath(lastPath) ?? name }));
       } catch (e) {
         // V173 (A-66): ここは**束縛の無い `catch {`** で、「開けませんでした」だけを出していた
         //（理由も残らない＝こちらからは永久に見えない）。理由つきのトースト＋ログにする。
@@ -3992,11 +4320,154 @@ async function importDroppedProjects(paths: string[]) {
   }
 }
 
+// ---------------- V200 (A-100・REQ-007): アルバムの 3DS 作品をまとめて .memoanima に ----------------
+
+/** V200: まとめ変換の最中（多重実行・ドロップの取り込みを止める旗。importRunning と同じ使い方）。
+ *  確認の画面を出す前から立てる（ボタンの二度押しで 2 本走らせない） */
+let kwzBatchRunning = false;
+
+/** V200: .kwz／.ppm を生バイトで読む。**読む前に**大きさの門番（`NOTE_READ_MAX_BYTES`・超えたら Rust が TOO_LARGE で断る）。
+ *  手作業の道（openEditorWithNote の read_file_bytes）と同じバイト列。JSON 配列にしない（V169 の流儀） */
+async function readNoteRaw(path: string): Promise<ArrayBuffer> {
+  const raw = await invoke<ArrayBuffer | Uint8Array | number[]>("read_file_raw", {
+    path,
+    maxBytes: NOTE_READ_MAX_BYTES,
+  });
+  const u = raw instanceof Uint8Array ? raw : raw instanceof ArrayBuffer ? new Uint8Array(raw) : new Uint8Array(raw as number[]);
+  // flipnote.js にはちょうどの長さの ArrayBuffer を渡す（手作業の道の `new Uint8Array(bytes).buffer` と同じ形）
+  return u.byteOffset === 0 && u.byteLength === u.buffer.byteLength
+    ? (u.buffer as ArrayBuffer)
+    : (u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength) as ArrayBuffer);
+}
+
+/** V200: サムネ（手作業の保存と同じ: そのとき書くサムネのコマを frameToPngBlob で） */
+async function thumbPngOf(p: Project): Promise<Uint8Array> {
+  const blob = await frameToPngBlob(p, p.thumbFrame ?? 0);
+  return blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
+}
+
+/** V200: 終わったときの知らせ（要件の 3 つ「◯件作りました／◯件は同じ名前があったので飛ばしました／◯件は作れませんでした」）。
+ *  中断したら先頭に 1 行。作れなかったものがあればログの案内を添える（理由はログにだけ書く） */
+function kwzBatchResultText(r: BatchResult): string {
+  const lines: string[] = [];
+  if (r.cancelled) lines.push(t("lib.kwzBatch.cancelled.msg", { rest: r.rest }));
+  lines.push(
+    t("lib.kwzBatch.created.msg", { n: r.created }),
+    t("lib.kwzBatch.skipped.msg", { n: r.skipped }),
+    t("lib.kwzBatch.failed.msg", { n: r.failed })
+  );
+  if (r.failed > 0) lines.push("", t("ed.log.sendHint.msg"));
+  return lines.join("\n");
+}
+
+/** V200 (A-100・REQ-007): ライブラリのアルバムの「このアルバムの 3DS 作品をまとめて .memoanima にする」。
+ *
+ *  手作業（ライブラリで .kwz を開いて Ctrl+S）と**同じもの**を、同じアルバムに 1 件ずつ作る（決まりと段取りは kwzBatch.ts）。
+ *  - 編集画面は開かない。元の .kwz／.ppm は読むだけ（Rust の read_file_raw）
+ *  - 同じ名前の .memoanima が在れば飛ばす（確認の前に数える・書くときも Rust が置き換えない）
+ *  - 進み具合と中断は取り込み（ドロップ取り込み）と同じ箱。中断は 1 件の切れ目でだけ効く＝作りかけを残さない
+ *  - 作れなかった理由はログへ（.kwz／.ppm のファイル名は残す・フォルダと作品名は落とす＝V173 と同じ作法）
+ *  - 終わったら一覧を取り直す（新しいファイルが見える） */
+async function convertAlbumNotes(album: string) {
+  if (!album) return;
+  if (kwzBatchRunning || importRunning) {
+    toast(kwzBatchRunning ? t("lib.kwzBatch.busy.toast") : t("imp.busy.toast"));
+    return;
+  }
+  const libRoot = settings.libraryDir;
+  if (!libRoot) {
+    toast(t("err.library.noDir.toast"));
+    return;
+  }
+  kwzBatchRunning = true;
+  let res: BatchResult | null = null;
+  try {
+    // 最新の一覧で数える（外で足された・消された .kwz を拾う。ドロップ取り込みと同じく取り直す）
+    let rows: PlanRow<LibraryView>[];
+    try {
+      const items = await invoke<LibraryView[]>("scan_library", { libRoot });
+      const cands = batchCandidates(items, album);
+      if (cands.length === 0) {
+        await noticeDialog(t("lib.kwzBatch.none.msg", { album }));
+        return;
+      }
+      const taken = await invoke<boolean[]>("projects_taken", {
+        libRoot,
+        album,
+        names: cands.map((c) => noteBaseName(c.name)),
+      });
+      rows = planBatch(cands, taken);
+    } catch (e) {
+      logError("import", `kwz-batch plan: ${importLogSafe(errText(e), [libRoot])}`);
+      toast(t("lib.loadError.toast", { err: errText(e) }));
+      return;
+    }
+    const n = planCounts(rows);
+    if (n.convert === 0) {
+      await noticeDialog(t("lib.kwzBatch.allSkipped.msg", { skip: n.skip }));
+      return;
+    }
+    // 確認: 何件作るか・（あれば）何件飛ばすか＋案内の 1 行（作者の決定の文のまま・別のキー）。
+    // 飛ばすのは「もう在る」と「この中で名前が重なる」の両方（レビュー指摘: 重なりはまだ在らないので、文はどちらも言う）
+    const head =
+      t("lib.kwzBatch.confirm.msg", { album, convert: n.convert }) +
+      (n.skip > 0 ? "\n" + t("lib.kwzBatch.skip.msg", { skip: n.skip }) : "");
+    if (!(await confirmDialog(head + "\n\n" + t("lib.kwzBatch.galleryNote.msg")))) return;
+    const prog = openImportProgressModal(n.convert, {
+      title: t("lib.kwzBatch.progress.msg"),
+      icon: "project",
+      cancel: t("imp.cancel.btn"),
+    });
+    try {
+      res = await runBatch(rows, {
+        read: (row) => readNoteRaw(row.item.path),
+        convert: async (buf, row) => {
+          const t0 = perfNow();
+          try {
+            return await convertNote(buf, row, { thumb: thumbPngOf });
+          } finally {
+            perfDone("note.convert", t0); // 決まった操作名と時間だけ（W-10）
+          }
+        },
+        write: async (row, c) => {
+          const r = await invoke<{ created: boolean; path: string; tmp_left: boolean }>(
+            "create_project_raw",
+            packRawSave({ libRoot, album, name: row.baseName }, [c.bytes, c.thumb])
+          );
+          // 作れたが一時ファイルの名前を消せなかった（中身は作ったファイルと同じ）。跡が残るので 1 行だけ（V173 の old name left と同じ考え方）
+          if (r.tmp_left) logError("import", `kwz-batch: ${logSafeFileLabel(row.item.path) || "-"}: tmp left`);
+          return r.created;
+        },
+        cancelled: prog.cancelRequested,
+        progress: (i, _total, row, stage) => prog.setStage(i, row.item.name, stage),
+        // W-10: .kwz／.ppm のファイル名は残す（3DS のハッシュ名で作品名ではない）。フォルダ・作品名・ライブラリの場所は落とす
+        failed: (row, e) => {
+          const label = logSafeFileLabel(row.item.path);
+          logError(
+            "import",
+            `kwz-batch: ${label ? `${label}: ` : ""}${importLogSafe(failReason(e), [row.item.path, libRoot])}`
+          );
+        },
+        yieldNow: yieldToPaint,
+      });
+    } finally {
+      prog.finish();
+    }
+  } finally {
+    kwzBatchRunning = false;
+  }
+  if (!res) return;
+  // 新しいファイルが見えるように一覧を取り直す（アルバムとスクロールはそのまま＝refresh の決まり）
+  await library.refresh();
+  await noticeDialog(kwzBatchResultText(res));
+}
+
 /** ドロップ処理の本体（onDragDropEvent から呼ぶ。DEV検証フックも同じ経路を通す） */
 async function handleDroppedPaths(paths: string[]) {
   // M10-16: 取り込み実行中の追加ドロップは無視（ダイアログも出さない・フラグ1本）
-  if (importRunning) {
-    toast(t("imp.busy.toast"));
+  // V200: まとめ変換の最中も同じ（同じアルバムへ書く 2 本目を走らせない）
+  if (importRunning || kwzBatchRunning) {
+    toast(kwzBatchRunning ? t("lib.kwzBatch.busy.toast") : t("imp.busy.toast"));
     return;
   }
   // M10-14: .kwz/.ppm は従来どおり即取り込み、.memoanima/.animemo は選択ダイアログへ
@@ -4062,7 +4533,8 @@ async function handleDroppedPaths(paths: string[]) {
       ) {
         return;
       }
-      showEditor(project, null);
+      // V199 (A-106): 左上・保存の既定の名前は、ドロップしたファイルの名前（拡張子なし）
+      showEditor(project, null, { fileName: stripExt(projPaths[0].split(/[\\/]/).pop() ?? "") });
     } catch (e) {
       // V173 (A-66): トーストは従来どおり（理由つき）。**ログが無かった**ので足す
       logError("import", `drop open: ${importLogSafe(errText(e), projPaths)}`);
@@ -5518,6 +5990,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   applyKeys();
   // M7-2b: ⚙ = 設定メニュー（エクスプローラー直結を廃止。フォルダ変更はメニュー内へ移設）
   $("#lib-change-dir").addEventListener("click", () => void openSettingsMenu());
+  // V198 (A-104 E-1): 「ギャラリー」＝既定のブラウザでギャラリーを開くだけ（画面は変えない・設定に関係なく使える）
+  $("#lib-gallery").addEventListener("click", () => openGalleryUrl(GALLERY_URL));
   // M12-E: 誤リロードのガードと、危ない操作の直前オートセーブ。**アプリの生存中ずっと**張る
   // （エディタの mount/unmount には紐づけない。中の判定は `editorOpen` で行う）。
   // keydown は **capture** ＝ 既存の bubble のハンドラとは別の口。順序は変えない。
@@ -5609,8 +6083,24 @@ const libraryCallbacks = {
   openEditorWithNote,
   openEditorWithProject,
   newNote,
-  openExport: (source: FrameSource, baseName: string, audio?: ExportAudioSource | null) =>
-    void openExportDialog(source, baseName, null, audio),
+  // V200 (A-100): アルバムの「まとめて .memoanima にする」。走っているあいだ（確認の前の数えも）はフォルダ・1 件の取り込みを始めない
+  convertAlbumNotes: (album: string) => void convertAlbumNotes(album),
+  kwzBatchBusy: () => kwzBatchRunning,
+  // V198 (E-2): ライブラリから書き出したときの「保存先を開く」は、選んでいる作品（.memoanima/.animemo のときだけ library が渡す）
+  openExport: (
+    source: FrameSource,
+    baseName: string,
+    audio?: ExportAudioSource | null,
+    work?: { album: string; name: string } | null
+  ) =>
+    void openExportDialog(
+      source,
+      baseName,
+      null,
+      audio,
+      undefined,
+      work && settings.libraryDir ? { libRoot: settings.libraryDir, album: work.album, name: work.name } : null
+    ),
   confirm: confirmDialog,
   prompt: promptDialog,
   toast,

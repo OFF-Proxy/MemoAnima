@@ -22,6 +22,7 @@ import {
   type Project,
 } from "../src/editor/model";
 import { compositeFrame } from "../src/editor/render";
+import { readEditorSource } from "./editorSource";
 import {
   sanitizeOnionLevel,
   sanitizeOnionDir,
@@ -166,14 +167,15 @@ function make3(): Project {
   check("5 ★作品の上限際は入るぶんだけ＋clamped", c(50, 65500).n === 35 && c(50, 65500).clamped);
   check("5 ★上限に達していたら 0 枚（呼ぶ側が上限のトーストを出す）", c(5, 65535).n === 0 && c(5, 65535).clamped);
   check("5 上限を1枚だけ超える要求", c(2, 65534).n === 1 && c(2, 65534).clamped);
-  // Codex V164 指摘②: `clamped` は**作品の上限（65,535）に当たったときだけ**。
+  // 独立レビュー V164 指摘②: `clamped` は**作品の上限（65,535）に当たったときだけ**。
   // 1回の上限（100）への丸めは小窓が先に見せるので、ここでは false（契約を検査で固定する）
   check("5 ★clamped は 65,535 に当たったときだけ（100 への丸めでは立たない）", !c(1000).clamped && c(1000).n === ADD_FRAMES_MAX);
 }
 
 // ================= 6. 配線の走査 =================
 {
-  const ed = fs.readFileSync(path.join(root, "src/editor/editor.ts"), "utf8");
+  // V213: editor.ts とコア（src/editor/core/editorCore.ts）を合わせて読む（数え方は同じ）
+  const ed = readEditorSource(root);
   const main = fs.readFileSync(path.join(root, "src/main.ts"), "utf8");
   const render = fs.readFileSync(path.join(root, "src/editor/render.ts"), "utf8");
 
@@ -182,9 +184,11 @@ function make3(): Project {
   const iTool = ed.indexOf('<div id="ed-toolopts"></div>');
   const iOnion = ed.indexOf('<div class="oni" id="ed-onion">');
   const iSize = ed.indexOf('<div class="sizes" id="ed-sizes">');
-  const iPal = ed.indexOf('<div class="pal" id="ed-pal">');
+  // ★V215 (A-124): 帯は色の段（上段の下端・道具の段の外）へ移り、行の上限のクラス（pal-rows）が付いた。見る字を新しい置き場所に合わせた
+  //  （並びの決まりは同じ＝帯はオニオンより後ろ。見つからなければ -1 で赤に倒れる）
+  const iPal = ed.indexOf('<div class="pal pal-rows" id="ed-pal">');
   check("6 ★オニオンが道具オプションの直後（上段の先頭付近）", iTool >= 0 && iOnion > iTool && iOnion < iSize, `tool=${iTool} onion=${iOnion} size=${iSize}`);
-  check("6 ★オニオンが「太さ」「色」より前にある", iOnion < iSize && iOnion < iPal);
+  check("6 ★オニオンが「太さ」「色」より前にある", iOnion < iSize && iPal > 0 && iOnion < iPal);
   check("6 向きの帯がオニオンの隣にある", ed.indexOf('id="ed-oniondir"') > iOnion);
   // V158 の記述ミス（「ここまでが上段」）が直っている
   check("6 V158 の誤ったコメントが残っていない", !ed.includes("ここまでが上段（道具）。以降が下段（レイヤー）"));
@@ -213,15 +217,15 @@ function make3(): Project {
   check("6 2,000 コマ超の注意はそのまま通る", /ed\.common\.manyFrames\.toast/.test(ed));
   check("6 65,535 の上限のトーストを通る", /ed\.tl\.addFrame\.limit\.toast/.test(ed));
   check("6 ダイアログの閉じ手を unmount で畳む", /this\.addFramesDialogClose\?\.\(\)/.test(ed));
-  // Codex V164 指摘①: 取り消したら**押す前のコマ**へ戻る（追加後の位置＝最大100コマ先に居座らない）
+  // 独立レビュー V164 指摘①: 取り消したら**押す前のコマ**へ戻る（追加後の位置＝最大100コマ先に居座らない）
   check(
     "6 ★取り消しで押す前のコマへ戻る（beforeIndex を覚えている）",
     /const beforeIndex = this\.frameIndex;/.test(ed) &&
       /self\.frameIndex = Math\.max\(0, Math\.min\(beforeIndex, self\.project\.frames\.length - 1\)\)/.test(ed)
   );
-  // Codex V164 指摘②: 上限への丸めを**押す前に**入力欄で見せる
+  // 独立レビュー V164 指摘②: 上限への丸めを**押す前に**入力欄で見せる
   check("6 ★枚数の入力欄が確定時に 1〜上限へ丸まる", /input\.addEventListener\("change"[\s\S]{0,260}?Math\.max\(1, Math\.min\(max, raw\)\)/.test(ed));
-  // Codex V164 指摘③: en/es/pt-BR の「1 frames」を避ける（数を末尾に置く形）
+  // 独立レビュー V164 指摘③: en/es/pt-BR の「1 frames」を避ける（数を末尾に置く形）
   for (const lang of ["en", "es", "pt-BR"] as const) {
     const dict = fs.readFileSync(path.join(root, `src/i18n/${lang}.ts`), "utf8");
     const m = dict.match(/"ed\.tl\.addFrames\.done\.toast": "([^"]*)"/);

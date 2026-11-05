@@ -32,8 +32,8 @@ export function isProjectLikeName(name: string): boolean {
  *  Rust の失敗の文には取り込み元のフルパスが混ざり得る（例:「取り込み元が見つかりません: <フルパス>」）
  *  ＝**利用者名と作品名がログに残る**。
  *
- *  ★Codex 指摘（優先度 高）: 語（空白区切り）だけを見る形だと、**名前に空白がある作品**で
- *   `C:\Users\me\作品 1.memoanima` → `<path> 1.memoanima` となり、**名前の断片が残った**。
+ *  ★独立レビューの指摘（優先度 高）: 語（空白区切り）だけを見る形だと、**名前に空白がある作品**で
+ *   `D:\Users\me\作品 1.memoanima` → `<path> 1.memoanima` となり、**名前の断片が残った**。
  *   そこで「分かっているパスを**先に完全一致で**消す」→「残りを保険で落とす」の 2 段にした。
  *   ここに置いたのは、**この漏れ方そのものを Node で叩く**ため（`v173_smoke` [S-15]）。
  *
@@ -45,8 +45,8 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** V173b: `k` を「区切り文字の書き方が違っても」「大文字小文字が違っても」消す。
  *
- *  ★Codex 指摘（優先度 高）: 完全一致だけだと、`known` が `C:\Users\John Doe\…` なのに
- *   理由の中が `C:/Users/John Doe/…`（区切りが逆）のとき**素通りし**、そのあとの保険が
+ *  ★独立レビューの指摘（優先度 高）: 完全一致だけだと、`known` が `D:\Users\John Doe\…` なのに
+ *   理由の中が `D:/Users/John Doe/…`（区切りが逆）のとき**素通りし**、そのあとの保険が
  *   空白で止まるので `<path> Doe/My Album/<file>` のように**利用者名とフォルダ名の断片が残る**。 */
 function blotOut(s: string, k: string, repl: string): string {
   const variants = new Set([k, k.replace(/\\/g, "/"), k.replace(/\//g, "\\")]);
@@ -65,12 +65,17 @@ export function importLogSafe(detail: string, known: string[] = []): string {
     if (isProjectLikeName(base)) {
       s = blotOut(s, k, "<file>");
       if (base) s = blotOut(s, base, "<file>");
+    } else if (isNoteName(base)) {
+      // ★V216b (A-133): .kwz／.ppm は 3DS が付ける名前の形のときだけ名前を残す。改名したもの（作品名が入りうる）は拡張子だけ
+      const label = logSafeFileLabel(base);
+      s = blotOut(s, k, label);
+      if (label !== base) s = blotOut(s, base, label);
     } else {
       s = blotOut(s, k, base); // フォルダだけ落とす（ファイル名は残す）
     }
   }
-  // ★V173b（Codex 指摘・高）: **作品ファイルへのパスは空白をまたいで**落とす。
-  //  下の保険はどれも空白で止まるので、`C:/Users/John Doe/My Album/Secret Work.memoanima` のように
+  // ★V173b（独立レビューの指摘・高）: **作品ファイルへのパスは空白をまたいで**落とす。
+  //  下の保険はどれも空白で止まるので、`D:/Users/John Doe/My Album/Secret Work.memoanima` のように
   //  **パスの途中に空白がある**と断片が残っていた。始まりは「パスらしい印」に限る＝日本語の説明文を飲み込まない。
   //  終わりは作品の拡張子（最短一致）。
   //  ⚠ **後読み（`(?<=…)`）は使わない**——この行は Mac（JavaScriptCore）でも走る。代わりに
@@ -96,13 +101,40 @@ export function importLogSafe(detail: string, known: string[] = []): string {
 
 /** V173b: ログの頭に付けてよい**ファイル名**（`.kwz` / `.ppm` だけ）。無ければ空文字。
  *
- *  ★Codex 指摘（優先度 低）: 解析ライブラリには `ArrayBuffer` を渡すので、失敗の理由に
+ *  ★独立レビューの指摘（優先度 低）: 解析ライブラリには `ArrayBuffer` を渡すので、失敗の理由に
  *   **ファイル名が入らない**。壊れた `.kwz` が複数あると、ログはどれも同じ 1 行になり
  *   「どれが失敗したか」が分からない。3DS の kwz は英数字のハッシュ名で**作品名ではない**ので、
  *   ここだけは名前を書いてよい（要件 §2 W-10）。`.memoanima` は名前＝作品名なので**付けない**。 */
 export function logSafeFileLabel(p: string): string {
   const base = (p.split(/[\\/]/).pop() ?? "").trim();
-  return /\.(?:kwz|ppm)$/i.test(base) ? base : "";
+  const m = /^(.*)\.(kwz|ppm)$/i.exec(base);
+  if (!m) return "";
+  // ★V216b (A-133・C-27): 名前を残すのは 3DS が付ける名前の形のときだけ（拡張子の前で見る）。ほか（改名したもの）は拡張子だけ
+  const ext = m[2].toLowerCase() as "kwz" | "ppm";
+  return isDsNoteStem(m[1], ext) ? base : `*.${ext}`;
+}
+
+/** ★V216b (A-133): 3DS が付ける名前の形（flipnote.js の `REGEX_KWZ_FILENAME`・`REGEX_PPM_FILENAME`・`REGEX_PPM_LOCAL_FILENAME` と同じ）。
+ *  拡張子の前の部分で見る。大文字と小文字も同じ決まり（kwz は小文字・ppm は大文字の 16 進）＝違えば「3DS の形ではない」 */
+export const DS_KWZ_STEM = /^[0-5a-z]{28}$/;
+export const DS_PPM_STEM = /^[0-9A-F]{6}_[0-9A-F]{13}_[0-9]{3}$/;
+export const DS_PPM_LOCAL_STEM = /^[0-9A-Z]{1}[0-9A-F]{5}_[0-9A-F]{13}_[0-9]{3}$/;
+
+function isDsNoteStem(stem: string, ext: "kwz" | "ppm"): boolean {
+  return ext === "kwz" ? DS_KWZ_STEM.test(stem) : DS_PPM_STEM.test(stem) || DS_PPM_LOCAL_STEM.test(stem);
+}
+
+/** V216b: .kwz／.ppm のファイル名か（拡張子だけを見る） */
+function isNoteName(base: string): boolean {
+  return /\.(?:kwz|ppm)$/i.test(base);
+}
+
+/** ★V216b (A-133): SD の取り込みの失敗の 1 行（Rust の `"<ファイル名>: <理由>"`）をログに書ける形にする。
+ *  名前は `logSafeFileLabel` を通す（3DS の形のときだけ残す）。名前と理由を切り分けられない形は名前ごと出さない（`-`） */
+export function bulkImportErrorLogSafe(e: string): string {
+  const m = /^(.*\.(?:kwz|ppm)): ([\s\S]*)$/i.exec(e);
+  if (!m) return "-";
+  return `${logSafeFileLabel(m[1])}: ${m[2]}`;
 }
 
 /** ドロップ取り込みで使う「保存名の素」。**先に `.gz` を外してから**拡張子を落とす。

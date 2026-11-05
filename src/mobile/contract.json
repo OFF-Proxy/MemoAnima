@@ -1,0 +1,146 @@
+{
+  "_": "V202 (M-1a): モバイルの JS と Rust の約束の 1 か所の表。Rust は src-tauri/src/pclib/mobile/contract.rs が include_str! で読み、命令・型・断る値と突き合わせる（cargo test）。JS は scripts/v202_smoke.ts が src/mobile/port.ts・session.ts と構文木で突き合わせ、見本を両側の関数に通す。片側だけ変えると赤",
+  "argsKey": "args",
+  "commands": [
+    { "name": "mobile_save_new", "body": "raw", "meta": { "album": "A", "name": "作品", "selfName": null }, "parts": ["data", "thumb"], "returns": "SaveResult", "metaType": "NewMeta" },
+    { "name": "mobile_save_overwrite", "body": "raw", "meta": { "album": "A", "name": "作品.memoanima", "sourceFingerprint": { "sha256": "9c5668158ebd3d5df576285859df83958c8b9e70bd03c408d55712e53adf8ad0", "size": 9 } }, "parts": ["data", "thumb"], "returns": "SaveResult", "metaType": "OverwriteMeta" },
+    { "name": "mobile_read_work", "body": "args", "args": { "album": "A", "name": "作品.memoanima" }, "argsType": "WorkArgs", "returns": "envelope:WorkHead" },
+    { "name": "mobile_find_works", "body": "args", "args": { "workId": "3f2a9c1e-7b4d-4e8a-9c2b-1d5e6f7a8b9c", "fingerprint": { "sha256": "9c5668158ebd3d5df576285859df83958c8b9e70bd03c408d55712e53adf8ad0", "size": 9 } }, "argsType": "FindArgs", "returns": "FoundWork[]" },
+    { "name": "mobile_resume", "body": "none", "returns": "ResumeItem[]" },
+    { "name": "mobile_rename_work", "body": "args", "args": { "album": "A", "name": "作品.memoanima", "newName": "新しい名前" }, "argsType": "RenameWorkArgs", "returns": "WorkPlace" },
+    { "name": "mobile_move_work", "body": "args", "args": { "album": "A", "name": "作品.memoanima", "destAlbum": "B" }, "argsType": "MoveWorkArgs", "returns": "WorkPlace" },
+    { "name": "mobile_create_album", "body": "args", "args": { "name": "アルバム" }, "argsType": "AlbumNameArgs", "returns": "AlbumPlace" },
+    { "name": "mobile_rename_album", "body": "args", "args": { "album": "A", "newName": "B" }, "argsType": "RenameAlbumArgs", "returns": "AlbumPlace" },
+    { "name": "mobile_free_space", "body": "none", "returns": "FreeSpace" },
+    { "name": "mobile_library_root", "body": "none", "returns": "string" },
+    { "name": "mobile_autosave_next_gen", "body": "none", "returns": "number" },
+    { "name": "mobile_autosave_write", "body": "raw", "meta": { "session": "0123456789abcdef0123456789abcdef", "gen": 7, "meta": { "title": "見本" } }, "parts": ["data"], "returns": "null", "metaType": "AutosaveWriteMeta" },
+    { "name": "mobile_autosave_list", "body": "none", "returns": "SessionEntry[]" },
+    { "name": "mobile_autosave_read", "body": "args", "args": { "session": "0123456789abcdef0123456789abcdef" }, "argsType": "SessionArgs", "returns": "envelope:AutosaveMeta" },
+    { "name": "mobile_autosave_delete", "body": "args", "args": { "session": "0123456789abcdef0123456789abcdef", "gen": 8 }, "argsType": "SessionGenArgs", "returns": "null" },
+    { "name": "mobile_autosave_claim", "body": "args", "args": { "session": "0123456789abcdef0123456789abcdef", "gen": 9 }, "argsType": "SessionGenArgs", "returns": "null" },
+    { "name": "mobile_library_init", "body": "args", "args": { "album": "未分類" }, "argsType": "LibraryInitArgs", "returns": "LibraryInit" }
+  ],
+  "androidCommands": [
+    { "name": "mobile_chunk_begin", "args": { "kind": "saveNew", "total": 9 }, "argsType": "ChunkBeginArgs", "returns": "string" },
+    { "name": "mobile_chunk_put", "args": { "upload": "0123456789abcdef0123456789abcdef", "index": 0, "data": "AAAA" }, "argsType": "ChunkPutArgs", "returns": "null" },
+    { "name": "mobile_chunk_save_new", "args": { "upload": "0123456789abcdef0123456789abcdef" }, "argsType": "UploadArgs", "returns": "SaveResult" },
+    { "name": "mobile_chunk_save_overwrite", "args": { "upload": "0123456789abcdef0123456789abcdef" }, "argsType": "UploadArgs", "returns": "SaveResult" },
+    { "name": "mobile_chunk_autosave_write", "args": { "upload": "0123456789abcdef0123456789abcdef" }, "argsType": "UploadArgs", "returns": "null" },
+    { "name": "mobile_chunk_abort", "args": { "upload": "0123456789abcdef0123456789abcdef" }, "argsType": "UploadArgs", "returns": "null" },
+    { "name": "mobile_read_begin", "args": { "kind": "work", "album": "A", "name": "作品.memoanima" }, "argsType": "ReadBeginArgs", "returns": "ReadHandle" },
+    { "name": "mobile_read_slice", "args": { "download": "0123456789abcdef0123456789abcdef", "offset": 0, "len": 4 }, "argsType": "ReadSliceArgs", "returns": "raw" },
+    { "name": "mobile_read_end", "args": { "download": "0123456789abcdef0123456789abcdef" }, "argsType": "DownloadArgs", "returns": "null" }
+  ],
+  "types": {
+    "SaveResult": ["fingerprint", "album", "name", "oursMoved", "keptCopies", "recordLeft"],
+    "FoundWork": ["album", "name", "idMatch", "fingerprintMatch"],
+    "ResumeItem": ["album", "name", "outcome"],
+    "WorkPlace": ["album", "name"],
+    "AlbumPlace": ["album"],
+    "FreeSpace": ["available", "total"],
+    "SessionEntry": ["session", "meta", "from"],
+    "Fingerprint": ["sha256", "size"],
+    "WorkHead": ["fingerprint", "album"],
+    "EvacRecord": ["v", "album", "name", "sourceFingerprint", "newFingerprint"],
+    "AutosaveMeta": ["title", "album", "name", "workId", "baseRev", "sourceFingerprint", "unsaved", "savedAt"],
+    "LibraryInit": ["steps", "ready"]
+  },
+  "initSteps": ["library", "album", "index", "mark"],
+  "settingsKey": "mobileLibraryReady",
+  "resumeOutcomes": ["restored", "backup", "copy", "dropped", "waiting"],
+  "sessionFrom": ["body", "bak"],
+  "refusals": [
+    "bad-request",
+    "bad-name",
+    "name-too-long",
+    "name-taken",
+    "album-missing",
+    "target-missing",
+    "fingerprint-mismatch",
+    "pending-record",
+    "stale-generation",
+    "bad-session",
+    "too-large",
+    "cross-volume",
+    "no-space",
+    "cannot-place",
+    "verify-failed",
+    "outside",
+    "unsupported",
+    "io"
+  ],
+  "envelope": {
+    "_": "読む命令（mobile_read_work・mobile_autosave_read）の封筒＝P-3 の pack_autosave_payload と同じ並び: [u32 LE 頭の長さ][{meta, path} の JSON（空白で埋めて作品が 8 の倍数の位置から）][作品]",
+    "meta": { "album": "A", "title": "見本" },
+    "path": "0123456789abcdef0123456789abcdef",
+    "dataHex": "010203ff",
+    "hex": "540000007b226d657461223a7b22616c62756d223a2241222c227469746c65223a22e8a68be69cac227d2c2270617468223a223031323334353637383961626364656630313233343536373839616263646566227d202020010203ff"
+  },
+  "saveBody": {
+    "_": "作品を運ぶ命令（mobile_save_new・mobile_save_overwrite・mobile_autosave_write）の生のボディ＝PC の save_project_raw と同じ封筒: [u32 LE 印の長さ][印の JSON]（[u32 LE 長さ][中身]）× n",
+    "meta": { "album": "A", "name": "作品", "selfName": null },
+    "partsHex": ["010203", ""],
+    "hex": "2d0000007b22616c62756d223a2241222c226e616d65223a22e4bd9ce59381222c2273656c664e616d65223a6e756c6c7d0300000001020300000000"
+  },
+  "fingerprint": {
+    "_": "指紋＝ファイルの中身の SHA-256（小文字の hex 64 字）と大きさ（バイト数）の組",
+    "text": "memoanima",
+    "sha256": "9c5668158ebd3d5df576285859df83958c8b9e70bd03c408d55712e53adf8ad0",
+    "size": 9
+  },
+  "formats": {
+    "workId": {
+      "_": "作品の ID（小文字だけを正とする・作るのは JS の newWorkId だけ）。JS の WORK_ID_RE と Rust の find::is_work_id が同じ答えを出す",
+      "valid": ["3f2a9c1e-7b4d-4e8a-9c2b-1d5e6f7a8b9c", "00000000-0000-1000-8000-000000000000", "ffffffff-ffff-8fff-bfff-ffffffffffff"],
+      "invalid": [
+        "3F2A9C1E-7B4D-4E8A-9C2B-1D5E6F7A8B9C",
+        "3f2a9c1e-7b4d-4E8a-9c2b-1d5e6f7a8b9c",
+        "00000000-0000-0000-0000-000000000000",
+        "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        "3f2a9c1e-7b4d-9e8a-9c2b-1d5e6f7a8b9c",
+        "3f2a9c1e-7b4d-4e8a-cc2b-1d5e6f7a8b9c",
+        "3f2a9c1e7b4d4e8a9c2b1d5e6f7a8b9c",
+        "{3f2a9c1e-7b4d-4e8a-9c2b-1d5e6f7a8b9c}",
+        "",
+        "3f2a9c1e-7b4d-4e8a-9c2b-1d5e6f7a8b9"
+      ]
+    },
+    "session": {
+      "_": "開いた作品ごとのオートセーブの番号（小文字の hex 32 字・作るのは JS の部品）",
+      "valid": ["0123456789abcdef0123456789abcdef", "ffffffffffffffffffffffffffffffff"],
+      "invalid": ["0123456789ABCDEF0123456789ABCDEF", "0123456789abcdef0123456789abcde", "0123456789abcdef0123456789abcdef0", "../../../../../../../../settings", "0123456789abcdef0123456789abcdeg", ""]
+    },
+    "record": {
+      "_": "退避の記録の番号（小文字の hex 16 字・作るのは Rust だけ）",
+      "valid": ["0123456789abcdef"],
+      "invalid": ["0123456789ABCDEF", "0123456789abcde", "..", ""]
+    },
+    "foldSame": [["Sakuhin", "SAKUHIN"], ["が", "が"], ["Äpfel", "äpfel"], ["İstanbul", "i̇stanbul"], ["作品A.memoanima", "作品a.MEMOANIMA"]],
+    "foldDiffer": [["a", "b"], ["ß", "ss"], ["作品", "作品1"]],
+    "newWorkBase": [
+      ["作品", "作品"],
+      ["CON", "CON_"],
+      ["con.v2", "con_.v2"],
+      ["COM1", "COM1_"],
+      ["LPT¹", "LPT¹_"],
+      ["CONSOLE", "CONSOLE"],
+      ["x.memoanima", "x"],
+      ["Y.ANIMEMO", "Y"],
+      ["a:b?", "a_b_"],
+      ["が", "が"],
+      ["trailing. ", "trailing"],
+      ["", "_"]
+    ]
+  },
+  "limits": {
+    "readMaxBytes": 536870912,
+    "nameMaxBytes": 255,
+    "tmpMarkMax": 36,
+    "fileMaxBytes": 219
+  },
+  "dirs": {
+    "sessions": "autosave/sessions",
+    "evac": "save-evac"
+  }
+}

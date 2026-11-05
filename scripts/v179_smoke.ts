@@ -2133,7 +2133,7 @@ const COUNTERS: Counter[] = [
   },
   {
     id: "12z",
-    what: "★main.ts で本物の canvas の代わりに受け口を付けない偽物を渡す（Codex 3 回目の形）",
+    what: "★main.ts で本物の canvas の代わりに受け口を付けない偽物を渡す（独立レビュー 3 回目の形）",
     edits: [
       {
         file: "src/main.ts",

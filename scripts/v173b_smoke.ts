@@ -86,7 +86,7 @@ const checkS16 = (src: string): { ok: boolean; why: string } => {
   const b = fnBody(src, "showLoadError");
   if (b === "") return { ok: false, why: "showLoadError が見つからない" };
   if (!/logError\??\.?\(/.test(b)) return { ok: false, why: "★logError が無い（理由がログに残らない）" };
-  // ⚠ Codex 指摘（中）: 本体には `lib.open.tooLarge.msg` などがあるので、`"open"` を**どこかに**探すだけだと
+  // ⚠ 独立レビューの指摘（中）: 本体には `lib.open.tooLarge.msg` などがあるので、`"open"` を**どこかに**探すだけだと
   //  種別を `"import"` に壊しても緑のままだった。**呼び出しの第1引数**を直接見る
   if (!/logError\??\.?\(\s*["']open["']/.test(b)) return { ok: false, why: 'ログの種別が "open" でない（第1引数）' };
   return { ok: true, why: "" };
@@ -125,7 +125,7 @@ const checkS17 = (src: string): { ok: boolean; why: string } => {
   // 2z: known を外した写し（伏せ字が効かなくなる）
   const z2 = libTs.replace(b, b.replace(/importLogSafe\(([A-Za-z_$][\w$]*),\s*[A-Za-z_$][\w$]*\)/, "importLogSafe($1)"));
   check("[S-18] 2z: importLogSafe から known を外した写しは [S-17] が赤", b !== "" && z2 !== libTs && !checkS17(z2).ok);
-  // 3z（Codex 指摘・中）: 種別だけ "import" に変えた写しも赤になること（呼び出しは複数行）
+  // 3z（独立レビューの指摘・中）: 種別だけ "import" に変えた写しも赤になること（呼び出しは複数行）
   const z3 = libTs.replace(b, b.replace(/(logError\?\.\(\s*)"open"/, '$1"import"'));
   check("[S-18] 3z: ログの種別を \"import\" に変えた写しは [S-16] が赤", b !== "" && z3 !== libTs && !checkS16(z3).ok);
 }
@@ -153,7 +153,7 @@ const checkS17 = (src: string): { ok: boolean; why: string } => {
   ];
   const off = OTHERS.filter(([l, w]) => !(read(`src/i18n/${l}.ts`).match(/"lib\.open\.unreadable\.msg": "([^"]+)"/)?.[1] ?? "").includes(w));
   check("[S-19] 6 言語とも「アニメーション」に当たる語で言っている", off.length === 0, off.map(([l]) => l).join(", "));
-  // 「次に何をすればいいか」が入っている（Codex 指摘・低）
+  // 「次に何をすればいいか」が入っている（独立レビューの指摘・低）
   const noAction = LANGS.filter((l) => {
     const v = read(`src/i18n/${l}.ts`).match(/"lib\.open\.unreadable\.msg": "([^"]+)"/)?.[1] ?? "";
     return !/(お試し|another file|otro archivo|outro arquivo|다른 파일|其他文件|其他檔案)/.test(v);
@@ -208,27 +208,27 @@ if (!gz) {
 } else {
   const { importLogSafe } = gz;
   // R-12: `.memoanima` は名前＝作品名なので、フルパスも名前も残さない
-  const projPath = "C:\\Users\\me\\Documents\\AniMemoライブラリ\\album\\わたしの 作品.memoanima";
+  const projPath = "C:\\Users\\me\\Documents\\MemoAnimaライブラリ\\album\\わたしの 作品.memoanima";
   const s1 = importLogSafe(`読み込み失敗: ${projPath} が壊れています`, [projPath]);
   check("[S-21] ★.memoanima は作品名もパスも残らない（空白入りの名前でも）",
     !s1.includes("わたしの") && !s1.includes("作品") && !s1.includes("me") && s1.includes("<file>"), s1);
   // R-11: `.kwz` はファイル名が残る（3DS のハッシュ名＝作品名ではない・どれが失敗したかの手掛かり）
-  const kwzPath = "C:\\Users\\me\\Documents\\AniMemoライブラリ\\album\\ABCD1234.kwz";
+  const kwzPath = "C:\\Users\\me\\Documents\\MemoAnimaライブラリ\\album\\abcd1234efgh1234ijkl1234mnop.kwz";
   const s2 = importLogSafe(`Error loading Flipnote: flipnote.js error: Could not identify source as a valid Flipnote file`, [kwzPath]);
   check("[S-21] ★ログには原文（英語）が残る（画面と用途が違う）", s2.includes("Could not identify source as a valid Flipnote file") && s2.includes("flipnote.js error"), s2);
   const s3 = importLogSafe(`読み込み失敗: ${kwzPath}`, [kwzPath]);
-  check("[S-21] .kwz はファイル名が残り、フォルダは消える", s3.includes("ABCD1234.kwz") && !s3.includes("Users") && !s3.includes("me"), s3);
+  check("[S-21] .kwz はファイル名が残り、フォルダは消える", s3.includes("abcd1234efgh1234ijkl1234mnop.kwz") && !s3.includes("Users") && !s3.includes("me"), s3);
 
-  // ===== Codex 指摘（優先度 高）の漏れ方を実際に叩く =====
+  // ===== 独立レビューの指摘（優先度 高）の漏れ方を実際に叩く =====
   // ★known とエラー文で**区切り文字の書き方がズレる**（Rust 側が正規化する等）と、
   //  完全一致では素通りし、保険は空白で止まるので**利用者名とフォルダ名の断片が残っていた**
-  const win = "C:\\Users\\John Doe\\My Album\\Secret Work.memoanima";
-  const posix = "C:/Users/John Doe/My Album/Secret Work.memoanima";
+  const win = "D:\\Users\\John Doe\\My Album\\Secret Work.memoanima";
+  const posix = "D:/Users/John Doe/My Album/Secret Work.memoanima";
   const leak = (s: string) => /John|Doe|My Album|Secret|Work/.test(s);
   check("[S-21] ★区切りが逆でも漏れない（known=\\ ／ 理由=/）", !leak(importLogSafe(`読み込み失敗: ${posix}`, [win])), importLogSafe(`読み込み失敗: ${posix}`, [win]));
   check("[S-21] ★区切りが逆でも漏れない（known=/ ／ 理由=\\）", !leak(importLogSafe(`読み込み失敗: ${win}`, [posix])), importLogSafe(`読み込み失敗: ${win}`, [posix]));
   check("[S-21] ★known を渡し忘れても漏れない（空白入りのフルパス）", !leak(importLogSafe(`読み込み失敗: ${posix}`)) && !leak(importLogSafe(`読み込み失敗: ${win}`)), importLogSafe(`読み込み失敗: ${posix}`));
-  check("[S-21] ★大文字の拡張子でも漏れない", !leak(importLogSafe("読み込み失敗: C:/Users/John Doe/My Album/Secret Work.MEMOANIMA")));
+  check("[S-21] ★大文字の拡張子でも漏れない", !leak(importLogSafe("読み込み失敗: D:/Users/John Doe/My Album/Secret Work.MEMOANIMA")));
   check("[S-21] ★UNC でも漏れない", !leak(importLogSafe("読み込み失敗: \\\\nas\\share\\John Doe\\Secret Work.animemo")));
   check("[S-21] ★相対パスでも漏れない", !leak(importLogSafe("読み込み失敗: ./John Doe/Secret Work.memoanima.gz")));
   check("[S-21] ★大小が違う known でも漏れない", !leak(importLogSafe(`読み込み失敗: ${win}`, [win.toLowerCase()])));
@@ -242,9 +242,10 @@ if (!gz) {
   check("[S-21] 説明文を巻き込まない", importLogSafe("この作品は約 600 MB で、開ける上限を超えています").includes("開ける上限"));
   check("[S-21] `mp3/wav/ogg` は潰さない", importLogSafe("対応していない形式です: mp3/wav/ogg のみ").includes("mp3/wav/ogg"));
 
-  // ===== Codex 指摘（優先度 低）: どれが失敗したかが分かる =====
+  // ===== 独立レビューの指摘（優先度 低）: どれが失敗したかが分かる =====
   const { logSafeFileLabel } = gz;
-  check("[S-21] logSafeFileLabel: .kwz / .ppm はファイル名を返す", logSafeFileLabel(kwzPath) === "ABCD1234.kwz" && logSafeFileLabel("/x/y/A.PPM") === "A.PPM");
+  // ★V216b (A-133): 名前を残すのは 3DS が付ける名前の形のときだけ（材料を 3DS の形の名前にした。改名した形は v216b_smoke [N] が見る）
+  check("[S-21] logSafeFileLabel: .kwz / .ppm はファイル名を返す", logSafeFileLabel(kwzPath) === "abcd1234efgh1234ijkl1234mnop.kwz" && logSafeFileLabel("/x/y/F12345_0123456789ABC_001.PPM") === "F12345_0123456789ABC_001.PPM");
   check("[S-21] ★logSafeFileLabel: 作品ファイルには何も付けない（名前＝作品名）", logSafeFileLabel(projPath) === "" && logSafeFileLabel("a/b.memoanima.gz") === "");
   const sle = fnBody(libTs, "showLoadError");
   check("[S-21] showLoadError が .kwz のときだけ名前を頭に付ける", /logSafeFileLabel/.test(sle) && /label \? `\$\{label\}:` : ""/.test(sle));

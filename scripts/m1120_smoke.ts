@@ -7,7 +7,9 @@
 //  - clip なし作品は合成結果が「clip を知らない参照実装」とビット同一（＋性能は別スクリプトで比較）
 //  - serialize: clip:true は往復で残る・非 boolean は false（キー消滅）・PROJECT_VERSION=5・旧 version の doc に clip があっても読める
 // ②の要点:
-//  - buildWobbleFrames(target=null) は M10-3 当時の実装（ここに参照実装として複写）とビット同一
+//  - ★V204 (A-111): 写し方を 1px の線を切らない形に変えた（REQ_wobble_tuning §3 の「変わる（わざと）」）ので、
+//    M10-3 の参照の実装とのビット単位の比べは外し、v204_smoke と同じ不変条件で見る:
+//    決まった結果・範囲の外は不変・索引の閉包（出てくる索引は元のレイヤーの索引か 0）。強さは 1〜10
 //  - target=レイヤー id: 対象レイヤーは全レイヤーモードの同じレイヤーとビット同一・他レイヤーは元コマとビット同一
 //  - 決定性（同じ入力→同じ結果）・SE 落ち・paper/order 複製
 
@@ -30,8 +32,7 @@ import {
 } from "../src/editor/model";
 import { compositeFrame, flattenIndexFrame } from "../src/editor/render";
 import { projectToBytes, projectFromBytes, PROJECT_VERSION, PV5_VERSION } from "../src/editor/serialize";
-import { buildWobbleFrames, WOBBLE_TABLE, WobbleKind, WobbleStrength } from "../src/editor/wobble";
-import { WarpField, applyWarp } from "../src/editor/warp";
+import { buildWobbleFrames, WobbleKind, WobbleStrength } from "../src/editor/wobble";
 // M12-1c-2: 文言の pin が言語に左右されないよう ja に固定する（pin の文字列は変えていない）
 import { setLang } from "../src/i18n";
 setLang("ja");
@@ -183,7 +184,7 @@ const addLayer = (p: Project, name: string, parent?: string, clip?: boolean): La
   // 編集画面と同じ compositeFrame の結果がそのまま出る（枠外は紙・枠上は赤）
   {
     const src = projectSource(p);
-    const rgba = await src.getFrameRgba(0); // V168 (E-1): 供給元は async（Codex 指摘: tsc の範囲外だった取りこぼし）
+    const rgba = await src.getFrameRgba(0); // V168 (E-1): 供給元は async（独立レビューの指摘: tsc の範囲外だった取りこぼし）
     const px = (x: number, y: number) => rgba[at(x, y) * 4] | (rgba[at(x, y) * 4 + 1] << 8) | (rgba[at(x, y) * 4 + 2] << 16);
     check("①書き出し FrameSource.getFrameRgba: 枠外 (95,95) 紙色・枠上 (100,100) 赤（clip 適用後）", px(95, 95) === paperRgb && px(100, 100) === hex2rgb("#ff2a2a"));
   }
@@ -305,25 +306,21 @@ await (async () => {
 
 // ================= ② ゆらゆら =================
 {
-  // M10-3 当時（editor.ts 内）の実装を**そのまま**複写した参照実装（全レイヤー）
-  const refBuild = (p: Project, cur: Frame, count: number, kind: WobbleKind, strength: WobbleStrength, seedBase: number, clip: Uint8Array | null): Frame[] => {
-    const { L, A } = WOBBLE_TABLE[kind][strength];
-    const field = new WarpField();
-    const out: Frame[] = [];
-    for (let k = 0; k < count - 1; k++) {
-      const seedK = (seedBase + Math.imul(k + 1, 0x9e3779b9)) >>> 0;
-      field.setValueNoise(seedK, (seedK ^ 0x6d2b79f5) >>> 0, L, A);
-      const nf = cloneFrame(cur);
-      nf.se = undefined;
-      for (const ld of p.layerDefs) {
-        const src = cur.layers[ld.id];
-        const dst = nf.layers[ld.id];
-        if (src && dst) applyWarp(src, dst, field, clip);
-      }
-      out.push(nf);
-    }
-    return out;
-  };
+  // ★V204: M10-3 の参照の実装（applyWarp だけの写し方）とのビット単位の比べは外した（写し方がわざと変わった）。
+  //  代わりに v204_smoke と同じ不変条件（範囲の外は不変・索引の閉包）を全部の組み合わせで見る
+  const closedAndMasked = (src: Frame, out: Frame[], m: Uint8Array | null) =>
+    out.every((fo) =>
+      p.layerDefs.every((ld) => {
+        const a = src.layers[ld.id];
+        const b = fo.layers[ld.id];
+        const vals = new Set<number>([0, ...a]);
+        for (let i = 0; i < PIXELS; i++) {
+          if (!vals.has(b[i])) return false;
+          if (m && !m[i] && b[i] !== a[i]) return false;
+        }
+        return true;
+      })
+    );
   const p = newProject("wobble");
   const cols = ["#141414", "#ff2a2a", "#1fa2ff"].map((h) => ensureColor(p, h));
   let s = 777;
@@ -340,22 +337,21 @@ await (async () => {
   rect(mask, 20, 20, 200, 160, 1);
   const framesEq = (a: Frame[], b: Frame[]) =>
     a.length === b.length && a.every((fa, i) => p.layerDefs.every((ld) => eqBuf(fa.layers[ld.id], b[i].layers[ld.id])) && fa.paper === b[i].paper);
-  let allSame = true;
+  let invariants = true;
   let deterministic = true;
   let targetSame = true;
   let othersUnchanged = true;
   let sourceUntouched = true;
   const srcCopy = cloneFrame(cur);
   const kinds: WobbleKind[] = ["line", "whole"];
-  const strengths: WobbleStrength[] = [0, 1, 2];
+  const strengths: WobbleStrength[] = [1, 3, 5, 7, 10]; // V204: 強さは 1〜10（3・5・7 は前の弱・中・強）
   for (const kind of kinds)
     for (const st of strengths)
       for (const count of [2, 3, 4])
         for (const m of [null, mask])
           for (const seed of [0x12345678, 0, 0xdeadbeef]) {
-            const ref = refBuild(p, cur, count, kind, st, seed, m);
             const now = buildWobbleFrames(p, cur, count, kind, st, seed, m, null);
-            if (!framesEq(ref, now)) allSame = false;
+            if (now.length !== count - 1 || !closedAndMasked(cur, now, m)) invariants = false;
             const again = buildWobbleFrames(p, cur, count, kind, st, seed, m, null);
             if (!framesEq(now, again)) deterministic = false;
             for (const t of p.layerDefs) {
@@ -371,18 +367,18 @@ await (async () => {
             }
             for (const ld of p.layerDefs) if (!eqBuf(cur.layers[ld.id], srcCopy.layers[ld.id])) sourceUntouched = false;
           }
-  check("②全レイヤー: M10-3 の参照実装とビット同一（2種類×3強さ×3枚数×マスク有無×3シード）", allSame);
+  check("②全レイヤー: 範囲の外は不変・出てくる索引は元のレイヤーの索引か 0（2種類×5強さ×3枚数×マスク有無×3シード）", invariants);
   check("②決定性: 同じ入力で同じ結果（全レイヤー／単体とも）", deterministic);
   check("②単体: 対象レイヤーは全レイヤーモードの同じレイヤーとビット同一", targetSame);
   check("②単体: 他レイヤーは元コマとビット同一・SE 落ち・paper/order 複製", othersUnchanged);
   check("②原本のコマは一切変わらない", sourceUntouched);
   // 差分の存在（対象レイヤーは実際に動いている＝「何も起きない」でない）
-  const one = buildWobbleFrames(p, cur, 3, "whole", 2, 0x12345678, null, p.layerDefs[0].id);
+  const one = buildWobbleFrames(p, cur, 3, "whole", 7, 0x12345678, null, p.layerDefs[0].id);
   let moved = 0;
   for (let i = 0; i < PIXELS; i++) if (one[0].layers[p.layerDefs[0].id][i] !== cur.layers[p.layerDefs[0].id][i]) moved++;
   check("②単体: 対象レイヤーの画素は実際に動く（>0）", moved > 0, `moved=${moved}`);
   // 存在しない id → 何も揺れない（複製だけ）
-  const none = buildWobbleFrames(p, cur, 2, "line", 1, 1, null, "NOPE");
+  const none = buildWobbleFrames(p, cur, 2, "line", 5, 1, null, "NOPE");
   check("②単体: 未知の対象 id なら全レイヤーが複製のまま", p.layerDefs.every((ld) => eqBuf(none[0].layers[ld.id], cur.layers[ld.id])));
 }
 

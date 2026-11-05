@@ -7,6 +7,7 @@
 //   ③ 検証（W-6 後継）が素通しする → 検査8 で**故意破損3種**（塊1バイト・ヘッダ1バイト・トレーラ長）が赤
 import fs from "node:fs";
 import path from "node:path";
+import { readEditorSource } from "./editorSource";
 import {
   newProject,
   makeEmptyFrame,
@@ -174,7 +175,7 @@ async function wakeAll(p: Project): Promise<void> {
   check("2 16bit: 全画素一致・読み側も 16bit", diffPixels(p, q) === 0 && q.indexBits === 16 && q.frames[0].layers.L1[100] === 280);
 }
 
-// ================= 2b. indexBits のズレ防御（Codex V163 指摘①） =================
+// ================= 2b. indexBits のズレ防御（独立レビュー V163 指摘①） =================
 {
   // p.indexBits が 8 のまま、起きている Uint16Array と眠り控え bits:16 が混ざった状態。
   // ヘッダを 8 のまま書くと「8bit ヘッダ＋16bit 塊」の自分で読めないファイルになる
@@ -245,7 +246,7 @@ async function wakeAll(p: Project): Promise<void> {
   check("4 眠り経由でも全画素一致", diffPixels(p, q2) === 0);
 }
 
-// ================= 5. PV5 → PV6 → PV5（旧形式書き出し・作者決定②の土台） =================
+// ================= 5. PV5 → PV6 → PV5（旧形式を開く土台。V197 で製品からの PV5 の保存はなくした＝書き手は検査用） =================
 {
   const p = make(8, 2, 13);
   const audio = new Uint8Array(512).map((_, i) => (i * 7) & 0xff);
@@ -327,7 +328,7 @@ async function wakeAll(p: Project): Promise<void> {
   new DataView(trailerBad.buffer).setUint32(good.length - 8, headerLen + 8, true);
   check("7 ★トレーラ長の改ざんで赤", !(await verifyPV6(trailerBad, 10, 1)).ok);
 
-  // ★読み込み時にも塊表の構造検査が効く（Codex V163 指摘③: 壊れた塊を眠り控えに
+  // ★読み込み時にも塊表の構造検査が効く（独立レビュー V163 指摘③: 壊れた塊を眠り控えに
   //   入れてしまうと、あとでコマ移動や書き出しのときに初めて落ちる）。
   //   最後の塊の ISIZE（＝ファイル末尾側）を書き換えても **開く時点で**断られる
   {
@@ -394,7 +395,8 @@ async function wakeAll(p: Project): Promise<void> {
 
 // ================= 9. 配線の走査（保存・オートセーブ・書き出し・プレビュー） =================
 {
-  const ed = fs.readFileSync(path.join(root, "src/editor/editor.ts"), "utf8");
+  // ★V213 (M-2a): editor.ts の描く処理はコア（src/editor/core/editorCore.ts）へ移った＝editor.ts とコアの字を並べて見る
+  const ed = readEditorSource(root);
   const lib = fs.readFileSync(path.join(root, "src/library.ts"), "utf8");
   const ser = fs.readFileSync(path.join(root, "src/editor/serialize.ts"), "utf8");
   const wk = fs.readFileSync(path.join(root, "src/editor/saveWorker.ts"), "utf8");
@@ -402,9 +404,24 @@ async function wakeAll(p: Project): Promise<void> {
 
   check("9 projectFromBytes が isPV6 で振り分ける", /if \(isPV6\(bytes\)\) \{[\s\S]{0,200}?decodePv6\(/.test(ser));
   check("9 verifySavedBytes が PV6 を振り分ける", /if \(isPV6\(bytes\)\) return verifyPV6\(bytes, expectFrames, 1\.5\);/.test(ser));
-  check("9 保存 Worker の既定は pv6（旧形式チェック時のみ gzip）", /mode: ctx\.legacy \? "gzip" : "pv6"/.test(ed));
-  check("9 オートセーブは encodePV6（中断可能）", /await import\("\.\/pv6"\)/.test(ed) && /await encodePV6\(this\.project, \{/.test(ed));
-  check("9 オートセーブの書く前検証は verifySavedBytes（PV6 も振り分けが効く）", /okAuto = await verifySavedBytes/.test(ed));
+  // ★V197 (A-103): 逆向きにした（前は `mode: ctx.legacy ? "gzip" : "pv6"` を固定していた）
+  // ★V201 (M-1a): 保存の写し（Worker への postMessage）とオートセーブの手順は共通の部品（saveCore.ts）へ移った。
+  //  見張る中身は同じ。見る場所を部品と、部品を呼ぶ editor の口に直した（editor は自分で postMessage しない・encodePV6 も呼ばない）
+  const core = fs.readFileSync(path.join(root, "src/editor/saveCore.ts"), "utf8").replace(/\r\n/g, "\n");
+  // runBackgroundSave の本文（見つからなければ空＝下の検査が赤になる）
+  const rbsAt = ed.indexOf("  private async runBackgroundSave(");
+  const rbs = rbsAt < 0 ? "" : ed.slice(rbsAt, ed.indexOf("\n  }\n", rbsAt));
+  check(
+    "9 保存 Worker へ形式を送らない＝いつも PV6（V197・V201 で部品の encodeViaWorker）",
+    /worker\.postMessage\(\{\s*kind: "encode",\s*seq,\s*project,\s*\}\)/.test(core) && (core.match(/\.postMessage\(/g) ?? []).length === 1 &&
+      rbs !== "" && !/postMessage\(/.test(rbs) && /encode: \(p\) => encodeViaWorker\(worker, seq, p\),/.test(rbs) && !/ctx\.legacy/.test(ed)
+  );
+  check(
+    "9 オートセーブは encodePV6（中断可能・V201 で部品の autosaveWork）",
+    /const r = await encodePV6\(d\.project, \{ yieldNow: d\.yieldNow, aborted: d\.aborted \}\);/.test(core) &&
+      /const out = await autosaveWork\(\{[\s\S]{0,200}?yieldNow: yieldToInput,\s*aborted: \(\) =>/.test(ed) && !/encodePV6/.test(ed)
+  );
+  check("9 オートセーブの書く前検証は verifySavedBytes（PV6 も振り分けが効く・部品の autosaveWork）", /const okAuto = await verifySavedBytes\(data, d\.project\.frames\.length\);/.test(core));
   // ★V168 (E-4): 検査9 の2本を置き換えた。
   //  以前は「書き出しの入口で全コマを起こす」を不変条件にしていたが、それは
   //  目安の 10.8 倍の作品で**論理サイズ 4.1GB をそのまま生で展開する見積りなしの確保**になる。
@@ -452,14 +469,24 @@ async function wakeAll(p: Project): Promise<void> {
   );
   check("9 ライブラリのプレビューが眠ったコマを起こしてから描く", /drawPreview\(\) \{[\s\S]{0,700}?frameHasAsleep\(cur\)/.test(lib));
   check("9 プレビューの先回り（起こす）と後片付け（只で眠らす）がある", /prewakePreview\(\) \{[\s\S]{0,900}?sleepFrame\(/.test(lib));
-  check("9 エディタ mount は眠りが残っていれば sleepOn を立てる", /projectBytes\(project\) >= Editor\.SLEEP_MIN_BYTES \|\| asleepCount\(project\) > 0/.test(ed));
+  // ★V214 (M-2b-1a): sleepOn を立てる行は mount からコアの openWorkStart へ移った（静的の読み方も Editor. → EditorCore.）。
+  //  式（しきい値 または 眠りが残っている）は同じ
+  check("9 エディタ mount は眠りが残っていれば sleepOn を立てる", /this\.sleepOn =\s*projectBytes\(project\) >= EditorCore\.SLEEP_MIN_BYTES \|\| asleepCount\(project\) > 0/.test(ed));
   check("9 1コマ画像保存も眠りを起こす", /#ed-imgexport"\)\.onclick = async[\s\S]{0,900}?wakeFrame\(this\.project, fr, "read"\)/.test(ed));
-  check("9 保存先ピッカーに形式チェックがある（旧形式書き出し・作者決定②）", /ps-legacy/.test(main) && /common\.saveTarget\.legacy\.msg/.test(main));
-  check("9 形式はコンテキストに覚える（Ctrl+S で黙って新形式に化けない）", /legacy: picked\.legacy/.test(ed));
-  // Codex V163 指摘②: 記憶は settings に永続化（再起動・開き直し・オートセーブ復元でも化けない）
-  check("9 ★形式の記憶は settings に永続化（保存時に記録）", /rememberLegacyTarget\(c\.album, c\.baseName, c\.legacy === true\)/.test(main));
-  check("9 ★開くときに legacy を復元する", /legacy: isLegacyTarget\(item\.album, stripExt\(item\.name\)\)/.test(main));
-  check("9 ★オートセーブ復元でも legacy を復元する", /legacy: isLegacyTarget\(String\(meta\.album\), String\(meta\.baseName\)\)/.test(main));
+  // ★V197 (A-103・作者決定 2026-10-07): 旧形式で保存する道をなくした。V163 で固定していた
+  //  「チェックがある」「legacy: picked.legacy」「記憶を settings に書く／開くとき・復元のときに戻す」を**逆向き**にした
+  //  （構文木で数える詳しい検査は v197_smoke [B-2][B-3]）
+  check("9 保存先ピッカーに形式チェックが無い（V197）", !/ps-legacy/.test(main) && !/common\.saveTarget\.legacy/.test(main));
+  check("9 形式をコンテキストに覚えない（V197）", !/legacy: picked\.legacy/.test(ed) && /const picked = await this\.cb\.pickSaveTarget\(defAlbum, defName\);/.test(ed));
+  check("9 ★形式の記憶を settings に書かない（V197）", !/rememberLegacyTarget/.test(main));
+  check(
+    "9 ★開くときに legacy を戻さない（V197）",
+    !/isLegacyTarget/.test(main) && /baseName: stripExt\(item\.name\),\s*(\/\/[^\n]*\n\s*)*\}\);/.test(main)
+  );
+  check(
+    "9 ★オートセーブ復元でも legacy を戻さない（V197）",
+    /baseName: String\(meta\.baseName\),\s*\}\s*: null;/.test(main)
+  );
 }
 
 console.log(`v163 smoke: pass=${pass} fail=${fail}`);

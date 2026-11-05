@@ -5,79 +5,34 @@
 
 import {
   Project,
-  LayerDef,
   LayerFolder,
-  IndexBuf,
   W,
   H,
   PIXELS,
   FPS_TABLE,
   PenTexture,
-  ensureColor,
-  allocIndexBuf,
-  copyIndexBuf,
-  promoteTo16,
-  newLayerId,
-  newFolderId,
-  makeEmptyFrame,
-  cloneFrame,
-  conformFrameWidth,
   UGO_COLORS,
   UGO3D_BLUE,
   clipBaseMap,
   effectiveLayerStates,
   ancestorLocked,
-  relinkShared,
-  projectBytes,
-  projectFaces,
   loadWallFaces,
-  LOAD_WALL_BYTES,
 } from "./model";
-import { compositeFrame, presentToCanvas, frameToPngBlob, flattenIndexFrame, type OnionDir } from "./render";
-// V195 (A-96): ▶ を押したときに始めるコマ（ライブラリの再生 2 か所と同じ 1 つの決まり）
-import { playStartFrame } from "./playStart";
+import { compositeFrame, presentToCanvas, frameToPngBlob, } from "./render";
+import { PlayClock, type PlayHost, type PlayPaused, type BgmPlan } from "./playClock"; // ★V209 (A-121)
 // V195 (A-98): 拡大したとき隅を窓の真ん中まで（余白の形と、倍率を変えても真ん中の点を残す計算）
 import { panLayout, anchorAt, scrollFor, fitZoom, panNeeded, type PanGeom } from "./stagePan";
-// V195 (A-99): 上の色の帯から色を消す前に「使っているか」を調べる（眠っているコマは起こさない）
-import { colorSlots, scanColorUse, colorDeleteVerdict } from "./colorUsage";
 // V192 (A-93): コマ一覧・小さいプレビュー・音の窓のプレビューは「実際の画素」で出す（縮めるときは面積平均・広げるときは整数倍）
 import { presentFit, fitFor, fitKey, watchFit, rgbaOf, releaseCanvas, type DisplayFit } from "./scaledView";
 // V164: 設定・入力の丸め（純関数だけの一枚。Node から import できる＝スモークが見張る）
 import {
-  sanitizeOnionLevel,
-  sanitizeOnionDir,
-  sanitizeFavoriteColors,
-  normalizeFavColor,
-  FAVORITE_COLORS_MAX,
   ADD_FRAMES_MAX,
-  clampAddFrames,
-  // V166 (B): 確保する前に見積もって断る
-  HEAVY_ALLOC_MAX_BYTES,
-  checkFrameAlloc,
-  isAllocFailure,
-  // V166 (Codex 指摘④): 16bit 昇格を織り込んだ見積もり
-  estimateBits,
-  promotionExtraBytes,
-  // V167 (K-3): スポイトの知らせを出すか（間引きの規則）
-  shouldNoticePick,
-  // V168 (S-1〜S-3): 保存の写しを、写す前に見積もる／待つか／断るか
-  snapshotBytes,
-  saveSnapshotPlan,
-  saveSnapshotAllowed,
-  SAVE_SNAPSHOT_MAX_BYTES,
-  type SnapshotEstimate,
 } from "./prefs";
-import {
-  History,
-  bufferChangeEntry,
-  entryBytes,
-  multiBufferChangeEntry,
-  NO_COLOR_REFS, // V195 (A-99): 色の番号を抱えないエントリの申告
-  type HistoryEntry,
-} from "./history";
 // M10-2a: 変位マップエンジン（歪み3方式と M10-3 のゆらゆらが共有する適用側）
-import { WarpField, applyWarp, isConvexQuad } from "./warp";
-import { buildWobbleFrames, type WobbleKind, type WobbleStrength } from "./wobble";
+import { WarpField, } from "./warp";
+import { type WobbleKind, type WobbleStrength, } from "./wobble";
+// V204 (A-111): 見本は 1 枚ずつ作る・シードの式は見本と［つくる］で 1 つ
+import { buildWobbleFrame, WOBBLE_STRENGTH_MIN, WOBBLE_STRENGTH_MAX, WOBBLE_STRENGTH_DEFAULT } from "./wobble";
 // M12-C: カーソルの純関数（DOM に触らない側）は cursor.ts に分けてある
 import {
   type CursorSettings,
@@ -86,44 +41,34 @@ import {
   cursorFor,
   cursorLayerHidden,
   hasRing,
-  footprintEdges,
-  outerRingRuns, // V178 (A-72): 全レイヤー消しゴムの二重線（外側の線）
+  cursorFrameOps, // ★V209 (A-122): 塗られるドットの外側の黒白 2 本線の枠（全レイヤー消しゴムの二重線も）
+  frameLineWidth,
+  paintedSize,
   antColor,
   canvasCursorFor,
   panCursorFor,
 } from "./cursor";
 import * as R from "./raster";
-// V191 (A-89): 1px のペン・消しゴムの線（L 字の角を出さない「描く前に決める」道）。raster.ts は触らない
-import * as L1 from "./line1px";
+// V208 (A-119): 範囲選択の境目の線（純関数）と、押してほとんど動かさずに離したかの判定
+import { selectionOutline, type SelOutline } from "./selOutline";
 // M17: マイ柄（カスタムトーン）。登録・解決・塗り込みの純関数はここ（settings にだけ保存・保存形式には触れない）
 import * as CT from "./customTone";
-import {
-  FrameClip,
-  makeClip,
-  buildFramesFromClip,
-  packClip,
-  unpackClip,
-  clipBytes,
-  // V166 (Codex 指摘②③): 写し取る量・開いたときの量を**確保する前に**知る
-  clipCopyBytes,
-  clipUnpackedBytes,
-} from "./frameClip";
 // V156 (P-1): 見えていないコマを圧縮して眠らせる（仕組みの全文は sleep.ts の冒頭）
 import {
   wakeFrame,
   sleepFrame,
-  invalidateFrame,
-  awakeBytes,
-  sleepBytes,
-  dropLayer,
-  wakeLayersAllFrames,
   frameHasAsleep,
-  asleepCount,
-  setStaleSleepLogger,
 } from "./sleep";
-import { FrameSource, projectSource, ExportAudioSource, formatBytes, formatSize } from "./exporter";
+// V199 (A-106): 作品の名前の正はファイル名（左上・書き出しの既定の名前・保存のときの meta.title）
+import { savedFileBase, baseFromSavedPath, displayTitle, exportBaseName } from "./workTitle";
+// V201 (M-1a): 保存とオートセーブの手順は共通の部品（画面と Tauri に触らない・モバイルも同じものを通る）
+import { saveWork, autosaveWork, encodeViaWorker, bindNewWorkId, type SaveKind } from "./saveCore";
+// V199 (A-105): レイヤー（フォルダ）のコピー・貼り付けの決まり（純関数・何を／どこへを決めて書くだけ）
 import {
-  AudioPreview,
+  pasteRange,
+} from "./layerClip";
+import { FrameSource, projectSource, ExportAudioSource, formatSize } from "./exporter";
+import {
   decodeAudio,
   getAudioCtx,
   ensureAudioRunning, // V172 (G-2)
@@ -131,8 +76,8 @@ import {
   bgmPlaybackRate,
   renderExportMix,
 } from "./audio";
-import type { BgmTrack, SeTrack, ProjectAudio, Frame } from "./model";
-import { newSeId, sanitizeAudio } from "./model";
+import type { BgmTrack, SeTrack, } from "./model";
+import { sanitizeAudio } from "./model";
 import { createSlider, SliderHandle } from "../ui/slider";
 import { t } from "../i18n";
 // V171: 線画アイコン（絵文字は OS で絵が変わるので、インライン SVG・currentColor に）
@@ -141,21 +86,20 @@ import { errText } from "../ui/errText";
 // V158 (C-2): canvas に描く UI の色は**配色から読む**（各所が色を持たない）
 import { uiColor, uiColorA } from "../ui/theme";
 // V159 (G-1): 性能ログ。**操作名は列挙されたものだけ**（作品名は書けない作り）
-import { perfNow, perfDone, setPerfContext, PERF_MIN_MS, type PerfOp } from "../perf";
+import { perfNow, perfDone, type PerfOp } from "../perf";
 // V166 (層1): 重い操作の漏斗が使う共通の表示（ライブラリ・ホームと**同じ1つの実装**）
 import { runWithBusy, yieldToPaint } from "../ui/busy"; // V155 (A-33): 画面に `Error:` を出さない
 // M12-1c-2: アプリが自動で付ける名前は defaults.ts が唯一の出どころ（literal の二重持ちを解消）
-import { folderBaseName, layerBaseName, untitledTitle } from "../i18n/defaults";
+import { untitledTitle } from "../i18n/defaults";
 import {
-  moveNodes,
-  wouldCycle,
   topNodesOf,
   ancestorChain,
-  // M13-1: 同名のメソッドがあるので別名で入れる（`this.` の有無で意味が変わると読み違える）
-  moveTargetLayerIds as computeMoveTargetLayerIds,
-  // V178 (A-72): 全レイヤー消しゴムの対象（実効の 👁 かつ実効の 🔒 でない・規則は 1 つ）
-  eraseAllTargets,
-  DropTarget,
+  // V208 (A-120): 一覧の並び（空のフォルダは親の中の一番下）と、ドラッグの入る先（上下の位置だけ）・端で流す量
+  layerDisplayRows,
+  dropTargetAt,
+  dragScrollStep,
+  type RowDropHit,
+  type RowDropPlan,
 } from "./layerTree";
 // M11-10: ショートカット（キー → コマンドID → 実行）。定義とプリセットは src/keymap.ts に集約
 import {
@@ -179,41 +123,12 @@ import { isMacPlatform, primaryMod } from "../platform";
 // M10-1c: 書体テーブル・明示ロード・サイズ選択の規則は fonts.ts に集約
 import {
   FONTS,
-  DEFAULT_TEXT,
   fontDef,
-  nearestSize,
-  ensureFontsLoaded,
-  sanitizeTextSettings,
   type FontKey,
 } from "./fonts";
-
-/** M10-1c: 文字ツールの設定（settings.json に永続化する） */
-export interface TextSettings {
-  family: FontKey;
-  size: number;
-  bold: boolean;
-  /** M10-11: 縦書き。旧 settings.json に無ければ false */
-  vertical: boolean;
-}
-
-type Tool =
-  | "pen"
-  | "eraser"
-  | "brush"
-  | "fill"
-  | "shape"
-  | "text"
-  | "eyedrop"
-  | "hand"
-  | "select"
-  | "transform"
-  | "warp"
-  // M11-8 P-2: 絵そのものを動かす専用ツール（選択範囲は「位置決めの道具」になったため）
-  | "move";
-
-type ShapeKind = "line" | "rect" | "ellipse";
-// M14 (S-2): 塗りツールの形式。bucket=従来のバケツ塗り / enclose=囲い塗り（ドラッグで囲んだ内側）
-type FillMode = "bucket" | "enclose";
+// ★V213 (M-2a): 描く操作はコア（src/editor/core/editorCore.ts）。この Editor はそれを受け継ぎ、画面と入力の皮だけを持つ
+import { EditorCore, type CoreCallbacks, yieldToInput, type Tool, type StrokeSample, type XformHitSizes, PEN_SIZES } from "./core/editorCore";
+export type { TextSettings } from "./core/editorCore";
 
 // M14 (S-1): ツール形式ストリップとサイドパネルが**同じ定義から**ボタン群を作るための単一ソース。
 // active は組み立て時のスナップショット（形式が変わるたび buildToolOptions/ストリップを組み直す）。
@@ -243,11 +158,8 @@ interface FormatGroup {
   panelChunk?: number;
 }
 
-/** M10-2a: 歪みの方式。M10-2a で動くのは push のみ（残りは M10-2b/2c） */
-type WarpMode = "push" | "bulge" | "pinch" | "corner";
-
-// M10-3: ゆらゆら差分。種類と強さ（弱/中/強）— M11-20 で純関数部分を wobble.ts へ切り出し。
-// main.ts（`?wobble` 診断）が editor から WOBBLE_TABLE を import しているので再エクスポートを残す
+// M10-3: ゆらゆら差分。種類と強さ（V204 で 1〜10）— M11-20 で純関数部分を wobble.ts へ切り出し。
+// main.ts（`?wobble` 診断）が editor から WOBBLE_TABLE を import しているので再エクスポートを残す（V204 も形は今のまま）
 export type { WobbleKind, WobbleStrength } from "./wobble";
 export { WOBBLE_TABLE } from "./wobble";
 
@@ -258,15 +170,10 @@ const MUTED_OVERLAY_SELECTORS = [".cvright", "#ed-mini"];
  *  `".4"` と書いて `"0.4"` で比べる形だと、CSSOM の正規化に依存して静かに壊れる。 */
 const MUTED_OPACITY = "0.4";
 
-const PEN_SIZES = [1, 2, 3, 5, 8, 12];
 // M14 (S-1): ツールボタンにポインタが乗ってからストリップを出すまでの遅延（暴発防止）。実機で調整
 const STRIP_HOVER_MS = 150;
 // M14 (S-1): ボタンから離れてからストリップを畳むまでの猶予（ボタン→ストリップへ渡る間の隙間で消えないように）
 const STRIP_CLOSE_MS = 140;
-// M14 (S-2): 囲い塗りで「これ未満の面積は誤タッチ」とみなして何もしない画素数のしきい値
-const ENCLOSE_MIN_PX = 8;
-// M16 (D-1): 「コマでずらす」1コマあたりのトーン参照座標オフセット（斜め (+1,+1)/コマ）。定数化
-const DITHER_SHIFT_STEP = 1;
 // M17: マイ柄チップのプレビュー（32×32 バッキング→CSS ×2・透明は 4px 市松）。実機判断で調整する定数
 const CUSTOM_CHIP_PX = 32;
 const CUSTOM_CHIP_CHECKER = 4;
@@ -291,15 +198,32 @@ const TEXTURES: { key: PenTexture; labelKey: string; icon: IconId }[] = [
   { key: "sand", labelKey: "ed.pen.tex.sand.title", icon: "tex-sand" },
 ];
 
+/** ★V216b (A-126・要件 docs/REQ_prerelease_fixes_v2_0_0.md §2-1): **その作品のファイル**（1 つのパス）。
+ *  ライブラリで開いた `.memoanima`・保存に成功したら Rust が返したパス。ほか（.kwz／.ppm／.animemo・新規メモ・ドロップ）は持たない（null）。
+ *  保存先がこのファイルなら確かめずに上書きし、ほかの在る名前へは確かめてから書く（比べるのは Rust）。
+ *  `size`・`mtimeUs` は開いた・書いた時点のそのファイルの大きさと更新時刻（オートセーブの印に控え、戻すときに比べる・分からなければ null） */
+export interface WorkFileRef {
+  path: string;
+  size: number | null;
+  mtimeUs: number | null;
+}
+
+/** V216b: 保存先の名前の空き（Rust の `save_target_status`）。own＝その作品のファイル／taken＝在る／reserved＝控え・.gz だけ／free＝空き */
+export type SaveTargetStatus = "own" | "taken" | "reserved" | "free";
+
+/** V216b: Rust が書く所で「在る」と断った文から種類を取り出す（`pclib::SAVE_EXISTS_TAKEN`／`SAVE_EXISTS_RESERVED`）。違う失敗は null */
+export function saveExistsKind(e: unknown): "taken" | "reserved" | null {
+  const m = /save-exists:(taken|reserved)/.exec(String(e));
+  return m ? (m[1] as "taken" | "reserved") : null;
+}
+
 export interface EditorSaveContext {
   libRoot: string;
   album: string;
   /** 拡張子なしのファイル名ベース */
   baseName: string;
-  /** V163: true＝**旧形式（PV5・v1.5系まで対応）**でこの保存先に書く（作者決定②）。
-   *  保存先ピッカーのチェックで選ぶ。**保存先ごとに覚える**——旧形式で書き出した
-   *  ファイルへ Ctrl+S すると黙って新形式に変わる、を防ぐ（共有目的が静かに壊れる）。 */
-  legacy?: boolean;
+  // ★V197 (A-103・作者決定 2026-10-07): V163 の `legacy`（旧形式 PV5 でこの保存先に書く）はなくした。
+  //  保存は**いつも PV6**（runBackgroundSave）。旧形式（PV1〜PV5）の作品を開くのは今までどおり
 }
 
 /** M11-17: パネル寸法（px）。settings.json の `layout` に保存する3つの数値 */
@@ -318,20 +242,24 @@ export interface EditorLayout {
 export type LayoutKey = keyof EditorLayout;
 
 /** V158 (L-1): 右パネルの**段ごとの畳み**（true = 畳んでいる＝相手が伸びる）。
- *  両方 true は作らない（畳むときに相手を必ず開く）。settings へ**追加キーのみ**で保存する。 */
+ *  両方 true は作らない（畳むときに相手を必ず開く）。settings へ**追加キーのみ**で保存する。
+ *  ★V215 (A-124): `col` = 色の段（上段の下端・いつも見える段）の畳み。top・bot の「片方を畳むともう片方は開く」とは
+ *  **別に**覚える（道具の段を畳んでも色の段は見えたまま）。前の版の設定（top・bot だけ）では開いている */
 export interface SideFold {
   top: boolean;
   bot: boolean;
+  col: boolean;
 }
-export const SIDE_FOLD_DEFAULT: Readonly<SideFold> = { top: false, bot: false };
+export const SIDE_FOLD_DEFAULT: Readonly<SideFold> = { top: false, bot: false, col: false };
 
-/** 壊れた値・両方 true は既定（どちらも開いている）へ倒す。 */
+/** 壊れた値・両方 true は既定（どちらも開いている）へ倒す。色の段は true のときだけ畳む（壊れた値は開く） */
 export function sanitizeSideFold(v: unknown): SideFold {
   const o = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
   const top = o.top === true;
   const bot = o.bot === true;
-  if (top && bot) return { ...SIDE_FOLD_DEFAULT };
-  return { top, bot };
+  const col = o.col === true;
+  if (top && bot) return { ...SIDE_FOLD_DEFAULT, col };
+  return { top, bot, col };
 }
 
 /** 既定値＝M11-16 までの固定値（styles.css の `--ed-*` 初期値と一致させる） */
@@ -413,14 +341,11 @@ export function sanitizeLayout(v: unknown): EditorLayout {
   };
 }
 
-export interface EditorCallbacks {
+export interface EditorCallbacks extends CoreCallbacks {
   onExit: () => void;
   onSaved: (path: string) => void;
   /** M8-2: 📷 画像をこのページに配置（変換モーダルは main.ts 側・共用） */
   importImage?: () => void;
-  /** M10-1c: 文字ツールの書体・サイズ・太さが変わったら settings.json へ保存する
-   *  （変えた瞬間だけ。文字を置くたびには呼ばない） */
-  onTextSettingsChange?: (t: TextSettings) => void;
   /** M11-13: ミニプレビューを隠す/出すが変わったら settings.json へ保存する
    *  （文字設定と同じ「変えた瞬間に保存」の流儀） */
   onHudHiddenChange?: (hidden: boolean) => void;
@@ -432,43 +357,30 @@ export interface EditorCallbacks {
   onCollapsedChange?: (collapsed: CollapsedState) => void;
   /** V158 (L-1): 右パネルの段ごとの畳みが変わったら settings.json へ保存する（同じ流儀） */
   onSideFoldChange?: (fold: SideFold) => void;
-  /** M13-2a (A-2): 選択範囲の色付け表示のトグルが変わったら settings.json へ保存する（同じ流儀） */
-  onSelMaskShowChange?: (show: boolean) => void;
   /** M14 (S-3): 右パネルの「種類/トーン」一覧の開閉が変わったら settings.json へ保存する（同じ流儀） */
   onToneOpenChange?: (open: boolean) => void;
-  /** M16 (D-1): トーンの「コマでずらす」トグルが変わったら settings.json へ保存する（同じ流儀） */
-  onDitherFrameShiftChange?: (on: boolean) => void;
-  /** V151 (E-8): 「次回から表示しない」チェックつき確認。ok=はい／skip=チェックが入っていた
-   *  （skip を覚えるのは editor 側の confirmWithSkip。未実装の呼び出し側では confirm と同じに扱う） */
-  confirmSkippable?: (msg: string) => Promise<{ ok: boolean; skip: boolean }>;
-  /** V151 (E-8): 非表示にした確認の一覧が変わったら settings.json へ保存する（⚙ でいつでも戻せる） */
-  onHiddenConfirmsChange?: (ids: string[]) => void;
-  /** M17: マイ柄の一覧が変わったら（登録・削除）settings.json へ保存する。履歴には積まない */
-  onCustomTonesChange?: (list: CT.CustomTone[]) => void;
-  /** M17: 「🎨 登録した色で塗る」トグルが変わったら settings.json へ保存する */
-  onCustomToneColorChange?: (on: boolean) => void;
-  /** V164 (U-1): オニオンの段数と向きが変わったら settings.json へ保存する（同じ流儀）。
-   *  作品ではなく**人の好み**なので settings 側（作品ファイルは1バイトも変わらない） */
-  onOnionChange?: (level: number, dir: OnionDir) => void;
-  /** V164 (U-3): よく使う色の棚が変わったら settings.json へ保存する（マイ柄と同じ流儀） */
-  onFavoriteColorsChange?: (list: string[]) => void;
   /** ライブラリ保存（Rust呼び出し）を委譲 */
   // V163: V161-B の Rust 側 gzip（gzBegin/gzChunk/gzAbort/saveProjectGz）は撤去した。
   // PV6 は Worker が完成品（68.7MB 級）を返すので、従来の saveProject（1回の raw ボディ）で足りる
   saveProject: (
     ctx: EditorSaveContext,
     data: Uint8Array,
-    thumbPng: Uint8Array
+    thumbPng: Uint8Array,
+    /** V216b (A-126): その作品のファイル（null＝無い）と、［置き換える］を選んだか（確かめた宛先とその 1 回だけ）。
+     *  在る名前で置き換えてよくなければ Rust が `save-exists:taken|reserved` で断る（`saveExistsKind`） */
+    guard?: { workFile: string | null; replace: boolean }
   ) => Promise<string>;
+  /** V216b (A-126): 書く前に引く保存先の名前の空き（無い・失敗は「分からない」＝書く所の Rust の断りに任せる） */
+  saveTargetStatus?: (ctx: EditorSaveContext, workFile: string | null) => Promise<SaveTargetStatus>;
+  /** V216b (A-126): その作品のファイルの大きさと更新時刻（オートセーブの印・分からなければ null） */
+  workFileStamp?: (path: string) => Promise<{ size: number; mtimeUs: number } | null>;
   /** F-4: 保存先ピッカー（既存アルバム一覧＋新規作成＋ファイル名）。
-   *  V163: 形式の選択（旧形式チェック）も**この1つのダイアログ**で受ける。
-   *  legacyDefault＝チェックの初期値（保存先に覚えている値）・戻りの legacy＝選ばれた値 */
+   *  V197 (A-103): V163 の形式の選択（旧形式チェック）はなくした＝選ぶのは保存先だけ */
   pickSaveTarget: (
     /** M12-D: 入れたいアルバム。**null＝おまかせ**（呼び出し側は既定名の文字列を作らない） */
     album: string | null,
-    defaultName: string,
-    legacyDefault: boolean
-  ) => Promise<{ album: string; baseName: string; legacy: boolean } | null>;
+    defaultName: string
+  ) => Promise<{ album: string; baseName: string } | null>;
   /** F-3: オートセーブ（アプリ設定領域へ・原子的保存はRust側） */
   autosave: (data: Uint8Array, meta: Record<string, unknown>) => Promise<void>;
   clearAutosave: () => Promise<void>;
@@ -491,24 +403,7 @@ export interface EditorCallbacks {
   /** V172: ダイアログだけ（読まない）。読みは `readAudioFile`＝呼び出し元の「読み込み中」の中で行う */
   pickAudioFile: () => Promise<AudioPick | null>;
   readAudioFile: (pick: AudioPick) => Promise<{ bytes: Uint8Array; mime: string; name: string } | null>;
-  confirm: (msg: string) => Promise<boolean>;
-  /** V157 (D-2): 選択肢から1つ選ばせる（`null` = やめる）。レイヤーカラーの適用先など、
-   *  「はい/いいえ」では足りない場面用。未実装なら呼び出し側が従来の動きへ落ちる */
-  choose?: (msg: string, options: string[]) => Promise<number | null>;
-  /** V154 (W-3): 「読んで閉じるだけ」の知らせ（ボタンは1つ）。選ばせる場面ではないので confirm と分ける。
-   *  未実装の呼び出し側ではトーストに落ちる（editor 側で `?.` して分岐する） */
-  notice?: (msg: string) => Promise<void>;
   prompt: (msg: string, def: string) => Promise<string | null>;
-  toast: (msg: string) => void;
-  /** M10-21: 入力診断ログ（ローカルの memoanima.log へ）。`?inputlog` か
-   *  VITE_INPUTLOG=1 ビルドでのみ editor から呼ばれる。通常は一切呼ばれない */
-  /** M10-21 → V154b (W-10): `app_config_dir/logs/memoanima.log` へ1行足す。
-   *
-   *  もとは `?inputlog` のときだけ使う入力診断用だったが、V154 以降は
-   *  **常時オンの節目のログ**（保存の成否・検証の失敗・復元・16bit 昇格・大きさの警告・起動）
-   *  も同じ流し先を使う。**作品名・パス・作品の中身は書かない**——「送ってください」と
-   *  頼む前提のものなので、個人が分かるものを入れない（Rust 側でも `<user>` に伏せる）。 */
-  appendLog?: (text: string) => void;
   /** V154 (W-6): 保存したファイルを読み戻す（確定の前に中身を確かめるため）。
    *  未実装なら読み戻しの検査は省く（書く前の検査と Rust 側のバイト照合は効いたまま） */
   readSavedFile?: (path: string) => Promise<Uint8Array | null>;
@@ -516,20 +411,6 @@ export interface EditorCallbacks {
    *  取り込みの進捗（`openImportProgressModal`）と同じ骨格で、数字は出さない。
    *  未実装なら進捗が出ないだけ（W-7 のロックと W-9 の遮断は効いたまま） */
   busy?: (msg: string) => () => void;
-}
-
-/** M10-23: メインスレッドを一瞬手放して、待っている入力イベントを先に処理させる。
- *  scheduler.yield（入力優先の正式API・Chromium 129+）があればそれを、無ければ
- *  MessageChannel のマクロタスク（setTimeout と違い 4ms クランプが無い）で代替する。
- *  オートセーブの分割エンコードがチャンク間で呼ぶ。 */
-function yieldToInput(): Promise<void> {
-  const sch = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
-  if (typeof sch?.yield === "function") return sch.yield();
-  return new Promise((r) => {
-    const ch = new MessageChannel();
-    ch.port1.onmessage = () => r();
-    ch.port2.postMessage(0);
-  });
 }
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) =>
@@ -541,110 +422,42 @@ const $ = <T extends HTMLElement = HTMLElement>(sel: string) =>
  *  REQ §8-1: 値は仮。実機で紙色・6色と見分けがつくかを見て決める */
 const SEL_MASK_RGBA: readonly [number, number, number, number] = [64, 140, 255, 102]; // rgba(64,140,255,.40)
 
-/** M6-6 R-2: 回転ゾーンのカーソルは標準 grab に変更。
- *  SVGカスタムカーソルは実機（WebView2＋ペンタブ）で表示されない/判別できないため撤去し、
- *  カーソル非依存の視覚補助（モードラベル .xmode-label）を併設する。 */
-const ROTATE_CURSOR = "grab";
+/** V208 (A-119): 範囲選択の線の白黒。cursor.ts の antColor（カーソルの輪・ドット枠の白黒）と同じ 2 色を使う。
+ *  絵の上に重ねるプレビューなので配色に追随させない（V158 C-2 と同じ理由） */
+const SEL_UI_INK = antColor(0, 0);
+const SEL_UI_PAPER = antColor(4, 0);
+/** V208 (A-119): 境目の点線をずらす間隔（ms） */
+const SEL_UI_TICK_MS = 110;
+/** V208 (A-119): 境目の辺がこれより多いときは点線を止めたままにする（1 回の描き直しを数ミリ秒に収める） */
+const SEL_UI_ANIM_MAX_EDGES = 20000;
 
-/** ★V178 (A-72): 全レイヤー消しゴムの 1 ストロークぶんの状態。 */
-interface EraseAllStroke {
-  /** なぞった作品。確定のときに作品が替わっていたら積まない（別の作品の履歴を汚さない） */
-  project: Project;
-  /** なぞり始めたコマ。**Frame オブジェクトで持つ**＝確定・取り消しは必ずこのコマへ戻る
-   *  （表示中のコマ番号で引くと、コマを移ってからの Ctrl+Z が別のコマへ書き戻す） */
-  frame: Frame;
-  /** 対象のレイヤー id（下→上。規則は layerTree.ts の `eraseAllTargets`） */
-  ids: string[];
-  /** なぞる前の写し（対象ぶん） */
-  before: Record<string, IndexBuf>;
-  /** ★距離の位相（`dashAcc`）は**レイヤーごと**に持つ。同じものを枚数ぶん回すと、1 本の線分で位相が
-   *  枚数ぶん進み、点線の穴の位置がレイヤーごとにずれる（要件 §3-2）。いまの消しゴムは solid で
-   *  位相を消費しないが、種類が増えたときに黙って壊れないよう、形を先に揃えておく */
-  dash: Record<string, { d: number }>;
-  /** 📌 の id（消したら全コマの絵が変わる＝フィルムを全部塗り直す） */
-  shared: Set<string>;
-}
-
-/** ★V178 (A-72・最後の網): 積む直前に 1 つだけ口を持つ履歴。
- *  全レイヤーの束より**先に**別の操作の履歴が積まれると、Ctrl+Z を続けても元の絵に戻らない。
- *  入口（コマンド・重い処理・↶↷・UI を押した時点・キー）で畳めなかった経路（知られていない経路・これから足す機能）でも、
- *  積む直前に束を確定すれば**履歴の順序（消しゴム → その操作）だけは必ず守れる** */
-class EditorHistory extends History {
-  constructor(private readonly beforePush: () => void) {
-    super();
-  }
-  push(entry: HistoryEntry) {
-    this.beforePush();
-    super.push(entry);
-  }
-}
-
-export class Editor {
-  project!: Project;
+export class Editor extends EditorCore<EditorCallbacks, HTMLCanvasElement> {
   saveCtx: EditorSaveContext | null = null;
-  cb!: EditorCallbacks;
-
-  frameIndex = 0;
-  activeLayerId = "";
-  tool: Tool = "pen";
-  prevTool: Tool = "pen";
-  shapeKind: ShapeKind = "line";
-  shapeFill = false;
-  selectKind: "rect" | "lasso" | "auto" = "rect";
-  /** M10-21: 入力診断ログの有効フラグ（mount 時に判定。通常起動では false のまま） */
-  private inputLog = false;
-  private inputLogBuf: string[] = [];
+  /** ★V216b (A-126): その作品のファイル（`WorkFileRef`）。替えるのは開いたとき・保存に成功したときだけ（確かめのキャンセルでは替えない） */
+  workFile: WorkFileRef | null = null;
+  /** V216b: 書く所の確かめで［別の名前で保存］を選んだ＝保存が終わったら保存先を選ぶ画面を開き直す（同じアルバム・その名前から案を作る） */
+  private saveRedirect: { album: string; baseName: string } | null = null;
+  /** V216b: 保存先を決めている最中（空きを聞いている・確かめを出している） */
+  private savePlanning = false;
+  /** V216b: 書く所の確かめ（背景の保存の途中）を出している最中。保存を待つ側（waitForSave）が中央の表示を重ねない */
+  private saveAsking = false;
+  /** ★V199 (A-106): いま開いているファイルの名前（拡張子なし）。**作品の名前の正**（要件 docs/REQ_title_filename.md）。
+   *  null＝まだファイルが無い（保存していない新しいメモ）。左上・書き出しの既定の名前・別名で保存の既定の名前はここから作る
+   *  （前は作ったときに入れた `meta.title` をそのまま出していて、名前を変えても最初の名前のままだった）。
+   *  決めるのは mount（開いたファイル）と保存の成功（書いたファイル）の 2 か所だけ */
+  fileBase: string | null = null;
   private inputLogTimer: number | null = null;
-  /** M10-19: 自動選択（✨）の参照（false=選択中のレイヤー / true=全レイヤー）。セッションのみ。
-   *  M13-2a: false 側の意味を「このレイヤー1枚」から「**選択中のレイヤーの合成**」へ広げた
-   *  （解決規則は M13-1 の `moveTargetLayerIds()` と同じ＝1枚だけ選んでいれば従来と同じ結果）。
-   *  boolean はそのまま＝設定の移行なし */
-  selectRefAll = false;
-  /** M13-2a (A-1): 範囲選択の合成方法。**ドラッグ開始時の修飾キーで決めて**、離すまで変えない
-   *  （Shift=足す／Alt=引く／無し=置き換え） */
-  private selMod: "replace" | "add" | "sub" = "replace";
-  /** M13-2a (A-2): 選択範囲の内側に色を付けて見せるか（既定オン・settings.json へ永続化） */
-  selMaskShow = true;
-  /** M13-2a (A-4): コマを消すときに確認を出すか（既定オン＝従来どおり・settings.json へ永続化）。
-   *  効くのは**コマの削除の確認だけ**。レイヤー・フォルダの削除の確認には触れない */
-  frameDeleteConfirm = true;
-  /** V151 (E-8): 「次回から表示しない」で非表示にした確認の id 集合（settings.hiddenConfirms）。
-   *  対象は3つだけ: "clearFrame"（キャンバスの消す）/ "layerDelete" / "folderDelete"（作者決定）。
-   *  📌全コマ共通の統一確認は対象外＝毎回出す */
-  private hiddenConfirms = new Set<string>();
-  /** M10-19: 自動選択の範囲（false=つながり=4方向連結 / true=画面全体の同添字） */
-  selectAutoGlobal = false;
-  /** M10-19: バケツ塗りの参照（false=このレイヤー（既定・従来） / true=全レイヤー）。セッションのみ */
-  fillRefAll = false;
-  /** ★V178 (A-72): 消しゴムの「全レイヤー」。オンのとき、なぞったところが**そのコマの見えているレイヤー
-   *  すべて**から消える（対象の規則は layerTree.ts の `eraseAllTargets`）。
-   *  **覚えない**＝settings に書かない（アプリを開き直すと必ずオフ・上の `fillRefAll` と同じ「セッションのみ」）。
-   *  *知らないうちにオンのまま* が、この道具でいちばん怖いから（要件 §3-4）。切り替えは `setEraseAllLayers` だけを通す */
-  private eraseAllLayers = false;
-  /** M14 (S-2): 塗りツールの形式（bucket=従来のバケツ / enclose=囲い塗り）。セッションのみ・既定はバケツ */
-  private fillMode: FillMode = "bucket";
-  /** M14 (S-2): 囲い塗りのドラッグ軌跡（自由選択の lassoPts と同じ流儀・別枠で持つ） */
-  private enclosePts: { x: number; y: number }[] = [];
+  /** M13-2a (A-2): 選択範囲の内側に色を付けて見せるか（settings.json へ永続化）。
+   *  V208 (A-119): 既定は**オフ**（作者の決定 2026-10-24。押してオンにした人＝true が保存されている人はオンのまま） */
+  selMaskShow = false;
   /** M14 (S-3): 右パネルの「種類/トーン」一覧を開いているか（既定=閉・settings.json へ永続化） */
   private toneOpen = false;
-  /** M16 (D-1): トーンを「コマでずらす」か（既定=オフ・settings.json へ永続化）。オンで描くと
-   *  コマ番号ぶんトーン参照座標が斜めにずれて焼かれる＝再生で点が揺れる。オフは従来と完全一致 */
-  private ditherFrameShift = false;
   /** M14 (S-1): 形式ストリップ（ツールボタン横の一時オーバーレイ）の状態 */
   private stripEl: HTMLElement | null = null;
   private stripOpenFor: Tool | null = null;
   private stripAnchor: HTMLElement | null = null;
   private stripOpenTimer: number | null = null;
   private stripCloseTimer: number | null = null;
-  colorHex: string = UGO_COLORS.black;
-  /** M11-2: ツールごとの太さ（ペン/ブラシ/消しゴムが各自の値を覚える）。
-   *  図形などはペンの値を流用する（＝独立サイズを持たせない・従来どおり）。
-   *  永続化はしない（従来の penSize と同じくセッション内のみ） */
-  private sizeByTool: Record<"pen" | "brush" | "eraser", number> = {
-    pen: 3,
-    brush: 3,
-    eraser: 3,
-  };
   /** M12-C: カーソルの設定（`settings.cursor` を正規化したもの）。 */
   private cursorCfg: CursorSettings = CURSOR_DEFAULTS;
   /** M12-C: 2階（輪・ドット枠）のどちらかが ON か。**false のときホバーは従来どおり素通り**。
@@ -656,84 +469,6 @@ export class Editor {
   private cursorRaf: number | null = null;
   /** M12-C: いま描いてある内容の指紋（位置・太さ・寸法。同じなら clearRect すらしない） */
   private cursorPainted = "";
-  /** 現在のツールの太さ。**実体は sizeByTool 側**にしかない（二重状態を持たない）。
-   *  こうしておかないと setTool を経由しないツール変更（貼り付け・画像配置・変形の
-   *  離脱/確定）で「記憶値と実際の太さ」が食い違う — レビュー検出 */
-  get penSize(): number {
-    return this.sizeByTool[this.sizeSlot(this.tool)];
-  }
-  set penSize(v: number) {
-    this.sizeByTool[this.sizeSlot(this.tool)] = v;
-    // M12-C: 太さが変わったら輪も描き直す。**ここが唯一の書き込み口**なので、
-    // ピッカーのクリックもショートカットも同じように反映される。
-    // ポインタが動かないと直らない（＝太さを変えても輪が古いまま）のを防ぐ
-    this.cursorPainted = "";
-    this.paintCursorLayer();
-  }
-  texture: PenTexture = "solid";
-  /** M5-4: ブラシのトーンパターン（ペンの texture とは独立に記憶。既定=網点大） */
-  brushToneId = "halftone-l";
-  /** M5-5 T-3: バケツ塗りのトーン（ブラシとは独立に記憶。既定=ベタ） */
-  fillToneId = "solid";
-  /** M11-14: かすり消し（消しゴムのトーン）。ブラシ・バケツと同じく**独立に記憶**し、
-   *  既定はベタ＝従来どおりの全消し。ブラシと共有すると、ブラシの既定（網点大）のせいで
-   *  **消しゴムが最初からかすれてしまい**「ベタ時は従来どおり」が初期状態で成立しない */
-  eraserToneId = "solid";
-  /** M17: ペンの「種類」でマイ柄を選んでいるときの id（"custom:<n>"）。""＝従来どおり texture で描く */
-  penToneId = "";
-  /** M17: 登録済みのマイ柄（settings.customTones から復元・登録順）。履歴には積まない */
-  private customTones: CT.CustomTone[] = [];
-  /** M17: 「🎨 登録した色で塗る」（既定オン・settings）。オフ＝非透明画素を形として現在色で塗る */
-  private customToneColor = true;
-  /** M17: ストローク中に使う解決済みトーン（pointerdown で**バッファ取得より先に**一括解決し、
-   *  move では再解決しない＝ストローク中に 16bit 昇格が起きてバッファ参照が死ぬのを防ぐ） */
-  private strokeTone: { kind: "pen" | "brush" | "eraser"; tone: R.ToneTile | null; colorTile: R.ColorTile | null } | null = null;
-  onionLevel = 0;
-  /** V164 (U-1): 透かす向き（前のコマだけ／両方／次のコマだけ）。**既定は "both"＝v1.6.0 と同じ絵**。
-   *  段数（`onionLevel`）とは独立した軸で、どちらも settings に保存する（人の好みなので作品には入れない）。 */
-  onionDir: OnionDir = "both";
-  /** V164 (U-3): よく使う色の棚（`settings.favoriteColors` から復元・登録順・"#RRGGBB"）。
-   *  **作品ではなく設定**＝作品をまたいで使える道具箱。履歴には積まない（マイ柄と同じ流儀） */
-  private favoriteColors: string[] = [];
-  stabilizer = true;
-  pressureEnabled = true;
-  textSize = DEFAULT_TEXT.size;
-  /** M10-1c: 文字ツールの書体と太さ（既定は現行の見た目に最も近い 丸文字/16px/太字） */
-  textFamily: FontKey = DEFAULT_TEXT.family;
-  textBold = DEFAULT_TEXT.bold;
-  /** M10-11: 縦書き（1列・上から下）。textBold と同じ流儀で永続化する */
-  textVertical = false;
-  /** M11-12: 確定前の浮動テキスト。**保持するのは文字のパラメータでピクセルではない**
-   *  （書体やサイズを変えても位置を保ったまま作り直せる。ピクセルで持つと変えるたびに劣化する）。
-   *
-   *  変形モード（`xformActive` + `floatBuf`）と同じ「浮いて → 動かして → 確定/取消」の
-   *  状態機械だが、**プロジェクトには一切触れていない**点が違う（レイヤーから切り出さない）。
-   *  そのため保存・オートセーブは浮いていても正しく走る（作品の中身は完全なまま）。
-   *  保存しない・履歴にも積まない（確定したときに1エントリだけ積む）。 */
-  private textDraft: {
-    text: string;
-    x: number;
-    y: number;
-    family: FontKey;
-    size: number;
-    bold: boolean;
-    vertical: boolean;
-  } | null = null;
-  /** 生成したマスクのキャッシュ（位置を動かすだけなら作り直さない）。
-   *  `cv` は色つきのプレビュー用キャンバスで、色を変えたときだけ作り直す */
-  private textDraftCache: {
-    key: string;
-    mask: { w: number; h: number; data: Uint8Array } | null;
-    cv: HTMLCanvasElement | null;
-    cvColor: string;
-  } | null = null;
-  /** 浮動テキストを掴んでいる位置（掴んだ点と左上の差） */
-  private textDrag: { ox: number; oy: number } | null = null;
-  /** M11-15: レイヤー専用クリップボード（アクティブレイヤーの現在コマの索引バッファ1枚）。
-   *  選択範囲のクリップボード（frameClip / edit.copy）とは**別枠**で互いに上書きしない。
-   *  値は colorTable の添字なので**同じ作品の編集セッション内でのみ有効**＝`mount()` で必ず破棄
-   *（別作品へ持ち出すと色化けする。破棄は `clearLayerClip()` 1箇所に集約） */
-  private layerClip: IndexBuf | null = null;
   /** E-2: ピクセル格子（1ドット≥8px で表示・既定ON） */
   gridEnabled = true;
   /** E-1: Space押下中の一時手のひら */
@@ -801,38 +536,12 @@ export class Editor {
     onUp: (e: PointerEvent) => void;
     onBlur: () => void;
   } | null = null;
-
-  // 再生
-  playing = false;
-  playTimer: number | null = null;
-
-  // ★V178 (A-72): 積む直前に全レイヤーの束を確定する（EditorHistory の説明）
-  history = new EditorHistory(() => {
-    if (this.eraseAllStroke) this.finishEraseAllNow();
-  });
-  /** ライブラリ未保存の変更があるか。true をセットするとオートセーブ対象にもなる */
-  private _dirty = false;
-  private autosavePending = false;
   private autosaveTimer: number | null = null;
   /** 保存/破棄でインクリメント。古い世代のオートセーブ書き込みを無効化する */
   private autosaveEpoch = 0;
   private autosaveInFlight: Promise<void> | null = null;
   /** V154 (W-5): 書き出し中か。true のあいだオートセーブは見送る（`autosavePending` は残す） */
   private exporting = false;
-  /** V154b (W-7/W-8/W-9): いま走っている重い処理（""＝走っていない）。
-   *
-   *  **これ1つで3つを同時に satisfies する**:
-   *   - W-7: 入口を閉じる（飛行中の呼び出しは**黙って捨てる**。キューに積まない）
-   *   - W-8: 進捗を出す（少し遅らせて出す＝一瞬で終わる保存ではチラつかない）
-   *   - W-9: 編集を受け付けない（`dialogOpen()` に混ぜてキーを止め、
-   *     `#screen-editor.ed-busy` でポインタを止める）
-   *
-   *  オートセーブの `autosaveInFlight` と同じ流儀（あちらは自分の周期を見送るだけなので別枠）。 */
-  /** V154b: 重い処理が走っているか（空＝走っていない）。V166: 漏斗（`runHeavy`）が使う "heavy" を追加。
-   *  ★**"save" を型から消した**（Codex 指摘・低）。保存は入口を閉じない（V161-A・壊すなリスト）——
-   *   コメントで方針を書くだけでは、いつか誰かが保存の種別を足して書けてしまう。
-   *   型から消せば**書いた瞬間にコンパイルが落ちる**＝方針が機械で守られる */
-  private busyKind: "" | "audio" | "export" | "heavy" = "";
   /** 進捗を畳む手（`cb.busy` の戻り値）。出していなければ null */
   private busyHide: (() => void) | null = null;
   /** 進捗を出すまでの遅延タイマー（0＝予約なし） */
@@ -840,7 +549,7 @@ export class Editor {
   /** 進捗を出すまでの待ち時間。**一瞬で終わる保存でチラつかせない**ための遅延。
    *  50コマの保存は実測 0.4 秒台なので、ここを超えるものだけ「待つ画面」を出す */
   private static readonly BUSY_DELAY_MS = 450;
-  /** 保存時に必ず保存先ピッカーを出すか（新規メモ・合作・保存先未定） */
+  /** 保存時に必ず保存先ピッカーを出すか（新規メモ・取り込んだ 3DS 作品・保存先未定） */
   askSaveTarget = false;
 
   // ---------------- V161 (A): 背景保存 ----------------
@@ -849,9 +558,6 @@ export class Editor {
   private saveInFlight: Promise<boolean> | null = null;
   /** V154b (W-7) の進化: 飛行中に来た保存要求を**1件だけ**予約（連打しても1件）。 */
   private saveQueued = false;
-  /** dirty 漏斗を通った回数。スナップショット時点と比べて「保存中に編集があったか」を
-   *  判定する（あれば dirty を残す＝「保存しました」がすべてを含むとは限らない）。 */
-  private editEpoch = 0;
   /** エンコードと圧縮を追い出す先（遅延生成・unmount で破棄）。 */
   private saveWorker: Worker | null = null;
   /** Worker への往復に付ける連番（古い保存の返事を新しい保存が拾わないため）。 */
@@ -864,580 +570,14 @@ export class Editor {
   /** V168 (S-2): 掃除待ちの進み（片づいたコマ数／全コマ数）。表示にだけ使う。 */
   private savePrep = { n: 0, total: 0 };
 
-  get dirty(): boolean {
-    return this._dirty;
-  }
-  set dirty(v: boolean) {
-    this._dirty = v;
-    if (v) this.autosavePending = true;
-    // V161 (A): 「何か変わった」の回数。背景保存が、スナップショットのあとに
-    // 編集があったか（＝dirty を落としてよいか）をこの数字で判定する。
-    // 経路の数え上げではなく**この漏斗1か所**（§1-g・V156 と同じ作法）
-    if (v) this.editEpoch++;
-    // ★V156 (P-1・条件5): 何かが変わった＝**いま見ているコマの圧縮控えは古い**。捨てる。
-    //
-    //  条件5「書きで起こしたコマの控えは必ず捨てる」を、**書いた経路を数え上げずに**満たすための要。
-    //  `dirty` はこのアプリの「何か変わった」の合図で、代入は 41 箇所あるが**すべてこの1か所を通る**
-    //  （`pointerDown` と同じ、既にあるこのファイルの作法）。絵を変えない変更（題名・速度・音）でも
-    //  控えを捨てるが、いま見ているコマは窓の中で当分眠らないので、無駄はほぼゼロ。
-    //
-    //  窓の**外**を書き換える操作（全コマ一括）はこれでは足りないので、そちらは
-    //  `wakeAllForWrite()` で明示的に起こす。さらに漏れても `sleep.ts` の指紋の網が拾う。
-    if (v && this.sleepOn) {
-      const f = this.project.frames[this.frameIndex];
-      if (f) invalidateFrame(f);
-    }
-  }
-
-  // ---------------- V157 (D-1): レイヤーロック 🔒 ----------------
-  /** 絵のデータを**自分で**書き換える道具（＝ロック中は入口で弾く）。
-   *
-   *  `transform` と `move` は入っていない——あちらは対象を `moveTargetLayerIds()` で解決し、
-   *  そこで実効ロックを除外済み（🔒を1枚混ぜて掴んでも、その1枚だけ動かない）。
-   *  ここで弾くと「ロックしていない他のレイヤーまで動かせない」になってしまう。 */
-  private static readonly PIXEL_TOOLS = new Set<Tool>([
-    "pen",
-    "eraser",
-    "brush",
-    "fill",
-    "shape",
-    "text",
-    "warp",
-  ]);
-  /** 最後にロックのトーストを出した時刻（連打で溢れさせないための間引き） */
-  private lastLockToastAt = 0;
-  /** V157: ロックの知らせ。**動的キーは `*Key` のプロパティで持つ**
-   *  （`SIZE_ADVICE` と同じ作法。`t(cond ? "a" : "b")` と書くと `m1201_i18n_check` の
-   *   使用検査が**沈黙して未使用キー扱い**になる——実際にこの回で1度踏んだ） */
-  private static readonly LOCK_TOAST = {
-    self: { msgKey: "ed.layer.locked.toast" },
-    byFolder: { msgKey: "ed.layer.lockedByFolder.toast" },
-  } as const;
-  /** V157 (D-2): レイヤーカラーの適用先ボタン。上と同じ理由で `*Key` に置く */
-  private static readonly COLOR_SCOPE = {
-    applyOne: { msgKey: "ed.layer.color.applyOne.btn" },
-    applyFrames: { msgKey: "ed.layer.color.applyFrames.btn" },
-    clearOne: { msgKey: "ed.layer.color.clearOne.btn" },
-    clearFrames: { msgKey: "ed.layer.color.clearFrames.btn" },
-  } as const;
-
-  /** V157 (D-1): 実効ロック（自分の 🔒 OR 祖先フォルダの 🔒）。 */
-  private isLayerLocked(id: string): boolean {
-    return effectiveLayerStates(this.project).get(id)?.locked === true;
-  }
-
-  /** V157 (D-1): これから絵を変える操作の入口で呼ぶ。
-   *  ロック中なら**トーストを出して** true を返す（＝呼び出し側は何もせず戻る）。
-   *
-   *  作者決定「黙って弾かない」。ただし描こうとするたびに出すと**うるさい**ので、
-   *  1.5 秒に1回までに間引く（ペンを何度も当てる／線を引き続ける場面で溢れない）。 */
-  private lockGuard(id = this.activeLayerId): boolean {
-    if (!this.isLayerLocked(id)) return false;
-    const now = performance.now();
-    // V157（Codex レビュー §4）: 間引きは**トーストが消えるまで**（3.2秒）。
-    // 1.5 秒だと、消える前に次が積み上がって同じ知らせが重なって見える
-    if (now - this.lastLockToastAt >= 3400) {
-      this.lastLockToastAt = now;
-      // V157（Codex レビュー §3・優先度 中）: **どちらの🔒で止まっているかを言う。**
-      // 親フォルダのロックなのに「このレイヤーはロック中です」と言われると、
-      // 子の🔒は薄くて押せない＝「外せないのに描けない」と迷子になる
-      const ld = this.project.layerDefs.find((l) => l.id === id);
-      const byParent = !!ld && ld.locked !== true && ancestorLocked(this.project, ld.parent);
-      this.cb.toast(t(Editor.LOCK_TOAST[byParent ? "byFolder" : "self"].msgKey));
-    }
-    return true;
-  }
-
-  /** V157 (D-1): レイヤーの 🔒 を切り替える（履歴に積む）。
-   *  親フォルダが🔒のときは切り替えさせない——切り替えられると
-   *  「解除したのに描けない」が起きる（要件の継承ルール）。 */
-  private toggleLayerLock(id: string) {
-    if (this.xformGuard()) return;
-    const ld = this.project.layerDefs.find((l) => l.id === id);
-    if (!ld) return;
-    if (ancestorLocked(this.project, ld.parent)) {
-      this.cb.toast(t("ed.layer.lockedByFolder.toast"));
-      return;
-    }
-    const before = ld.locked === true;
-    const self = this;
-    const set = (v: boolean) => {
-      const l = self.project.layerDefs.find((x) => x.id === id);
-      if (!l) return;
-      if (v) l.locked = true;
-      else delete l.locked;
-      self.dirty = true;
-      self.rebuildLayers();
-    };
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label: before ? "ロック解除" : "ロック",
-      bytes: 64, // クロージャが持つのは id と真偽値だけ（画素は1バイトも抱えない）
-      undo: () => set(before),
-      redo: () => set(!before),
-    });
-    const _t0 = perfNow();
-    set(!before);
-    perfDone("layer.lock", _t0);
-  }
-
-  /** V157 (D-1): フォルダの 🔒 を切り替える（中身すべてが実効ロックになる）。 */
-  private toggleFolderLock(fid: string) {
-    if (this.xformGuard()) return;
-    const f = this.folderById(fid);
-    if (!f) return;
-    if (ancestorLocked(this.project, f.parent)) {
-      this.cb.toast(t("ed.layer.lockedByFolder.toast"));
-      return;
-    }
-    const before = f.locked === true;
-    const self = this;
-    const set = (v: boolean) => {
-      const cur = self.folderById(fid);
-      if (!cur) return;
-      if (v) cur.locked = true;
-      else delete cur.locked;
-      self.dirty = true;
-      self.rebuildLayers();
-    };
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label: before ? "フォルダのロック解除" : "フォルダのロック",
-      bytes: 64,
-      undo: () => set(before),
-      redo: () => set(!before),
-    });
-    set(!before);
-  }
-
-  // ---------------- V178 (A-72): 全レイヤー消しゴム ----------------
-  /** V178: いま「全レイヤー」で消すか（道具が消しゴムで、切り替えがオン） */
-  private eraseAllOn(): boolean {
-    return this.tool === "eraser" && this.eraseAllLayers;
-  }
-
-  /** V178: 知らせと説明の文言。**動的キーは `*Key` で持つ**（`LOCK_TOAST` と同じ作法・検査が沈黙しないように） */
-  private static readonly ERASE_ALL_TEXT = {
-    none: { msgKey: "ed.eraser.allLayers.none.toast" },
-    wait: { msgKey: "ed.eraser.allLayers.wait.toast" },
-    hint: { msgKey: "ed.eraser.allLayers.hint" },
-  } as const;
-
   /** V178: 描きながら押さえて使うキー（`KeyboardEvent.key`）。これらが来ても全レイヤーの束は終えない
    *  （Shift・Ctrl・Alt は修飾・単体タップの割り当て、Space は手のひら。どれも作品を変えない） */
   private static readonly HELD_WHILE_DRAWING = new Set(["Shift", "Control", "Alt", "Meta", " "]);
 
-  /** V178: 「全レイヤー」を切り替える。**覚えない**（設定に書く口を呼ばない）。
-   *  カーソルの二重線を描き直し、オンにしたとき窓がまだ眠っていれば起こしておく（§3-5）。
-   *  起こす入口は `renderCanvas` の 1 つだけ——同じコマを 2 か所から同時に起こすと、後から起きたほうが
-   *  `f.layers[id]` を差し替え、その間に描いた線が消える */
-  private setEraseAllLayers(on: boolean) {
-    this.eraseAllLayers = on;
-    this.cursorPainted = "";
-    this.paintCursorLayer();
-    if (on && this.sleepOn && !this.frameReady()) this.renderCanvas();
-  }
-
-  /** V178: 全レイヤー消しゴムの関所。**描けないとき true**（呼び出し側は何もせず戻る＝`lockGuard` と同じ形）。
-   *  いまのレイヤーの 🔒 では止めない——🔒 のレイヤーは対象から外れるだけ（移動・変形と同じ線引き）。
-   *   ① 対象のうち、まだ眠っているものがある → 描かない（半分だけ消えた状態を作らない・§3-5）
-   *   ② 対象が 0 枚（全部 🔒／全部非表示）→ 描かない
-   *  どちらもトーストで知らせる（`lockGuard` と同じ 3.4 秒の間引き） */
-  private eraseAllGuard(): boolean {
-    const { ids, asleep } = eraseAllTargets(this.project, this.frameIndex);
-    if (asleep.length > 0) {
-      this.eraseAllToast("wait");
-      // 窓（表示中＋前後3）を起こすのは renderCanvas の入口だけ。起きたら次のストロークから効く
-      if (this.sleepOn && !this.frameReady()) this.renderCanvas();
-      return true;
-    }
-    if (ids.length === 0) {
-      this.eraseAllToast("none");
-      return true;
-    }
-    return false;
-  }
-
-  private eraseAllToast(kind: "none" | "wait") {
-    const now = performance.now();
-    if (now - this.lastEraseAllToastAt < 3400) return;
-    this.lastEraseAllToastAt = now;
-    this.cb.toast(t(Editor.ERASE_ALL_TEXT[kind].msgKey));
-  }
-
-  /** V178: 全レイヤーのストロークを始める。対象ごとに写しと位相を用意し、📌 が入っていれば
-   *  **その作品で最初の 1 回だけ**知らせる（決-1: 確認ダイアログは出さない＝描き味を止めない）。
-   *  関所（`eraseAllGuard`）を通ったあとに呼ぶ。対象が 0 枚でも束は返す＝1 枚の経路へは落とさない */
-  private beginEraseAll(): EraseAllStroke | null {
-    const frame = this.project.frames[this.frameIndex];
-    if (!frame) return null;
-    const { ids } = eraseAllTargets(this.project, this.frameIndex);
-    const pinnedIds = this.sharedLayerIds();
-    const st: EraseAllStroke = { project: this.project, frame, ids, before: {}, dash: {}, shared: new Set() };
-    for (const id of ids) {
-      st.before[id] = copyIndexBuf(frame.layers[id]);
-      st.dash[id] = { d: 0 };
-      if (pinnedIds.has(id)) st.shared.add(id);
-    }
-    if (st.shared.size > 0 && !this.eraseAllPinNoticed.has(this.project)) {
-      this.eraseAllPinNoticed.add(this.project);
-      this.cb.toast(t("ed.eraser.allLayers.pinned.toast"));
-    }
-    this.eraseAllStroke = st;
-    return st;
-  }
-
-  /** V178: 押した瞬間の打点を、対象のレイヤーぜんぶに打つ（座標は整数の pt＝A-70 の約束どおり）。
-   *  `stamp` は位相を使わない（点線の間引きは `strokeSegment` の側）ので、ここでは dashAcc を替えない */
-  private eraseAllStamp(st: EraseAllStroke, x: number, y: number, o: R.PenOptions) {
-    for (const id of st.ids) {
-      const buf = st.frame.layers[id];
-      if (!buf) continue;
-      R.stamp(buf, x, y, o);
-    }
-  }
-
-  /** V178: 線分を、対象のレイヤーぜんぶに引く。座標（lastPt / smoothPt）は全レイヤー共通の 1 組。
-   *  ★位相（dashAcc）だけは**レイヤーごと**に差し替える（同じ o を枚数ぶん回すと位相が枚数ぶん進む）。
-   *  `seed` と `toneShift` はコマ単位なので共有してよい */
-  private eraseAllSegment(
-    st: EraseAllStroke,
-    x0: number,
-    y0: number,
-    x1: number,
-    y1: number,
-    o: R.PenOptions
-  ) {
-    for (const id of st.ids) {
-      const buf = st.frame.layers[id];
-      if (!buf) continue;
-      o.dashAcc = st.dash[id];
-      R.strokeSegment(buf, x0, y0, x1, y1, o);
-    }
-  }
-
-  // ---------------- V191 (A-89): 1px の線（描く前に決める） ----------------
-  /** ★V191: 太さ 1 の線分を 1px の道（`line1px.ts`）で打つ。いちばん新しい画素は「仮」にして、まだ描かない。
-   *  状態が無ければ（押した瞬間が太さ 1 でなかった／筆圧で太い線分を挟んだ）、線分の始点＝もう描いてある画素から始め直す。
-   *  `all` があれば、確定した画素を対象のレイヤーぜんぶに打つ */
-  private line1pxSegment(x0: number, y0: number, x1: number, y1: number, o: R.PenOptions, buf: IndexBuf | null, all: EraseAllStroke | null): void {
-    if (!this.line1px) this.line1px = { st: L1.line1pxBegin(Math.round(x0), Math.round(y0)), all };
-    L1.line1pxSegment(this.line1px.st, x0, y0, x1, y1, o, (x, y, s, po) => this.line1pxPlot(x, y, s, po, buf, all));
-  }
-
-  /** ★V191: 確定した 1 画素を打つ。1 枚なら `plot1px`、全レイヤーなら対象ぜんぶに（`eraseAllSegment` と同じく、
-   *  点線の位相 dashAcc だけはレイヤーごとに差し替える）。打つかどうかの判定は `stamp` のまま */
-  private line1pxPlot(x: number, y: number, s: number, o: R.PenOptions, buf: IndexBuf | null, all: EraseAllStroke | null): void {
-    if (all) {
-      for (const id of all.ids) {
-        const b = all.frame.layers[id];
-        if (!b) continue;
-        o.dashAcc = all.dash[id];
-        L1.plot1px(b, x, y, s, o);
-      }
-    } else if (buf) L1.plot1px(buf, x, y, s, o);
-  }
-
-  /** ★V191 (A-89): **描き終わりの漏斗。** 1px の線の「仮」の画素（ペン先の 1 画素）を打って、状態を空にする。
-   *
-   *  なぞりが終わる道は全部ここを通す: pointerup（`onPointerUp`・**いまの道具に関係なく・束の確定と履歴より前**）／
-   *  全レイヤーの束を途中で確定するとき（`finishEraseAllNow`・`commitEraseAll` より前）／pointerup が来ないまま畳んだとき
-   *  （`endPointerSession` は `onPointerUp` を呼ぶので同じ道。⚠ ただし重い処理の最中は onPointerUp が漏斗より前で抜けるので、
-   *  そのなぞりの 1 枚の経路の仮は `dropStaleLine1px` が打たずに捨てる＝そのなぞりは履歴も積まれていない）／
-   *  筆圧で太い線分に替わるとき（`onPointerMove`）／次に押した時点の網（`onPointerDownInner`・束の網より前）。
-   *  漏れると**線の最後の 1 画素が消える**・取り消しの束に入らない（v191_smoke [S-4]・[S-11]）。
-   *  仮は、その画素を作ったときの打ち方で打つ（途中で道具が替わっても前の色で打つ＝束をペンの色で塗らない）。
-   *  全レイヤーの束がもう確定していたら打たない（履歴の外へ書かない） */
-  private endLine1px(): void {
-    const cur = this.line1px;
-    if (!cur) return;
-    this.line1px = null;
-    const all = cur.all;
-    if (all && all !== this.eraseAllStroke) return;
-    const buf = all ? null : this.activeBuffer();
-    if (L1.line1pxEnd(cur.st, (x, y, s, o) => this.line1pxPlot(x, y, s, o, buf, all))) this.renderCanvas();
-  }
-
-  /** ★V191 (A-89・レビュー指摘): pointerup を最後まで通らずに終わったなぞりの、**1 枚の経路の**仮の 1 画素を打たずに捨てる。
-   *  そのなぞりは履歴も積まれていないので、あとで打つと「そのとき選んでいるコマ・レイヤー（🔒 でも）」へ履歴の外に書いてしまう。
-   *  呼ぶのは endPointerSession（onPointerUp のあと）と pointerdown の網だけ。束の分は触らない（endLine1px の守りが見る） */
-  private dropStaleLine1px(): void {
-    if (this.line1px && !this.line1px.all) this.line1px = null;
-  }
-
-  /** ★V178 (A-72・Codex 指摘 2〜3 回目・高): 全レイヤーの束を、**作品に別の変更が入る前に**確定して終える。
-   *
-   *  描いている最中でもキーやもう 1 本のポインタは効く（`onKeyDown` に `pointerDown` の関所は無い）。コマの削除・
-   *  取り消し・コマ移動・重い処理が束より**先に**走ると、その履歴が「消したあと」の絵を抱えてしまい、
-   *  **Ctrl+Z しても元の絵に戻らない**（Codex 実測: コマ削除 → Ctrl+Z で 93 画素が消えたまま）。
-   *  だから入口——キー（`onKeyDown`・ダイアログ／文字入力欄／IME の関所のあと）・コマンド（`runCommand`）・重い処理（`beginBusy`）・↶↷（`handleUndo` /
-   *  `handleRedo`）・UI を押した時点（`uiPointerHandler`）——で先にここを通し、入口を通らない経路は
-   *  **ほかの履歴を積む直前**（`EditorHistory`）で拾う（最後の網）。
-   *  押している最中なら、そのストロークはここで終わる（残りのなぞりは次に押すまで描かない＝座標は触らない） */
-  private finishEraseAllNow(): void {
-    if (!this.eraseAllStroke) return;
-    // 1px の線の仮の 1 画素を、束に入れてから確定する（v191_smoke [S-4] (f)・[S-11]）
-    this.endLine1px(); // ★V191 (A-89): 描き終わりの漏斗（束の確定）
-    this.commitEraseAll();
-    if (this.pointerDown) {
-      // pointerup と同じ後始末（押していない・終端の控えなし・解決済みトーンなし・捕捉なし）
-      this.pointerDown = false;
-      this.lastPointerEvent = null;
-      this.strokeTone = null;
-      this.releaseCapture();
-    }
-  }
-
-  /** V178: 全レイヤーのストロークを確定する。**歪みの確定と同じ形**——1 画素でも変わったレイヤーだけ
-   *  before/after を積み、`multiBufferChangeEntry` を **1 つだけ** push する（ひとなぞり＝ Ctrl+Z 1 回）。
-   *
-   *  ★歪みの形から 2 つだけ変えた（どちらも、歪みの形のままだと壊れると V178 の調べで実測した所）:
-   *   ① 戻し先は **Frame オブジェクト**で引く。歪みは「Ctrl+Z を押した時点で表示中のコマ」で引くので、
-   *      コマを移ってから Ctrl+Z すると**別のコマへ書き戻す**（`pushBufferHistory`・変形・「消す」と同じ持ち方）
-   *   ② 取り消し・やり直しの前に、そのコマを**書きで起こす**（`prepare`）。大きい作品で窓の外へ出て眠った
-   *      コマは `frame.layers[id]` が無く、起こさないと Ctrl+Z が**黙って空振り**する */
-  private commitEraseAll() {
-    const st = this.eraseAllStroke;
-    this.eraseAllStroke = null;
-    if (!st) return;
-    // 作品が替わっていたら積まない（別の作品の履歴を汚さない）。★なぞったコマが作品から外れていても、
-    // 同じ作品なら積む——外したのは**いま積まれようとしている操作**（コマの削除など・EditorHistory の網）で、
-    // 束が先に積まれれば、その操作の取り消しでコマが戻ったあと、束の取り消しで元の絵に戻る
-    if (st.project !== this.project) return;
-    const frame = st.frame;
-    const beforeDiff: Record<string, IndexBuf> = {};
-    const afterDiff: Record<string, IndexBuf> = {};
-    let pinned = false;
-    for (const id of st.ids) {
-      const b = st.before[id];
-      const a = frame.layers[id];
-      if (!b || !a) continue;
-      let differs = false;
-      for (let i = 0; i < b.length; i++) {
-        if (b[i] !== a[i]) {
-          differs = true;
-          break;
-        }
-      }
-      if (!differs) continue; // 1 画素も変わっていないレイヤーは積まない（メモリ・§3-3）
-      beforeDiff[id] = b;
-      afterDiff[id] = copyIndexBuf(a);
-      if (st.shared.has(id)) pinned = true;
-    }
-    if (Object.keys(afterDiff).length === 0) return; // 1 枚も変わっていなければ履歴を積まない
-    const self = this;
-    // 📌 は全コマの絵が変わる＝フィルムを全部塗り直す（§3-4b・全コマが変わったことに気づける唯一の目印）。
-    // 塗り直しは rebuildFilm（見えている分だけ遅延で描く＝F-0 の流儀・全コマ貼り付けと同じ）
-    const repaint = () => {
-      if (pinned) self.rebuildFilm();
-      else {
-        const fi = self.project.frames.indexOf(frame);
-        if (fi >= 0) self.paintFilmThumb(fi);
-      }
-    };
-    const onApply = () => {
-      // Undo/Redo もデータ変更なので dirty（＝オートセーブ対象）にする
-      self.dirty = true;
-      self.renderCanvas();
-      repaint();
-    };
-    const entry = multiBufferChangeEntry(
-      "消しゴム（全レイヤー）",
-      (id) => frame.layers[id] ?? null,
-      beforeDiff,
-      afterDiff,
-      onApply
-    );
-    entry.prepare = () => wakeFrame(self.project, frame, "write");
-    this.history.push(entry);
-    // 書いたコマの圧縮控えは古い。dirty の漏斗は「表示中のコマ」だけを見るので、ここは名指しで捨てる
-    if (this.sleepOn) invalidateFrame(frame);
-    this.dirty = true;
-    this.renderCanvas();
-    repaint();
-  }
-
-  // ---------------- V156 (P-1): 眠り ----------------
-  /** 眠りを効かせるしきい値。**これ未満の作品はいままでと完全に同じ経路**を通る
-   *  （スパイク実測: 50コマ×3レイヤーで減らせるのは 11 MiB しかなく、遅くなる理由だけが残る）。 */
-  private static readonly SLEEP_MIN_BYTES = 32 * 1024 * 1024;
-  /** 窓の半径。オニオンは UI が 切/1/2/3 の4択で最大3（`compositeFrame` が frameIndex±k を読む）。
-   *  **常に ±3 を起こしておく**——オニオンを 0→3 に切り替えた瞬間に6コマ起こすと引っかかるので、
-   *  段数に追従させない。20レイヤーでも 7コマ＝10.3 MiB で、効き目にはまったく影響しない。 */
-  private static readonly SLEEP_WINDOW = 3;
-  /** この作品で眠りを効かせるか（mount のときに大きさで決める） */
-  private sleepOn = false;
-  /** 裏で眠らせる作業が走っているか */
-  private sweeping = false;
-  /** V168 (S-2): いま走っている掃除の1周（`sweepSleep` の Promise）。保存の待ちが**同じ周を待つ**ために持つ */
-  private sweepJob: Promise<void> | null = null;
-  /** V168 (S-2): 掃除が進んだときに呼ぶ口（保存の待ちがピルの数字を更新する）。メーターと同じ間引き点で呼ぶ */
-  private sweepProgressCb: (() => void) | null = null;
-  /** 次に見にいくコマ（掃除の巡回位置） */
-  private sweepCursor = 0;
-  /** 起こし直しの世代（追い越しで古い結果を描かないための番号） */
-  private wakeGen = 0;
-  /** 掃除中にメーターを更新した時刻（走査が重いので 0.5 秒に1回まで） */
-  private lastSweepMeterAt = 0;
-  /** V159 (G-1): 直近にメーターが数えた面数。性能ログの文脈にだけ使う（表示には使わない）。 */
-  private lastFaces = 0;
-
-  /** V156: 📌 全コマ共通レイヤーの id（眠らせない＝全コマで見えていて実体は1つ） */
-  private sharedLayerIds(): Set<string> {
-    const s = new Set<string>();
-    for (const ld of this.project.layerDefs) if (ld.shared === true) s.add(ld.id);
-    return s;
-  }
-
-  /** V156: そのコマは窓の中か（表示中＋オニオンが読む前後） */
-  private inSleepWindow(i: number): boolean {
-    return Math.abs(i - this.frameIndex) <= Editor.SLEEP_WINDOW;
-  }
-
-  /** V156: 描くのに要るコマ（表示中＋前後3）が全部起きているか。 */
-  private frameReady(): boolean {
-    if (!this.sleepOn) return true;
-    const lo = Math.max(0, this.frameIndex - Editor.SLEEP_WINDOW);
-    const hi = Math.min(this.project.frames.length - 1, this.frameIndex + Editor.SLEEP_WINDOW);
-    for (let i = lo; i <= hi; i++) {
-      const f = this.project.frames[i];
-      if (!f?.sleep) continue;
-      for (const id of Object.keys(f.sleep)) if (!f.layers[id]) return false;
-    }
-    return true;
-  }
-
-  /** V156: 窓（表示中＋前後3）を起こす。**書きで起こす**——ここは利用者が描く場所なので、
-   *  控えを残すと「描いた絵が次に眠るとき古い控えで上書きされる」（条件5）。 */
-  private async ensureSleepWindow(): Promise<void> {
-    if (!this.sleepOn) return;
-    // 再生中は**読みで**起こす（条件2）。控えを残しておけば、窓から出るときの片付けが只になり、
-    // 1周の再生で 25 秒ぶんの再圧縮が走るのを防げる。再生中はキャンバスに触れると
-    // 再生が止まる（`stopPlayback`）ので、読みで起こしたコマに描かれることはない。
-    // 止まったあとに描けば `dirty` のセッターが控えを捨てる（条件5）。
-    const mode = this.playing ? "read" : "write";
-    const lo = Math.max(0, this.frameIndex - Editor.SLEEP_WINDOW);
-    const hi = Math.min(this.project.frames.length - 1, this.frameIndex + Editor.SLEEP_WINDOW);
-    const jobs: Promise<void>[] = [];
-    for (let i = lo; i <= hi; i++) {
-      const f = this.project.frames[i];
-      if (f) jobs.push(wakeFrame(this.project, f, mode));
-    }
-    await Promise.all(jobs);
-  }
-
-  /** V156: 窓の外を少しずつ眠らせる（条件1: 先に全部圧縮しない）。
-   *
-   *  スパイク実測で 1,091 コマの圧縮は **25.6 秒**。読み込みと直列にすると
-   *  V155 で 11 秒にした「開く速さ」が 36 秒に戻ってしまう。だから**開いたあと**、
-   *  1コマずつ・合間にメインスレッドを譲りながら片付ける。
-   *  描いている間・再生中は**触らない**（体感に漏らさない）。 */
-  private sweepSleep(): Promise<void> {
-    if (this.sweeping || !this.sleepOn) return Promise.resolve();
-    // V168 (S-2): 1周の Promise を `sweepJob` に持つ。保存の待ちは**走っている周を待ち**、
-    // 終わったら条件を見直して次の周を頼む（多重起動はしない＝`sweeping` は従来どおり）
-    const job = this.sweepSleepPass().finally(() => {
-      if (this.sweepJob === job) this.sweepJob = null;
-    });
-    this.sweepJob = job;
-    return job;
-  }
-
-  /** V168: 掃除の**1周**。`sweepSleep` から呼ぶ（外からは呼ばない）。 */
-  private async sweepSleepPass(): Promise<void> {
-    this.sweeping = true;
-    const keep = this.sharedLayerIds();
-    try {
-      let scanned = 0;
-      const total = this.project.frames.length;
-      while (this.mounted && this.sleepOn && scanned < total) {
-        // 描いている間・再生中・変形中は「**只で片付くもの**」しか触らない。
-        // 圧縮は 1コマ 20 レイヤーで数十 ms かかるので、ここで走らせると描き味に出る。
-        // 逆に「控えが生きている生を手放すだけ」は費用ゼロなので、再生中でも進めてよい
-        //（進めないと、1周の再生で全コマが生に戻ってしまう）。
-        const freeOnly = this.pointerDown || this.playing || this.xformActive;
-        const i = this.sweepCursor % Math.max(1, this.project.frames.length);
-        this.sweepCursor = i + 1;
-        scanned++;
-        const f = this.project.frames[i];
-        if (!f || this.inSleepWindow(i)) continue;
-        if (Object.keys(f.layers).length === 0) continue; // もう眠っている
-        if ((await sleepFrame(this.project, f, keep, freeOnly)) > 0 && !freeOnly) {
-          // 1コマ圧縮したらメインスレッドを譲る（描き味に出さない）
-          await new Promise((r) => setTimeout(r, 0));
-          // V156（Codex レビュー）: **メーターの「実際に使っている量」を追従させる。**
-          // 片付けは 27 秒かけて進むのに、メーターは再描画や履歴の動きがあるまで
-          // 更新されない＝**画面が古い数字を出したまま**になっていた。
-          // 数える処理は全コマを走査するので、0.5 秒に1回までに絞る
-          //（この行が動くこと自体が「いま片付けている」の合図にもなる）
-          const now = performance.now();
-          if (now - this.lastSweepMeterAt > 500) {
-            this.lastSweepMeterAt = now;
-            this.updateSizeMeter();
-            this.sweepProgressCb?.(); // V168 (S-2): 保存の待ちがピルの「片づけ中 n/N」を進める
-          }
-        }
-      }
-    } finally {
-      this.sweeping = false;
-      // 終わったところで必ず1回そろえる（途中の間引きで最後の数字が古いまま残らないように）
-      if (this.mounted) this.updateSizeMeter();
-    }
-  }
-
-  /** V156: 窓の後ろに出ていったコマを只で片付ける（再生中の1コマぶん）。 */
-  private async evictBehind(center: number): Promise<void> {
-    if (!this.sleepOn) return;
-    const i = center - Editor.SLEEP_WINDOW - 1;
-    const f = this.project.frames[i];
-    if (!f) return;
-    await sleepFrame(this.project, f, this.sharedLayerIds(), true /* 只で片付くものだけ */);
-  }
-
   /** V156: コマの準備待ちの札。出しっぱなしにならないよう、隠すのは必ず同じ1か所を通す。 */
-  private showWaitBadge(on: boolean): void {
+  protected override showWaitBadge(on: boolean): void {
     const el = document.querySelector("#ed-wait-badge") as HTMLElement | null;
     if (el) el.hidden = !on;
-  }
-
-  /** V156: 掃除をうながす（コマ移動・編集・時間経過のたびに軽く呼ぶ）。 */
-  private nudgeSweep(): void {
-    if (!this.sleepOn || this.sweeping) return;
-    void this.sweepSleep();
-  }
-
-  // ストローク中
-  private strokeBefore: IndexBuf | null = null;
-  private strokeSeed = 1;
-  private dashAcc = { d: 0 };
-  /** ★V178 (A-72): 進行中の全レイヤーのストローク（pointerdown で作り、pointerup で確定して捨てる）。
-   *  null なら 1 枚の経路（従来どおり） */
-  private eraseAllStroke: EraseAllStroke | null = null;
-  /** ★V191 (A-89): 1px の線の「1 画素遅らせて決める」状態。太さ 1 の線分を打っている間だけ持つ（null＝打っていない）。
-   *  `all` は全レイヤーの束に打っているときの束（座標は全レイヤー共通の 1 組＝状態もなぞりに 1 つ）。
-   *  なぞりが終わる道は全部 `endLine1px`（描き終わりの漏斗）を通り、そこで仮の画素を打って捨てる */
-  private line1px: { st: L1.Line1px; all: EraseAllStroke | null } | null = null;
-  /** V178 (決-1): 「📌 は全コマから消える」を知らせた作品。**作品（Project）ごと**に 1 回
-   *  （mount でのリセットに頼らない＝別の作品を開けば自然に出し直す。弱い参照なので閉じた作品を抱え込まない） */
-  private eraseAllPinNoticed = new WeakSet<Project>();
-  /** V178: 「消せるレイヤーがない／準備中」の間引き（`lockGuard` と同じ 3.4 秒）。
-   *  -Infinity で始める＝起動した直後の 1 回目も必ず出す */
-  private lastEraseAllToastAt = -Infinity;
-  private lastPt: { x: number; y: number } | null = null;
-  private smoothPt: { x: number; y: number } | null = null;
-  private _pointerDown = false;
-  /** 接触中フラグ。M11-16: **書き込みを1箇所に集約**し、立つ瞬間に HUD を薄く・下りる瞬間に
-   *  戻す（setStrokeHud）。pointerup / pointercancel / blur→endPointerSession / スポイトの早期解放 /
-   *  mount のリセット…どこから下ろしても必ずここを通るので「消えたまま戻らない」が起きない */
-  private get pointerDown(): boolean {
-    return this._pointerDown;
-  }
-  private set pointerDown(v: boolean) {
-    if (this._pointerDown === v) return;
-    this._pointerDown = v;
-    // 手のひら/Space のパンは「描いている」わけではないので薄くしない（倍率表示を見ながら動かせる）。
-    // panState は pointerDown=true より前に立つ（onPointerDown のパン分岐）ので、ここで判定できる
-    this.setStrokeHud(v && !this.panState);
   }
   /** M11-5: いま #ed-cvwrap が掴んでいるポインタ。pointerup/pointercancel が届かないまま
    *  終わった接触を後から解放するために覚えておく（掴みっぱなしだと、その入力機器の
@@ -1445,42 +585,6 @@ export class Editor {
   private capturedPointerId: number | null = null;
   /** M11-5: 直近のポインタイベント。接触が途切れたとき、この位置でストロークを閉じる */
   private lastPointerEvent: PointerEvent | null = null;
-  private shapeStart: { x: number; y: number } | null = null;
-  /** M10-7: 図形ドラッグ中の**生の**終点（拘束前）。Shift の押下/解放を
-   *  マウスを動かさずに即反映するため、拘束前の座標を保持しておく必要がある */
-  private shapeLastPt: { x: number; y: number } | null = null;
-  /** M10-7: Shift の押下状態。pointer イベントの `shiftKey` を真実として毎回同期し、
-   *  keydown/keyup でも更新する（ウィンドウ非フォーカス中の押下を取りこぼさないため） */
-  private shiftHeld = false;
-  // 歪み（M10-2a）。パラメータは既存の流儀に合わせて永続化しない（penSize 等と同じ）
-  private warpMode: WarpMode = "push";
-  private warpRadius = 24;
-  private warpStrength = 50;
-  private warpField: WarpField | null = null;
-  /** ストローク開始時の全レイヤースナップショット（layerId -> IndexBuf）。適用元は常にこれ */
-  private warpBefore: Record<string, IndexBuf> | null = null;
-  private warpLastPt: { x: number; y: number } | null = null;
-  /** M10-2b: 魚眼の中心。**ストローク開始位置で固定**する（追従させない）。
-   *  中心が動くと場が複数中心の重ね合わせになって魚眼でなくなり、液状化の亜種になる。
-   *  また行き過ぎ止めは「変位が径方向である」ことを前提にしているので、前提が崩れる。 */
-  private warpCenter: { x: number; y: number } | null = null;
-  /** M10-2b: 押しっぱなし連続適用のタイマー */
-  private warpTimer: number | null = null;
-  // M10-2c: 四隅変形。**transform とは独立した状態機械**にする（REQ §3.5）。
-  // transform は xformCutDone / selMoveBefore / cancelSelectionMove と絡んでいるので、
-  // 射影変換をそこへ差し込むと M5-3 → M5-5 系の退行を再演する。
-  // M13-2b (T-2): transform は「N 枚を**同じ1枚のマスク**で切り出した float の集合」（`xformLayers`）になった。
-  // `floatBuf` は幾何の基準（[0] と同寸）として残している。四隅が独立であることは変わらない
-  private cornerActive = false;
-  /** 変形後の四隅（左上→右上→右下→左下）。ドット座標 */
-  private cornerPts: { x: number; y: number }[] = [];
-  /** 変形前の矩形（選択範囲があればその外接矩形、なければキャンバス全体） */
-  private cornerRect: { x0: number; y0: number; x1: number; y1: number } | null = null;
-  private cornerBefore: Record<string, IndexBuf> | null = null;
-  /** 掴んでいるハンドルの index。M13-2b (T-1): 0..3=四隅 / 4..7=辺の中央。null = 掴んでいない */
-  private cornerDrag: number | null = null;
-  /** M13-2b (T-1): ドラッグ開始時の4点とポインタ。辺ハンドルは**開始時からの差分**で毎回作り直す */
-  private cornerDragBase: { pts: { x: number; y: number }[]; start: { x: number; y: number } } | null = null;
   /** 四隅モード中だけ pointer-events を切った浮遊UIと、その元の値 */
   private cornerMuted: { el: HTMLElement; prevPe: string; prevOp: string }[] = [];
   /** M10-3: エディタ内の自前ダイアログの開いている数。>0 の間はショートカットを通さない */
@@ -1489,53 +593,42 @@ export class Editor {
    *  開いたまま unmount されると modalDepth が 1 のまま残り、再 mount 後に
    *  ショートカットが全滅する。**modalDepth を直接 0 にはしない**（片付け漏れが隠れる） */
   private wobbleDialogClose: (() => void) | null = null;
+  /** V204 (A-111・REQ §2-2): ゆらゆらのダイアログの前の値。**アプリを閉じるまで覚える**（static＝作品を開き直しても残る・保存しない） */
+  private static wobbleLast: { count: number; strength: WobbleStrength; kind: WobbleKind; target: "all" | "active" } = {
+    count: 3,
+    strength: WOBBLE_STRENGTH_DEFAULT,
+    kind: "line",
+    target: "all",
+  };
+  /** V204 (A-111・B-6): いま見本に出している絵（検査の入口）。frames[0] は元のコマ、1〜 が差分（どれも 320×240 の合成＝
+   *  compositeFrame と同じ・拡大した canvas の画素ではない）。ダイアログを閉じたら null */
+  private wobblePreview: {
+    count: number;
+    strength: WobbleStrength;
+    kind: WobbleKind;
+    target: "all" | "active";
+    seed: number;
+    fps: number;
+    frames: Uint32Array[];
+    ms: number;
+  } | null = null;
   /** V164 (U-4): 「まとめて追加」ダイアログの閉じ手（`wobbleDialogClose` と同じ理由・同じ流儀） */
   private addFramesDialogClose: (() => void) | null = null;
-  private lassoPts: { x: number; y: number }[] = [];
-
-  // 選択・変形
-  private selMask: Uint8Array | null = null;
-  /** 変形の**幾何の基準**になる float（枠・ハンドル・当たり判定・回転中心はこれで決まる）。
-   *  M13-2b: 複数レイヤーのときは `xformLayers[0].float` を指す。全レイヤーの float は
-   *  **同じ1枚のマスク**で切り出すので ox/oy/w/h が全部一致し、どれを基準にしても同じ（REQ §4） */
-  private floatBuf: R.FloatBuf | null = null;
-  /** M13-2b (T-2): 変形の対象レイヤー N 枚ぶん。`float` は同じマスクで切り出した浮動、`before` は切り出す前の
-   *  スナップショット（取消・履歴の before）。**絵の無いレイヤーも持ち回る**（確定時のレイヤー集合を
-   *  開始時と一致させ、履歴の対称性を保つため・REQ §6-2）。`cv` はプレビュー用の単色キャンバスのキャッシュ
-   *  （float は変形中に変わらないので1回作れば足りる＝20枚でも追従が遅れない） */
-  private xformLayers: { id: string; float: R.FloatBuf; before: IndexBuf; cv?: HTMLCanvasElement }[] = [];
-  private xform: R.Transform = {
-    tx: 0,
-    ty: 0,
-    angle: 0,
-    sx: 1,
-    sy: 1,
-    flipH: false,
-    flipV: false,
-  };
-  private xformActive = false;
-  // M11-8: selmask=選択枠だけの移動（P-1） / layermove=レイヤーの絵の移動（P-2）
-  // M13-2b (T-3): scalex / scaley ＝ 辺ハンドルで片方向だけ伸ばす（掴んだ辺だけが動き、対辺は止まる）
-  private dragMode:
-    | ""
-    | "move"
-    | "scale"
-    | "scalex"
-    | "scaley"
-    | "rotate"
-    | "selmove"
-    | "selmask"
-    | "layermove" = "";
-  private dragStart: { x: number; y: number } | null = null;
-  private dragBase: R.Transform | null = null;
-  /** M13-2b (T-3): 掴んだ辺がローカル軸のどちら側か（+1 / -1）。対辺を止める補正に使う */
-  private dragSide = 1;
-  private static clipboard: R.FloatBuf | null = null;
-  /** M3.3: ページ／複数ページ・クリップボード（アプリ全体・クロスメモ保持） */
-  private static frameClip: FrameClip | null = null;
-  /** フィルムの範囲選択（Shift+クリック）。コマ構造変更でリセット */
-  private rangeAnchor: number | null = null;
-  private rangeSel: { a: number; b: number } | null = null;
+  // ---------------- V208 (A-119): 範囲選択の線の層（#ed-sel-ui・画面解像度） ----------------
+  /** 境目の線を作ったマスクの実体（替わったときだけ作り直す） */
+  private selUiSrc: Uint8Array | null = null;
+  private selUiOutline: SelOutline | null = null;
+  /** 境目の線の Path2D（物理 px）と、作ったときの寸法・ずらし */
+  private selUiPath: Path2D | null = null;
+  private selUiPathKey = "";
+  /** 辺が多すぎて点線を止めているときの、境目の線を描いた絵の控え（1 枚だけ）と、その寸法・位相 */
+  private selUiCache: HTMLCanvasElement | null = null;
+  private selUiCacheKey = "";
+  /** 点線をずらすタイマー（動いていなければ null）と、点線の位相 */
+  private selUiTimer: number | null = null;
+  private selUiPhase = 0;
+  /** 今その間は線を出さない場面（矩形選択のドラッグ中・移動ツールで範囲の絵を動かしている間） */
+  private selUiHideFor: "rect" | "selmove" | null = null;
 
   // ================= V166 (C): Alt でカーソルが止まる件 =================
   //
@@ -1587,7 +680,6 @@ export class Editor {
     }
   }
 
-  private composite = new Uint32Array(PIXELS);
   private keydownHandler = (e: KeyboardEvent) => {
     // V166 (C): Alt の押し・離しを数える（釣り合いが崩れたら keyup が届いていない＝候補1）
     if (e.key === "Alt") {
@@ -1677,17 +769,15 @@ export class Editor {
    *  矢印キーの移動セッションを確定する。capture 段階なので**どのボタンの処理より先**に走る
    *（保存・書き出し・タイムライン・レイヤー行・キャンバス…を1箇所でまかなう） */
   private uiPointerHandler = () => {
-    if (this.mounted) this.endArrowSession();
-    // ★V178 (A-72・Codex 3 回目): 描いている最中に**もう 1 本のポインタ**（ペンを置いたままマウス等）で
-    //  ボタンを押すと、そのボタンの処理が束より先に作品を変える（↶↷・消す・コマの追加…）。
-    //  ここは capture 段階で**どのボタンの処理より先**に走る漏斗なので、ここで束を確定して終える
-    if (this.mounted && this.eraseAllStroke) this.finishEraseAllNow();
+    // ★V214 (M-2b-1a): 確定する中身（矢印の移動・全レイヤーの束）はコアの otherOperationStarted
+    this.otherOperationStarted();
   };
   /** M11-8: ステージのスクロール（手のひら・ホイール）にランチャーを追従させる */
   private stageScrollHandler = () => {
     if (this.mounted) this.refreshSelectionLauncher();
+    // ★V209 (A-122): スクロール（手のひら・ホイール）で絵が動いたら、枠をポインタの下へ引き直す
+    if (this.mounted && this.cursorLive) this.syncCursorFrame();
   };
-  private mounted = false;
   /** F-0対策: フィルムサムネは可視分のみ遅延描画（canvasメモリ上限対策）。
    *  V192 (R-3): バッキングは 80×60 固定をやめ、**枠の実画素**（CSS の大きさ × dpr）で面積平均して描く。
    *  そのぶん 1 枚が大きくなり得る（dpr 2・2 倍の高さで 296×222）ので、**見えなくなったサムネはバッキングを手放す**
@@ -1717,59 +807,27 @@ export class Editor {
     project: Project,
     saveCtx: EditorSaveContext | null,
     cb: EditorCallbacks,
-    opts: { askSaveTarget?: boolean; sideFold?: SideFold } = {}
+    // V199 (A-106): fileName＝保存先は無いが名前の分かるファイル（ウィンドウへのドロップ→「編集」）の名前（拡張子なし）
+    opts: { askSaveTarget?: boolean; sideFold?: SideFold; fileName?: string; workFile?: WorkFileRef | null } = {}
   ) {
     // V158 (L-1): 右パネルの段の畳み（settings から。壊れた値・両方畳みは既定へ）
     this.sideFold = sanitizeSideFold(this.sideFoldPending ?? opts.sideFold);
-    this.project = project;
-    // M15 (K-1): 共通レイヤーの不変条件（全コマが同一バッファを参照）を読み込み直後に確立する。
-    // serialize は「差があれば shared を外す」までを済ませているので、残った shared は張り直すだけ
-    relinkShared(project);
-    // ★V156 (P-1): この作品で眠りを効かせるか。**小さい作品はいままでと完全に同じ経路**
-    //（スパイク実測: 50コマ×3レイヤーで減らせるのは 11 MiB しかなく、遅くなる理由だけが残る）。
-    // 開いた直後は全部起きている——条件1「先に全部圧縮しない」ので、
-    // 片付けは `nudgeSweep()` が背景で少しずつ進める
-    // V163: PV6 の遅延読みは**眠り控えを持った姿**で届く。論理サイズがしきい値を割っていても
-    // 眠っているコマがあるなら sleepOn を立てる（立てないと renderCanvas が起こさず白紙になる）。
-    // 通常は projectFromBytes 側のしきい値（PV6_EAGER_MAX_RAW）と揃っているので保険の側
-    this.sleepOn =
-      projectBytes(project) >= Editor.SLEEP_MIN_BYTES || asleepCount(project) > 0;
-    this.sweepCursor = 0;
-    // 数え漏れを拾ったときの記録（W-10 の常時ログへ。名前もパスも出さない）
-    setStaleSleepLogger(
-      this.sleepOn
-        ? (detail) => this.cb.appendLog?.(`[V156] ${detail}`)
-        : null
-    );
+    // ★V214 (M-2b-1a): 作品を受け取って、共通レイヤーを張り直し・眠りを効かせるか決める（コアの openWorkStart・字と順は前と同じ）
+    this.openWorkStart(project);
     this.saveCtx = saveCtx;
     this.askSaveTarget = opts.askSaveTarget ?? saveCtx == null;
-    this.cb = cb;
-    this.frameIndex = 0;
-    this.activeLayerId = project.layerDefs[project.layerDefs.length - 1]?.id ?? "";
-    this.history.clear();
-    this.dirty = false;
-    this.mounted = true;
-    // V159 (G-1): ログの1行ごとに添える「作品の大きさ」を教える口をつなぐ。
-    // **ここで数え直さない**——面数は全コマ走査なので、メーターが数えた値（`lastFaces`）を返すだけ。
-    // 少し古い値でも「大きい作品なのか」を読むには十分で、測るために遅くするほうが害が大きい
-    setPerfContext(() => ({
-      f: this.project.frames.length,
-      l: this.project.layerDefs.length,
-      s: this.lastFaces,
-    }));
-    // V154: 知らせは「作品につき1回」＝別の作品を開いたら出し直す（Editor は使い回される）
-    this.promoteNoticed = false;
-    this.sizeNoticedLevel = "";
-    // V178 (A-72): 描きかけの束を持ち越さない（📌 の知らせは作品ごとの WeakSet なので、ここで戻さなくてよい）。
-    //（「全レイヤー」の切り替え自体は `fillRefAll` と同じくアプリを閉じるまで残る＝設定には書かない）
-    this.eraseAllStroke = null;
-    this.line1px = null; // ★V191 (A-89): 1px の線の仮も持ち越さない（別の作品へ打たない）
+    // ★V216b (A-126): その作品のファイル（ライブラリで開いた .memoanima・その項目つきのオートセーブ。ほかは無い）
+    this.workFile = opts.workFile ?? null;
+    this.saveRedirect = null;
+    // ★V199 (A-106): 開いたファイルの名前。保存先が決まっていて選び直さない（＝ライブラリのファイルを開いた・
+    //  その作品のオートセーブを戻した）ならその名前、ドロップで開いたならそのファイルの名前、新しいメモは null。
+    //  「保存先を選ぶ」かどうかの判定は main.ts の editorWorkRef（V198）と同じ
+    this.fileBase = opts.fileName || (saveCtx && !this.askSaveTarget ? saveCtx.baseName : null);
+    // ★V214: 位置・履歴・未保存の印・開いた印・性能の口・作品ごとの知らせ・描きかけを最初の姿に（コアの openWorkReset・字と順は前と同じ）
+    this.openWorkReset(project, cb);
     this.exporting = false; // W-5: 書き出し中に戻る→別の作品を開く、で取り残さない
-    this.playing = false;
-    this.selMask = null;
-    this.floatBuf = null;
-    this.xformLayers = []; // M13-2b
-    this.xformActive = false;
+    // ★V214: 再生と時計・選択（と選択の線）・浮いた絵・変形を最初の姿に（コアの openWorkPlayAndFloat）
+    this.openWorkPlayAndFloat();
     // 表示状態は前回セッションを持ち越さない（swapped/回転/ズームのリセット）
     this.previewLarge = false;
     this.viewRot = 0;
@@ -1778,20 +836,8 @@ export class Editor {
     // V195 (A-98): パンの形・控えた点も持ち越さない（開いたら全体表示＝applyZoom が .pan を外す）
     this.panGeom = null;
     this.panHeld = null;
-    // 範囲選択も前のメモを持ち越さない（古いインデックスでのコピー/クラッシュ防止）
-    this.rangeSel = null;
-    this.rangeAnchor = null;
-    // フォルダ選択も持ち越さない（別プロジェクトの dangling parent 防止・Codexレビュー指摘#3）
-    this.selectedFolderId = null;
-    // M11-19 レビュー検出の既存バグ: 複数選択（selectedNodeIds/selAnchorId）も持ち越されていた。
-    // 新規メモはレイヤー id が毎回同じなので、前の作品で選んでいた行が次の作品でも「選択中」のまま残り、
-    // 行ドラッグの「選択外の行から掴んだら単独選択に切替」が効かなかった（起動直後＝空集合と同じにする）
-    this.selectedNodeIds = new Set();
-    this.selAnchorId = null;
-    // M11-15: レイヤー専用クリップボードは**作品を跨がない**（値は colorTable の添字＝別作品では色化け）。
-    // 破棄は clearLayerClip() 1箇所（ボタンはこの後 buildSidePanel が作り直すので、
-    // ここでの無効化は空振りしてよい）
-    this.clearLayerClip();
+    // ★V214: コマの範囲・フォルダとレイヤーの選択・レイヤーの控えを持ち越さない（コアの openWorkSelection）
+    this.openWorkSelection();
     $("#ed-stage").classList.remove("swapped");
 
     // M10-21: 入力診断フラグ（?inputlog または VITE_INPUTLOG=1 の診断ビルド）。
@@ -1831,14 +877,14 @@ export class Editor {
     // **掴んだままなら解放してから忘れる** — ウィンドウへのドロップ→「編集」は unmount() を
     // 通らずに mount() し直すので、ここで id を忘れるだけだと二度と解放できなくなる
     this.spacePanned = false;
-    this.pointerDown = false;
+    this.openWorkPointer(); // ★V214: 押している印を下ろす（コアの openWorkPointer・前と同じ位置＝HUD のフックはパンの状態を読む）
     this.panState = null;
     this.lastPointerEvent = null;
     this.releaseCapture();
     this.cancelRowDrag();
     this.cancelFrameDrag(); // M11-7: 掴んだまま別の作品を開かない
     this.finishSplitDrag(false); // M11-17: スプリッターも同じ
-    setIconLabel($("#ed-title"), "pen", project.meta.title || untitledTitle()); // V171: ✏ → pen（線画）
+    this.refreshTitle(); // V199 (A-106): 左上はいまのファイルの名前（V171: ✏ → pen の線画）
     // M11-18: キャンバス集中は**持ち越さない**（previewLarge と同じ一時的な見方）。個別の畳み（collapsed）と
     // ミニの置き場（miniDock）は設定から復元済みで、applyLayout / applyHud が DOM へ反映する
     this.focusActive = false;
@@ -1861,15 +907,12 @@ export class Editor {
     // 2階は位置が決まってから描くので、ここでは触らない
     this.applyCanvasCursor();
     this.cursorDot = null;
+    this.cursorClient = null; // ★V209 (A-122)
+    this.frameCursorOn = false;
     this.cursorPainted = "";
     this.applyZoom();
     this.refreshAll();
-    // M15 (K-1): 旧版で共通レイヤーが編集され、コマ間に差があったため共通を外して開いた場合に一言。
-    // serialize が付けた一時フラグを読んで消す（settings の __recovered と同じ運用）
-    if ((this.project as { __sharedConflict?: boolean }).__sharedConflict) {
-      delete (this.project as { __sharedConflict?: boolean }).__sharedConflict;
-      this.cb.toast(t("ed.layer.sharedConflict.toast"));
-    }
+    this.openWorkNotice(); // ★V214: 共通を外して開いたときの一言（コアの openWorkNotice）
     // F-0対策: レイアウト確定後にサイズ確定＋再描画（表示直後は clientWidth が不定になり得る）。
     // 以後のサイズ変化にも ResizeObserver で追従する（applyZoom はサイズ設定のみなので再描画も呼ぶ）。
     requestAnimationFrame(() =>
@@ -1912,13 +955,9 @@ export class Editor {
     // M11-10: 矢印キーの移動セッションを「別の操作」で確定させる（capture）
     $("#screen-editor").addEventListener("pointerdown", this.uiPointerHandler, true);
     // F-3: オートセーブ（15秒間隔・変更があるときだけ・描画中はスキップ）
-    this._dirty = false;
-    this.autosavePending = false;
+    this.openWorkClean(); // ★V214: 未保存の印と便の印を下ろす（コアの openWorkClean・setter を通らない）
     this.autosaveTimer = window.setInterval(() => void this.runAutosave(), 15000);
-    // V156 (P-1・条件1): **開いたあと**に少しずつ眠らせる。読み込みには一切足さない
-    //（全部圧縮すると 25.6 秒かかる＝V155 で 11 秒にした「開く速さ」が台無しになる）。
-    // 少し待ってから始める＝開いた直後の描き出しに重なりにくくする
-    if (this.sleepOn) window.setTimeout(() => this.nudgeSweep(), 600);
+    this.openWorkSweepSoon(); // ★V214: 眠りの片付けを少し待ってから始める（コアの openWorkSweepSoon）
   }
 
   unmount() {
@@ -1935,13 +974,7 @@ export class Editor {
         `[V167 C] alt unbalanced down=${this.altDownCount} up=${this.altUpCount} fix=${this.altFixCount}`
       );
     }
-    this.stopPlayback();
-    // ★V156 (P-5): 履歴を捨てる。**いままで捨てていなかった**——`history.clear()` は
-    // `mount` の中にしか無く、ライブラリ画面へ戻っても直前の作品の履歴が抱える生 IndexBuf
-    //（予算いっぱいなら数十〜百 MiB）が次に開くまで居座っていた。
-    // すぐ下で warpField を「1.5MB を保持し続けないように」と null にしているのに、
-    // その 100 倍を放置していた（V156 スパイクの副産物）。mount 側の clear はそのまま残す
-    this.history.clear();
+    this.closeWorkStart(); // ★V214: 再生を止めて履歴を捨てる（コアの closeWorkStart・字と順は前と同じ）
     // V161 (A): 保存 Worker を畳む（leave は waitForSave を通るので、ここに来る時点で
     // 飛行中の保存は無い。次の作品で必要になれば作り直す）
     this.saveWorker?.terminate();
@@ -1950,12 +983,7 @@ export class Editor {
       clearTimeout(this.savePillTimer);
       this.savePillTimer = 0;
     }
-    // V159 (G-1): 作品の大きさを教える口も外す（閉じたあとの行に前の作品の数字を残さない）
-    setPerfContext(null);
-    // V156 (P-1): 裏の片付けを止める。ログの口も外す（別の作品に持ち越さない）
-    this.sleepOn = false;
-    this.showWaitBadge(false); // 出しっぱなしで画面を離れない
-    setStaleSleepLogger(null);
+    this.closeWorkSleep(); // ★V214: 性能の口・眠り・待ちの印・ログの口を外す（コアの closeWorkSleep）
     window.removeEventListener("keydown", this.keydownHandler);
     window.removeEventListener("keyup", this.keyupHandler);
     window.removeEventListener("pointerdown", this.modTapPointerHandler, true); // V165 (D-4)
@@ -1967,6 +995,7 @@ export class Editor {
       .querySelector("#ed-cvwrap")
       ?.removeEventListener("pointerleave", this.cursorLeaveHandler);
     this.cancelCursorFrame();
+    this.stopSelUiTimer(); // V208 (A-119): 選択の点線のタイマーを止める（画面を離れてから描かない）
     // M11-5: 診断ビルドで張った分（張っていなければ何も起きない）
     window.removeEventListener("keydown", this.keyLogHandler);
     window.removeEventListener("keyup", this.keyLogHandler);
@@ -1982,11 +1011,8 @@ export class Editor {
     // M14 (S-1): 形式ストリップは document.body 直付けの固定オーバーレイなので、画面を離れる前に必ず畳む
     //（他の浮遊UIと同じ後始末。タイマーも closeStrip の中で全て止める＝ライブラリ画面に残らない）
     this.closeStrip();
-    // M11-10: 矢印キーの移動セッションを持ったまま画面を離れない（確定してから閉じる）
-    this.endArrowSession();
-    // M11-12: 浮動テキストも同じ（保険。⟵もどる等の通常経路では xformGuard で既に焼けている）。
-    // DOM が消えかけているので silent（UI 更新なし）で呼ぶ
-    this.commitTextDraft(true);
+    // ★V214: 矢印の移動と文字の下書きを確定する（コアの closeWorkPending）。画面のフックを呼ぶので、選択の小窓を隠すより前
+    this.closeWorkPending();
     document
       .querySelector("#screen-editor")
       ?.removeEventListener("pointerdown", this.uiPointerHandler, true);
@@ -2015,19 +1041,7 @@ export class Editor {
       clearInterval(this.autosaveTimer);
       this.autosaveTimer = null;
     }
-    // M10-2b 積み残し: 連続適用タイマーを止める。
-    // unmount() は pointerDown を触らないので、押しっぱなしのまま閉じるとタイマー側の
-    // 三重ガード（pointerDown/tool/warpMode）を全部すり抜けて stepFisheye() が**1回実行される**。
-    // pointerUp が来ないため履歴にも積まれず、Undo 不能な1段階の歪みが焼かれてしまう。
-    this.clearFisheyeRepeat();
-    // M10-2c: 未確定の四隅変形が残ったまま閉じないように取り消す（全画素を元へ戻す）。
-    // DOM が消えかけているので silent（UI 更新なし）で呼ぶ
-    if (this.cornerActive) this.cancelCornerWarp(true);
-    this.warpCenter = null;
-    this.warpField = null; // 最大 1.5MB を保持し続けないように
-    this.warpBefore = null;
-    this.warpLastPt = null;
-    this.audioPreview.invalidate();
+    this.closeWorkWarp(); // ★V214: 魚眼の連続を止め・四隅を取り消し・歪みの場と音の試聴を捨てる（コアの closeWorkWarp）
     this.audioPanelClose?.();
     // M10-4 P-1-3: 開いたままのゆらゆらダイアログを閉じる。close(null) を通るので
     // modalDepth の減算・capture リスナー解除・back.remove() が全部走り、
@@ -2042,15 +1056,16 @@ export class Editor {
     }
     const rest = this.inputLogBuf.splice(0);
     if (rest.length) this.cb.appendLog?.(rest.join("\n"));
-    this.mounted = false;
+    this.closeWorkEnd(); // ★V214: 開いた印を下ろす（コアの closeWorkEnd）
   }
 
   /** F-3: 変更があればアプリ設定領域へオートセーブ（保存の原子性はRust側が担保） */
   private async runAutosave() {
     // 変形/選択の浮動中はレイヤーから切り出したピクセルがプロジェクト外にあるため
-    // スナップショットが欠損する — スキップして次周期へ（Codexレビュー指摘#6）
+    // スナップショットが欠損する — スキップして次周期へ（独立レビューの指摘#6）
+    // ★V214 (M-2b-1a): 作品の側の「書き始めない」条件（閉じた・重い処理・押している・変形・浮いた絵・四隅）はコアの autosaveBlocked。
+    //  PC の便の印（autosavePending）・前の便と保存の飛行中・書き出し中はここで足す（判断は前と同じ）
     if (
-      !this.mounted ||
       !this.autosavePending ||
       // M10-23: 分割エンコード化で1回の所要が長くなり、15秒interval と3秒リトライが
       // 重なり得る。多重併走すると invalidateAutosave が後発の飛行中書き込みを待てない
@@ -2059,80 +1074,62 @@ export class Editor {
       // V161 (A): 背景保存の飛行中も見送る（同じ作品を2本同時に直列化しない。
       // pending は残るので、保存が終わった次の周期に走る）
       this.saveInFlight != null ||
-      // V154b (W-7): **手動保存・音声の読み込み・書き出しの最中は見送る。**
-      // 手動保存が譲るようになった（W-8）ので、15秒タイマーがそのすき間に割り込み得る。
-      // 割り込むと本体2つぶんのメモリを同時に積む＝この回で潰している事故そのもの
-      this.busyKind !== "" ||
       // V154 (W-5): 書き出し中は見送る。600コマの動画をエンコードしている最中に
       // 15秒ごとに作品まるごと（138〜276MB）を直列化し直すと、書き出しと保存が
       // 同時に山を作って落ちる。**書き出し中は編集できない＝取りこぼす変更が無い**ので、
       // pending を残したまま見送り、終わった直後に走らせる（setExporting）
       this.exporting ||
-      this.pointerDown ||
-      this.xformActive ||
-      this.floatBuf ||
-      // M10-2c: 四隅変形は確定するまで何秒でも未確定のプレビューが置かれたままになる。
-      // ここを塞がないと、確定していない絵がそのまま保存される
-      this.cornerActive
+      this.autosaveBlocked()
     )
       return;
     this.autosavePending = false;
     const epoch = this.autosaveEpoch;
     const job = (async () => {
-      const { verifySavedBytes } = await import("./serialize");
-      const { encodePV6 } = await import("./pv6");
-      // M10-23: 大型作品でエンコードがメインスレッドを数秒塞いでいた（300ページで約2.7秒
-      // →ペンの pointerdown が最大1.9秒待たされる実測）。チャンクごとに入力へ譲り、
-      // エンコード中に編集が起きたら破棄して次の機会に回す（途切れたスナップショットは
-      // 決して書かない）。変更は必ず dirty→autosavePending か history.mutations に現れる
+      // ★V201 (M-1a): 手順（PV6 にする〔譲りと中断つき〕→ 確かめる → 書く）は共通の部品 `autosaveWork`（saveCore.ts）へ移した。
+      //  ここに残すのは、いつ捨てるか・いつ書かないかの判断（編集画面の状態）と、書く印（題名・保存先）と、結果ごとの後始末。
+      // 変更は必ず dirty→autosavePending か history.mutations に現れる
       //（bufferChangeEntry の onApply / afterFrameStructureChange 等が dirty を立てる）
-      // V163: オートセーブも現行形式（PV6）で書く。眠っている塊は控えをそのまま写すので、
-      // 掃除の済んだ大きい作品では従来（全コマ base64+gzip）より桁違いに軽い。
-      // 復元は projectFromBytes の振り分けがそのまま読む（AMAS1 の皮は従来どおり）
-      const hist0 = this.history.mutations;
-      const r = await encodePV6(this.project, {
+      // ★V214 (M-2b-1a): 書き始めの印（autosaveMark）と、その印からの変化（autosaveChangedSince＝閉じた・履歴が変わった・押した・
+      //  変形・浮いた絵・四隅）はコア。PC の時計の世代と便の印（autosavePending）はここで足す
+      const mark = this.autosaveMark();
+      const out = await autosaveWork({
+        project: this.project,
         yieldNow: yieldToInput,
         aborted: () =>
-          !this.mounted ||
           epoch !== this.autosaveEpoch ||
           this.autosavePending ||
-          this.history.mutations !== hist0 ||
-          this.pointerDown ||
-          this.xformActive ||
-          !!this.floatBuf ||
-          this.cornerActive,
+          this.autosaveChangedSince(mark),
+        // 直前にライブラリ保存/破棄が完了していたら、この古いスナップショットは書かない
+        stillCurrent: () => epoch === this.autosaveEpoch && this.mounted,
+        meta: () => ({
+          title: this.titleNow(), // V199 (A-106): 復元の知らせに出す名前＝いまのファイルの名前（無ければ題名）
+          // V199 (A-106): 保存先の無いファイル（ドロップで開いた作品）の名前。戻したときの左上に使う（AMAS1 の meta は形の決まりの無い JSON）
+          fileBase: this.fileBase,
+          album: this.saveCtx?.album ?? null,
+          baseName: this.saveCtx?.baseName ?? null,
+          libRoot: this.saveCtx?.libRoot || null,
+          askSaveTarget: this.askSaveTarget,
+          // ★V216b (A-126 §2-1 の 8): その作品のファイルと、開いた・書いた時点の大きさと更新時刻（分からなければ書かない＝戻すと「無い」）
+          workFile:
+            this.workFile && this.workFile.size != null && this.workFile.mtimeUs != null
+              ? { path: this.workFile.path, size: this.workFile.size, mtimeUs: this.workFile.mtimeUs }
+              : null,
+          savedAt: new Date().toISOString(),
+        }),
+        write: (w) => this.cb.autosave(w.data, w.meta),
+        log: (line) => void this.cb.appendLog?.(line),
       });
-      const data = r?.bytes ?? null;
-      if (!data) {
+      if (out === "aborted") {
         // 中断（エンコード中に編集が始まった等）。変更は残っているので保存待ちに戻し、
         // 次の15秒周期を待たずに、ペンを置いた隙間で保存できるよう短い再試行を1回だけ予約
         if (this.mounted && epoch === this.autosaveEpoch) {
           this.autosavePending = true;
           window.setTimeout(() => void this.runAutosave(), 3000);
         }
-        return;
-      }
-      // 直前にライブラリ保存/破棄が完了していたら、この古いスナップショットは書かない
-      if (epoch !== this.autosaveEpoch || !this.mounted) return;
-      // V154 (W-6): **手動保存と同じ扱い**。書く前に中身を確かめ、通らなければ書かない。
-      // オートセーブの上書きは1世代前を `.bak` へ退避するので、壊れたものを書くと
-      // **良い世代が1つ押し出される**。書かなければ、前の世代がそのまま残る。
-      // 期待コマ数は**エンコード中に構造が変わっていない**ことが `aborted` で保証されている
-      const okAuto = await verifySavedBytes(data, this.project.frames.length);
-      if (!okAuto.ok) {
-        this.cb.appendLog?.(`[V154 W-6] autosave skipped (bad bytes): ${okAuto.reason}`);
-        // 変更は残っているので保存待ちに戻す（次の周期でもう一度作り直す）
+      } else if (out === "bad") {
+        // 確かめに落ちて書かなかった（ログは部品が書いた）。変更は残っているので保存待ちに戻す（次の周期でもう一度作り直す）
         if (this.mounted && epoch === this.autosaveEpoch) this.autosavePending = true;
-        return;
       }
-      await this.cb.autosave(data, {
-        title: this.project.meta.title ?? untitledTitle(),
-        album: this.saveCtx?.album ?? null,
-        baseName: this.saveCtx?.baseName ?? null,
-        libRoot: this.saveCtx?.libRoot || null,
-        askSaveTarget: this.askSaveTarget,
-        savedAt: new Date().toISOString(),
-      });
     })();
     const flight = job.then(
       () => {},
@@ -2180,7 +1177,7 @@ export class Editor {
     if (!this.mounted) return true;
     // V161 (A): 画面を離れる前に、飛行中の保存を待つ（要件: 閉じる・別メモは保存完了を待つ）
     await this.waitForSave();
-    if (this.xformGuard()) return false; // E-4: 変形中は確定/取消が先
+    if (this.leaveBlocked()) return false; // E-4: 変形中は確定/取消が先（★V214: 判断はコアの leaveBlocked）
     if (this.dirty) {
       const ok = await this.cb.confirm(message);
       if (!ok) return false;
@@ -2295,7 +1292,7 @@ export class Editor {
   }
 
   /** 音声ボタンの状態表示（♪=あり / 🔇=全ミュート / 薄色♪=なし）。M5-1: BGM+SE対応 */
-  private updateAudioToolButton() {
+  protected override updateAudioToolButton() {
     const b = document.querySelector("#ed-tool-audio") as HTMLElement | null;
     if (!b) return;
     const a = this.project.audio ?? null;
@@ -2325,7 +1322,7 @@ export class Editor {
   }
 
   /** M5-4 B-3/M5-5 T-3: ペン=テクスチャ3種 / ブラシ・バケツ=トーンピッカー（2列・大小並び・各自独立記憶） */
-  private rebuildTexPicker() {
+  protected override rebuildTexPicker() {
     const head = document.querySelector("#ed-texhead") as HTMLElement | null;
     const tex = document.querySelector("#ed-tex") as HTMLElement | null;
     if (!head || !tex) return;
@@ -2357,11 +1354,7 @@ export class Editor {
           : toneMode === "fill"
             ? this.fillToneId
             : this.eraserToneId;
-      const setId = (id: string) => {
-        if (toneMode === "brush") this.brushToneId = id;
-        else if (toneMode === "fill") this.fillToneId = id;
-        else this.eraserToneId = id;
-      };
+      const setId = (id: string) => this.setToneIdFor(toneMode, id); // ★V214: どの道具の枠に書くかはコア
       // M11-19→M11-24: グループの区切り。**文字は出さない**（「ざこメモの柄／メモアニマの柄」は削除・
       // 作者指摘）。並び・id・タイルは一切変えない。斜め格子（diag-grid）の下に細い線を1本だけ引いて、
       // 3DS 由来の柄と本アプリで足した柄の切れ目だけ残す（先頭には引かない＝上に何も無いので不要）。
@@ -2424,8 +1417,7 @@ export class Editor {
         d.title = t(tx.labelKey);
         d.replaceChildren(icon(tx.icon)); // V171: 線画アイコン（currentColor）
         d.addEventListener("click", () => {
-          this.texture = tx.key;
-          this.penToneId = ""; // M17: texture を選んだらマイ柄は解除
+          this.pickPenTexture(tx.key); // ★V214: 中身はコア
           tex.querySelectorAll(".tx, .tone-btn").forEach((e) => e.classList.remove("on"));
           d.classList.add("on");
         });
@@ -2468,9 +1460,8 @@ export class Editor {
     row.appendChild(sw);
     row.appendChild(lab);
     row.addEventListener("click", () => {
-      this.ditherFrameShift = !this.ditherFrameShift;
+      this.toggleDitherFrameShift(); // ★V214: 中身と設定への知らせはコア
       sw.classList.toggle("on", this.ditherFrameShift);
-      this.cb.onDitherFrameShiftChange?.(this.ditherFrameShift);
     });
     tex.appendChild(row);
   }
@@ -2519,9 +1510,8 @@ export class Editor {
       row.appendChild(sw);
       row.appendChild(lab);
       row.addEventListener("click", () => {
-        this.customToneColor = !this.customToneColor;
+        this.toggleCustomToneColor(); // ★V214: 中身と設定への知らせはコア
         sw.classList.toggle("on", this.customToneColor);
-        this.cb.onCustomToneColorChange?.(this.customToneColor);
       });
       tex.appendChild(row);
     }
@@ -2560,66 +1550,6 @@ export class Editor {
     });
   }
 
-  /** 範囲選択から柄を登録する（選択オプション／ストリップの「柄として登録」）。
-   *  settings にだけ保存（履歴外・トーストで知らせる）。32×32 超は左上を切り出し、全透明は拒否、
-   *  上限 12 で満杯なら「一番古い（登録順の先頭）を消して登録しますか？」 */
-  private async registerCustomTone() {
-    if (this.xformGuard()) return;
-    if (!this.selMask) {
-      this.cb.toast(t("ed.sel.needSelection.toast"));
-      return;
-    }
-    const buf = this.activeBuffer();
-    if (!buf) {
-      this.cb.toast(t("ed.common.needLayer.toast"));
-      return;
-    }
-    const cap = CT.captureCustomTone(buf, this.selMask, this.project.colorTable, CT.CUSTOM_TONE_MAX_SIZE);
-    if (!cap) {
-      this.cb.toast(t("ed.tone.custom.empty.toast"));
-      return;
-    }
-    if (this.customTones.length >= CT.CUSTOM_TONE_MAX_COUNT) {
-      const ok = await this.cb.confirm(t("ed.tone.custom.full.msg"));
-      if (!ok) return;
-      this.customTones.shift(); // 登録順の先頭＝一番古い
-      this.pruneToneIds();
-    }
-    this.customTones.push({ id: CT.nextCustomToneId(this.customTones), w: cap.w, h: cap.h, colors: cap.colors });
-    this.saveCustomTones();
-    this.cb.toast(
-      cap.cropped ? t("ed.tone.custom.cropped.toast", { w: cap.w, h: cap.h }) : t("ed.tone.custom.registered.toast")
-    );
-    this.rebuildTexPicker();
-  }
-
-  /** 右クリック→確認つき削除（settings のみ・履歴外）。選んでいた柄が消えたらベタへ戻す */
-  private async deleteCustomTone(id: number) {
-    const ok = await this.cb.confirm(t("ed.tone.custom.delete.msg"));
-    if (!ok) return;
-    this.customTones = this.customTones.filter((c) => c.id !== id);
-    this.pruneToneIds();
-    this.saveCustomTones();
-    this.cb.toast(t("ed.tone.custom.deleted.toast"));
-    this.rebuildTexPicker();
-  }
-
-  /** 消えたマイ柄を指している道具のトーン選択を既定へ戻す（ブラシ/バケツ/消しゴム=ベタ・ペン=texture） */
-  private pruneToneIds() {
-    const alive = (key: string) => {
-      const cid = CT.parseCustomToneKey(key);
-      return cid === null || this.customTones.some((c) => c.id === cid);
-    };
-    if (!alive(this.brushToneId)) this.brushToneId = "solid";
-    if (!alive(this.fillToneId)) this.fillToneId = "solid";
-    if (!alive(this.eraserToneId)) this.eraserToneId = "solid";
-    if (!alive(this.penToneId)) this.penToneId = "";
-  }
-
-  private saveCustomTones() {
-    this.cb.onCustomTonesChange?.(this.customTones.map((c) => ({ ...c, colors: [...c.colors] })));
-  }
-
   /** M14 (S-3): 「種類/トーン」一覧の開閉を DOM へ反映する。閉＝現在の種類（.on）だけ1行表示（CSS 側で
    *  .tex.collapsed の非選択を隠す）。ヘッダ末尾に開閉マーク（▾/▸）を付け直す（textContent で消えるため毎回）。 */
   private applyToneFold() {
@@ -2637,62 +1567,25 @@ export class Editor {
     }
   }
 
-  /** M11-2: そのツールが太さを記憶する枠。ペン/ブラシ/消しゴムは各自、
-   *  それ以外（図形など）はペンの枠を共有する */
-  private sizeSlot(t: Tool): "pen" | "brush" | "eraser" {
-    return t === "brush" ? "brush" : t === "eraser" ? "eraser" : "pen";
+  /** M11-2: 太さピッカーの選択表示を現在の penSize に合わせ直す（DOMは作り直さない） */
+  /** ★V214 (M-2b-1a): 変形の取っ手・回転の輪・歪みの四隅の当たり（キャンバスのドット）。PC は前の値のまま（6・12・8） */
+  protected override xformHitSizes(): XformHitSizes {
+    return Editor.XFORM_HIT_SIZES;
+  }
+  private static readonly XFORM_HIT_SIZES: XformHitSizes = { hit: 6, ring: 12, corner: 8 };
+
+  /** ★V214: 取り消しとやり直しのボタンの有効・無効（前は bindHeader の history.onchange の中・字は同じ） */
+  protected override undoRedoShown() {
+    ($("#ed-undo") as HTMLButtonElement).disabled = !this.history.canUndo;
+    ($("#ed-redo") as HTMLButtonElement).disabled = !this.history.canRedo;
   }
 
-  /** M11-2: 太さピッカーの選択表示を現在の penSize に合わせ直す（DOMは作り直さない） */
-  private refreshSizePicker() {
+  protected override refreshSizePicker() {
     const host = document.querySelector("#ed-sizes");
     if (!host) return;
     host.querySelectorAll(".sz").forEach((el, i) => {
       el.classList.toggle("on", PEN_SIZES[i] === this.penSize);
     });
-  }
-
-  private setTool(t: Tool) {
-    const _t0 = perfNow();
-    // M11-12: 文字ツールから抜けるときは浮動テキストを**確定**する（変形の「取り消し」とは逆。
-    // 打った文字が黙って消えないように＝REQ「別のツールへ切り替える＝確定」）
-    if (this.textDraft && t !== "text") this.commitTextDraft();
-    if (this.xformActive && t !== "transform") this.cancelTransform();
-    // M10-2c: 歪み以外へ抜けるときは未確定の四隅変形を取り消す
-    if (this.cornerActive && t !== "warp") this.cancelCornerWarp();
-    // M10-2b: 歪み以外へ切り替えたら連続適用タイマーを確実に止める
-    if (t !== "warp") {
-      this.clearFisheyeRepeat();
-      this.warpCenter = null;
-    }
-    this.prevTool = this.tool;
-    this.tool = t;
-    // M17: ストローク中に道具が変わったら、前の道具用に解決した色タイルは捨てる（次の move は新しい道具で解決）
-    this.strokeTone = null;
-    // M14 (S-1): 別ツールへ切り替えたら、前のツール用に開いていたストリップは畳む
-    if (this.stripOpenFor && this.stripOpenFor !== t) this.closeStrip();
-    // M11-2: 太さの実体は sizeByTool なので、ここは表示（.sz の on）を合わせるだけ
-    this.refreshSizePicker();
-    if (t === "transform") this.beginTransform();
-    // M10-2c: 歪みへ戻ってきたときにモードが corner のままなら再開する
-    // （これが無いとハンドルの出ていない死んだモードになる）
-    if (t === "warp" && this.warpMode === "corner" && !this.cornerActive)
-      this.beginCornerWarp();
-    this.updateToolButtons();
-    this.buildToolOptions();
-    this.rebuildTexPicker(); // M5-4: ペン⇄ブラシでピッカー切替（各自の選択を記憶）
-    this.redrawOverlay();
-    // M12-C: 1階（CSS の cursor）と2階（輪・枠）をツールに合わせ直す。
-    // ここは既にある redrawOverlay の直後で、ホバー経路とは無関係（頻度はツール切替のときだけ）
-    this.applyCanvasCursor();
-    // A-21: 手のひら/Space パンで `#ed-cvwrap` に残った grab/grabbing を、切り替えた道具に合わせて畳む。
-    // ペンで pointerdown すると外枠が setPointerCapture でカーソルの決定権を握るので、
-    // canvas 側だけ直しても掴んだ瞬間に外枠の grab が出てしまう（capture の仕様）
-    this.updatePanCursor();
-    this.cursorPainted = "";
-    this.paintCursorLayer();
-    this.revealToolOptions();
-    perfDone("tool.switch", _t0);
   }
 
   /** M11-11: ツールオプション（確定/キャンセル等）が画面外だと気づけないので、はみ出していれば見せる。
@@ -2709,10 +1602,14 @@ export class Editor {
     else if (hr.bottom > sr.bottom + 1) host.scrollIntoView({ block: "end" });
   }
 
-  private updateToolButtons() {
+  protected override updateToolButtons() {
     document.querySelectorAll("#ed-tools .tool").forEach((el) => {
       el.classList.toggle("on", (el as HTMLElement).dataset.tool === this.tool);
     });
+    // ★V209 (A-122): ツールが替わった所（setTool・貼り付けと画像の配置で変形に入る・endTransform で抜ける）で、枠と 1 階を一緒に決め直す
+    //（setTool を通らない所もここは通る。変形を抜けたら今のツールのカーソルへ・キーでツールを替えた直後もポインタの下に枠）
+    if (this.tool !== "transform") this.applyCanvasCursor();
+    this.syncCursorFrame();
   }
 
   private buildSidePanel() {
@@ -2730,7 +1627,7 @@ export class Editor {
     host.innerHTML = `
       <div class="side-sec side-top" id="ed-side-top">
       <div class="side-sechead">
-        <!-- V158（Codex 指摘③）: ここは**上段の中身の名前**。ed.panel.foldTools.title
+        <!-- V158（独立レビューの指摘③）: ここは**上段の中身の名前**。ed.panel.foldTools.title
              （＝「道具列を畳む」・左の道具列を畳むボタンの説明）を借りていたので、
              畳んだあとに「道具列を畳む」だけが残って別の操作に見えていた -->
         <span>${t("ed.side.tools.label")}</span>
@@ -2748,20 +1645,7 @@ export class Editor {
       <div class="oni" id="ed-oniondir"></div>
       <h3>${t("ed.pen.size.label")}</h3><div class="sizes" id="ed-sizes"></div>
       <h3 id="ed-texhead" class="foldhead">${t("ed.pen.kind.label")}</h3><div class="tex" id="ed-tex"></div>
-      <h3 id="ed-colhead">${t("ed.color.head.palette.label")}</h3>
-      <div class="pal" id="ed-pal"></div>
-      <div class="row" style="margin-top:2px">
-        <span class="tog">${t("ed.color.fullcolor.label")}</span><div class="sw2" id="ed-fullcolor"></div>
-        <input type="color" id="ed-colorpick" value="#141414" style="width:40px;height:28px;border:3px solid var(--ink);border-radius:8px;padding:0;background:#fff" hidden />
-      </div>
-      <!-- ★V164 (U-3): よく使う色の棚。上の「色」帯（＝作品の colorTable 全色）とは**別物**で、
-           こちらは**自分で登録した色だけ**・**設定に保存**（作品をまたいで残る道具箱）。
-           フルカラーでは colorTable が際限なく増えて色見本の壁になるので、その逃げ場 -->
-      <h3 id="ed-favhead">${t("ed.color.fav.head.label")}</h3>
-      <div class="pal" id="ed-favpal"></div>
-      <div class="selacts" id="ed-favacts">
-        <button class="minibtn" id="ed-fav-toggle">${t("ed.color.fav.add.btn")}</button>
-      </div>
+      <!-- ★V215 (A-124): 色まわり（見出し・帯・フルカラー・よく使う色）は下の「色の段」へ移した。紙の色はここに残す（D-1） -->
       <div class="row"><span class="tog">${t("ed.color.paper.label")}</span><div id="ed-paperpal" class="pal" style="flex:1"></div></div>
       <!-- V164 (U-2): V158 の記述ミスを訂正。**ここはまだ上段（道具）の中**——
            下段（レイヤー）が始まるのは #ed-side-bot から。線の太さ〜作品の大きさも
@@ -2778,6 +1662,42 @@ export class Editor {
       <!-- V154 (W-2): 作品の大きさ。**実体を数える**（掛け算ではない）・履歴は別行 -->
       <h3 id="ed-szhead">${t("ed.size.head.label")}</h3>
       <div class="szmeter" id="ed-szmeter"></div>
+      <!-- ★V197 (A-101): 上段のスクロールの下端のぼかし（飾り・クリックは素通し）。
+           下端で切れて真ん中が隠れた色見本が、すぐ下の仕切りの下に潜っているように見えていた
+           （重なりではない＝V197 報告 §1 の数字）。かならず**中身の最後**に置く（sticky で下端に貼り付き、
+           一番下までスクロールすると最後の要素の下の空き地に収まる） -->
+      <div class="side-fade" aria-hidden="true"></div>
+      </div>
+      <!-- ★V215 (A-124・REQ_color_section §2-1): 色の段。上段（#ed-side-top）の中・道具のスクロール（#ed-side-topbody）の外・
+           その下（仕切りのすぐ上）＝**いつも見える**。中身は前の色まわりそのまま（id・イベント・処理は 1 つも変えていない）。
+           帯とよく使う色は見える段数に上限があり（fitColorRows）、超えたら**その中だけ**で行ごとにスクロールする。
+           見出しの行: 今の見出しの字・［整理］（A-125）・畳む（道具の段を畳んでもこの段は見えたまま）。
+           ［整理］は字ではなくアイコン（trash）にした: 右の列の幅 220 で、長い見出し（es「Color (color completo)」など）と字のボタンが
+           1 行に入らない（C-6・v215_ui の実測）。字（§5-3）は説明と読み上げの名前（aria-label）に入れる -->
+      <div class="side-col" id="ed-side-col">
+      <div class="side-sechead side-colhead">
+        <h3 id="ed-colhead">${t("ed.color.head.palette.label")}</h3>
+        <button class="minibtn" id="ed-pal-tidy" type="button">${iconHtml("trash")}</button>
+        <button class="minibtn sfold" id="ed-sfold-col" type="button">${iconHtml("chev-down")}</button>
+      </div>
+      <div class="side-colbody" id="ed-side-colbody">
+      <div class="pal pal-rows" id="ed-pal"></div>
+      <div class="row" style="margin-top:2px">
+        <span class="tog">${t("ed.color.fullcolor.label")}</span><div class="sw2" id="ed-fullcolor"></div>
+        <input type="color" id="ed-colorpick" value="#141414" style="width:40px;height:28px;border:3px solid var(--ink);border-radius:8px;padding:0;background:#fff" hidden />
+      </div>
+      <!-- ★V164 (U-3): よく使う色の棚。上の「色」帯（＝作品の colorTable 全色）とは**別物**で、
+           こちらは**自分で登録した色だけ**・**設定に保存**（作品をまたいで残る道具箱）。
+           フルカラーでは colorTable が際限なく増えて色見本の壁になるので、その逃げ場 -->
+      <!-- ★V215: 見出しと［＋ いまの色］を 1 行に並べた（色の段の高さを詰めて、最小の窓でも道具の段を残す） -->
+      <div class="side-favrow">
+      <h3 id="ed-favhead">${t("ed.color.fav.head.label")}</h3>
+      <div class="selacts" id="ed-favacts">
+        <button class="minibtn" id="ed-fav-toggle">${t("ed.color.fav.add.btn")}</button>
+      </div>
+      </div>
+      <div class="pal pal-rows" id="ed-favpal"></div>
+      </div>
       </div>
       </div>
       <div class="ed-vsplit" id="ed-side-vsplit"></div>
@@ -2798,18 +1718,33 @@ export class Editor {
       <div class="selacts" id="ed-layerclip">
         <button class="minibtn" id="ed-lc-copy">${iconLabelHtml("copy-to-layer", t("ed.layerclip.copy.btn"))}</button>
         <button class="minibtn" id="ed-lc-paste">${iconLabelHtml("clipboard", t("ed.layerclip.paste.btn"))}</button>
+        <button class="minibtn" id="ed-lc-paste-over">${iconLabelHtml("clipboard", t("ed.layerclip.pasteOver.btn"))}</button>
         <button class="minibtn" id="ed-lc-paste-new">${iconLabelHtml("clipboard", t("ed.layerclip.pasteNew.btn"))}</button>
         <button class="minibtn" id="ed-lc-paste-all">${iconLabelHtml("clipboard", t("ed.layerclip.pasteAll.btn"))}</button>
       </div>
       </div>
       </div>
     `;
-    // V158 (L-1): 段の畳みボタン（見出しは畳んでも残るので、そこから戻せる）
-    for (const which of ["top", "bot"] as const) {
+    // V158 (L-1): 段の畳みボタン（見出しは畳んでも残るので、そこから戻せる）。★V215: 色の段（col）も同じ形
+    for (const which of ["top", "bot", "col"] as const) {
       const b = document.getElementById(`ed-sfold-${which}`);
       if (b) b.onclick = () => this.setSideFold(which, !this.sideFold[which]);
     }
     this.refreshSideFoldButtons();
+    // ★V215 (A-125): ［整理］は押したらコアの手続きを呼ぶだけ（調べる・確かめる・消す・知らせるはコア）
+    $("#ed-pal-tidy").addEventListener("click", () => void this.tidyPaletteColors());
+    $("#ed-pal-tidy").setAttribute("aria-label", t("ed.color.tidy.btn"));
+    // ★V215 (A-124): 帯とよく使う色の見える段数を、上段の高さ（窓・比率・畳み・幅）に合わせて決め直す
+    this.colorRowsObs?.disconnect();
+    this.colorRowsObs = null;
+    if (typeof ResizeObserver !== "undefined") {
+      this.colorRowsObs = new ResizeObserver(() => this.fitColorRows());
+      this.colorRowsObs.observe($("#ed-side-top"));
+    }
+    for (const id of ["ed-pal", "ed-favpal"]) {
+      const el = document.getElementById(id);
+      el?.addEventListener("scroll", () => this.markColorRowsMore(el), { passive: true });
+    }
     $("#ed-szhead").title = t("ed.size.head.title");
     // M14 (S-3): 「種類/トーン」ヘッダで一覧を開閉（閉じると現在の種類だけ1行表示）。状態は settings に記憶
     $("#ed-texhead").addEventListener("click", () => {
@@ -2822,10 +1757,12 @@ export class Editor {
     for (const { sel, titleKey } of [
       // V158 (L-1): 上下の境界の説明も**組んだあとに**入れる（訳文に " が入っても属性が割れない）
       { sel: "#ed-side-vsplit", titleKey: "ed.side.split.title" },
+      { sel: "#ed-pal-tidy", titleKey: "ed.color.tidy.title" }, // ★V215 (A-125)
       { sel: "#ed-folder-add", titleKey: "ed.layer.folderAdd.title" },
       { sel: "#ed-layer-merge", titleKey: "ed.layer.mergeDown.title" },
       { sel: "#ed-lc-copy", titleKey: "ed.layerclip.copy.title" },
       { sel: "#ed-lc-paste", titleKey: "ed.layerclip.paste.title" },
+      { sel: "#ed-lc-paste-over", titleKey: "ed.layerclip.pasteOver.title" },
       { sel: "#ed-lc-paste-new", titleKey: "ed.layerclip.pasteNew.title" },
       { sel: "#ed-lc-paste-all", titleKey: "ed.layerclip.pasteAll.title" },
       { sel: "#ed-lw-thicken", titleKey: "ed.linew.thicken.title" },
@@ -2856,40 +1793,26 @@ export class Editor {
     fc.classList.toggle("on", this.project.colorMode === "fullcolor");
     $("#ed-colorpick").hidden = this.project.colorMode !== "fullcolor";
     fc.addEventListener("click", async () => {
-      // V154 (W-3): 大きい作品でフルカラーを**入れる直前**だけ、これから起きることを見せる。
-      // ここが「257色目でメモリが倍になる」への入口＝止められる最後の地点（小さい作品では出ない）
-      if (
-        this.project.colorMode === "palette" &&
-        this.project.indexBits === 8 &&
-        projectBytes(this.project) >= Editor.SIZE_CAUTION
-      ) {
-        const now = projectBytes(this.project);
-        const ok = await this.cb.confirm(
-          t("ed.color.fullcolor.big.msg", { size: formatBytes(now), after: formatBytes(now * 2) })
-        );
-        if (!ok) return;
-      }
-      this.project.colorMode =
-        this.project.colorMode === "palette" ? "fullcolor" : "palette";
+      // ★V214: 確かめる条件と切り替えはコアの toggleFullcolor（断ったら false）。ここは見た目だけ
+      if (!(await this.toggleFullcolor())) return;
       fc.classList.toggle("on", this.project.colorMode === "fullcolor");
       $("#ed-colorpick").hidden = this.project.colorMode !== "fullcolor";
       $("#ed-colhead").textContent =
         this.project.colorMode === "fullcolor"
           ? t("ed.color.head.fullcolor.label")
           : t("ed.color.head.palette.label");
-      this.dirty = true;
     });
     ($("#ed-colorpick") as HTMLInputElement).addEventListener("input", (e) => {
-      this.colorHex = (e.target as HTMLInputElement).value;
-      this.rebuildPalette();
+      this.selectColor((e.target as HTMLInputElement).value); // ★V214: 中身はコア
     });
     // レイヤー操作
     $("#ed-layer-add").addEventListener("click", () => this.addLayer());
     $("#ed-folder-add").addEventListener("click", () => this.addFolder());
     $("#ed-layer-del").addEventListener("click", () => void this.deleteLayer());
     // M11-15: レイヤーのコピー＆ペースト
-    $("#ed-lc-copy").addEventListener("click", () => this.copyLayerFrame());
-    $("#ed-lc-paste").addEventListener("click", () => this.pasteLayerFrame());
+    $("#ed-lc-copy").addEventListener("click", () => void this.copyLayerFrame());
+    $("#ed-lc-paste").addEventListener("click", () => void this.pasteLayerFrame());
+    $("#ed-lc-paste-over").addEventListener("click", () => void this.pasteLayerOverFrame());
     $("#ed-lc-paste-new").addEventListener("click", () => this.pasteLayerToNew());
     $("#ed-lc-paste-all").addEventListener("click", () => void this.pasteLayerAllFrames());
     this.updateLayerClipButtons();
@@ -2906,17 +1829,15 @@ export class Editor {
       d.className = "lv" + (lv === this.onionLevel ? " on" : "");
       d.textContent = label;
       d.addEventListener("click", () => {
-        this.onionLevel = lv;
         oni.querySelectorAll(".lv").forEach((e) => e.classList.remove("on"));
         d.classList.add("on");
-        this.saveOnion(); // V164 (U-1): 段数も設定に保存（向きと揃える）
-        this.renderCanvas();
+        this.setOnionLevel(lv); // ★V214: 中身はコア
       });
       oni.appendChild(d);
     });
     // V164 (U-1): オニオンの向き。既存の `.oni`/`.lv` をそのまま使う（新しい CSS は足さない）。
     // ★文言は「前のコマ／次のコマ」＝タイムラインの ed.tl.prev/next.title と**同じ言葉**にした。
-    //  「前だけ／後だけ」は「前へ向かって」とも読めて逆の意味に取れる（Codex 観点）
+    //  「前だけ／後だけ」は「前へ向かって」とも読めて逆の意味に取れる（レビューの観点）
     const dirs = $("#ed-oniondir");
     for (const it of [
       { dir: "prev", labelKey: "ed.onion.dirPrev.btn", titleKey: "ed.onion.dirPrev.title" },
@@ -2928,11 +1849,9 @@ export class Editor {
       d.textContent = t(it.labelKey);
       d.title = t(it.titleKey); // R-2: 属性はプロパティ代入（訳文に " が入っても割れない）
       d.addEventListener("click", () => {
-        this.onionDir = it.dir;
         dirs.querySelectorAll(".lv").forEach((e) => e.classList.remove("on"));
         d.classList.add("on");
-        this.saveOnion();
-        this.renderCanvas();
+        this.setOnionDir(it.dir); // ★V214: 中身はコア
       });
       dirs.appendChild(d);
     }
@@ -2961,162 +1880,7 @@ export class Editor {
     );
     this.buildToolOptions();
     this.updateSizeMeter(); // V154 (W-2): 組み直したら中身を入れる
-  }
-
-  // ---------------- V154 (W-2/W-3/W-4): 作品の大きさ ----------------
-
-  /** しきい値。**環境で変えない**（要件 §2-W-2）。
-   *  搭載メモリを見て変えると「同じ作品なのに人によって違う警告が出る」＝説明できない挙動になり、
-   *  「あの人は大丈夫だったのに」で相談が噛み合わなくなる。`sysinfo` 等の依存も足さない。
-   *
-   *  V154b（作者の訂正・2026-08-28）: **壁（`LOAD_WALL_BYTES` = 384 MiB）から逆算する**。
-   *  以前の 256/512 MiB は仮置きで、**512 MiB は壁の向こう側**だった——
-   *  警告が出るより先に「保存はできるのに開けない」に落ちてしまう。
-   *  いまは 384 MiB の **50% で注意・75% で警告**（＝壁に当たる前に必ず声がかかる）。 */
-  private static readonly SIZE_CAUTION = 192 * 1024 * 1024; // 384 MiB の 50%
-  private static readonly SIZE_WARN = 288 * 1024 * 1024; // 384 MiB の 75%
-  /** 履歴に許すバイト数の下限・上限（W-4） */
-  /** V156 (P-2): 下限を 16 → **64 MiB**。
-   *  ペン1手は before/after 2枚＝**153,600 B（8bit）／307,200 B（16bit）**なので、
-   *  64 MiB あれば 16bit でも 218 手・8bit なら 437 手が確実に残る（要件の 200 手を下限だけで賄う）。
-   *  16 MiB だった頃は、大きい作品でここに張り付いて **8bit 109 手・16bit 54 手**しか戻れなかった。 */
-  private static readonly HIST_BUDGET_MIN = 64 * 1024 * 1024;
-  /** V156 (P-2): 上限。**下の式では `SIZE_CAUTION`(192 MiB) を超えられない**ので、
-   *  256 MiB は一度も効かない死に定数だった（V156 スパイクの指摘）。実際の天井に合わせる。 */
-  private static readonly HIST_BUDGET_MAX = 192 * 1024 * 1024;
-  /** 注意/警告のときに足す助言。**動的キーは `*Key` のプロパティで持つ**
-   *  （`m1201_i18n_check` の検査4 がこの形だけを拾える。文字列を組み立てると検査が沈黙する） */
-  private static readonly SIZE_ADVICE = {
-    caution: { msgKey: "ed.size.caution.msg" },
-    warn: { msgKey: "ed.size.warn.msg" },
-  } as const;
-  /** 16bit 昇格の案内は**1つの作品につき1回**（毎回出すと邪魔・要件「止まらないこと」） */
-  private promoteNoticed = false;
-  /** 大きさの知らせを出した帯（"" =まだ出していない）。帯が上がったときだけ出す */
-  private sizeNoticedLevel: "" | "caution" | "warn" = "";
-
-  /** V154: メーターの3行を書き、履歴の予算（W-4）を作品の大きさに合わせる。
-   *  呼ぶ場所は「絵の量が変わり得た直後」だけ（ストローク中は呼ばない）。 */
-  private updateSizeMeter() {
-    // ★V166 (D): **重い操作の最中は数え直さない。**
-    //  事故のログで `meter.update` が **12.7秒**（7,687コマ×20レイヤー＝153,740面）かかっていた。
-    //  貼り付け1回ごとに全コマ・全レイヤーを4通り数え直す（論理サイズ・実サイズ・面数・履歴）ので、
-    //  **貼り付けそのものより数え直しのほうが支配的**だった。
-    //  漏斗の中では予約だけして、`runHeavy` の後始末で**1回だけ**数える。
-    //  ⚠ V154 W-2 の「掛け算ではなく実体を数える」は弱めていない——**回数を減らしただけ**
-    if (this.busyKind === "heavy") {
-      this.meterPending = true;
-      return;
-    }
-    const _t0 = perfNow();
-    const host = document.querySelector("#ed-szmeter") as HTMLElement | null;
-    // W-4: 作品が大きいほど履歴に許す量を減らす（＝戻せる回数が自動で減る）。
-    // 小さい作品では上限に張り付く＝64件の従来どおり（体感を変えない）
-    const proj = projectBytes(this.project);
-    // V156 (P-1): 実メモリ（起きている生バッファ＋眠っている圧縮控え）。
-    // **表示の数字（proj）は論理サイズのまま**——あちらは門番の入力なので変えない（条件4）。
-    // V156 (P-1): **育った作品にも効かせる。**開いたときは小さくても、コマを足していけば
-    // しきい値を越える（連番挿入・ページ挿入・ゆらゆら）。ここは絵の量が変わった直後に
-    // 呼ばれる場所なので、越えた時点で眠りを始める（一度 true にしたら下げない＝往復しない）
-    if (!this.sleepOn && proj >= Editor.SLEEP_MIN_BYTES) {
-      this.sleepOn = true;
-      setStaleSleepLogger((detail) => this.cb.appendLog?.(`[V156] ${detail}`));
-      this.nudgeSweep();
-    }
-    const real = this.sleepOn ? awakeBytes(this.project) + sleepBytes(this.project) : proj;
-    // V156 (P-2): 予算の基準を**実サイズ**にする。論理サイズのままだと、大きい作品は
-    // 眠って実際は軽くなっているのに永遠に下限へ張り付く（再現データで 115 MiB＝785手が出せない）
-    this.history.budgetBytes = Math.max(
-      Editor.HIST_BUDGET_MIN,
-      Math.min(Editor.HIST_BUDGET_MAX, Editor.SIZE_CAUTION - real)
-    );
-    if (!host) return;
-    const hist = this.history.totalBytes();
-    const total = proj + hist;
-    const level: "ok" | "caution" | "warn" =
-      total >= Editor.SIZE_WARN ? "warn" : total >= Editor.SIZE_CAUTION ? "caution" : "ok";
-    host.className = "szmeter lv-" + level;
-    const row = (label: string, n: number, cls = "") =>
-      `<div class="szrow ${cls}"><span>${label}</span><b>${formatSize(n)}</b></div>`;
-    // V154b: **面数（レイヤー×コマ）**。バイト数より分かりやすい（作者の指示）。
-    //
-    // V155（Codex レビュー §1・優先度 高）: 出す数字は同じだが、**言葉を変えた**。
-    // V154b では「開ける上限 約5,242面」「保存できても開き直せません」と書いていた。
-    // 分割読み込みにした今、それは**嘘**になる（21,960面の再現データが実際に開く）。
-    // 「画面が示すことと実際に起きることが食い違う」＝要件が名指しで避けろと言っている形。
-    // いまは同じ数字を**重くなる目安**として出し、「分けると軽い」で終える（脅さない）
-    const faces = projectFaces(this.project);
-    this.lastFaces = faces; // V159 (G-1): 性能ログの文脈に使う（ここでしか数えない）
-    const faceMax = loadWallFaces(this.project.indexBits === 16 ? 16 : 8);
-    const overWall = faces > faceMax;
-    host.innerHTML =
-      row(t("ed.size.project.label"), proj) +
-      // V156（Codex レビュー §5・優先度 高）: 「200回戻れる」と読んで危ない操作を試した人が、
-      // 実際には減っていることにボタンが灰色になるまで気づけなかった。**いま何回戻れるか**を出す
-      row(t("ed.size.history.steps.label", { n: this.history.undoDepth }), hist) +
-      row(t("ed.size.total.label"), total, "tot") +
-      // V156 (P-1): 眠りが効いている作品だけ、**実際に使っている量**をもう1行出す。
-      // 上の3行は論理サイズ（＝作品の大きさの目安）のままで、意味は変えていない。
-      // V156（Codex レビュー §2）: 片付けの最中はそれが分かるようにする（27 秒かかるので、
-      // 数字が動いていること自体が「壊れていない」の合図になる）
-      (this.sleepOn
-        ? row(this.sweeping ? t("ed.size.real.busy.label") : t("ed.size.real.label"), real)
-        : "") +
-      `<p class="sznote${overWall ? " adv" : ""}">${t("ed.size.faces.msg", {
-        n: faces.toLocaleString(),
-        max: faceMax.toLocaleString(),
-      })}</p>` +
-      // 目安を超えている＝開くのも保存も重い。**開けなくなるとは言わない**（V155）
-      (overWall ? `<p class="sznote adv">${t("ed.size.overWall.msg")}</p>` : "") +
-      // 「統合したのに『元に戻す』が減らない」を**説明なしで**分かるようにする1行（要件 §2-W-2）
-      `<p class="sznote">${t("ed.size.history.msg")}</p>` +
-      // V156（Codex レビュー §5）: 200 回という約束と「自動で減る」の関係を、**約束のそばに**書く
-      `<p class="sznote">${t("ed.size.undo.msg")}</p>` +
-      // V156（Codex レビュー §1・優先度 高）: 同じ箱に**論理サイズ**と**実メモリ**が並ぶので、
-      // 「どっちが本当のメモリなのか」が分からなくなる。眠りが効いているときだけ1行で分ける
-      (this.sleepOn ? `<p class="sznote">${t("ed.size.twoNumbers.msg")}</p>` : "") +
-      (level === "ok" ? "" : `<p class="sznote adv">${t(Editor.SIZE_ADVICE[level].msgKey)}</p>`);
-    // 右パネルは縦に長い＝**下端のメーターは画面の高さによっては見えない**（900×540 で実測: 内容 943px /
-    // 見える高さ 458px）。色が付いても気づかない人がいるので、**帯が上がったときだけ一度知らせる**。
-    // 失われた 500〜600コマの作品はちょうど「注意」の帯（132〜264MB）だった＝ここで黙っていると
-    // 今回の事故と同じことが起きる（Codex レビュー指摘・優先度 高）。
-    // 1つの作品で最大2回（注意で1回・警告に上がってもう1回）・小さい作品では絶対に出ない・
-    // 閉じるだけで何も起きない（止めない）
-    if (level !== "ok" && this.sizeNoticedLevel !== "warn" && this.sizeNoticedLevel !== level) {
-      this.sizeNoticedLevel = level;
-      this.cb.appendLog?.(
-        `[V154b] size ${level} project=${proj} history=${hist} total=${total} ` +
-          `faces=${projectFaces(this.project)}/${loadWallFaces(
-            this.project.indexBits === 16 ? 16 : 8
-          )} wall=${LOAD_WALL_BYTES}`
-      );
-      // 数字は本文に混ぜず、**いまの合計**を頭に添える（訳文を増やさずに現在値を見せる）
-      const head = `${t("ed.size.total.label")} ${formatSize(total)}`;
-      void this.cb.notice?.(head + "\n\n" + t(Editor.SIZE_ADVICE[level].msgKey));
-    }
-    // V159 (G-1): メーターは全コマを走査する（面数・実メモリ）。**呼ばれる回数が多い場所**なので、
-    // ここが 50ms を超えて何度も出るなら、それ自体が「操作が重い」の一因
-    perfDone("meter.update", _t0);
-  }
-
-  /** V154 (W-3): 16bit 昇格＝**メモリの使用量が倍**になり、色を減らしても戻らない一方通行
-   *  （`editor.ts` の promoteTo16 は片道）。**小さい作品ではこれまでどおりトーストだけ**。
-   *  大きい作品のときだけ、いまの量を添えて**作品につき一度**知らせる（止めはしない）。 */
-  private noticePromote16() {
-    const proj = projectBytes(this.project);
-    if (this.promoteNoticed || proj < Editor.SIZE_CAUTION || !this.cb.notice) {
-      this.cb.toast(t("ed.color.promote16.toast")); // 従来どおり（小さい作品の体感を変えない）
-      return;
-    }
-    this.promoteNoticed = true;
-    this.cb.appendLog?.(`[V154b] promote16 bytes=${proj}`);
-    // ここに来た時点で昇格は済んでいる＝`proj` は**倍になったあと**の量
-    void this.cb.notice(t("ed.color.promote16.big.msg", { size: formatBytes(proj) }));
-  }
-
-  // ---------------- 音声UI（M6-3: 波形調整パネル） ----------------
-
-  private audioPreview = new AudioPreview();
+  } // 384 MiB の 50%
   private audioPanelEl: HTMLElement | null = null;
   private audioPanelClose: (() => void) | null = null;
   /** M11-6: 波形（`#ap-wave`）のドラッグを畳む手（`audioPanelClose` と同じ流儀）。
@@ -3131,6 +1895,9 @@ export class Editor {
     if (this.busyKind) return;
     if (this.audioPanelEl) return;
     if (this.playing) this.stopPlayback();
+    // ★V209 (A-121): 音の窓を開くと ⏸ した位置（何周目か）も捨てる（SE の続きも試し再生を止めるときに捨てる＝今と同じ）
+    this.playPaused = null;
+    this.playEnded = null;
     const proj = this.project;
     const orig = proj.audio?.bgm ?? null;
     const fps = FPS_TABLE[proj.speedIndex] || 8;
@@ -3169,22 +1936,23 @@ export class Editor {
     this.audioPanelEl = back;
 
     // ---- 試し再生（音＋大プレビュー。ループ毎に頭出しリセット=A-1と同じ規則） ----
-    let trialTimer: number | null = null;
+    // ★V209 (A-121): コマは経過時間から決める（エディタの ▶・ライブラリと同じ時計 `PlayClock`）。BGM と SE は音の時計で予約する。
+    //  鳴らし方は作業コピー w の「書き出す長さ」で決める（曲の長さの形は曲を最後まで流してアニメを繰り返し、曲の終わりで頭から）。
+    //  試し再生は作品の「ループ」を見ずにいつも繰り返す（今と同じ）
+    let trialClock: PlayClock | null = null;
+    /** V209 (R-15): 試し再生の世代（音の用意を待つ間に押し直されたら、待っていた始め方は捨てる） */
+    let trialGen = 0;
+    /** V209: 音の用意を待っている間（ボタンは「止める」の見た目） */
+    let trialStarting = false;
+    /** V209: 待っている間の始め方が ⏸ からの続きなら、その位置（待つ間に止められたら戻す） */
+    let trialPending: PlayPaused | null = null;
     let trialFrame = 0;
-    let trialNode: AudioBufferSourceNode | null = null;
-    let trialGain: GainNode | null = null;
-    /** V172 (Codex 指摘・中): 試し再生のノードを繋いだ ctx。再生ヘッドと停止位置の時計は**必ずこれ**で測る。
-     *  `ensureAudioRunning` が途中で ctx を作り直しても、ノード（古い ctx）と時計（新しい ctx）が食い違わない
-     *  （古い ctx は closed で時計が止まる＝音が止まったのと同じ側に倒れる）。次の再生で新しい ctx に乗る */
-    let trialCtx: AudioContext | null = null;
-    const headClock = () => (trialCtx ?? getAudioCtx()).currentTime;
-    // M6-4 P-5: 再生ヘッド（AudioContext.currentTime 基準。null=非再生）
-    let playheadT0: number | null = null;
+    // M6-4 P-5: 再生ヘッド（V209: 絵と同じ時計で動かす）
     let playheadRaf = 0;
     // M6-5 Q-2: 停止位置マーカー（次の再生開始・パネル閉でクリア）
     let stopMarkT: number | null = null;
-    // M6-6 R-5: 一時停止位置（音源の絶対秒。null=一時停止中でない）
-    let pausedAt: number | null = null;
+    // M6-6 R-5: 一時停止位置（V209: 描き終わっていた所。null=一時停止中でない）
+    let trialPaused: PlayPaused | null = null;
     const normTrim = () => {
       const dur = buffer?.duration ?? 0;
       const ts = Math.max(0, Math.min(w.trimStartMs / 1000, Math.max(0, dur - 0.05)));
@@ -3192,87 +1960,41 @@ export class Editor {
       if (te <= ts) te = dur;
       return { ts, te };
     };
-    const stopTrialAudio = () => {
-      try {
-        trialNode?.stop();
-        trialNode?.disconnect();
-        trialGain?.disconnect();
-      } catch {
-        /* noop */
-      }
-      trialNode = null;
-      trialGain = null;
-    };
-    /** M5-1（Codex指摘#2）: 試し再生も速度連動 rate を適用（通常再生・書き出しと一致させる） */
+    /** M5-1（独立レビューの指摘#2）: 試し再生も速度連動 rate を適用（通常再生・書き出しと一致させる） */
     const trialRate = () => bgmPlaybackRate(proj.speedIndex, w.baseSpeedIndex);
-    /** offsetSec = 頭出し(ts)からの相対再開位置（R-5。0=頭出しから）。音源（バッファ）秒 */
-    const playTrialAudio = (offsetSec = 0) => {
-      stopTrialAudio();
-      if (!buffer || w.muted) return;
-      try {
-        const ctx = getAudioCtx();
-        // V172 (G-2): interrupted（WebKit）も拾う。同期の場所なので投げっぱなし＝作り直されたら次の再生から新しい ctx。
-        // Codex 指摘（中）: ヘッドの時計は**この ctx**で測る（`headClock`）。作り直しが起きても、ノードと時計が別の ctx にならない
-        trialCtx = ctx;
-        void ensureAudioRunning(ctx);
-        const { ts, te } = normTrim();
-        const startAt = ts + Math.max(0, offsetSec);
-        if (startAt >= te) return; // 音側は終端まで再生済み（アニメだけ続く）
-        const node = ctx.createBufferSource();
-        node.buffer = buffer;
-        node.playbackRate.value = trialRate();
-        const gain = ctx.createGain();
-        gain.gain.value = Math.max(0, Math.min(1, w.volume));
-        node.connect(gain);
-        gain.connect(ctx.destination);
-        node.start(0, startAt, Math.max(0, te - startAt));
-        trialNode = node;
-        trialGain = gain;
-      } catch {
-        /* 自動再生制限などは無音で続行 */
-      }
-    };
-    /** 再生ヘッドの時計を合わせる（ミュート中も AudioContext の時計で動かす。
-     *  offset=tsからの相対・音源秒。実時間には 1/rate 換算で積む） */
-    const resetPlayhead = (offsetSec = 0) => {
-      try {
-        playheadT0 = headClock() - Math.max(0, offsetSec) / trialRate();
-      } catch {
-        playheadT0 = null;
-      }
-    };
-    /** いま鳴っている位置（音源の絶対秒。トリム終端でクランプ。経過実時間×rate=音源秒） */
-    const currentHeadT = () => {
+    /** V209: 試し再生の BGM（窓で作業中の値。トリムを変えると、次に頭から鳴らすときから効く＝毎回読む） */
+    const trialPlan = (): BgmPlan | null => {
+      if (!buffer || w.muted) return null;
       const { ts, te } = normTrim();
-      let t = ts;
-      if (playheadT0 != null) {
-        try {
-          t = ts + (headClock() - playheadT0) * trialRate();
-        } catch {
-          /* noop */
-        }
-      }
-      return Math.min(t, te);
+      if (!(te > ts)) return null;
+      return { buf: buffer, trimStart: ts, trimEnd: te, rate: trialRate(), volume: w.volume };
     };
+    /** V209: 再生ヘッドの換算（ミュート中も動かす） */
+    const headTrim = () => {
+      const { ts, te } = normTrim();
+      return { trimStart: ts, trimEnd: te, rate: trialRate() };
+    };
+    const trialActive = () => trialClock != null || trialStarting;
     const setTrialButton = (playing: boolean) => {
       const b = box.querySelector("#ap-trial") as HTMLButtonElement | null;
       if (b) setIconLabel(b, playing ? "stop" : "play", playing ? t("ed.audio.trial.stop.btn") : t("ed.audio.trial.play.btn")); // V171
     };
     const stopTrial = () => {
-      pausedAt = null; // R-5: 完全停止（再開位置は持ち越さない）
-      if (trialTimer != null) {
-        clearInterval(trialTimer);
-        trialTimer = null;
-      }
-      stopTrialAudio();
-      self.audioPreview.stopSe(); // M11-1: 試し再生で発火したSEも止める
-      if (playheadT0 != null) {
+      trialGen++; // V209: 待っている始め方も捨てる
+      trialStarting = false;
+      trialPending = null;
+      trialPaused = null; // R-5: 完全停止（再開位置は持ち越さない）
+      const clock = trialClock;
+      trialClock = null;
+      if (clock) {
         // Q-2: どこまで聴いたか分かるよう、停止位置に薄いマーカーを残す
-        stopMarkT = currentHeadT();
-        playheadT0 = null;
+        stopMarkT = clock.songPos(headTrim());
+        clock.stop();
         cancelAnimationFrame(playheadRaf);
         drawWave(); // ヘッドを消してマーカーを描く
       }
+      self.audioPreview.stopBgm();
+      self.audioPreview.stopSe(); // M11-1: 試し再生で発火したSEも止める
       setTrialButton(false);
     };
     /** V192 (R-5): 音の窓のプレビューの出す大きさ（枠・dpr が変わったら apFitWatch が捨てる） */
@@ -3303,81 +2025,102 @@ export class Editor {
     };
     const startHeadRaf = () => {
       const tickHead = () => {
-        if (playheadT0 == null) return;
+        if (!trialClock) return;
         drawWave();
         playheadRaf = requestAnimationFrame(tickHead);
       };
       playheadRaf = requestAnimationFrame(tickHead);
     };
-    // M5-1: 試し再生でも配置SEをコマ発火（プロジェクトの生きた配置を参照）
-    const fireTrialSe = (i: number, skipIds?: string[]) => {
-      const a = proj.audio;
-      if (!a || a.se.length === 0) return;
-      const ids = proj.frames[i]?.se;
-      if (!ids) return;
-      for (const id of ids) {
-        if (skipIds && skipIds.includes(id)) continue; // M11-9: 続きから鳴っているSEは重ねない
-        const t = a.se.find((s) => s.id === id);
-        if (t) self.audioPreview.fireSe(t);
-      }
-    };
-    const startFrameTimer = (skipIds?: string[]) => {
-      fireTrialSe(trialFrame, skipIds); // 開始コマ
-      trialTimer = window.setInterval(() => {
-        let next = trialFrame + 1;
-        if (next >= frameCount) {
-          next = 0;
-          if (frameCount > 1) {
-            playTrialAudio(); // A-1と同じ: アニメが先頭に戻るたび音も頭出し
-            self.audioPreview.stopSe(); // M11-1: SEも本再生と同じく頭出しし直す（周回で重ねない）
-            resetPlayhead(); // ヘッドも頭出し位置へ戻す
-          }
+    /** V209: 試し再生を t0（繰り返しの頭から・秒）から始める。音の用意（ensureAudioRunning・SE のデコード）を待ってから */
+    const runTrial = async (t0: number, from: PlayPaused | null) => {
+      const gen = ++trialGen;
+      trialStarting = true;
+      trialPending = from;
+      setTrialButton(true);
+      // M5-1: 試し再生でも配置SEをコマ発火（プロジェクトの生きた配置を参照）
+      const se = self.usedSeTracks();
+      if (trialPlan() || se.length > 0) {
+        // V172 (G-2): interrupted（WebKit）も拾う。V209: SE だけでも待つ
+        try {
+          await ensureAudioRunning(getAudioCtx());
+        } catch {
+          /* 無音で続行 */
         }
-        trialFrame = next;
-        fireTrialSe(next);
-        drawTrialFrame();
-      }, 1000 / fps);
+        if (se.length > 0) await self.audioPreview.prepareSe(se);
+      }
+      if (gen !== trialGen || !self.audioPanelEl) return; // 待っている間に止められた・押し直された
+      trialStarting = false;
+      trialPending = null;
+      const host: PlayHost = {
+        shape: () => ({ fps, frameCount, loop: true }),
+        show: (i) => {
+          trialFrame = i;
+          drawTrialFrame();
+        },
+        ended: () => stopTrial(),
+        reshape: () => stopTrial(),
+        seAt: (i) => {
+          const a = proj.audio;
+          const ids = proj.frames[i]?.se;
+          if (!a || !ids) return [];
+          const out: { buf: AudioBuffer; track: SeTrack }[] = [];
+          for (const id of ids) {
+            const tr = a.se.find((s) => s.id === id);
+            const b = tr && !tr.muted ? self.audioPreview.seBuffer(tr) : undefined;
+            if (tr && b) out.push({ buf: b, track: tr });
+          }
+          return out;
+        },
+        bgm: trialPlan,
+      };
+      const clock = new PlayClock(host, self.audioPreview);
+      trialClock = clock;
+      stopMarkT = null;
+      const plan = trialPlan();
+      clock.start({ t0, songMode: w.syncMode === "animToAudio" && !!plan, wantAudio: !!plan || se.length > 0, resume: !!from });
+      startHeadRaf();
     };
     const startTrial = () => {
       stopTrial();
       stopMarkT = null; // Q-2: 再生開始で停止位置マーカーをクリア
       trialFrame = 0;
       drawTrialFrame();
-      playTrialAudio();
-      resetPlayhead();
-      startHeadRaf();
-      startFrameTimer();
-      setTrialButton(true);
+      void runTrial(0, null);
     };
     // R-5: 一時停止（位置マーカーを残す）⇄ 同位置から再開。コマ位置(trialFrame)も維持する
     const pauseTrial = () => {
-      if (trialTimer == null) return;
-      const t = currentHeadT();
-      clearInterval(trialTimer);
-      trialTimer = null;
-      stopTrialAudio();
+      if (trialStarting) {
+        // V209 (R-15): 待っている間の ⏸ は、始める前のまま（続きの位置も戻す）
+        trialGen++;
+        trialStarting = false;
+        trialPaused = trialPending;
+        trialPending = null;
+        setTrialButton(false);
+        return;
+      }
+      const clock = trialClock;
+      if (!clock) return;
+      trialClock = null;
+      trialGen++;
       // M11-1: 一時停止でSEも止める（本再生の⏸と同じ扱い）
       // M11-9: 止めるだけでなく「どこまで鳴ったか」を畳む＝再開で続きから鳴る
-      self.audioPreview.pauseSe();
-      playheadT0 = null;
+      // ★V209: 位置は描き終わっている所。表示をそのコマへ進めてから畳む（clock.pause の中）
+      const p = clock.pause();
+      trialPaused = p;
       cancelAnimationFrame(playheadRaf);
-      pausedAt = t;
-      stopMarkT = t; // 一時停止中はQ-2マーカーと同じ見た目で位置を示す
+      stopMarkT = clock.songPos(headTrim(), p.t); // 一時停止中はQ-2マーカーと同じ見た目で位置を示す
       drawWave();
       setTrialButton(false);
     };
     const resumeTrial = () => {
-      if (trialTimer != null || pausedAt == null) return;
-      const off = Math.max(0, pausedAt - normTrim().ts);
-      pausedAt = null;
+      const p = trialPaused;
+      if (trialActive() || !p) return;
+      trialPaused = null;
       stopMarkT = null;
       drawTrialFrame();
-      playTrialAudio(off);
-      resetPlayhead(off);
-      startHeadRaf();
-      // M11-9: 一時停止で畳んだSEを続きから鳴らし、そのぶんは開始コマで重ねて鳴らさない
-      startFrameTimer(self.audioPreview.resumeSe());
-      setTrialButton(true);
+      // M11-9: 一時停止で畳んだSEを続きから鳴らし、そのぶんは開始コマで重ねて鳴らさない（PlayClock が resumeSe を呼ぶ）
+      const same = p.fps === fps && p.frameCount === frameCount && p.frame === trialFrame;
+      void runTrial(same ? p.t : trialFrame / fps, same ? p : null);
     };
 
     // ---- 波形描画（ピーク min/max・コマ目盛ルーラー・トリムハンドル・再生ヘッド） ----
@@ -3486,7 +2229,7 @@ export class Editor {
       ctx2.fillStyle = uiColor("--paper", "#fbefd6");
       ctx2.fillRect(0, 0, W2, RULER_H);
       // P-5: 試し再生中は現在コマをルーラー上でハイライト
-      if (playheadT0 != null) {
+      if (trialClock) {
         const fx0 = xOf(ts + trialFrame / fps);
         const fx1 = xOf(ts + (trialFrame + 1) / fps);
         if (fx1 > 0 && fx0 < W2) {
@@ -3539,7 +2282,7 @@ export class Editor {
         H2 - 6
       );
       // Q-2: 停止位置マーカー（ヘッドと同色の半透明・非再生時のみ）
-      if (stopMarkT != null && playheadT0 == null) {
+      if (stopMarkT != null && !trialClock) {
         const x = xOf(stopMarkT);
         if (x >= 0 && x <= W2) {
           ctx2.strokeStyle = uiColor("--playhead", "#e0218a") + "73";
@@ -3551,15 +2294,10 @@ export class Editor {
           ctx2.lineWidth = 1;
         }
       }
-      // P-5: 再生ヘッド（AudioContext の時計基準。トリム終端で止め、表示窓の外なら描かない）
-      // M5-1: 経過実時間×rate=音源秒（速度連動と一致）
-      if (playheadT0 != null) {
-        let t = ts;
-        try {
-          t = ts + (headClock() - playheadT0) * trialRate();
-        } catch {
-          /* noop */
-        }
+      // P-5: 再生ヘッド（トリム終端で止め、表示窓の外なら描かない）
+      // M5-1: 経過実時間×rate=音源秒（速度連動と一致）。★V209 (A-121): 絵と同じ時計（聞こえている所）で動かす
+      if (trialClock) {
+        let t = trialClock.songPos(headTrim()) ?? ts;
         if (t > te) t = te;
         const x = xOf(t);
         if (x >= 0 && x <= W2) {
@@ -3712,7 +2450,7 @@ export class Editor {
       box.querySelector("#ap-mute")?.addEventListener("click", (e) => {
         w.muted = !w.muted;
         (e.currentTarget as HTMLElement).classList.toggle("on", w.muted);
-        if (w.muted) stopTrialAudio();
+        if (w.muted) self.audioPreview.stopBgm(); // V209: 予約した BGM ごと（次の頭出しはミュートを読んで鳴らさない）
       });
       // Q-1: 音量/ズームは共通スライダー部品（プレースホルダを差し替え）
       volHandle = null;
@@ -3725,7 +2463,7 @@ export class Editor {
           onInput: (v) => {
             w.volume = v / 100;
             (box.querySelector("#ap-volv") as HTMLElement).textContent = `${v}%`;
-            if (trialGain) trialGain.gain.value = w.volume;
+            if (trialClock) self.audioPreview.setBgmVolume(w.volume); // V209: 予約した BGM のノードにも
           },
         });
         volHandle.root.id = "ap-vol";
@@ -3757,13 +2495,13 @@ export class Editor {
         drawWave();
       });
       box.querySelector("#ap-trial")?.addEventListener("click", () => {
-        if (trialTimer != null) stopTrial();
+        if (trialActive()) stopTrial();
         else startTrial(); // 一時停止中でもボタンは頭出しから（クリック再開はプレビュー側）
       });
       // R-5: 大プレビューのクリックで再生⇄一時停止（再開は同位置から）
       box.querySelector("#ap-mini-box")?.addEventListener("click", () => {
-        if (trialTimer != null) pauseTrial();
-        else if (pausedAt != null) resumeTrial();
+        if (trialActive()) pauseTrial();
+        else if (trialPaused != null) resumeTrial();
         else startTrial();
       });
       (box.querySelector("#ap-start") as HTMLInputElement | null)?.addEventListener(
@@ -4147,222 +2885,41 @@ export class Editor {
           syncMode,
           // M10-11: 範囲先頭が作品先頭から何秒か。全範囲なら lo=0 → 0
           rangeStartSec: lo / (FPS_TABLE[p.speedIndex] || 8),
+          // V216b (A-134・C-29): 範囲の頭より前のコマの SE（曲が主でないとき、まだ鳴っているものを途中から鳴らす）
+          preRangeSe: p.frames.slice(0, lo).map((f) => (f.se && f.se.length > 0 ? [...f.se] : undefined)),
         });
       },
     };
   }
-
-  // ---------------- M5-1: SEトラック・コマ配置の操作（Undo対応） ----------------
-
-  /** 音声パネルが開いている間だけ設定される SEセクション再描画フック */
-  private seSectionRefresh: (() => void) | null = null;
   /** V158 (C-3): 音声パネルの波形を描き直す口（配色を切り替えたとき用）。
    *  パネルを開いていないときは null＝何もしない。 */
   private waveRedraw: (() => void) | null = null;
 
-  /** SE配置の対象コマ（フィルム範囲選択中は範囲・それ以外は現在コマ） */
-  private selectedFrameIndices(): number[] {
-    if (this.rangeSel) {
-      const out: number[] = [];
-      for (let i = this.rangeSel.a; i <= this.rangeSel.b; i++) out.push(i);
-      return out;
-    }
-    return [this.frameIndex];
+  /** V157 (D-2 / U-4): このコマだけの表示色の目印（コマの帯の細い帯）。付いていなければ null。
+   *  「付けた本人が後から分からなくなる」を防ぐための目印（作者判断で採用）。
+   *  色は付いているうちの1つを使う（複数レイヤーに付いていても行は1本＝混雑させない） */
+  private filmColorMark(i: number): HTMLElement | null {
+    const fcs = this.project.frames[i]?.layerColors;
+    const first = fcs ? Object.values(fcs)[0] : undefined;
+    if (!first) return null;
+    const bar = document.createElement("i");
+    bar.className = "fc-mark";
+    bar.style.background = first;
+    bar.title = t("ed.frameColor.mark.title", { n: Object.keys(fcs!).length });
+    return bar;
   }
 
-  private ensureProjectAudio(): ProjectAudio {
-    if (!this.project.audio) this.project.audio = { bgm: null, se: [] };
-    return this.project.audio;
-  }
-
-  /** SE変更後の共通処理（dirty・ボタン/フィルム表示・パネル再描画） */
-  private afterSeChange() {
-    this.dirty = true;
-    // M11-9 P-1: SEを編集したら「一時停止で畳んだ続き」は捨てる（消した音源の続きが後から鳴らない）。
-    // 鳴っている音には触れない＝従来の挙動は変えない
-    this.audioPreview.discardPausedSe();
-    sanitizeAudio(this.project);
-    this.updateAudioToolButton();
-    this.updateFilmSeMarks();
-    this.seSectionRefresh?.();
-    this.updateSizeMeter(); // V154 (W-2 ③): 音声もメモリに載っている
-  }
-
-  private seById(id: string): SeTrack | undefined {
-    return this.project.audio?.se.find((s) => s.id === id);
-  }
-
-  /** SEトラック追加（外部ファイル。M5-2でマイク録音を追加予定） */
-  private addSeTrack(picked: { bytes: Uint8Array; mime: string; name: string }) {
-    const track: SeTrack = {
-      id: newSeId(this.project),
-      name: picked.name.replace(/\.[^.]+$/, "") || "SE",
-      source: "external",
-      mime: picked.mime,
-      data: picked.bytes,
-      volume: 1,
-      muted: false,
-    };
-    const self = this;
-    const apply = () => {
-      const a = self.ensureProjectAudio();
-      if (!a.se.some((s) => s.id === track.id)) a.se.push(track);
-      self.afterSeChange();
-    };
-    const revert = () => {
-      const a = self.project.audio;
-      if (a) a.se = a.se.filter((s) => s.id !== track.id);
-      self.afterSeChange();
-    };
-    // V154 (W-2 ③): 取り消すと、この音源のバイト列は履歴のクロージャだけが持つ（Codex レビュー指摘）
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label: "SE追加",
-      bytesIfUndone: entryBytes(track),
-      undo: revert,
-      redo: apply,
+  /** V205 (A-113): 1 コマだけ、コマの帯の色の目印を今の色に直す（帯を作り直さない＝1 コマの上書きの貼り付けと、その取り消し・やり直し） */
+  protected override updateFilmColorMark(i: number) {
+    document.querySelectorAll(`#ed-film .fr[data-idx="${i}"]`).forEach((el) => {
+      el.querySelector(".fc-mark")?.remove();
+      const bar = this.filmColorMark(i);
+      if (bar) el.appendChild(bar);
     });
-    apply();
-  }
-
-  /** SEトラック削除（全コマの配置も外す。Undoで配置ごと復元） */
-  private deleteSeTrack(id: string) {
-    const a = this.project.audio;
-    const idx = a?.se.findIndex((s) => s.id === id) ?? -1;
-    if (!a || idx < 0) return;
-    const track = a.se[idx];
-    const placedAt: number[] = [];
-    this.project.frames.forEach((f, i) => {
-      if (f.se?.includes(id)) placedAt.push(i);
-    });
-    const self = this;
-    const apply = () => {
-      const cur = self.project.audio;
-      if (cur) cur.se = cur.se.filter((s) => s.id !== id);
-      for (const i of placedAt) {
-        const f = self.project.frames[i];
-        if (f?.se) {
-          f.se = f.se.filter((x) => x !== id);
-          if (f.se.length === 0) f.se = undefined;
-        }
-      }
-      self.afterSeChange();
-    };
-    const revert = () => {
-      const cur = self.ensureProjectAudio();
-      if (!cur.se.some((s) => s.id === id)) cur.se.splice(Math.min(idx, cur.se.length), 0, track);
-      for (const i of placedAt) {
-        const f = self.project.frames[i];
-        if (!f) continue;
-        if (!f.se) f.se = [];
-        if (!f.se.includes(id)) f.se.push(id);
-      }
-      self.afterSeChange();
-    };
-    // V154 (W-2 ③): 消した効果音のバイト列も履歴が抱えたまま（戻せばプロジェクト側へ帰る）
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label: "SE削除",
-      bytesIfApplied: entryBytes(track),
-      undo: revert,
-      redo: apply,
-    });
-    apply();
-  }
-
-  /** 音量変更の履歴（スライダーの確定時に呼ぶ。値は既に反映済み） */
-  private pushSeVolumeHistory(id: string, from: number, to: number) {
-    const self = this;
-    this.dirty = true;
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label: "SE音量",
-      undo() {
-        const t = self.seById(id);
-        if (t) t.volume = from;
-        self.afterSeChange();
-      },
-      redo() {
-        const t = self.seById(id);
-        if (t) t.volume = to;
-        self.afterSeChange();
-      },
-    });
-  }
-
-  private toggleSeMute(id: string) {
-    const t = this.seById(id);
-    if (!t) return;
-    const self = this;
-    const apply = () => {
-      const cur = self.seById(id);
-      if (cur) cur.muted = !cur.muted;
-      self.afterSeChange();
-    };
-    this.history.push({ colorRefs: NO_COLOR_REFS, label: "SEミュート", undo: apply, redo: apply });
-    apply();
-  }
-
-  private renameSeTrack(id: string, name: string) {
-    const t = this.seById(id);
-    if (!t || t.name === name) return;
-    const from = t.name;
-    const self = this;
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label: "SE名前変更",
-      undo() {
-        const cur = self.seById(id);
-        if (cur) cur.name = from;
-        self.afterSeChange();
-      },
-      redo() {
-        const cur = self.seById(id);
-        if (cur) cur.name = name;
-        self.afterSeChange();
-      },
-    });
-    t.name = name;
-    this.afterSeChange();
-  }
-
-  /** 選択コマへの配置トグル（全コマ配置済みなら解除・そうでなければ全コマへ配置。履歴1件） */
-  private toggleSePlacement(id: string, frames: number[]) {
-    if (!this.seById(id) || frames.length === 0) return;
-    const all = frames.every((i) => this.project.frames[i]?.se?.includes(id));
-    // 変化のあるコマだけ記録（Undoで正確に戻す）
-    const affected = frames.filter((i) => {
-      const has = this.project.frames[i]?.se?.includes(id) ?? false;
-      return all ? has : !has;
-    });
-    if (affected.length === 0) return;
-    const self = this;
-    const add = !all;
-    const applyTo = (doAdd: boolean) => {
-      for (const i of affected) {
-        const f = self.project.frames[i];
-        if (!f) continue;
-        if (doAdd) {
-          if (!f.se) f.se = [];
-          if (!f.se.includes(id)) f.se.push(id);
-        } else if (f.se) {
-          f.se = f.se.filter((x) => x !== id);
-          if (f.se.length === 0) f.se = undefined;
-        }
-      }
-      self.afterSeChange();
-    };
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label: add ? "SE配置" : "SE配置解除",
-      undo: () => applyTo(!add),
-      redo: () => applyTo(add),
-    });
-    applyTo(add);
   }
 
   /** フィルムの ♪ マーク（SE配置のあるコマ）を更新 */
-  private updateFilmSeMarks() {
+  protected override updateFilmSeMarks() {
     document.querySelectorAll("#ed-film .fr").forEach((el) => {
       const i = Number((el as HTMLElement).dataset.idx);
       const has = !Number.isNaN(i) && !!this.project.frames[i]?.se?.length;
@@ -4370,7 +2927,7 @@ export class Editor {
     });
   }
 
-  private rebuildPalette() {
+  protected override rebuildPalette() {
     const pal = $("#ed-pal");
     pal.innerHTML = "";
     // ★V195 (A-99): 帯から消した色は空き番号（""）として残る＝帯には出さない。消したあと同じ色をまた使うと
@@ -4387,10 +2944,7 @@ export class Editor {
       d.className = "sw" + (hex === this.colorHex ? " on" : "");
       d.style.background = hex;
       d.title = t("ed.color.swatch.title", { hex }); // V195 (A-99): 「右クリックで消す」を足した（今までは hex だけ）
-      d.addEventListener("click", () => {
-        this.colorHex = hex;
-        this.rebuildPalette();
-      });
+      d.addEventListener("click", () => this.selectColor(hex)); // ★V214
       // V195 (A-99): 右クリック → 調べて → 確認 → 消す（マイ柄の右クリック削除 `deleteCustomTone` と同じ流儀）。
       //  透明と紙の色の列には付けない（消せない色）
       d.addEventListener("contextmenu", (e) => {
@@ -4404,10 +2958,7 @@ export class Editor {
     const tp = document.createElement("button");
     tp.className = "sw tp" + (this.colorHex === "" ? " on" : "");
     tp.title = t("ed.color.transparent.title");
-    tp.addEventListener("click", () => {
-      this.colorHex = "";
-      this.rebuildPalette();
-    });
+    tp.addEventListener("click", () => this.selectColor("")); // ★V214
     pal.appendChild(tp);
     // 紙色ボタン列。M11-14b: 既定パレットと同じうごメモ3Dの6色（白先頭＝既定紙色）。
     // 水色 #06aeff は #0038ce に置き換え（UGO_COLORS 定数そのものは不変）
@@ -4443,112 +2994,12 @@ export class Editor {
     if (this.textDraft) this.redrawOverlay();
   }
 
-  // ---------------- V195 (A-99): 上の色の帯から色を消す ----------------
-
-  /** ★V195 (A-99・REQ-009): 帯の色を右クリックしたとき。
-   *
-   *  ① **使っているかを先に調べる**（全コマ・全レイヤー・眠っているコマ・紙・取り消しの記録・コピー中の絵）。
-   *    使っていれば消さずに「この色は ◯ コマで使っています」等を知らせる（消せない色に確認を出さない）。
-   *    調べるのは重い操作の漏斗（runHeavy）の中＝大きい作品でも固めない・その間はほかの操作を受け付けない
-   *  ② 使っていなければ**確かめてから**消す。消すのは**空き番号にするだけ**（colorTable[k] = ""）＝画素は 1 つも変えない
-   *  ③ 1 回の操作として取り消しに積む（Ctrl+Z で帯に戻る・Ctrl+Y でまた消える）
-   *  判断と数え方は `colorUsage.ts`（純関数・v195_smoke が本物の Editor で確かめる） */
-  private async deletePaletteColor(hex: string) {
-    if (this.busyKind || this.pointerDown) return;
-    // ★矢印キーの移動の途中（移動前の絵を番号のまま `layerDrag.before` 等に持ち、800ms 後のタイマーで確定する）を
-    //  **先に確定する**。マウスの右クリックは押した時点で uiPointerHandler が確定させるが、キーボードから右クリックの
-    //  メニューを出したとき（Shift+F10・メニューキー）はそこを通らない＝調べたあとでタイマーが「移動前の絵」を履歴に
-    //  積み、Ctrl+Z で消した番号の画素が戻ってくる（V195 のコミット前レビューの指摘）。gotoFrame と同じ形
-    this.endArrowSession();
-    if (this.xformGuard()) return; // 変形中の浮いた絵（番号のまま）を抱えたまま空けない
-    const project = this.project;
-    const slots = colorSlots(project, hex);
-    if (slots.length === 0) return;
-    // 履歴の変更カウンタは**調べる直前**に取る（入口の beginBusy が残りの束を確定したあと＝それは調べる中に入る）。
-    // 調べている間・確認を閉じるまでに 1 つでも動いたら、調べた結果は古い＝消さない
-    let gen = -1;
-    const use = await this.runHeavy("color.scan", t("ed.heavy.colorScan.msg"), () => {
-      gen = this.history.mutations;
-      return scanColorUse(
-        project,
-        slots,
-        {
-          history: this.history.entriesForScan(),
-          clips: [Editor.clipboard?.data ?? null, this.layerClip],
-        },
-        yieldToInput
-      );
-    });
-    if (!use || this.project !== project || !this.mounted) return; // 入口が閉じていた／作品が替わった
-    if (this.history.mutations !== gen) return; // 調べている間に履歴が動いた（キーもポインタも止まっているので普通は起きない）
-    const verdict = colorDeleteVerdict(use);
-    if (verdict === "frames") {
-      this.cb.toast(t("ed.color.usedFrames.toast", { n: use.frames }));
-      return;
-    }
-    if (verdict === "history") {
-      this.cb.toast(t("ed.color.usedHistory.toast"));
-      return;
-    }
-    if (verdict === "clip") {
-      this.cb.toast(t("ed.color.usedClip.toast"));
-      return;
-    }
-    const ok = await this.cb.confirm(t("ed.color.delete.msg", { hex }));
-    if (!ok) return;
-    // 調べてから確認を閉じるまでに作品が変わっていたら、調べた結果は古い＝消さない（確認の間は操作できないので保険）
-    if (this.project !== project || this.history.mutations !== gen || !this.mounted) return;
-    if (slots.some((k) => (project.colorTable[k] ?? "").toLowerCase() !== hex.toLowerCase())) return;
-    const self = this;
-    const set = (toEmpty: boolean) => {
-      for (const k of slots) project.colorTable[k] = toEmpty ? "" : hex;
-      self.dirty = true;
-      self.rebuildPalette();
-    };
-    this.history.push({
-      label: "色を消す",
-      colorRefs: NO_COLOR_REFS, // 抱えているのは hex の文字列だけ（画素はゼロ）
-      undo: () => set(false),
-      redo: () => set(true),
-    });
-    set(true);
-    this.cb.toast(t("ed.color.deleted.toast"));
-  }
-
   // ---------------- V164 (U-3): よく使う色の棚 ----------------
 
-  /** V164: settings から復元（mount 前でよい。`buildSidePanel` が読む）。
-   *  健全化は `prefs.ts` の純関数（壊れた要素だけ捨てる＝スモークが見張っている） */
-  restoreFavoriteColors(v: unknown) {
-    this.favoriteColors = sanitizeFavoriteColors(v);
-  }
 
-  /** 棚に入れられる色か（透明＝`""` は色ではないので入れられない） */
-  private favoriteHexNow(): string | null {
-    return normalizeFavColor(this.colorHex);
-  }
-
-  /** いまの色を登録／登録済みなら外す（ボタン1つで両方＝要件 U-3 の「登録／解除」） */
-  private toggleFavoriteColor() {
-    const hex = this.favoriteHexNow();
-    if (!hex) return; // 透明のときはボタン自体が無効
-    const at = this.favoriteColors.indexOf(hex);
-    if (at >= 0) {
-      this.favoriteColors.splice(at, 1);
-    } else {
-      if (this.favoriteColors.length >= FAVORITE_COLORS_MAX) {
-        this.cb.toast(t("ed.color.fav.full.toast", { max: FAVORITE_COLORS_MAX }));
-        return;
-      }
-      this.favoriteColors.push(hex);
-    }
-    // マイ柄と同じ流儀: 変えた瞬間に settings へ（履歴には積まない＝作品の Undo とは無関係）
-    this.cb.onFavoriteColorsChange?.([...this.favoriteColors]);
-    this.rebuildFavPalette();
-  }
 
   /** 棚の描き直し（色見本＋登録ボタンの文言・有効/無効）。DOM が無い場面では何もしない */
-  private rebuildFavPalette() {
+  protected override rebuildFavPalette() {
     const pal = document.getElementById("ed-favpal");
     const btn = document.getElementById("ed-fav-toggle") as HTMLButtonElement | null;
     if (!pal || !btn) return;
@@ -4559,10 +3010,7 @@ export class Editor {
       d.className = "sw" + (hex === now ? " on" : "");
       d.style.background = hex;
       d.title = t("ed.color.fav.swatch.title", { hex });
-      d.addEventListener("click", () => {
-        this.colorHex = hex;
-        this.rebuildPalette(); // 上の帯と棚の両方が塗り直る（選択枠が2つ点くことはない）
-      });
+      d.addEventListener("click", () => this.selectColor(hex)); // ★V214: 上の帯と棚の両方が塗り直る（選択枠が2つ点くことはない）
       pal.appendChild(d);
     }
     const registered = now != null && this.favoriteColors.includes(now);
@@ -4570,28 +3018,68 @@ export class Editor {
     // 透明（消し色）は棚に入れられない。押せないことが見て分かるよう無効にし、理由は title に
     btn.disabled = now == null;
     btn.title = now == null ? t("ed.color.fav.needColor.title") : t("ed.color.fav.toggle.title");
+    this.fitColorRows(); // ★V215 (A-124): 色の数が変わると要る段数が変わる（見た目だけ・作品には触らない）
   }
 
-  /** V164 (U-1): オニオンの段数と向きを settings へ（変えた瞬間に保存＝マイ柄・配色と同じ流儀） */
-  private saveOnion() {
-    this.cb.onOnionChange?.(this.onionLevel, this.onionDir);
+  // ---------------- V215 (A-124): 色の段の見える段数 ----------------
+
+  /** 帯（#ed-pal）とよく使う色（#ed-favpal）の見える段数の上限（D-2: 帯は 3 段＝8 列で 24 色・棚は 2 段＝16 色） */
+  private static readonly COLOR_ROWS_MAX = { pal: 3, fav: 2 } as const;
+  /** 道具の段に少なくとも残す高さ（1 行ぶん・レイヤーの 1 行と同じ 34px）。これに下端のぼかし（見本 1 つぶん）を足して見る */
+  private static readonly TOOLS_MIN_PX = 34;
+  /** 上段の大きさを見張る（窓・比率・幅が変わったら段数を決め直す） */
+  private colorRowsObs: ResizeObserver | null = null;
+
+  /** ★V215 (A-124・REQ_color_section §2-1 の 3・5・6・7): 帯とよく使う色の見える段数を決める（CSS の `--rows`）。
+   *  枠の高さは行の高さちょうど（`.pal-rows`）で行ごとに吸い付く＝真ん中が切れた見本は止まった所では見えない（V197 と同じ性質）。
+   *  まず両方 1 段（棚が空なら 0）を置き、上段に道具の段が 1 行ぶん（TOOLS_MIN_PX＋ぼかし）残る範囲で、帯を 3 段まで・棚を 2 段まで増やす。
+   *  1 段ずつでも道具の段が残らない（窓が低い・上段の比率が小さい）ときは 1 段のまま（残らない形＝tight は報告書の数）。
+   *  色の段を畳んでいるとき・画面に出ていないときは何もしない（ひらいたときに applyLayout から呼ぶ） */
+  private fitColorRows() {
+    if (!this.mounted || this.sideFold.col) return;
+    const top = document.getElementById("ed-side-top");
+    const col = document.getElementById("ed-side-col");
+    const body = document.getElementById("ed-side-topbody");
+    const pal = document.getElementById("ed-pal");
+    const fav = document.getElementById("ed-favpal");
+    if (!top || !col || !body || !pal || !fav) return;
+    const topH = top.getBoundingClientRect().height;
+    if (!(topH > 0) || !(col.clientWidth > 0)) return;
+    const cs = getComputedStyle(top);
+    const cols = Number(cs.getPropertyValue("--pal-cols")) || 8;
+    const gap = parseFloat(cs.getPropertyValue("--pal-gap")) || 5;
+    const secGap = parseFloat(cs.rowGap) || 0;
+    const ccs = getComputedStyle(col);
+    const cw = col.clientWidth - (parseFloat(ccs.paddingLeft) || 0) - (parseFloat(ccs.paddingRight) || 0);
+    const sw = (cw - (cols - 1) * gap) / cols;
+    const rowsH = (k: number) => (k > 0 ? k * sw + (k - 1) * gap : 0);
+    // 枠は上下 4px の余白と -4px の外側の余白で、置き場の高さには中身（行）のぶんだけ効く
+    const boxH = (e: HTMLElement) => Math.max(0, e.getBoundingClientRect().height - 8);
+    const head = top.firstElementChild as HTMLElement | null;
+    const headH = head ? head.getBoundingClientRect().height : 0;
+    const colOther = col.scrollHeight - boxH(pal) - boxH(fav);
+    // 道具の段は、下端のぼかし（.side-fade・見本 1 つぶん）の上に 1 行ぶんが見えるだけ残す
+    const avail = topH - headH - 2 * secGap - colOther - Editor.TOOLS_MIN_PX - sw;
+    const needPal = Math.max(1, Math.ceil(pal.children.length / cols));
+    const needFav = Math.ceil(fav.children.length / cols);
+    let nPal = 1;
+    let nFav = needFav > 0 ? 1 : 0;
+    const fits = (a: number, b: number) => rowsH(a) + rowsH(b) <= avail + 0.5;
+    while (nPal < Math.min(Editor.COLOR_ROWS_MAX.pal, needPal) && fits(nPal + 1, nFav)) nPal++;
+    while (nFav < Math.min(Editor.COLOR_ROWS_MAX.fav, needFav) && fits(nPal, nFav + 1)) nFav++;
+    pal.style.setProperty("--rows", String(nPal));
+    fav.style.setProperty("--rows", String(Math.max(1, nFav)));
+    this.markColorRowsMore(pal);
+    this.markColorRowsMore(fav);
   }
 
-  /** V164 (U-1): settings から復元。**壊れた値・未設定はすべて既定へ倒す**
-   *  （段数 0＝切／向き "both"＝v1.6.0 と同じ絵）。判定は `prefs.ts` の純関数 */
-  restoreOnion(level: unknown, dir: unknown) {
-    this.onionLevel = sanitizeOnionLevel(level);
-    this.onionDir = sanitizeOnionDir(dir);
+  /** 枠の上・下に続きがあるかの印（スクロールバーは出さないので、端の線で知らせる） */
+  private markColorRowsMore(el: HTMLElement) {
+    el.classList.toggle("more-up", el.scrollTop > 1);
+    el.classList.toggle("more-down", el.scrollTop + el.clientHeight < el.scrollHeight - 1);
   }
 
-  // ---------------- M3.7: レイヤーツリー（フォルダ・ネスト対応） ----------------
 
-  /** 選択中フォルダ（新規作成先・フォルダ操作の対象） */
-  private selectedFolderId: string | null = null;
-  /** M3.8: 複数選択（レイヤー/フォルダの node id。描画対象 activeLayerId は従来どおり1枚） */
-  private selectedNodeIds = new Set<string>();
-  /** M3.8: Shift範囲選択の起点（最後に普通クリックした node） */
-  private selAnchorId: string | null = null;
   /** M3.8: ドラッグ中の選択トップノード群（DnDセッション中のみ） */
   private dragNodes: string[] | null = null;
   /** M3.8: 表示リスト（rebuildLayers が更新。DnDヒット判定・Shift範囲用） */
@@ -4610,6 +3098,10 @@ export class Editor {
     document
       .querySelectorAll("#ed-layers .droptarget")
       .forEach((x) => x.classList.remove("droptarget"));
+    // V208 (A-120): 入る先のフォルダを薄く塗った行
+    document
+      .querySelectorAll("#ed-layers .lay-dropzone")
+      .forEach((x) => x.classList.remove("lay-dropzone"));
   }
 
   // ---------------- M3.9 H-2: Pointer Events 自前ドラッグ ----------------
@@ -4626,11 +3118,18 @@ export class Editor {
     startY: number;
     active: boolean;
     ghost: HTMLElement | null;
-    target: { t: DropTarget; zone: "above" | "below" | "into"; rowIdx: number } | null;
+    /** V208 (A-120): ゴーストの 2 行目（入る先） */
+    ghostDest: HTMLElement | null;
+    target: RowDropPlan | null;
     hoverFolder: string | null;
     hoverTimer: number | null;
     onMove: (e: PointerEvent) => void;
     onUp: (e: PointerEvent) => void;
+    /** V208 (A-120): 最後のポインタの位置（一覧を流している間に入る先を測り直す） */
+    lastX: number;
+    lastY: number;
+    /** V208 (A-120): 端で流している requestAnimationFrame（流していなければ null） */
+    scrollRaf: number | null;
   } | null = null;
   /** ドラッグ後の click（選択変更）を1回だけ抑止する */
   private suppressRowClick = false;
@@ -4657,11 +3156,15 @@ export class Editor {
       startY: e.clientY,
       active: false,
       ghost: null,
+      ghostDest: null,
       target: null,
       hoverFolder: null,
       hoverTimer: null,
       onMove,
       onUp,
+      lastX: e.clientX,
+      lastY: e.clientY,
+      scrollRaf: null,
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -4676,10 +3179,8 @@ export class Editor {
       d.active = true;
       this.suppressRowClick = true; // ドラッグ確定後の click は選択変更しない
       // クリック→即ドラッグ: 選択外の行から開始したら単独選択に切替（クラスのみ更新）
-      if (!this.selectedNodeIds.has(d.id)) {
-        this.selectedNodeIds = new Set([d.id]);
-        this.selAnchorId = d.id;
-        if (d.kind === "layer") this.activeLayerId = d.id;
+      if (this.grabRowForDrag(d.id, d.kind)) {
+        // ★V214: 選びを替えるのはコアの grabRowForDrag（選択の外の行から掴んだとき）。ここは行の見た目だけ
         this.displayRows.forEach((r) => {
           r.el.classList.toggle("sel", this.selectedNodeIds.has(r.id));
           if (r.kind === "layer") r.el.classList.toggle("active", r.id === this.activeLayerId);
@@ -4694,39 +3195,108 @@ export class Editor {
       );
       // ゴースト（掴んでいる中身の表示）
       const g = document.createElement("div");
-      g.className = "drag-ghost";
+      g.className = "drag-ghost lay-drag-ghost";
       const name =
         d.kind === "folder"
           ? (this.folderById(d.id)?.name ?? "")
           : this.project.layerDefs.find((l) => l.id === d.id)?.name ?? "";
       const n = this.dragNodes.length;
+      // V208 (A-120): 1 行目（掴んでいる物）と 2 行目（入る先）を子の要素に分ける。フィルムのコマ・ライブラリのカードの
+      // ゴースト（同じ .drag-ghost）は変えない
+      const head = document.createElement("div");
+      head.className = "lay-drag-ghost-head";
       // textContent なので escHtml は通さない（レイヤー名・フォルダ名はユーザーのデータ）
-      g.textContent = n > 1 ? t("ed.layer.dragGhostMulti.label", { name, count: n - 1 }) : name;
-      if (d.kind === "folder") g.prepend(icon("folder")); // V171: 📁 → folder（文字の前に SVG）
+      head.textContent = n > 1 ? t("ed.layer.dragGhostMulti.label", { name, count: n - 1 }) : name;
+      if (d.kind === "folder") head.prepend(icon("folder")); // V171: 📁 → folder（文字の前に SVG）
+      const dest = document.createElement("div");
+      dest.className = "lay-drag-ghost-dest";
+      dest.hidden = true;
+      g.append(head, dest);
       document.body.appendChild(g);
       d.ghost = g;
+      d.ghostDest = dest;
     }
     if (d.ghost) {
       d.ghost.style.left = `${ev.clientX + 14}px`;
       d.ghost.style.top = `${ev.clientY + 16}px`;
     }
-    // ヒットテスト
-    const hit = this.hitTestRowDrag(ev.clientX, ev.clientY);
-    d.target = hit;
-    if (!hit) {
+    d.lastX = ev.clientX;
+    d.lastY = ev.clientY;
+    this.refreshRowDragTarget();
+    this.updateRowDragScroll(); // V208 (A-120): 一覧の端で流す
+  }
+
+  /** V208 (A-120): 今のポインタの位置で入る先を測り直して見せる（ポインタが動いたときと、一覧が流れたとき） */
+  private refreshRowDragTarget() {
+    const d = this.rowDrag;
+    if (!d || !d.active) return;
+    const plan = this.hitTestRowDrag(d.lastX, d.lastY);
+    d.target = plan;
+    if (!plan) {
       this.clearDndUi();
       d.ghost?.classList.add("invalid");
+      if (d.ghostDest) d.ghostDest.hidden = true;
       this.setDragHoverFolder(null);
       return;
     }
     d.ghost?.classList.remove("invalid");
-    this.showRowIndicator(hit.rowIdx, hit.zone, hit.t); // M13-1: 入る先のインデントで線を引く
-    // 折りたたみフォルダに1秒ホバーで自動展開（into ゾーンのみ）
+    this.showRowIndicator(plan); // 入る先の段の字下げで線を引く・入る先のフォルダを塗る
+    if (d.ghostDest) this.fillDropLabel(d.ghostDest, plan);
+    // 折りたたみフォルダに1秒ホバーで自動展開（中の一番下へ＝フォルダの行の下半分のときだけ）
     const hoverId =
-      hit.zone === "into" && this.folderById(hit.t.type === "into" ? hit.t.folder : undefined)?.collapsed
-        ? (hit.t as { folder: string }).folder
-        : null;
+      plan.view.kind === "into" && plan.folder && this.folderById(plan.folder)?.collapsed ? plan.folder : null;
     this.setDragHoverFolder(hoverId);
+  }
+
+  /**
+   * V208 (A-120): ゴーストの 2 行目に入る先を出す。フォルダの名前（利用者のデータ）は textContent で入れ、
+   * 名前の所だけを省略記号で切る（ja は名前が先なので、全体を切ると「の中の一番下へ」の方が消える）
+   */
+  private fillDropLabel(el: HTMLElement, plan: RowDropPlan) {
+    const MARK = "\u2063\u2063";
+    const text =
+      plan.label === "out"
+        ? t("ed.layer.dropOut.label")
+        : plan.label === "inEnd"
+          ? t("ed.layer.dropInEnd.label", { name: MARK })
+          : t("ed.layer.dropIn.label", { name: MARK });
+    const at = text.indexOf(MARK);
+    const parts: HTMLElement[] = [];
+    const span = (cls: string, s: string) => {
+      const x = document.createElement("span");
+      x.className = cls;
+      x.textContent = s;
+      parts.push(x);
+    };
+    if (at < 0) span("lay-drag-ghost-fix", text);
+    else {
+      if (at > 0) span("lay-drag-ghost-fix", text.slice(0, at));
+      span("lay-drag-ghost-name", this.folderById(plan.folder)?.name ?? "");
+      if (at + MARK.length < text.length) span("lay-drag-ghost-fix", text.slice(at + MARK.length));
+    }
+    el.replaceChildren(...parts);
+    el.hidden = false;
+  }
+
+  /** V208 (A-120): 一覧の端で流す（requestAnimationFrame・流れている間も入る先を測り直す・ドラッグが終わると止まる） */
+  private updateRowDragScroll() {
+    const d = this.rowDrag;
+    if (!d || !d.active || d.scrollRaf != null || typeof requestAnimationFrame !== "function") return;
+    const tick = () => {
+      const dd = this.rowDrag;
+      if (!dd || dd !== d) return;
+      dd.scrollRaf = null;
+      const box = document.querySelector("#ed-side-botbody") as HTMLElement | null;
+      if (!box) return;
+      const br = box.getBoundingClientRect();
+      const step = dragScrollStep(dd.lastY, br.top, br.bottom);
+      if (step === 0) return;
+      const before = box.scrollTop;
+      box.scrollTop = before + step;
+      if (box.scrollTop !== before) this.refreshRowDragTarget();
+      dd.scrollRaf = requestAnimationFrame(tick);
+    };
+    d.scrollRaf = requestAnimationFrame(tick);
   }
 
   private setDragHoverFolder(folderId: string | null) {
@@ -4740,73 +3310,58 @@ export class Editor {
     d.hoverFolder = folderId;
     if (folderId) {
       d.hoverTimer = window.setTimeout(() => {
-        const f = this.folderById(folderId);
-        if (f && f.collapsed && this.rowDrag) {
-          f.collapsed = false;
-          this.dirty = true;
-          this.rebuildLayers(); // 自前ドラッグなので再構築してもドラッグは継続できる
-        }
+        if (this.rowDrag) this.openFolderForDrop(folderId); // ★V214: 開くのはコア（自前ドラッグなので再構築してもドラッグは継続できる）
       }, 1000);
     }
   }
 
-  /** 画面座標 → 行/隙間ゾーンと DropTarget（null=パネル外 or 循環で不可） */
-  private hitTestRowDrag(
-    x: number,
-    y: number
-  ): { t: DropTarget; zone: "above" | "below" | "into"; rowIdx: number } | null {
+  /**
+   * 画面座標 → 入る先（null＝パネルの外・スクロールの枠の外・循環で不可）。
+   * V208 (A-120): 上下の位置だけで決める（X は左右の範囲の確かめにだけ使う）。決め方は layerTree.ts の dropTargetAt。
+   * 当たり判定はスクロールの枠（#ed-side-botbody）の中で見えている所だけ（隠れた行に当てない）。
+   */
+  private hitTestRowDrag(x: number, y: number): RowDropPlan | null {
     const host = document.querySelector("#ed-layers") as HTMLElement | null;
+    const box = document.querySelector("#ed-side-botbody") as HTMLElement | null;
     const ids = this.dragNodes ?? [];
     if (!host || ids.length === 0) return null;
     const hr = host.getBoundingClientRect();
-    if (x < hr.left - 12 || x > hr.right + 12 || y < hr.top - 12 || y > hr.bottom + 12)
-      return null; // パネル外=ドロップなし（キャンセル）
+    if (x < hr.left - 12 || x > hr.right + 12) return null; // パネル外=ドロップなし（キャンセル）
+    const br = box ? box.getBoundingClientRect() : hr;
+    if (y < br.top || y > br.bottom) return null; // 枠の上端より上・下端より下＝入る先なし
     const rows = this.displayRows;
-    let rowIdx = rows.length;
-    let zone: "above" | "below" | "into" = "above";
+    let hit: RowDropHit = { kind: "end" }; // 最後の行より下の空き地（#ed-layerclip の上も）
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i].el.getBoundingClientRect();
       if (y < r.top) {
-        rowIdx = i;
-        zone = "above"; // 行間（マージン）の隙間 = この行の上
+        hit = { kind: "gap", index: i }; // 行間（マージン）の隙間 = この行の上
         break;
       }
       if (y <= r.bottom) {
-        rowIdx = i;
-        const frac = (y - r.top) / Math.max(1, r.height);
-        if (rows[i].kind === "folder")
-          zone = frac < 0.25 ? "above" : frac > 0.75 ? "below" : "into";
-        else zone = frac < 0.5 ? "above" : "below";
+        hit = { kind: "row", index: i, half: y - r.top < r.height / 2 ? "upper" : "lower" };
         break;
       }
     }
-    const t: DropTarget =
-      zone === "into"
-        ? { type: "into", folder: this.displayRows[rowIdx].id }
-        : this.gapTargetAt(zone === "above" ? rowIdx : rowIdx + 1, x); // M13-1: X で内／外を出し分ける
-    const parent = t.type === "into" ? t.folder : t.parent;
-    if (wouldCycle(this.project, ids, parent)) return null; // 循環禁止
-    return { t, zone, rowIdx };
+    return dropTargetAt(this.project, rows, hit, ids);
   }
 
-  private showRowIndicator(
-    rowIdx: number,
-    zone: "above" | "below" | "into",
-    target?: DropTarget // M13-1: 入る先が分かると挿入線をそのインデントで描ける
-  ) {
+  /** 入る先を見せる: 挿入線（入る先の段の字下げ）か、中の一番下へのフォルダの枠。入る先のフォルダは中身ごと薄く塗る */
+  private showRowIndicator(plan: RowDropPlan) {
     this.clearDndUi();
+    if (plan.folder) {
+      for (const r of this.displayRows) {
+        const chain = ancestorChain(this.project, r.kind === "folder" ? r.id : r.parent);
+        if (chain.includes(plan.folder)) r.el.classList.add("lay-dropzone");
+      }
+    }
     if (!this.insLineEl) return;
-    if (zone === "into") {
-      this.displayRows[rowIdx]?.el.classList.add("droptarget");
+    if (plan.view.kind === "into") {
+      this.displayRows[plan.view.rowIdx]?.el.classList.add("droptarget");
       return;
     }
-    // M13-1: 挿入線を**入る先のインデント**で描く。
-    // 同じ隙間でも X しだいで「フォルダの中」と「外」に分かれるので、
-    // これが無いとどちらに入るのか利用者には分からない（受け入れ基準）。
-    const insParent = target && target.type === "gap" ? target.parent : undefined;
-    this.insLineEl.style.marginLeft = `${ancestorChain(this.project, insParent).length * 14}px`;
-    // 挿入線: gap の位置（末尾は最後の行の下）
-    const gi = zone === "above" ? rowIdx : rowIdx + 1;
+    this.insLineEl.style.marginLeft = `${plan.view.depth * 14}px`;
+    // 挿入線: 落としたあとに掴んだ物が出る所（rows[gap] の上・末尾は最後の行の下）
+    const gi = plan.view.gap;
     let top: number;
     if (gi < this.displayRows.length) top = this.displayRows[gi].el.offsetTop - 4;
     else {
@@ -4828,7 +3383,7 @@ export class Editor {
     // click は pointerup 直後（同期的なイベント順）に来るので、その後で抑止フラグを必ず解除する
     // （行外で離した場合などに click が来ずフラグが残り、次の正当なクリックを飲み込まないように）
     if (wasActive) setTimeout(() => (this.suppressRowClick = false), 0);
-    if (wasActive && !cancelled && target && ids) this.performTreeMove(ids, target.t);
+    if (wasActive && !cancelled && target && ids) this.performTreeMove(ids, target.target);
   }
 
   /** ドラッグの後片付け（移動はしない）。Escや浮遊状態リセットからも呼ぶ */
@@ -4839,223 +3394,11 @@ export class Editor {
     window.removeEventListener("pointerup", d.onUp);
     window.removeEventListener("pointercancel", d.onUp);
     if (d.hoverTimer != null) clearTimeout(d.hoverTimer);
+    if (d.scrollRaf != null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(d.scrollRaf); // V208 (A-120)
     d.ghost?.remove();
     this.clearDndUi();
     this.rowDrag = null;
     this.dragNodes = null;
-  }
-
-  private folderById(id: string | undefined): LayerFolder | undefined {
-    return (this.project.folders ?? []).find((f) => f.id === id);
-  }
-
-  /** レイヤーの祖先フォルダ連鎖（root→…→直親。壊れ/循環は途中で打ち切り） */
-  private ancestorChain(parent: string | undefined): string[] {
-    const chain: string[] = [];
-    const seen = new Set<string>();
-    let cur = parent;
-    while (cur && !seen.has(cur)) {
-      const f = this.folderById(cur);
-      if (!f) break;
-      seen.add(cur);
-      chain.unshift(cur);
-      cur = f.parent;
-    }
-    return chain;
-  }
-
-  /** フォルダ（ネスト込み）に属するレイヤーの layerDefs インデックス列（昇順） */
-  private folderLayerIndices(folderId: string): number[] {
-    const out: number[] = [];
-    this.project.layerDefs.forEach((ld, i) => {
-      if (this.ancestorChain(ld.parent).includes(folderId)) out.push(i);
-    });
-    return out;
-  }
-
-  /** 構造スナップショット（defs順・parent・folders・コマ固有order）を撮る */
-  private captureStructure() {
-    return {
-      defs: this.project.layerDefs.map((l) => ({ ...l })),
-      folders: (this.project.folders ?? []).map((f) => ({ ...f })),
-      orders: this.project.frames.map((f) => (f.order ? [...f.order] : undefined)),
-      active: this.activeLayerId,
-      selFolder: this.selectedFolderId,
-    };
-  }
-
-  private restoreStructure(s: ReturnType<Editor["captureStructure"]>) {
-    this.project.layerDefs = s.defs.map((l) => ({ ...l }));
-    this.project.folders = s.folders.map((f) => ({ ...f }));
-    this.project.frames.forEach((f, i) => {
-      f.order = s.orders[i] ? [...s.orders[i]!] : undefined;
-    });
-    this.activeLayerId = s.active;
-    this.selectedFolderId = s.selFolder;
-    this.afterLayerChange();
-  }
-
-  /** 構造変更を履歴付きで実行（before/after スナップショット方式） */
-  private pushStructure(label: string, mutate: () => void) {
-    const before = this.captureStructure();
-    mutate();
-    const after = this.captureStructure();
-    const self = this;
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label,
-      undo: () => self.restoreStructure(before),
-      redo: () => self.restoreStructure(after),
-    });
-    this.afterLayerChange();
-  }
-
-  /** 物理順（layerDefs）が変わる操作の前処理: コマ固有描画順を標準化（既存 moveLayer と同じ扱い） */
-  private clearFrameOrders(): boolean {
-    let had = false;
-    for (const f of this.project.frames) {
-      if (f.order) {
-        f.order = undefined;
-        had = true;
-      }
-    }
-    return had;
-  }
-
-  /** フォルダ追加: 選択中レイヤーを子にして作成（フォルダ選択中はその中に空フォルダ） */
-  private addFolder() {
-    if (this.xformGuard()) return;
-    const folders = (this.project.folders ??= []);
-    const targetFolder = this.selectedFolderId
-      ? this.folderById(this.selectedFolderId)
-      : undefined;
-    const active = this.project.layerDefs.find((l) => l.id === this.activeLayerId);
-    this.pushStructure("フォルダ作成", () => {
-      const id = newFolderId(this.project);
-      const folder: LayerFolder = {
-        id,
-        name: `${folderBaseName()}${folders.length + 1}`,
-        visible: true,
-        opacity: 1,
-        collapsed: false,
-        parent: targetFolder ? targetFolder.id : active?.parent,
-      };
-      folders.push(folder);
-      if (!targetFolder && active) active.parent = id; // 選択レイヤーを包む
-      this.selectedFolderId = id;
-    });
-  }
-
-  /** フォルダ削除（中身はルートへ or 中身ごと） */
-  private async deleteFolder(id: string) {
-    if (this.xformGuard()) return;
-    const folder = this.folderById(id);
-    if (!folder) return;
-    // V151 (E-8): 「次回から表示しない」対象の1つ（id: folderDelete）。省くのは**この1段目だけ**。
-    // 2段目（中身も削除するか）は yes/no どちらも先へ進む「選択」なので、非表示にしても従来どおり出る
-    const ok = await this.confirmWithSkip("folderDelete", t("ed.layer.folderDeleteConfirm.msg", { name: folder.name }));
-    if (!ok) return;
-    const memberIdx = this.folderLayerIndices(id);
-    const withContents =
-      memberIdx.length > 0 &&
-      (await this.cb.confirm(
-        t("ed.layer.folderDeleteContents.msg", { count: memberIdx.length })
-      ));
-    if (!withContents) {
-      this.pushStructure("フォルダ削除", () => {
-        const folders = this.project.folders ?? [];
-        // 直下の子（レイヤー/フォルダ）を1つ外（folder.parent）へ
-        for (const ld of this.project.layerDefs)
-          if (ld.parent === id) ld.parent = folder.parent;
-        for (const f of folders) if (f.parent === id) f.parent = folder.parent;
-        this.project.folders = folders.filter((f) => f.id !== id);
-        if (this.selectedFolderId === id) this.selectedFolderId = null;
-      });
-      return;
-    }
-    // 中身ごと削除: レイヤーバッファも履歴に退避（deleteLayer と同等の可逆性）
-    if (memberIdx.length >= this.project.layerDefs.length) {
-      this.cb.toast(t("ed.layer.deleteAllBlocked.toast"));
-      return;
-    }
-    // ★V166 (層2): 中身ごと削除は「レイヤー削除の N 枚ぶん」＝いちばん重い経路のひとつ。
-    //  2段の確認はどちらも漏斗の外（＝待ち時間に箱を出さない）
-    await this.runHeavy("layer.del", t("ed.heavy.delLayer.msg"), () =>
-      this.deleteFolderWithContents(id, memberIdx)
-    );
-  }
-
-  private async deleteFolderWithContents(id: string, memberIdx: number[]) {
-    const structBefore = this.captureStructure();
-    const removedIds = memberIdx.map((i) => this.project.layerDefs[i].id);
-    // V166 (B): 控えは「全コマ × 消すレイヤーの枚数」＝この回でいちばん大きくなり得る確保
-    if (!this.allowBufferAlloc(this.project.frames.length * removedIds.length, "folder.del", removedIds)) return;
-    // ★V156 (P-1): 全コマの画素を控えるので、消す対象のレイヤーだけ先に起こす
-    await wakeLayersAllFrames(this.project, removedIds, "write");
-    const savedBuffers = this.project.frames.map((f) => {
-      const m: Record<string, IndexBuf> = {};
-      for (const lid of removedIds)
-        m[lid] = copyIndexBuf(f.layers[lid] ?? allocIndexBuf(this.project));
-      return m;
-    });
-    const removeSet = new Set(removedIds);
-    const removeFolderIds = new Set(
-      (this.project.folders ?? [])
-        .filter((f) => f.id === id || this.ancestorChain(f.parent).includes(id))
-        .map((f) => f.id)
-    );
-    removeFolderIds.add(id);
-    const apply = () => {
-      this.project.layerDefs = this.project.layerDefs.filter((l) => !removeSet.has(l.id));
-      this.project.folders = (this.project.folders ?? []).filter(
-        (f) => !removeFolderIds.has(f.id)
-      );
-      for (const f of this.project.frames) {
-        for (const lid of removedIds) dropLayer(f, lid); // V156: 眠りぶんも
-        if (f.order) f.order = f.order.filter((x) => !removeSet.has(x));
-      }
-      if (removeSet.has(this.activeLayerId))
-        this.activeLayerId =
-          this.project.layerDefs[this.project.layerDefs.length - 1]?.id ?? "";
-      if (this.selectedFolderId && removeFolderIds.has(this.selectedFolderId))
-        this.selectedFolderId = null;
-      this.afterLayerChange();
-    };
-    const self = this;
-    this.history.push({
-      colorRefs: () => ({ bufs: savedBuffers.flatMap((m) => Object.values(m)) }), // V195 (A-99)
-      label: "フォルダごと削除",
-      // V156 (P-1): 巻き戻しは全コマへバッファを配り直す。眠っていると取りこぼすので先に起こす
-      prepare: () => wakeLayersAllFrames(self.project, removedIds, "write"),
-      bytes: entryBytes(savedBuffers), // V154 (W-2): 中身のレイヤーを全コマぶん抱える
-      undo() {
-        self.restoreStructure(structBefore);
-        self.project.frames.forEach((f, fi) => {
-          for (const lid of removedIds) {
-            const nb = allocIndexBuf(self.project);
-            nb.set(savedBuffers[fi][lid]);
-            f.layers[lid] = nb;
-          }
-        });
-        self.afterLayerChange();
-      },
-      redo: apply,
-    });
-    apply();
-  }
-
-  // ---------------- M3.8: クリスタ流DnD（選択・移動・挿入線） ----------------
-
-  /** 選択の正規化: 存在しない node を除去し、空なら active を選択 */
-  private pruneSelection() {
-    const alive = new Set<string>([
-      ...this.project.layerDefs.map((l) => l.id),
-      ...(this.project.folders ?? []).map((f) => f.id),
-    ]);
-    for (const id of [...this.selectedNodeIds])
-      if (!alive.has(id)) this.selectedNodeIds.delete(id);
-    if (this.selectedNodeIds.size === 0 && this.activeLayerId)
-      this.selectedNodeIds.add(this.activeLayerId);
   }
 
   /** 行クリックの選択更新（click=単独 / Ctrl=トグル / Shift=表示リスト範囲） */
@@ -5065,134 +3408,22 @@ export class Editor {
       this.suppressRowClick = false;
       return;
     }
-    if (ev.ctrlKey || ev.metaKey) {
-      if (this.selectedNodeIds.has(id)) this.selectedNodeIds.delete(id);
-      else {
-        this.selectedNodeIds.add(id);
-        if (kind === "layer") this.activeLayerId = id;
-      }
-      this.selAnchorId = id;
-    } else if (ev.shiftKey && this.selAnchorId) {
-      const order = this.displayRows.map((r) => r.id);
-      const a = order.indexOf(this.selAnchorId);
-      const b = order.indexOf(id);
-      if (a >= 0 && b >= 0) {
-        this.selectedNodeIds = new Set(order.slice(Math.min(a, b), Math.max(a, b) + 1));
-        if (kind === "layer") this.activeLayerId = id;
-      }
-    } else {
-      this.selectedNodeIds = new Set([id]);
-      this.selAnchorId = id;
-      if (kind === "layer") {
-        this.activeLayerId = id;
-        this.selectedFolderId = null;
-      }
-    }
-    // V181: Mac の ⌘＋クリックも Ctrl＋クリックと同じ（上のトグルは以前から ctrl と meta の両方を見ている）
-    if (kind === "folder" && !ev.shiftKey && !primaryMod(ev))
-      this.selectedFolderId = this.selectedFolderId === id ? null : id;
-    this.rebuildLayers();
+    // ★V214 (M-2b-1a): 選び方（単独・Ctrl／⌘でトグル・Shift で範囲・フォルダの選択）はコアの selectLayerRow。
+    //  範囲は今の一覧の並び（displayRows）で決める
+    this.selectLayerRow(
+      id,
+      kind,
+      { ctrlOrMeta: ev.ctrlKey || ev.metaKey, shift: ev.shiftKey, primary: primaryMod(ev) },
+      this.displayRows.map((r) => r.id)
+    );
   }
 
-  /**
-   * M13-1: 隙間を「フォルダの内側」と見なす X のしきい値（画面座標）。
-   *
-   *   しきい値 = レイヤーパネルの左端 + (候補B の深さ + 1) * 14 - 7
-   *            （＝候補B の子が描かれるインデントの、半段ぶん手前）
-   *
-   * ★この数値は**仮**です（REQ_M13_1_move §8 未決1）。狭すぎると外に出せず、広すぎると中に入れない。
-   *   作者が実機（ペンタブ・液タブ）で触って調整するので、**式はこの1箇所にしか書いていません**。
-   *   調整するときはここだけを変えてください。
-   */
-  private gapInsideThresholdX(hostLeft: number, insideFolderId: string): number {
-    const INDENT_PX = 14; // 行の marginLeft と同じ単位
-    const BIAS_PX = 7; // インデントの半分ぶん手前で「内側」に倒す
-    // ancestorChain(id) は id 自身を含むので、その長さ ＝ その子が描かれる深さ ＝ (深さ + 1)
-    const childDepth = ancestorChain(this.project, insideFolderId).length;
-    return hostLeft + childDepth * INDENT_PX - BIAS_PX;
-  }
-
-  /**
-   * 表示リストの隙間 gi（rows[gi] の上）を DropTarget(gap) に解決する。
-   * M13-1: `x`（ドラッグ中の画面 X）を渡すと、**フォルダの内／外**を出し分ける。
-   * 省略すると従来どおり「下の行の親」になる。
-   */
-  private gapTargetAt(gi: number, x?: number): DropTarget {
-    const rows = this.displayRows;
-    // 候補A（外）= 隙間の直下にある行の親（隙間に挿すとその行と同じ階層になる）＝従来の挙動
-    let parent: string | undefined = undefined;
-    if (gi < rows.length) parent = rows[gi].parent;
-    // 候補B（内）= 隙間の直上の行が属するフォルダ。
-    // 上の行が**フォルダ行**（折りたたみ中・空を含む）なら、そのフォルダ自身。
-    // これが無いと「フォルダの最後の子の下の隙間」が必ず外になる（M13-1 の症状）。
-    const above = gi > 0 ? rows[gi - 1] : null;
-    const inside = above ? (above.kind === "folder" ? above.id : above.parent) : undefined;
-    // A と B が同じなら X を見ない（従来どおり）。違うときだけ X で選ぶ。
-    // depth の比較は保険: 表示順の都合で B が A より浅くなることは無いはずだが、
-    // もしそうなったときに内外が逆転しないようにする
-    if (x !== undefined && inside !== undefined && inside !== parent) {
-      const host = document.querySelector("#ed-layers") as HTMLElement | null;
-      const deeper =
-        ancestorChain(this.project, inside).length > ancestorChain(this.project, parent).length;
-      if (host && deeper && x >= this.gapInsideThresholdX(host.getBoundingClientRect().left, inside))
-        parent = inside;
-    }
-    // 物理位置 = 隙間より下（表示）で最初に物理アンカーを持つ行の直上
-    // ★M13-1: ここは**触らない**（不変条件2「物理順が変わったときだけ order を標準化」に効く）。
-    //   候補B を選んだときも、隙間の下の行の直上＝そのフォルダの最下位の子の下、で正しい
-    let phys = 0;
-    for (let i = gi; i < rows.length; i++) {
-      const r = rows[i];
-      if (r.kind === "layer") {
-        phys = r.phys + 1;
-        break;
-      }
-      const members = this.folderLayerIndices(r.id);
-      if (members.length > 0) {
-        phys = members[members.length - 1] + 1;
-        break;
-      }
-      // 空フォルダは物理アンカーなし → さらに下を見る
-    }
-    return { type: "gap", parent, phys };
-  }
-
-  /** DnD確定: 選択トップノード群を target へ（履歴1件・変化なしなら履歴を積まない） */
-  private performTreeMove(ids: string[], target: DropTarget) {
-    if (this.xformGuard()) return;
-    const before = this.captureStructure();
-    const res = moveNodes(this.project, ids, target);
-    if (!res.ok) {
-      if (res.error) this.cb.toast(res.error);
-      return;
-    }
-    if (res.changedPhys && this.clearFrameOrders())
-      this.cb.toast(t("ed.layer.frameOrderNormalized.toast"));
-    const after = this.captureStructure();
-    if (JSON.stringify(after) === JSON.stringify(before)) {
-      this.afterLayerChange();
-      return; // 実質変化なし（同じ場所へドロップ等）
-    }
-    const self = this;
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label: "レイヤー移動",
-      undo: () => self.restoreStructure(before),
-      redo: () => self.restoreStructure(after),
-    });
-    const _t0 = perfNow();
-    this.afterLayerChange();
-    perfDone("layer.move", _t0);
-  }
-
-  private rebuildLayers() {
+  protected override rebuildLayers() {
     const _t0 = perfNow();
     const host = $("#ed-layers");
     host.innerHTML = "";
     this.displayRows = [];
-    this.pruneSelection();
-    const folders = this.project.folders ?? [];
-    const emittedFolders = new Set<string>();
+    super.rebuildLayers(); // ★V214: 選択の手入れ（pruneSelection）はコアの既定の中身（同じ位置で呼ぶ＝前と同じ）
 
     // M3.8: 挿入線インジケータ（rebuildごとに作り直し・クラスフィールドで共有）
     const insLine = document.createElement("div");
@@ -5209,9 +3440,6 @@ export class Editor {
       });
     };
 
-    const isCollapsedUnder = (chain: string[]): boolean =>
-      chain.some((fid) => this.folderById(fid)?.collapsed);
-
     const makeFolderRow = (f: LayerFolder, depth: number) => {
       const row = document.createElement("div");
       row.className =
@@ -5226,9 +3454,7 @@ export class Editor {
       col.title = t("ed.layer.folderCollapse.title");
       col.addEventListener("click", (e) => {
         e.stopPropagation();
-        f.collapsed = !f.collapsed;
-        this.dirty = true;
-        this.rebuildLayers();
+        this.toggleFolderCollapsed(f); // ★V214: 中身はコア
       });
       const eye = document.createElement("span");
       eye.className = "eye";
@@ -5236,10 +3462,7 @@ export class Editor {
       eye.style.opacity = f.visible ? "1" : "0.35";
       eye.addEventListener("click", (e) => {
         e.stopPropagation();
-        if (this.xformGuard()) return;
-        this.pushStructure("フォルダ表示切替", () => {
-          f.visible = !f.visible;
-        });
+        this.toggleFolderVisible(f); // ★V214: 関所と中身はコア
       });
       const nm = document.createElement("span");
       nm.className = "nm";
@@ -5248,10 +3471,7 @@ export class Editor {
       nm.addEventListener("dblclick", async (e) => {
         e.stopPropagation();
         const v = await this.cb.prompt(t("ed.layer.folderName.msg"), f.name);
-        if (v)
-          this.pushStructure("フォルダ名変更", () => {
-            f.name = v;
-          });
+        this.renameFolder(f, v); // ★V214: 聞いた値を受け取るのはコア（空なら何もしない）
       });
       // M6-5 Q-1/Q-6: 共通スライダー部品（行DnDに乗っ取られない・端まで一致）
       let opBefore: number | null = null;
@@ -5262,34 +3482,9 @@ export class Editor {
         className: "lay-op",
         title: t("ed.layer.folderOpacity.title"),
         onDown: () => (opBefore = f.opacity),
-        onInput: (v) => {
-          f.opacity = v / 100;
-          this.renderCanvas();
-          this.dirty = true;
-        },
+        onInput: (v) => this.setFolderOpacityLive(f, v), // ★V214: 中身はコア
         onChange: () => {
-          if (opBefore != null && opBefore !== f.opacity) {
-            const from = opBefore;
-            const to = f.opacity;
-            const fid = f.id;
-            const self = this;
-            // 構造系Undoで folders 配列が clone に差し替わるため、
-            // オブジェクト参照でなく id で適用時に解決する（Codexレビュー指摘#5）
-            this.history.push({
-              colorRefs: NO_COLOR_REFS, // V195 (A-99)
-              label: "フォルダ不透明度",
-              undo() {
-                const cur = self.folderById(fid);
-                if (cur) cur.opacity = from;
-                self.afterLayerChange();
-              },
-              redo() {
-                const cur = self.folderById(fid);
-                if (cur) cur.opacity = to;
-                self.afterLayerChange();
-              },
-            });
-          }
+          this.commitFolderOpacity(f, opBefore); // ★V214: 履歴を積むのはコア（変わっていなければ積まない）
           opBefore = null;
         },
       });
@@ -5299,7 +3494,7 @@ export class Editor {
       const fLockedByParent = ancestorLocked(this.project, f.parent);
       flk.className =
         "eye lay-lock" + (fLockedBySelf ? " on" : "") + (fLockedByParent ? " byparent" : "");
-      // V157（Codex レビュー §5）: **オフは 🔓**。閉じた鍵を薄く出すと
+      // V157（独立レビュー §5）: **オフは 🔓**。閉じた鍵を薄く出すと
       // 「全部にロックが掛かっている」と一瞬読める（👁/🚫 と同じく字を変えて分ける）
       flk.replaceChildren(icon(fLockedBySelf || fLockedByParent ? "lock" : "unlock")); // V171: 状態ペア lock / unlock
       flk.style.opacity = fLockedBySelf ? "1" : fLockedByParent ? "0.25" : "0.35";
@@ -5336,33 +3531,23 @@ export class Editor {
       this.displayRows.push({ kind: "folder", id: f.id, el: row, parent: f.parent, phys: -1 });
     };
 
-    const emitFolderChain = (chain: string[]) => {
-      chain.forEach((fid, depth) => {
-        if (emittedFolders.has(fid)) return;
-        const parentChain = chain.slice(0, depth);
-        if (isCollapsedUnder(parentChain)) {
-          emittedFolders.add(fid);
-          return;
-        }
-        const f = this.folderById(fid);
-        if (f) makeFolderRow(f, depth);
-        emittedFolders.add(fid);
-      });
-    };
-
     // M11-20: クリッピングの土台と実効可視（合成側 render.ts と**同じ関数**で解決＝UI と描画が食い違わない）
     const clipBases = clipBaseMap(this.project);
     const effStates = effectiveLayerStates(this.project);
     const nameOf = (id: string) => this.project.layerDefs.find((l) => l.id === id)?.name ?? "";
 
-    // 上→下で表示（配列は下→上）。同一フォルダの子は連続配置の不変条件を前提に、
-    // 各レイヤーの祖先チェーンに沿ってフォルダ見出しを挿入する
-    for (let i = this.project.layerDefs.length - 1; i >= 0; i--) {
+    // 上→下で表示（配列は下→上）。並びは layerTree.ts の layerDisplayRows が決める（V208 A-120・ドラッグの
+    // 入る先の決め方と同じ並び）: 同一フォルダの子は連続配置の不変条件を前提に、各レイヤーの祖先チェーンに沿って
+    // フォルダ見出しを挿入し、空のフォルダは親の中身の一番下に出す・たたんだフォルダの中は出さない
+    for (const ent of layerDisplayRows(this.project)) {
+      if (ent.kind === "folder") {
+        const f = this.folderById(ent.id);
+        if (f) makeFolderRow(f, ent.depth);
+        continue;
+      }
+      const i = ent.phys;
       const ld = this.project.layerDefs[i];
-      const chain = this.ancestorChain(ld.parent);
-      emitFolderChain(chain);
-      if (isCollapsedUnder(chain)) continue; // 折りたたみ中
-      const depth = chain.length;
+      const depth = ent.depth;
       const clipOn = ld.clip === true;
       const baseId = clipOn ? (clipBases.get(ld.id) ?? null) : null;
       const baseShown = baseId ? (effStates.get(baseId)?.visible ?? true) : false;
@@ -5398,13 +3583,7 @@ export class Editor {
       eye.style.opacity = ld.visible ? "1" : "0.35";
       eye.addEventListener("click", (e) => {
         e.stopPropagation();
-        if (this.xformGuard()) return; // E-4
-        ld.visible = !ld.visible;
-        this.rebuildLayers();
-        this.renderCanvas();
-        // M10-23 レビュー検出の既存バグ: visible は保存対象なのに dirty を立てておらず、
-        // 可視切替だけではオートセーブも終了警告も働かなかった（不透明度・名前と同じ流儀）
-        this.dirty = true;
+        this.toggleLayerVisible(ld); // ★V214: 関所と中身はコア
       });
       const nm = document.createElement("span");
       nm.className = "nm";
@@ -5413,11 +3592,7 @@ export class Editor {
       nm.addEventListener("dblclick", async (e) => {
         e.stopPropagation();
         const v = await this.cb.prompt(t("ed.layer.name.msg"), ld.name);
-        if (v) {
-          ld.name = v;
-          this.rebuildLayers();
-          this.dirty = true;
-        }
+        this.renameLayer(ld, v); // ★V214: 聞いた値を受け取るのはコア（空なら何もしない）
       });
       // M6-5 Q-1/Q-6: 共通スライダー部品（行DnDに乗っ取られない・端まで一致）
       const op = createSlider({
@@ -5426,11 +3601,7 @@ export class Editor {
         value: Math.round(ld.opacity * 100),
         className: "lay-op",
         title: t("ed.layer.opacity.title"),
-        onInput: (v) => {
-          ld.opacity = v / 100;
-          this.renderCanvas();
-          this.dirty = true;
-        },
+        onInput: (v) => this.setLayerOpacityLive(ld, v), // ★V214: 中身はコア
       });
       // M15 (K-1): 📌 全コマ共通トグル（クリップの隣）。フォルダには付けない＝レイヤー行だけ
       const pin = document.createElement("span");
@@ -5450,7 +3621,7 @@ export class Editor {
       const lk = document.createElement("span");
       lk.className =
         "eye lay-lock" + (lockedBySelf ? " on" : "") + (lockedByParent ? " byparent" : "");
-      // V157（Codex レビュー §5）: オフは 🔓（上のフォルダ行と同じ理由）
+      // V157（独立レビュー §5）: オフは 🔓（上のフォルダ行と同じ理由）
       lk.replaceChildren(icon(lockedBySelf || lockedByParent ? "lock" : "unlock")); // V171: 状態ペア lock / unlock
       lk.style.opacity = lockedBySelf ? "1" : lockedByParent ? "0.25" : "0.35";
       lk.title = lockedByParent
@@ -5466,7 +3637,7 @@ export class Editor {
       const chip = document.createElement("span");
       chip.className = "lay-colorchip" + (ld.displayColor ? " on" : "");
       if (ld.displayColor) chip.style.background = ld.displayColor;
-      // V157（Codex レビュー §2）: 押すと**適用先を選ぶダイアログ**が開く。
+      // V157（独立レビュー §2）: 押すと**適用先を選ぶダイアログ**が開く。
       // 「解除」「表示」と書くと、押した瞬間に効くように読める（画面と実際の食い違い）
       chip.title = ld.displayColor
         ? t("ed.layer.displayColor.on.title", { color: ld.displayColor })
@@ -5483,7 +3654,7 @@ export class Editor {
       row.appendChild(op.root);
       row.appendChild(chip);
       // V157 (D-1): 行そのものに印を付ける。**👁オフ（アイコンが薄くなるだけ）と見分ける**ため、
-      // ロックは行の左に帯を出す（Codex レビューの観点「👁オフと取り違えないか」）
+      // ロックは行の左に帯を出す（独立レビューの観点「👁オフと取り違えないか」）
       if (lockedBySelf || lockedByParent) row.classList.add("locked");
       row.addEventListener("click", (e) => {
         if (this.xformGuard()) return; // E-4: 変形対象レイヤーの切替を防ぐ
@@ -5492,12 +3663,6 @@ export class Editor {
       bindRowDnd(row, ld.id, "layer");
       host.appendChild(row);
       this.displayRows.push({ kind: "layer", id: ld.id, el: row, parent: ld.parent, phys: i });
-    }
-    // 空フォルダ（メンバー無し）を末尾に表示
-    for (const f of folders) {
-      if (emittedFolders.has(f.id)) continue;
-      const chain = [...this.ancestorChain(f.parent), f.id];
-      emitFolderChain(chain);
     }
     // M11-19: 貼り付けボタンの「貼り先」表示をアクティブレイヤーに追従させる（レイヤー選択・改名・追加削除は
     // すべてここを通る。例外は行ドラッグ確定時の updateRowDrag＝あちらでも呼ぶ）
@@ -5517,18 +3682,18 @@ export class Editor {
             key: "format", variant: "oni",
             items: [
               { id: "bucket", labelKey: "ed.fill.bucket.btn", icon: "fill", active: this.fillMode === "bucket",
-                select: () => { this.fillMode = "bucket"; this.enclosePts = []; this.afterFormatChange(); } },
+                select: () => this.setFillMode("bucket") },
               { id: "enclose", labelKey: "ed.fill.enclose.btn", icon: "fill-enclose", active: this.fillMode === "enclose",
-                select: () => { this.fillMode = "enclose"; this.enclosePts = []; this.afterFormatChange(); } },
+                select: () => this.setFillMode("enclose") },
             ],
           },
           {
             key: "ref", labelKey: "ed.fill.ref.label", variant: "oni",
             items: [
               { id: "self", labelKey: "ed.fill.refSelf.btn", active: !this.fillRefAll,
-                select: () => { this.fillRefAll = false; this.afterFormatChange(); } },
+                select: () => this.setFillRefAll(false) },
               { id: "all", labelKey: "ed.fill.refAll.btn", titleKey: "ed.fill.refAll.title", active: this.fillRefAll,
-                select: () => { this.fillRefAll = true; this.afterFormatChange(); } },
+                select: () => this.setFillRefAll(true) },
             ],
           },
         ];
@@ -5539,11 +3704,11 @@ export class Editor {
             key: "kind", variant: "oni",
             items: [
               { id: "line", labelKey: "ed.shape.line.btn", active: this.shapeKind === "line",
-                select: () => { this.shapeKind = "line"; this.afterFormatChange(); } },
+                select: () => this.setShapeKind("line") },
               { id: "rect", labelKey: "ed.shape.rect.btn", icon: "shape-rect", active: this.shapeKind === "rect",
-                select: () => { this.shapeKind = "rect"; this.afterFormatChange(); } },
+                select: () => this.setShapeKind("rect") },
               { id: "ellipse", labelKey: "ed.shape.ellipse.btn", icon: "shape-ellipse", active: this.shapeKind === "ellipse",
-                select: () => { this.shapeKind = "ellipse"; this.afterFormatChange(); } },
+                select: () => this.setShapeKind("ellipse") },
             ],
           },
         ];
@@ -5569,20 +3734,20 @@ export class Editor {
             key: "kind", variant: "oni",
             items: [
               { id: "rect", labelKey: "ed.sel.rect.btn", icon: "select", active: this.selectKind === "rect",
-                select: () => { this.selectKind = "rect"; this.afterFormatChange(); } },
+                select: () => this.setSelectKind("rect") },
               { id: "lasso", labelKey: "ed.sel.lasso.btn", icon: "select-lasso", active: this.selectKind === "lasso",
-                select: () => { this.selectKind = "lasso"; this.afterFormatChange(); } },
+                select: () => this.setSelectKind("lasso") },
               { id: "auto", labelKey: "ed.sel.auto.btn", icon: "select-auto", active: this.selectKind === "auto",
-                select: () => { this.selectKind = "auto"; this.afterFormatChange(); } },
+                select: () => this.setSelectKind("auto") },
             ],
           },
           {
             key: "ref", labelKey: "ed.sel.ref.label", variant: "oni", visible: this.selectKind === "auto",
             items: [
               { id: "self", labelKey: "ed.sel.refSel.btn", active: !this.selectRefAll,
-                select: () => { this.selectRefAll = false; this.afterFormatChange(); } },
+                select: () => this.setSelectRefAll(false) },
               { id: "all", labelKey: "ed.sel.refAll.btn", active: this.selectRefAll,
-                select: () => { this.selectRefAll = true; this.afterFormatChange(); } },
+                select: () => this.setSelectRefAll(true) },
             ],
           },
           {
@@ -5611,7 +3776,7 @@ export class Editor {
                 btn.appendChild(i);
                 btn.title = t("ed.pen.sizePick.title", { n: s });
               },
-              select: () => { this.penSize = s; this.refreshSizePicker(); this.afterFormatChange(); },
+              select: () => this.pickPenSizeFormat(s),
             })),
           },
         ];
@@ -5622,16 +3787,7 @@ export class Editor {
             key: "font", variant: "oni",
             items: FONTS.map((f) => ({
               id: f.key, labelKey: f.labelKey, active: this.textFamily === f.key,
-              select: () => {
-                this.textFamily = f.key;
-                const d = fontDef(this.textFamily);
-                this.textSize = nearestSize(d, this.textSize);
-                if (!d.hasBold) this.textBold = false;
-                this.syncTextDraftStyle();
-                this.afterFormatChange();
-                this.redrawOverlay();
-                this.cb.onTextSettingsChange?.(this.textSettings());
-              },
+              select: () => this.setTextFamily(f.key, "format"),
             })),
           },
         ];
@@ -5641,9 +3797,9 @@ export class Editor {
             key: "flip", variant: "oni",
             items: [
               { id: "fliph", labelKey: "ed.xform.flipH.btn", icon: "flip-h", active: this.xform.flipH,
-                select: () => { this.xform.flipH = !this.xform.flipH; this.afterFormatChange(); this.redrawOverlay(); } },
+                select: () => this.toggleXformFlip("h") },
               { id: "flipv", labelKey: "ed.xform.flipV.btn", icon: "flip-v", active: this.xform.flipV,
-                select: () => { this.xform.flipV = !this.xform.flipV; this.afterFormatChange(); this.redrawOverlay(); } },
+                select: () => this.toggleXformFlip("v") },
             ],
           },
         ];
@@ -5724,18 +3880,9 @@ export class Editor {
 
   /** M14 (S-1): 形式が変わったあとにパネルの #ed-toolopts と（開いていれば）ストリップを組み直す。
    *  select クロージャは this.tool が対象ツールに一致している前提（ストリップ側で先に setTool 済み）。 */
-  private afterFormatChange() {
+  protected override afterFormatChange() {
     this.buildToolOptions();
     if (this.stripOpenFor) this.rebuildStrip();
-  }
-
-  /** M14 (S-1): 歪みモードの切替（旧 #ed-warpmode のクリック処理と同一）。四隅の開始/取消もここで面倒を見る */
-  private selectWarpMode(m: WarpMode) {
-    if (this.warpMode === m) return;
-    if (this.cornerActive) this.cancelCornerWarp(); // 四隅から抜けるときは未確定の変形を取り消す
-    this.warpMode = m;
-    if (m === "corner") this.beginCornerWarp();
-    this.afterFormatChange();
   }
 
   // ================= M14 (S-1): 形式ストリップ（ツールボタン横の一時オーバーレイ） =================
@@ -5851,7 +3998,7 @@ export class Editor {
     this.stripAnchor = null;
   }
 
-  private buildToolOptions() {
+  protected override buildToolOptions() {
     const host = $("#ed-toolopts");
     host.innerHTML = "";
     // M14 (S-1): パネル側のクリックは it.select 直呼び（this.tool は既に対象ツール）
@@ -5920,53 +4067,29 @@ export class Editor {
         ? t("ed.text.input.placeholder")
         : t("ed.text.inputIdle.placeholder");
       $("#ed-text-hint").title = drafting ? t("ed.text.draftingHint.title") : t("ed.text.idleHint.title");
+      // ★V214: 書体・大きさ・太字・縦書きの中身はコア（setTextFamily ほか）
       $("#ed-textfont").addEventListener("change", (e) => {
-        this.textFamily = (e.target as HTMLSelectElement).value as FontKey;
-        const d = fontDef(this.textFamily);
-        // 直前のサイズが新候補にあれば維持し、無ければ最も近い値へ
-        this.textSize = nearestSize(d, this.textSize);
-        if (!d.hasBold) this.textBold = false;
-        this.syncTextDraftStyle(); // M11-12: 浮動テキストへ即反映（位置は変えない）
-        this.buildToolOptions();
-        this.redrawOverlay();
-        this.cb.onTextSettingsChange?.(this.textSettings());
+        this.setTextFamily((e.target as HTMLSelectElement).value as FontKey, "options");
       });
       $("#ed-textsize").addEventListener("change", (e) => {
-        this.textSize = Number((e.target as HTMLSelectElement).value);
-        this.syncTextDraftStyle();
-        this.redrawOverlay();
-        this.cb.onTextSettingsChange?.(this.textSettings());
+        this.setTextSize(Number((e.target as HTMLSelectElement).value));
       });
       // M10-15: 行は hasBold の書体でしか描かない — 存在するときだけリスナを張る
       document.querySelector("#ed-textbold")?.addEventListener("click", () => {
-        if (!fontDef(this.textFamily).hasBold) return; // 最終防衛線（行が無いので実質不要）
-        this.textBold = !this.textBold;
-        this.syncTextDraftStyle();
-        this.buildToolOptions();
-        this.redrawOverlay();
-        this.cb.onTextSettingsChange?.(this.textSettings());
+        this.toggleTextBold();
       });
       // M10-11: 向き（横書き／縦書き）。既存の .oni + .lv だけで組む（新規CSSなし）
       host.querySelectorAll("#ed-textdir .lv").forEach((b) =>
         b.addEventListener("click", () => {
           const v = (b as HTMLElement).dataset.v === "v";
-          if (v === this.textVertical) return;
-          this.textVertical = v;
-          this.syncTextDraftStyle();
-          this.buildToolOptions();
-          this.redrawOverlay();
-          this.cb.onTextSettingsChange?.(this.textSettings());
+          this.setTextVertical(v);
         })
       );
       // M11-12: 複数行の入力欄。打つたびにプレビューを作り直す（間引きなし・実測で不要と判断）
       {
         const ta = $("#ed-textinput") as HTMLTextAreaElement;
         ta.value = this.textDraft?.text ?? "";
-        ta.addEventListener("input", () => {
-          if (!this.textDraft) return;
-          this.textDraft.text = ta.value;
-          this.redrawOverlay();
-        });
+        ta.addEventListener("input", () => this.setTextDraftText(ta.value)); // ★V214: 中身はコア
         // Escape と Ctrl+Enter は**入力欄の中でも**効かせる。window 側の onKeyDown は
         // isTextEntry() で早期 return するので、ここで受けないとどちらも届かない。
         // それ以外（Enter=改行 / 矢印=カーソル移動 / P=「P」）はブラウザ既定のまま通す
@@ -6099,12 +4222,7 @@ export class Editor {
       $("#ed-sel-cut").addEventListener("click", () => this.copySelection(true));
       $("#ed-sel-paste").addEventListener("click", () => this.pasteClipboard());
       $("#ed-sel-del").addEventListener("click", () => this.deleteSelection());
-      $("#ed-sel-none").addEventListener("click", () => {
-        // M10-22: 解除も履歴へ（選択が無いときは何も積まない）
-        if (this.selMask) this.pushSelectionHistory("選択解除", this.selMask.slice(), null);
-        this.selMask = null;
-        this.redrawOverlay();
-      });
+      $("#ed-sel-none").addEventListener("click", () => this.deselect()); // ★V214: 中身はコア
     } else if (this.tool === "transform") {
       // M11-11: 数値の行は畳める（変形の状態には一切触らない・見た目だけ）
       const fold = this.xformNumFold;
@@ -6164,28 +4282,14 @@ export class Editor {
         // 畳んでいる間は数値の入力欄が無いので、以降の配線は飛ばす
         $("#ed-x-ok").addEventListener("click", () => void this.commitTransform());
         $("#ed-x-cancel").addEventListener("click", () => {
-          this.cancelTransform();
-          this.setTool(this.prevTool === "transform" ? "pen" : this.prevTool);
+          this.cancelTransformAndReturn(); // ★V214
         });
         return;
       }
-      $("#ed-x-angle").addEventListener("input", (e) => {
-        this.xform.angle =
-          ((Number((e.target as HTMLInputElement).value) || 0) * Math.PI) / 180;
-        this.redrawOverlay();
-        this.paintUiOverlay();
-      });
+      $("#ed-x-angle").addEventListener("input", (e) => this.setXformAngleInput((e.target as HTMLInputElement).value)); // ★V214
       // M13-2b (T-3): 横と縦を別々に。数値欄は**中心基準**（従来の等比と同じ流儀。対辺を止めるのは辺ハンドルのドラッグ）
-      $("#ed-x-scalex").addEventListener("input", (e) => {
-        this.xform.sx = Math.max(1, Number((e.target as HTMLInputElement).value) || 100) / 100;
-        this.redrawOverlay();
-        this.paintUiOverlay();
-      });
-      $("#ed-x-scaley").addEventListener("input", (e) => {
-        this.xform.sy = Math.max(1, Number((e.target as HTMLInputElement).value) || 100) / 100;
-        this.redrawOverlay();
-        this.paintUiOverlay();
-      });
+      $("#ed-x-scalex").addEventListener("input", (e) => this.setXformScaleInput("x", (e.target as HTMLInputElement).value)); // ★V214
+      $("#ed-x-scaley").addEventListener("input", (e) => this.setXformScaleInput("y", (e.target as HTMLInputElement).value)); // ★V214
       $("#ed-x-snap").addEventListener("click", () => {
         this.snap15 = !this.snap15;
         this.buildToolOptions();
@@ -6194,8 +4298,7 @@ export class Editor {
       $("#ed-x-flip").appendChild(this.renderFormatGroups(this.toolFormatGroups("transform"), "panel", panelClick));
       $("#ed-x-ok").addEventListener("click", () => void this.commitTransform());
       $("#ed-x-cancel").addEventListener("click", () => {
-        this.cancelTransform();
-        this.setTool(this.prevTool === "transform" ? "pen" : this.prevTool);
+        this.cancelTransformAndReturn(); // ★V214
       });
     } else if (this.tool === "eraser") {
       // ★V178 (A-72・決-3 ①): 「全レイヤー」の切り替え。形は描き味の切り替え（`bindTog` / `ed-tog-stab`）と
@@ -6214,7 +4317,6 @@ export class Editor {
       });
     }
   }
-  private snap15 = false;
   /** M11-11: 変形の数値の行を畳んでいるか（見た目だけ・変形の状態には触らない） */
   private xformNumFold = false;
   /** M11-11: 変形プレビューを透かしているか（押している間だけ true） */
@@ -6320,17 +4422,11 @@ export class Editor {
     );
     $("#ed-play").addEventListener("click", () => this.togglePlayback());
     $("#ed-loop").addEventListener("click", () => {
-      this.project.loop = !this.project.loop;
+      this.toggleLoop(); // ★V214: 中身はコア
       $("#ed-loop").classList.toggle("onb", this.project.loop);
-      this.dirty = true;
     });
     $("#ed-speed").addEventListener("change", (e) => {
-      this.project.speedIndex = Number((e.target as HTMLSelectElement).value);
-      this.dirty = true;
-      if (this.playing) {
-        this.stopPlayback();
-        this.startPlayback();
-      }
+      this.setSpeedIndex(Number((e.target as HTMLSelectElement).value)); // ★V214: 中身はコア
     });
     $("#ed-addframe").addEventListener("click", () => void this.addFrame(false));
     $("#ed-addframes").addEventListener("click", () => void this.onAddFramesClick());
@@ -6343,159 +4439,22 @@ export class Editor {
     this.rebuildFilm();
   }
 
-  // ---------------- M10-3: ゆらゆら差分の自動生成 ----------------
-
-  /** 現在のコマの全レイヤーから決定的な32bitハッシュを作る（FNV-1a 風）。
-   *  同じ絵なら必ず同じ値。ここで乱数を使うと「同じ入力で同じ結果」が壊れる。 */
-  private hashCurrentFrame(): number {
-    const f = this.project.frames[this.frameIndex];
-    let h = 0x811c9dc5;
-    if (!f) return h >>> 0;
-    for (const ld of this.project.layerDefs) {
-      const b = f.layers[ld.id];
-      if (!b) continue;
-      for (let i = 0; i < PIXELS; i++) {
-        h ^= b[i];
-        h = Math.imul(h, 0x01000193);
-      }
-    }
-    return h >>> 0;
-  }
-
-  /**
-   * M10-3: ゆらゆら差分を作る。**現在のコマは読むだけで一切変更しない。**
-   * 戻り値は「原本の直後に挿入する N−1 枚」。`project.frames` には触らない。
-   * 本体は wobble.ts の純関数（M11-20 で切り出し）。ここは「現在コマ・選択範囲」を渡す薄い殻。
-   *
-   * `seedBase` を**引数で受け取る**のは意図的。内部で `hashCurrentFrame()` を呼ぶと
-   * `?wobble` から固定シードを渡して決定性を検証できなくなる。ハッシュは呼び出し側の仕事。
-   * `targetLayerId`（M11-20）: null=全レイヤー（従来）／id=そのレイヤーだけ歪め、他は複製のまま
-   */
-  private buildWobbleFrames(
-    count: number, // 2 | 3 | 4（原本を含めた総枚数）
-    kind: WobbleKind,
-    strength: WobbleStrength,
-    seedBase: number,
-    targetLayerId: string | null = null
-  ): Frame[] {
-    const cur = this.project.frames[this.frameIndex];
-    if (!cur) return [];
-    // M11-8 P-4（REQ 表D）: 選択範囲があるときは**範囲内だけ**を揺らす（歪みツールと揃える）。
-    // 全コマ共通の場（field）は変えず、適用時にマスクで弾く
-    return buildWobbleFrames(
-      this.project,
-      cur,
-      count,
-      kind,
-      strength,
-      seedBase,
-      this.selMask ?? null,
-      targetLayerId
-    );
-  }
-
   private async onWobbleClick(): Promise<void> {
     if (this.xformGuard()) return; // 変形中は止める（既存の流儀）
     if (!this.project.frames[this.frameIndex]) return;
     const opt = await this.openWobbleDialog();
     if (!opt) return;
-    // M11-20: 「選択中のレイヤーだけ」の対象はアクティブレイヤー1枚。フォルダを選んでいても
-    // activeLayerId は生きているので、その旨を案内して続行（REQ「フォルダ選択中はトースト等で案内」）
-    let targetLayerId: string | null = null;
-    let targetName = "";
-    if (opt.target === "active") {
-      const ld = this.project.layerDefs.find((l) => l.id === this.activeLayerId);
-      if (!ld || !this.activeBuffer()) {
-        this.cb.toast(t("ed.common.needLayer.toast"));
-        return;
-      }
-      targetLayerId = ld.id;
-      targetName = ld.name;
-      if (this.selectedFolderId)
-        this.cb.toast(t("ed.wobble.folderSkipped.toast", { name: ld.name }));
-    }
-    const n = opt.count - 1;
-    if (this.project.frames.length + n > 65535) {
-      this.cb.toast(t("ed.wobble.limitExceeded.toast"));
-      return;
-    }
-    const willWarn = this.project.frames.length + n >= 2000;
-    // ★V166 (層2/B): 小窓（＝利用者を待っている時間）は漏斗の外。
-    //  実際に作る区間だけを包む。ゆらゆらは最大100枚を**一度に**作るので見積もりも要る
-    // ゆらゆらは既存のコマをずらして作る＝新しい色は増えない
-    if (!this.allowFrameAlloc(opt.count, 0, "frame.wobble")) return;
-    await this.runHeavy("frame.wobble", t("ed.heavy.wobble.msg"), () =>
-      this.onWobbleApply(opt, targetLayerId, targetName, willWarn)
-    );
-  }
-
-  private onWobbleApply(
-    opt: { count: number; kind: WobbleKind; strength: WobbleStrength; target: "all" | "active" },
-    targetLayerId: string | null,
-    targetName: string,
-    willWarn: boolean
-  ) {
-    const kindIndex = opt.kind === "line" ? 0 : 1;
-    // シード式は M10-3 のまま（対象種別は混ぜない）。「全レイヤー」は従来とビット同一・
-    // 単体モードの対象レイヤーは全レイヤーモードの同じレイヤーとビット同一＝機械検証できる不変条件
-    const seedBase =
-      (this.hashCurrentFrame() ^
-        Math.imul(this.project.frames.length, 0x9e3779b1) ^
-        Math.imul(this.frameIndex + 1, 0x85ebca6b) ^
-        Math.imul(kindIndex * 3 + opt.strength + 1, 0xc2b2ae35)) >>>
-      0;
-    const newFrames = this.buildWobbleFrames(
-      opt.count,
-      opt.kind,
-      opt.strength,
-      seedBase,
-      targetLayerId
-    );
-    if (newFrames.length === 0) return;
-    const at = this.frameIndex + 1;
-    const self = this;
-    const apply = () => {
-      // redo 時に 16bit 昇格を跨いでいる可能性があるので正規化（pasteFrames と同じ）
-      for (const f of newFrames) conformFrameWidth(self.project, f);
-      self.project.frames.splice(at, 0, ...newFrames);
-      // **frameIndex は動かさない**。ゆらゆらは「原本は変わらない」のが機能の肝なので、
-      // pasteFrames と違って挿入先へは移動せず、押したあとも原本に留まる
-      self.afterFrameStructureChange();
-    };
-    const revert = () => {
-      self.project.frames.splice(at, newFrames.length);
-      self.frameIndex = Math.min(self.frameIndex, self.project.frames.length - 1);
-      self.afterFrameStructureChange();
-    };
-    // V154 (W-2): 取り消したコマは履歴が抱える（同上）
-    this.history.push({
-      colorRefs: () => ({ frames: newFrames }), // V195 (A-99)
-      label: "ゆらゆら差分",
-      bytesIfUndone: entryBytes(newFrames),
-      undo: revert,
-      redo: apply,
-    });
-    apply();
-    if (willWarn)
-      this.cb.toast(t("ed.common.manyFrames.toast"));
-    // 速度ヒント。**速度は勝手に変えない。** トーストが2連続で重なって読めないので、
-    // 生成枚数のトーストにヒントを混ぜて1つにまとめる（P-9-2 の許容範囲）
-    const fps = FPS_TABLE[this.project.speedIndex] ?? 8;
-    // M12-1b-2（監査 #44）: 断片（「…」だけ ）の連結をやめ、対象×fps ヒントの**完全文4キー**にした
-    this.cb.toast(
-      targetLayerId
-        ? fps >= 12
-          ? t("ed.wobble.doneLayerFpsHint.toast", { name: targetName, count: newFrames.length })
-          : t("ed.wobble.doneLayer.toast", { name: targetName, count: newFrames.length })
-        : fps >= 12
-          ? t("ed.wobble.doneFpsHint.toast", { count: newFrames.length })
-          : t("ed.wobble.done.toast", { count: newFrames.length })
-    );
+    // ★V213 (M-2a): 作る計算はコア（applyWobble）。ダイアログは画面（PC）
+    await this.applyWobble(opt);
   }
 
   /** ゆらゆらの設定ダイアログ。`EditorCallbacks` は増やさず、
    *  `openAudioPanel` と同じく `modal-back` + `modal-box` を自前で組む。
-   *  クラスは既存のものだけを使い、新しい CSS 宣言は1つも足さない。 */
+   *  ★V204 (A-111): 強さは 1〜10 のバー（弱・中・強のラジオは無くした）。上に見本（今のコマの合成で 元 → 差分1 → … を
+   *  作品の速さで繰り返す・4fps より遅い作品は 4fps・音は鳴らさない）。枚数・強さ・種類・対象はアプリを閉じるまで覚える。
+   *  見本のぶん広いので `.wb-box` を足した（styles.css。.modal-box の規則は触らず max-width だけ打ち消す・M10-3 の
+   *  「CSS を足さない」は REQ §2-3 で外した）。見本は 1 枚ずつ作って合成の RGBA だけを持つ（コマの写しを抱え続けない）。
+   *  変えたら作り直す（1 枚ごとに譲り、その間に変わったら最後の値で作り直す）。タイマーと作りかけは close() で止める */
   private openWobbleDialog(): Promise<{
     count: number;
     kind: WobbleKind;
@@ -6505,18 +4464,40 @@ export class Editor {
   } | null> {
     // M11-20: 「選択中のレイヤーだけ」の行に、いま対象になるレイヤー名を出す（何が揺れるか迷わせない）。
     // 長い名前は M11-19 の貼り付けボタンと同じくコードポイント 12 字＋…（label は nowrap で、
-    // .modal-box 480px を突き抜けないように。フル名は title に）
-    const activeFull =
-      this.project.layerDefs.find((l) => l.id === this.activeLayerId)?.name ?? "";
+    // ダイアログを突き抜けないように。フル名は title に）
+    // ★V205 (A-114・REQ §2-2): 対象は wobbleTargetLayerIds（見本・［つくる］と同じ関数）。レイヤー 1 枚＝描いているレイヤーの名前（今のまま）・
+    //  フォルダ 1 つ＝フォルダの名前と中の枚数・2 つ以上＝枚数（どれも 📌 を除いた数）
+    const wt = this.wobbleTargets();
+    const activeFull = wt.name;
     const activeCps = [...activeFull];
     const activeName = activeCps.length > 12 ? `${activeCps.slice(0, 12).join("")}…` : activeFull;
     const esc = (s: string) =>
       s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    // label は innerHTML へ入るので**名前は esc() を通す**（ユーザーのデータ・フォルダ名も）。
+    // title は**プロパティ代入**なので esc は不要（付けると &lt; が字として見える）
+    const targetLabel =
+      wt.kind === "folder"
+        ? t("ed.wobble.targetFolder.label", { name: esc(activeName) })
+        : wt.kind === "multi"
+          ? t("ed.wobble.targetMulti.label", { count: wt.ids.length })
+          : activeName
+            ? t("ed.wobble.targetActiveNamed.label", { name: esc(activeName) })
+            : t("ed.wobble.targetActive.label");
+    const targetTitle =
+      wt.kind === "folder"
+        ? t("ed.wobble.targetFolder.title", { name: activeFull, count: wt.ids.length })
+        : wt.kind === "multi"
+          ? t("ed.wobble.targetMulti.title", { count: wt.ids.length })
+          : activeFull
+            ? t("ed.wobble.targetActiveNamed.title", { name: activeFull })
+            : undefined;
+    // V204: 前の値（アプリを閉じるまで）
+    const last = Editor.wobbleLast;
     return new Promise((resolve) => {
       const back = document.createElement("div");
       back.className = "modal-back";
       const box = document.createElement("div");
-      box.className = "modal-box";
+      box.className = "modal-box wb-box";
       back.appendChild(box);
       // R-2 案1: title は属性に埋めず、組んだあとにプロパティで入れる（訳文に " が入っても割れない）。
       // 付ける先・付ける順番は元と同じ（style の次に title）なので DOM の形は変わらない
@@ -6535,33 +4516,22 @@ export class Editor {
           })
           .join("");
       box.innerHTML = `<p class="modal-msg">${t("ed.wobble.dialog.label")}</p>
+        <div class="wb-prev" id="wb-prev"><canvas id="wb-preview" width="320" height="240"></canvas></div>
         <div class="modal-msg" style="text-align:left">
           <div style="margin-bottom:8px">${t("ed.wobble.count.label")} ${radios("wb-n", [
             { v: "2", label: t("ed.wobble.count2.label") },
             { v: "3", label: t("ed.wobble.count3.label") },
             { v: "4", label: t("ed.wobble.count4.label") },
-          ], "3")}</div>
-          <div style="margin-bottom:8px">${t("ed.wobble.strength.label")} ${radios("wb-s", [
-            { v: "0", label: t("ed.wobble.strengthWeak.label") },
-            { v: "1", label: t("ed.wobble.strengthMid.label") },
-            { v: "2", label: t("ed.wobble.strengthStrong.label") },
-          ], "1")}</div>
+          ], String(last.count))}</div>
+          <div class="wb-srow" id="wb-srow"><span>${t("ed.wobble.strength.label")}</span><span class="wb-sval" id="wb-s-val"></span></div>
           <div style="margin-bottom:8px">${t("ed.wobble.kind.label")} ${radios("wb-k", [
             { v: "line", label: t("ed.wobble.kindLine.label") },
             { v: "whole", label: t("ed.wobble.kindWhole.label") },
-          ], "line")}</div>
+          ], last.kind)}</div>
           <div>${t("ed.wobble.target.label")} ${radios("wb-t", [
             { v: "all", label: t("ed.wobble.targetAll.label") },
-            {
-              v: "active",
-              // label は innerHTML へ入るので**レイヤー名は esc() を通す**（ユーザーのデータ）
-              label: activeName
-                ? t("ed.wobble.targetActiveNamed.label", { name: esc(activeName) })
-                : t("ed.wobble.targetActive.label"),
-              // title は**プロパティ代入**になったので esc は不要（付けると &lt; が字として見える）
-              title: activeFull ? t("ed.wobble.targetActiveNamed.title", { name: activeFull }) : undefined,
-            },
-          ], "all")}</div>
+            { v: "active", label: targetLabel, title: targetTitle },
+          ], last.target)}</div>
         </div>
         <div class="modal-actions">
           <button class="btn" id="wb-cancel">${t("common.cancel.btn")}</button>
@@ -6571,9 +4541,102 @@ export class Editor {
         const label = box.querySelector(`input[name="${p.name}"][value="${p.v}"]`)?.closest("label") as HTMLElement | null;
         if (label) label.title = p.title;
       }
+      // V204 (A-111・REQ §2-2): 強さのバー（1〜10・右に今の数）。説明は title と読み上げ（aria-label）に
+      const sVal = box.querySelector("#wb-s-val") as HTMLElement;
+      const sTitle = t("ed.wobble.strength.title");
+      const slider = createSlider({
+        min: WOBBLE_STRENGTH_MIN,
+        max: WOBBLE_STRENGTH_MAX,
+        step: 1,
+        value: last.strength,
+        title: sTitle,
+        className: "wb-slider",
+        onInput: (v) => {
+          sVal.textContent = String(v);
+          kick();
+        },
+      });
+      slider.root.querySelector("input")?.setAttribute("aria-label", sTitle);
+      sVal.textContent = String(slider.value());
+      (box.querySelector("#wb-srow") as HTMLElement).insertBefore(slider.root, sVal);
+      const prevBox = box.querySelector("#wb-prev") as HTMLElement;
+      prevBox.title = t("ed.wobble.preview.title");
+      const cv = box.querySelector("#wb-preview") as HTMLCanvasElement;
       document.body.appendChild(back);
 
       let done = false;
+      const val = (name: string) =>
+        (box.querySelector(`input[name="${name}"]:checked`) as HTMLInputElement)
+          .value;
+      const readOpts = () => ({
+        count: Number(val("wb-n")),
+        kind: val("wb-k") as WobbleKind,
+        strength: Math.max(WOBBLE_STRENGTH_MIN, Math.min(WOBBLE_STRENGTH_MAX, slider.value())) as WobbleStrength,
+        target: (val("wb-t") === "active" ? "active" : "all") as "all" | "active",
+      });
+
+      // ---------------- V204 (A-111・REQ §2-3): 見本 ----------------
+      // 中身は今のコマの合成（compositeFrame＝紙・表示・不透明度は編集画面と同じ。オニオン・格子なし）。
+      // 差分は［つくる］と同じ関数（buildWobbleFrame）・同じシード（wobbleSeed）・同じ範囲と対象で 1 枚ずつ作り、
+      // 合成の RGBA（320×240）だけを持つ。出し方は小さいプレビューと同じ fitFor＋presentFit（整数倍・fill は使わない）
+      const proj = this.project;
+      const cur = proj.frames[this.frameIndex];
+      const fps = Math.max(4, FPS_TABLE[proj.speedIndex] ?? 8);
+      const orig = compositeFrame(proj, this.frameIndex);
+      const mask = this.selMask ?? null;
+      // V205 (A-114): 「選択中」は開いたときに決めた対象（wt）の集まり。0 枚（［つくる］は断る）なら空の集まり＝元の絵のまま見せる
+      //  （null は全レイヤーの意味なので渡さない）
+      const activeSet: ReadonlySet<string> = new Set(wt.ids);
+      const field = new WarpField();
+      let fit: DisplayFit | null = null;
+      let shown = 0;
+      const paint = () => {
+        if (done) return;
+        const fr = this.wobblePreview?.frames ?? [orig];
+        if (!fit) fit = fitFor(prevBox);
+        if (!fit) return;
+        presentFit(cv, rgbaOf(fr[shown % fr.length]), W, H, fit);
+      };
+      // 透明の紙は薄い市松（小さいプレビューと同じ・データには触れない）
+      cv.classList.toggle("paper-clear", cur?.paper === 0);
+      let gen = 0;
+      let building = false;
+      const build = async () => {
+        if (building || !cur) return;
+        building = true;
+        try {
+          for (;;) {
+            const my = gen;
+            const o = readOpts();
+            const t0 = perfNow();
+            const seed = this.wobbleSeed(o.kind, o.strength);
+            const frames: Uint32Array[] = [orig];
+            for (let k = 0; k < o.count - 1; k++) {
+              // 1 枚ごとに譲る（バーを動かしている間に固まらない）。譲っている間に変わったら最後の値で作り直す
+              await yieldToInput();
+              if (done || my !== gen) break;
+              const nf = buildWobbleFrame(proj, cur, k, o.kind, o.strength, seed, mask, o.target === "active" ? activeSet : null, field);
+              frames.push(compositeFrame({ ...proj, frames: [nf] }, 0));
+            }
+            if (done) return;
+            if (my !== gen) continue;
+            this.wobblePreview = { ...o, seed, fps, frames, ms: perfNow() - t0 };
+            shown = 0;
+            paint();
+            return;
+          }
+        } finally {
+          building = false;
+        }
+      };
+      const kick = () => {
+        gen++;
+        void build();
+      };
+      const timer = window.setInterval(() => {
+        shown++;
+        paint();
+      }, 1000 / fps);
       const close = (
         r: {
           count: number;
@@ -6583,7 +4646,12 @@ export class Editor {
         } | null
       ) => {
         if (done) return;
+        // V204: 閉じ方によらず今の値を覚える（つくる・キャンセル・Esc・背景・離脱）
+        Editor.wobbleLast = readOpts();
         done = true;
+        gen++;
+        window.clearInterval(timer);
+        this.wobblePreview = null;
         this.modalDepth--;
         this.wobbleDialogClose = null;
         window.removeEventListener("keydown", onKey, true);
@@ -6610,35 +4678,32 @@ export class Editor {
       };
       window.addEventListener("keydown", onKey, true);
       this.modalDepth++;
-      const val = (name: string) =>
-        (box.querySelector(`input[name="${name}"]:checked`) as HTMLInputElement)
-          .value;
-      const pick = () =>
-        close({
-          count: Number(val("wb-n")),
-          kind: val("wb-k") as WobbleKind,
-          strength: Number(val("wb-s")) as WobbleStrength,
-          target: val("wb-t") === "active" ? "active" : "all",
-        });
+      const pick = () => close(readOpts());
       (box.querySelector("#wb-ok") as HTMLElement).addEventListener("click", pick);
       (box.querySelector("#wb-cancel") as HTMLElement).addEventListener(
         "click",
         () => close(null)
       );
+      // V204: 枚数・種類・対象を変えたら見本を作り直す（バーは onInput から）
+      box.addEventListener("change", (e) => {
+        if ((e.target as HTMLInputElement | null)?.type === "radio") kick();
+      });
       // M10-11: ペンで即閉じしないよう pointerdown に（main.ts の modal() と同じ理由）
       back.addEventListener("pointerdown", (e) => {
         if (e.target === back) close(null);
       });
       (box.querySelector("#wb-ok") as HTMLElement).focus();
+      paint();
+      kick();
     });
   }
 
-  private updatePasteButton() {
+  protected override updatePasteButton() {
     const b = document.querySelector("#ed-pastepage") as HTMLButtonElement | null;
     if (b) b.disabled = !Editor.frameClip;
   }
 
-  private rebuildFilm() {
+  protected override rebuildFilm() {
     const _t0 = perfNow();
     const film = $("#ed-film");
     film.innerHTML = "";
@@ -6681,33 +4746,13 @@ export class Editor {
       cv.height = 0;
       fr.appendChild(no);
       fr.appendChild(cv);
-      // V157 (D-2 / U-4): このコマだけの表示色が付いていたら、細い帯を出す。
-      // 「付けた本人が後から分からなくなる」を防ぐための目印（作者判断で採用）。
-      // 色は付いているうちの1つを使う（複数レイヤーに付いていても行は1本＝混雑させない）
-      const fcs = this.project.frames[i]?.layerColors;
-      const first = fcs ? Object.values(fcs)[0] : undefined;
-      if (first) {
-        const bar = document.createElement("i");
-        bar.className = "fc-mark";
-        bar.style.background = first;
-        bar.title = t("ed.frameColor.mark.title", { n: Object.keys(fcs!).length });
-        fr.appendChild(bar);
-      }
+      // V157 (D-2 / U-4): このコマだけの表示色が付いていたら、細い帯を出す（V205: 作り方は filmColorMark に移した＝1 コマだけ直す道と同じ）
+      const bar = this.filmColorMark(i);
+      if (bar) fr.appendChild(bar);
       fr.addEventListener("click", (e) => {
         // M11-7: 並べ替えで掴んだあとの click ではコマを切り替えない
         if (this.suppressFrameClick) return;
-        if (e.shiftKey) {
-          // 範囲選択: 起点（rangeAnchor）〜 i
-          if (this.rangeAnchor == null) this.rangeAnchor = this.frameIndex;
-          this.rangeSel = {
-            a: Math.min(this.rangeAnchor, i),
-            b: Math.max(this.rangeAnchor, i),
-          };
-        } else {
-          this.rangeSel = null;
-          this.rangeAnchor = i;
-        }
-        this.gotoFrame(i);
+        this.clickFrame(i, e.shiftKey); // ★V214: コマの範囲の起点と移るのはコア
       });
       // M11-7: 並べ替えは Pointer Events の自前ドラッグ（HTML5 DnD は実 exe で発火しない）
       fr.addEventListener("pointerdown", (e) => {
@@ -6959,10 +5004,11 @@ export class Editor {
     await wakeFrame(this.project, fr, "read");
     if (!this.mounted || this.project.frames[i] !== fr) return; // 間にコマが動いた
     this.paintFilmThumb(i, el);
-    if (!this.inSleepWindow(i)) await sleepFrame(this.project, fr, this.sharedLayerIds(), true);
+    // ★V216b (A-128): 片づけを止めている間（重い操作・元に戻す／やり直しが読みで起こした面を使っている間）は眠らせ直さない
+    if (!this.inSleepWindow(i) && !this.sweepHeld()) await sleepFrame(this.project, fr, this.sharedLayerIds(), true);
   }
 
-  private paintFilmThumb(i: number, cv?: HTMLCanvasElement) {
+  protected override paintFilmThumb(i: number, cv?: HTMLCanvasElement) {
     const film = $("#ed-film");
     const el =
       cv ??
@@ -7025,7 +5071,7 @@ export class Editor {
     }
   }
 
-  private updateFilmSelection() {
+  protected override updateFilmSelection() {
     document.querySelectorAll("#ed-film .fr").forEach((el) => {
       const idx = Number((el as HTMLElement).dataset.idx);
       el.classList.toggle("on", idx === this.frameIndex);
@@ -7035,6 +5081,7 @@ export class Editor {
       );
     });
     this.updateBadge();
+    this.syncPasteRangeLabel(); // V199 (A-105): 「貼り付け → コマ 3〜8」を範囲に追従させる
   }
 
   private updateBadge() {
@@ -7066,23 +5113,16 @@ export class Editor {
       //  **読む直前に起こし、読み終えたら眠らせ直す**ことで守る。不変条件は同じ・守り方だけ変えた
       this.cb.openExport(
         projectSource(this.project),
-        (this.project.meta.title || untitledTitle()).replace(/\.[^.]+$/, ""),
+        exportBaseName(this.fileBase, this.project.meta.title, untitledTitle()), // V199 (A-106): いまのファイルの名前
         this.rangeSel,
         this.buildExportAudioSource(),
-        (m) => {
-          // P-6: 書き出しダイアログでの「書き出す長さ」選択を記憶（値の書き戻しのみ）
-          const b = this.project.audio?.bgm;
-          if (b && b.syncMode !== m) {
-            b.syncMode = m;
-            this.dirty = true;
-          }
-        }
+        (m) => this.setBgmSyncMode(m) // ★V214: 中身はコア
       );
     };
     // M11-11: いま見ているコマ1枚を画像で保存（アニメの書き出しとは別の導線）
     $("#ed-imgexport").onclick = async () => {
       if (this.xformGuard()) return; // 変形/歪みの未確定があるときは先に確定させる
-      await this.waitForSave(); // V161（Codex 指摘④）: 書き出し系はどれも保存完了を待つ
+      await this.waitForSave(); // V161（独立レビューの指摘④）: 書き出し系はどれも保存完了を待つ
       if (this.playing) this.stopPlayback();
       // V163: いま見ているコマは窓の中でほぼ必ず起きているが、眠っていたら白紙が出る
       // （compositeFrame は眠りを知らない）ので、1コマだけ読みで起こす（数十ms）
@@ -7093,15 +5133,13 @@ export class Editor {
       this.cb.openImageExport?.(
         this.project,
         this.frameIndex,
-        (this.project.meta.title || untitledTitle()).replace(/\.[^.]+$/, "")
+        exportBaseName(this.fileBase, this.project.meta.title, untitledTitle()) // V199 (A-106): いまのファイルの名前
       );
     };
-    this.history.onchange = () => {
-      ($("#ed-undo") as HTMLButtonElement).disabled = !this.history.canUndo;
-      ($("#ed-redo") as HTMLButtonElement).disabled = !this.history.canRedo;
-      this.updateSizeMeter(); // V154 (W-2): 履歴が動いたら「元に戻す」の行も動く
-    };
-    this.history.onchange();
+    // ★V214 (M-2b-1a): 履歴が動いたときの手続き（ボタン〔undoRedoShown〕→ 大きさと履歴の予算の数え直し）はコアの historyChanged。
+    //  つなぐのも開いたときに 1 回呼ぶのも前と同じ所
+    this.bindHistory();
+    this.historyChanged();
     // V158 (L-2): 左上の「このコマの絵を消す」。**🌀 と同じ `clearFrame()` を呼ぶだけ**
     //（確認の設定・選択範囲の扱い・Undo の粒度を二重に持たない＝実装を分けない）
     $("#ed-clearframe").onclick = () => void this.clearFrame();
@@ -7301,17 +5339,14 @@ export class Editor {
     this.collapsed = sanitizeCollapsed(v);
   }
 
-  /** M13-2a (A-2): settings.json の `selMask` から復元。**`false` 以外はすべてオン**（既定オン・追加のみ） */
+  /** M13-2a (A-2): settings.json の `selMask` から復元。V208 (A-119): **`true` のときだけオン**（キーが無い・false はオフ。
+   *  キーは変えない＝書くのは今どおり押した瞬間だけ。キーが無いときの意味は作者の決定で変えた） */
   restoreSelMaskShow(v: unknown) {
-    this.selMaskShow = v !== false;
+    this.selMaskShow = v === true;
     if (this.mounted) this.redrawOverlay();
   }
 
-  /** M13-2a (A-4): settings.json の `frameDeleteConfirm` から復元。**`false` 以外はすべてオン**
-   *  （既定オン＝従来どおり確認が出る・追加のみ）。⚙ はライブラリ画面からしか開けないので mount 前の復元で足りる */
-  restoreFrameDeleteConfirm(v: unknown) {
-    this.frameDeleteConfirm = v !== false;
-  }
+
 
   /** M14 (S-3): settings.json の `toneOpen` から復元。**`true` のときだけ開く**（既定=閉・追加のみ）。
    *  ⚙ の設定ではなくパネルのヘッダで開閉するので、mount 前の復元で足りる（buildSidePanel が読む） */
@@ -7319,45 +5354,13 @@ export class Editor {
     this.toneOpen = v === true;
   }
 
-  /** M16 (D-1): settings.json の `ditherFrameShift` から復元。**`true` のときだけオン**（既定=オフ・追加のみ）。
-   *  ⚙ ではなくトーン欄のトグルで切り替えるので、mount 前の復元で足りる（rebuildTexPicker が読む） */
-  restoreDitherFrameShift(v: unknown) {
-    this.ditherFrameShift = v === true;
-  }
 
-  /** V151 (E-8): settings.json の `hiddenConfirms` から復元。知らない id は捨てる（追加のみ・旧 settings は []） */
-  restoreHiddenConfirms(v: unknown) {
-    this.hiddenConfirms = new Set(
-      Array.isArray(v) ? v.filter((x): x is string => x === "clearFrame" || x === "layerDelete" || x === "folderDelete") : []
-    );
-  }
 
-  /** V151 (E-8): 「次回から表示しない」チェックつき確認の唯一の入口。
-   *  - 非表示に設定済み（hiddenConfirms に id がある）→ ダイアログを出さず true
-   *  - 「はい」＋チェック → 以後非表示にして settings へ（⚙ の「確認ダイアログ」節でいつでも戻せる）
-   *  - 「いいえ」ならチェックされていても**覚えない**（キャンセルで非表示になる事故を防ぐ）
-   *  - confirmSkippable が未配線（旧ホスト）なら従来の confirm と同じに動く */
-  private async confirmWithSkip(id: "clearFrame" | "layerDelete" | "folderDelete", msg: string): Promise<boolean> {
-    if (this.hiddenConfirms.has(id)) return true;
-    if (!this.cb.confirmSkippable) return this.cb.confirm(msg);
-    const r = await this.cb.confirmSkippable(msg);
-    if (r.ok && r.skip) {
-      this.hiddenConfirms.add(id);
-      this.cb.onHiddenConfirmsChange?.([...this.hiddenConfirms]);
-    }
-    return r.ok;
-  }
 
-  /** M17: settings.json の `customTones` から復元（壊れた要素だけ捨てる・上限12・旧 settings は []）。
-   *  mount 前の復元で足りる（rebuildTexPicker が読む） */
-  restoreCustomTones(v: unknown) {
-    this.customTones = CT.sanitizeCustomTones(v);
-  }
 
-  /** M17: settings.json の `customToneColor` から復元。**`false` 以外はオン**（既定オン・追加のみ） */
-  restoreCustomToneColor(v: unknown) {
-    this.customToneColor = v !== false;
-  }
+
+
+
 
   /** いま実際に畳まれているか（個別状態 or 集中） */
   private isCollapsed(key: CollapseKey): boolean {
@@ -7383,6 +5386,8 @@ export class Editor {
       side.style.setProperty("--ed-side-top", `${this.layout.sideTop}%`);
       side.classList.toggle("fold-top", this.sideFold.top);
       side.classList.toggle("fold-bot", this.sideFold.bot);
+      side.classList.toggle("fold-col", this.sideFold.col); // ★V215 (A-124)
+      this.fitColorRows(); // 窓・比率・畳みが変わったら色の段の段数を決め直す（ResizeObserver より先に・同じ拍で）
     }
     document
       .getElementById("ed-side-vsplit")
@@ -7611,7 +5616,7 @@ export class Editor {
     if (!main) return val;
     const SPLIT = 10;
     const PAD = 20; // .ed-main padding 10×2
-    // V158 (L-1・Codex 指摘①): `sideTop` は**％**なので、px を前提にした下の分岐へ入れてはいけない。
+    // V158 (L-1・独立レビューの指摘①): `sideTop` は**％**なので、px を前提にした下の分岐へ入れてはいけない。
     // 入れると `floor = min(minHere, startVal, …)` の「掴んだ値より下げない」規則がそのまま効いて、
     // **境界を上へ動かせなくなる**（レイヤーを広げようとドラッグしても戻らない＝壊れて見える）。
     // ここでの動的な上限は「下段が最低の高さ（--ed-side-bot-min ＝ 168px）を保てるところまで」。
@@ -7790,229 +5795,6 @@ export class Editor {
     this.finishSplitDrag(false);
   }
 
-  // ---------------- 保存 ----------------
-
-  /** 保存。成功時 true / キャンセル・失敗時 false（saveAs のフラグ復元に使う） */
-  /** V154 (W-6): 保存したファイルを読み戻して中身を確かめる。
-   *
-   *  読み戻せないとき（コマンド未実装・巨大すぎて読めない）は**検査を省いて通す**。
-   *  ここで落とすと、確かめる手段が無いだけの人が保存できなくなるため。
-   *  その場合も「書く前の検査」と Rust 側のバイト照合は効いている。 */
-  private async verifySavedFile(
-    path: string,
-    expectFrames: number
-  ): Promise<{ ok: boolean; reason: string }> {
-    if (!this.cb.readSavedFile) return { ok: true, reason: "" };
-    let bytes: Uint8Array | null = null;
-    try {
-      bytes = await this.cb.readSavedFile(path);
-    } catch (e) {
-      // 読み出しそのものが失敗＝**確かめられなかった**だけ。保存は成功している可能性が高い
-      this.cb.appendLog?.(`[V154 W-6] read-back-unavailable (check skipped): ${String(e)}`);
-      return { ok: true, reason: "" };
-    }
-    if (!bytes) return { ok: true, reason: "" };
-    const { verifySavedBytes } = await import("./serialize");
-    const r = await verifySavedBytes(bytes, expectFrames);
-    return { ok: r.ok, reason: r.reason };
-  }
-
-  // ================= V166 (層1): 重い操作の漏斗 =================
-  //
-  // ★なぜ要るか（2026-08-31 の事故）
-  //   1,000コマ規模のコマを貼り付け連打 → `Array buffer allocation failed` を8回出しながら
-  //   操作を受け付け続け、最後に WebView ごと落ちた。原因は**貼り付けが「重い処理」として
-  //   扱われていなかった**こと——入口の閉鎖も表示も無く、**連打できた**。
-  //   ログには 11〜25秒の停止が `busy=no` で何度も残っていた（＝何も出さずに固まっていた）。
-  //
-  // ★この関数が唯一の入口（§1-g 層1）
-  //   1. **入口を閉じる**（実行中は同じ操作も他の重い操作も受け付けない＝連打が原理的に起きない）
-  //   2. **ボタンを見た目でも無効に**する（`updateBusyButtons`）
-  //   3. `PERF_MIN_MS`（50ms）を過ぎたら「◯◯しています」を出す（一瞬で終わる操作では出さない）
-  //   4. **`finally` で必ず解放**する（例外で閉じっぱなしにしない）
-  //   5. 終わってから**メーターを1回だけ**数え直す（D: 操作の最中に 12.7 秒かけて数え直さない）
-  //   6. 確保に失敗したら**そこで天井を下げる**（E: 2回目以降を同じ形で失敗させない）
-  //
-  // ★表示の仕組みは増やさない: 中身は `ui/busy.ts` の `runWithBusy` に委ねる
-  //  （ライブラリ・ホームと**同じ1つの実装**。こちらはそれに「入口の閉鎖」を足しているだけ）。
-  //
-  // ⚠ **保存はここを通さない**（V161-A の「保存中も描ける」を殺すため・壊すなリスト）。
-  //   保存は `runBackgroundSave` が自前で持つ（入口を閉じない・右下の小さなピルだけ）。
-
-  /** V166: 重い操作と判定する表示遅延（ms）。`PERF_MIN_MS` と同じ値にしてあるので、
-   *  **長タスクとして記録される区間には必ず表示が出ている**（ログの `busy=no` が消える）。 */
-  private static readonly HEAVY_BUSY_DELAY_MS = PERF_MIN_MS;
-
-  /** V166 (E): 1回の重い操作に許す確保量。確保に失敗したら**その場で下げる**
-   *  （＝以後その先へは伸ばさない。undo や削除で実際に減れば、また入るようになる）。 */
-  private heavyAllocBudget = HEAVY_ALLOC_MAX_BYTES;
-
-  /** V166 (D): 重い操作の最中にメーターの数え直しを頼まれたか（終わってから1回だけ実行する） */
-  private meterPending = false;
-
-  /** V166 (層1): **重い操作はすべてこれを通る。**
-   *
-   *  @param op   `PerfOp`（＝待たせる対象と数える対象を同じ一覧にする・要件 層2）
-   *  @param msg  「◯◯しています」の訳文
-   *  @returns    `fn` の戻り値。**入口が閉じていて実行しなかったときは `undefined`**
-   */
-  async runHeavy<T>(op: PerfOp, msg: string, fn: () => T | Promise<T>): Promise<T | undefined> {
-    // ★連打が原理的に起きない: 走っている間は同じ操作も他の重い操作も受け付けない。
-    //  黙って捨てる（ボタンは無効になっているので、届くのはキー経由だけ）
-    if (this.busyKind) return undefined;
-    this.beginBusy("heavy");
-    try {
-      // ★V166（Codex 指摘・優先度中）: **1回だけ画面に描かせてから**中身を始める。
-      //  重い処理の多くは**同期**（貼り付けの組み立て・統合の焼き込み）で、始まったら
-      //  イベントループが返ってこない＝`beginBusy` で付けた「押せない見た目」が
-      //  **描かれないまま固まる**。ここで1拍譲ると、少なくとも
-      //  「受け付けた・押せなくなった」ことは必ず見える。
-      //  ⚠ 同期処理の最中に「◯◯しています」の箱を**出すことはできない**（タイマーが動けない）。
-      //   それには操作そのものを刻む必要があり、この回の範囲を超える（報告書に明記）。
-      await yieldToPaint();
-      return await runWithBusy(op, msg, async () => fn(), Editor.HEAVY_BUSY_DELAY_MS);
-    } catch (e) {
-      // V166 (E): 確保に失敗したら**1回目でそこを天井にする**。
-      // 事故のログでは `unhandledrejection` を8回出しながら操作を受け付け続けていた
-      if (isAllocFailure(e)) {
-        const real = this.sleepOn
-          ? awakeBytes(this.project) + sleepBytes(this.project)
-          : projectBytes(this.project);
-        this.heavyAllocBudget = Math.max(0, Math.min(this.heavyAllocBudget, Math.floor(real / 8)));
-        this.cb.appendLog?.(`[V166] alloc failed op=${op} budget=${this.heavyAllocBudget}`);
-        if (this.cb.notice) void this.cb.notice(t("ed.heavy.outOfMemory.msg"));
-        else this.cb.toast(t("ed.heavy.outOfMemory.msg"));
-        return undefined;
-      }
-      // それ以外の例外は握り潰さない（呼び出し側／既存の unhandledrejection の網へ）
-      throw e;
-    } finally {
-      // ★どの抜け方でも必ず入口を開ける（基準5: わざと投げても次の操作ができる）
-      this.endBusy();
-      // V166 (D): 溜めておいたメーターの数え直しを**ここで1回だけ**
-      if (this.meterPending) {
-        this.meterPending = false;
-        this.updateSizeMeter();
-      }
-    }
-  }
-
-  /** V166: いま起きている「面」の数（コマ×レイヤーで実体があるもの）。
-   *  昇格（`promoteTo16`）が既存バッファを作り直すぶんの見積もりに使う。 */
-  private awakeFaceCount(): number {
-    let n = 0;
-    for (const f of this.project.frames) n += Object.keys(f.layers).length;
-    return n;
-  }
-
-  /** V166 (Codex 指摘⑤): 指定レイヤーのうち**まだ眠っている面**の数。
-   *  `wakeLayersAllFrames` がこれから展開する＝確保する枚数そのもの。 */
-  private asleepFaces(layerIds: string[]): number {
-    let n = 0;
-    for (const f of this.project.frames) {
-      if (!f.sleep) continue;
-      for (const id of layerIds) if (f.sleep[id] && !f.layers[id]) n++;
-    }
-    return n;
-  }
-
-  /** V166 (B): 「これから n コマ確保してよいか」を聞く。だめなら**断り文句を出して false**。
-   *  丸めと上限は `prefs.ts` の純関数（スモークが直接叩ける）。
-   *
-   *  @param incomingColors 持ち込む色数の上限（クリップの palette 長など）。
-   *    ★Codex 指摘④: これを渡さないと**16bit 昇格を見落として実確保量を半分に見積もる**。
-   *    0 を渡すのは「新しい色が1つも増えない」と分かっている操作だけ（コマ複製・空コマ追加）。
-   *  @param where ログに出す操作名（決められた語だけ・W-10） */
-  private allowFrameAlloc(frames: number, incomingColors = 0, where = "paste"): boolean {
-    const curBits: 8 | 16 = this.project.indexBits === 16 ? 16 : 8;
-    // ★昇格が起こり得るなら 16bit で見積もる（安全側にしか外れない）
-    const bits = estimateBits(this.project.colorTable.length, incomingColors, curBits);
-    const extra = promotionExtraBytes(this.awakeFaceCount(), bits === 16 && curBits === 8);
-    // 昇格ぶんの追加確保は予算から先に引く（＝そのぶん入るコマ数が減る）
-    const budget = Math.max(0, this.heavyAllocBudget - extra);
-    const r = checkFrameAlloc(frames, this.project.layerDefs.length, bits, budget);
-    if (r.ok) return true;
-    // ★「入りません」ではなく**何コマなら入るか**を言う（要件 §2-B）。
-    //  ただし**1コマも入らない**ときに「約0コマまで貼り付けられます」と言うのは
-    //  日本語として壊れているし、助言にもなっていない。そこだけは
-    //  「減らすか、保存して開き直す」と言う（＝E の文面と同じ助言）
-    const msg =
-      r.maxFrames > 0
-        ? t("ed.heavy.tooManyFrames.msg", { max: r.maxFrames })
-        : t("ed.heavy.outOfMemory.msg");
-    if (this.cb.notice) void this.cb.notice(msg);
-    else this.cb.toast(msg);
-    // Codex 指摘（低）: どの操作で断ったのかを書く（前は全部 `paste refused` だった）
-    this.cb.appendLog?.(
-      `[V166] ${where} refused need=${r.needBytes} budget=${budget} bits=${bits} maxFrames=${r.maxFrames}`
-    );
-    return false;
-  }
-
-  /** V166 (Codex 指摘・優先度高②③): **バイト数そのもの**で通す/断るを決める入口。
-   *  「コマ数 × レイヤー数」で表せない確保（クリップの写し取り・展開）に使う。
-   *
-   *  @param perFrameBytes 分かるなら1コマあたりのバイト数。渡すと断り文句が
-   *    **「あと約◯コマまで」**になる（要件 §2-B）。0 なら「減らしてください」だけを言う。
-   *    ★ここを足したのは、展開の見積もり（高③）を先に置いた結果、
-   *     **何コマ入るかを言う道が塞がれてしまった**のに気づいたため。
-   *     断るのが先でも、言うことの質は落とさない。 */
-  private allowBytes(needBytes: number, where: string, perFrameBytes = 0): boolean {
-    if (needBytes <= this.heavyAllocBudget) return true;
-    const maxFrames = perFrameBytes > 0 ? Math.floor(this.heavyAllocBudget / perFrameBytes) : 0;
-    const msg =
-      maxFrames > 0
-        ? t("ed.heavy.tooManyFrames.msg", { max: maxFrames })
-        : t("ed.heavy.outOfMemory.msg");
-    if (this.cb.notice) void this.cb.notice(msg);
-    else this.cb.toast(msg);
-    this.cb.appendLog?.(
-      `[V166] ${where} refused need=${needBytes} budget=${this.heavyAllocBudget} maxFrames=${maxFrames}`
-    );
-    return false;
-  }
-
-  /** V166 (B): 「1レイヤーぶんのバッファを n 枚」確保してよいか。
-   *
-   *  ★コマを増やす操作だけでなく、**全コマに効くレイヤー操作**も同じ形で落ちる:
-   *   レイヤー統合は「全コマ × 2枚」の控えを取るので、7,687コマなら **1.18 GB**——
-   *   貼り付けと同じ確保量になる。コマ数の上限（65,535）はここでも1つも役に立たない。
-   *  ★断り文句は「減らすか、保存して開き直す」（＝この確保のほとんどは**元に戻す**用の控えで、
-   *   開き直せば履歴が空になって実際に入るようになる）。「あと何コマ」は意味を持たないので言わない。 */
-  private allowBufferAlloc(count: number, where: string, wakeLayerIds: string[] = []): boolean {
-    const bits: 8 | 16 = this.project.indexBits === 16 ? 16 : 8;
-    // ★V166（Codex 指摘・優先度高⑤）: **起こすぶんも確保**である。
-    //  見落としていた: これらの操作は控えを取る前に `wakeLayersAllFrames` で
-    //  眠っているコマを展開する。控えだけ数えて起こすぶんを数えないと、
-    //  実際の確保量を半分近く見落とす（眠っている作品ほどズレる）。
-    const wake = wakeLayerIds.length ? this.asleepFaces(wakeLayerIds) : 0;
-    const r = checkFrameAlloc(count + wake, 1, bits, this.heavyAllocBudget);
-    if (r.ok) return true;
-    if (this.cb.notice) void this.cb.notice(t("ed.heavy.outOfMemory.msg"));
-    else this.cb.toast(t("ed.heavy.outOfMemory.msg"));
-    this.cb.appendLog?.(
-      `[V166] ${where} refused need=${r.needBytes} budget=${this.heavyAllocBudget}`
-    );
-    return false;
-  }
-
-  // ---------------- V154b (W-7/W-8/W-9): 重い処理は1本だけ ----------------
-
-  /** V154b: 重い処理に入る。**入口を閉じてから**呼ぶこと（`busyKind` が空でないときは呼ばない）。
-   *  ロック（W-7/W-9）は**この瞬間から**効く。進捗（W-8）は `showBusyAfterDelay` で別に出す
-   *  ——保存先ピッカーのように「利用者を待っている時間」に進捗を出さないため。
-   *  V166: 表示は `runHeavy`（＝`runWithBusy`）へ寄せたので、ここは**入口の閉鎖だけ**を持つ。 */
-  private beginBusy(kind: "audio" | "export" | "heavy") {
-    // ★V178 (A-72・Codex 2 回目): 重い処理が作品を変える前に、全レイヤーの束を確定して終える。
-    //  busyKind を立てるのはここだけ＝重い処理の最中に束が残ることは無くなる（pointerup の関所で取りこぼさない）
-    if (this.eraseAllStroke) this.finishEraseAllNow();
-    this.busyKind = kind;
-    // ポインタを止める（キーは dialogOpen() が見る）。**遅延なしで即座に**——
-    // 進捗が出るまでの 450ms に触られたら、そこで混ざったものが保存される
-    document.querySelector("#screen-editor")?.classList.add("ed-busy");
-    this.updateBusyButtons();
-  }
-
   /** V154b (W-8): 少し待ってから進捗を出す（一瞬で終わる処理ではチラつかせない） */
   private showBusyAfterDelay(msg: string) {
     if (!this.busyKind || this.busyTimer || this.busyHide) return;
@@ -8021,19 +5803,6 @@ export class Editor {
       if (!this.busyKind) return; // もう終わっていた
       this.busyHide = this.cb.busy?.(msg) ?? null;
     }, Editor.BUSY_DELAY_MS);
-  }
-
-  /** V154b: 重い処理から出る。**どの経路でも必ず呼ぶ**（finally で呼ぶこと）。 */
-  private endBusy() {
-    if (this.busyTimer) {
-      clearTimeout(this.busyTimer);
-      this.busyTimer = 0;
-    }
-    this.busyHide?.();
-    this.busyHide = null;
-    this.busyKind = "";
-    document.querySelector("#screen-editor")?.classList.remove("ed-busy");
-    this.updateBusyButtons();
   }
 
   /** V154b (W-7): 重い処理の入口（保存・別名保存・書き出し）のボタンを、
@@ -8051,7 +5820,7 @@ export class Editor {
   private reportSaveBroken(where: string, reason: string, err?: unknown): false {
     this.cb.appendLog?.(`[V154 W-6] save not committed (${where}): ${reason}`);
     // V154b (W-10): 送ってもらえれば原因が分かる、と**その場で**伝える。
-    // Codex レビュー（優先度 中）: 例外で落ちた保存はトーストだけで、**控えが残っていることも
+    // 独立レビュー（優先度 中）: 例外で落ちた保存はトーストだけで、**控えが残っていることも
     // ログのことも伝わっていなかった**。いちばん普通に起きる失敗（書き込めない等）なので、
     // そこにも同じ知らせを出す（文面だけ「読み戻したら壊れていた」と分ける）
     const head = err === undefined
@@ -8063,7 +5832,24 @@ export class Editor {
     return false; // dirty は true のまま／オートセーブも残したまま
   }
 
-  async save(): Promise<boolean> {
+  /** V199 (A-106): いまの作品の名前（ファイルがあればその名前・無ければ題名か「無題」） */
+  titleNow(): string {
+    return displayTitle(this.fileBase, this.project.meta.title, untitledTitle());
+  }
+
+  /** V199 (A-106): 編集画面の左上（#ed-title）を、いまの作品の名前にする（開いたとき・保存できたとき）。
+   *  長い名前は CSS の省略（`.h-title` の ellipsis）＝ライブラリの表示と同じ。全文は title で見える */
+  private refreshTitle() {
+    const el = document.querySelector("#ed-title") as HTMLElement | null;
+    if (!el) return;
+    const name = this.titleNow();
+    setIconLabel(el, "pen", name); // V171: ✏ → pen（線画）
+    el.title = name;
+  }
+
+  /** @param explicit V201: 明示の「別名で保存」（saveAs からだけ渡す）。保存の種類は部品へ明示で渡す
+   *   （askSaveTarget だけでは分からない＝新規メモ・オートセーブからの復元・ドロップから編集も保存先を選ぶ） */
+  async save(explicit?: "saveAs", redirect?: { album: string; baseName: string }): Promise<boolean> {
     // V154b (W-7) → V161 (A): 飛行中の保存要求は、捨てずに**1件だけ予約**する。
     // 保存中も描けるようになった＝「描いてからもう一度 Ctrl+S」が普通に起きる。
     // 捨てると「押したのに最新の絵が保存されていない」になる。連打しても予約は1件
@@ -8073,35 +5859,45 @@ export class Editor {
       this.saveQueued = true;
       return this.saveInFlight;
     }
-    if (this.busyKind) return false; // 音声読み込み・書き出しの最中は従来どおり弾く
-    if (this.xformGuard()) return false; // E-4
-    if (this.askSaveTarget || !this.saveCtx) {
-      // F-4: 既存アルバムのピッカー（＋新規フォルダ作成）で保存先を選ぶ
-      // M12-D: 保存済みのアルバムがあればそれ、無ければ **null（おまかせ）**。
-      // 以前は既定名の文字列を作って渡し、受け側が文字列比較していた
-      const defAlbum = this.saveCtx?.album ?? null;
-      const defName =
-        this.saveCtx?.baseName ??
-        (this.project.meta.title || untitledTitle()).replace(/\.[^.]+$/, "");
-      // V163: 形式チェックの初期値＝この保存先に覚えている値（無ければ新形式）
-      const picked = await this.cb.pickSaveTarget(defAlbum, defName, this.saveCtx?.legacy === true);
-      if (!picked) return false;
-      this.saveCtx = {
-        libRoot: this.saveCtx?.libRoot ?? "",
-        album: picked.album,
-        baseName: picked.baseName,
-        legacy: picked.legacy,
-      };
+    if (this.saveBlocked()) return false; // ★V214: 重い処理の最中・変形の途中（関所）の判断はコアの saveBlocked（順は前と同じ）
+    // ★V216b (A-126): 保存先を決めて、同じ名前の作品が在れば**書く前に**確かめる（キャンセル＝何も変えない）
+    //  確かめている間（空きを聞く・画面を出す）に来た保存は、予約に回す（2 本目を並べない）。キャンセルなら予約も捨てる
+    if (this.savePlanning) {
+      this.saveQueued = true;
+      return false;
+    }
+    this.savePlanning = true;
+    let plan: Awaited<ReturnType<Editor["planSaveTarget"]>>;
+    try {
+      plan = await this.planSaveTarget(explicit, redirect);
+    } finally {
+      this.savePlanning = false;
+    }
+    if (!plan) {
+      this.saveQueued = false;
+      return false;
+    }
+    const kind: SaveKind = plan.kind;
+    if (plan.picked) {
+      // 確かめが済んでから保存先を替える（キャンセルでは保存先も ID も替わらない＝要件 §2-1 の 3）
+      this.saveCtx = plan.ctx;
+      // ★V201 (P-1): 別名で保存は、保存先が替わった**この時点**で新しい作品の ID を入れる（版は 0 から＝次に書くと 1）。
+      //  このあと写しの見積りで断られても・書けなくても、新しい保存先には新しい ID（ID と版を保存先に結び付ける）
+      if (kind === "saveAs") bindNewWorkId(this.project);
     }
     // V161 (A): ここから先は**背景**で走る。編集ロックはかけない（W-9 は保存では外した・要件）。
     // 中央の「保存中です」も出さない——右下の控えめなピルに変えた（描いている手を止めない）
-    const job = this.runBackgroundSave();
+    // V216b: 「置き換えてよい」は確かめたこの宛先とこの 1 回の書き込みだけ（予約した次の保存へ持ち越さない）
+    const job = this.runBackgroundSave(kind, plan.replace);
     this.saveInFlight = job;
+    let ok = false;
     try {
-      return await job;
+      ok = await job;
     } finally {
       this.saveInFlight = null;
       this.updateSavePill(false);
+      // V216b: 書く所の確かめで［別の名前で保存］→ 保存先を選ぶ画面を開き直す（予約は捨てる＝画面が 2 つ出ない）
+      if (this.saveRedirect) this.saveQueued = false;
       // W-7 の進化: 予約が入っていれば、**そのときの最新の姿**でもう一度（1件だけ）。
       // setTimeout で1拍置くのは、この finally の中から save() を再入させないため
       if (this.saveQueued && this.mounted) {
@@ -8109,6 +5905,79 @@ export class Editor {
         setTimeout(() => void this.save(), 0);
       }
     }
+    const re = this.saveRedirect;
+    this.saveRedirect = null;
+    if (re && this.mounted) return this.save(explicit, re);
+    return ok;
+  }
+
+  /** ★V216b (A-126・要件 §2-1 の 2〜6): 保存先を決める。選ぶ画面を出すときは出し、宛先に同じ名前の作品（か控え）が在れば
+   *  ［別の名前で保存］［置き換える］［キャンセル］を聞く。**何も変えない**（保存先を替えるのは呼び出し側＝確かめが済んでから）。
+   *  null＝キャンセル。`picked`＝保存先を選び直した（saveCtx を替える）。`replace`＝［置き換える］を選んだ */
+  private async planSaveTarget(
+    explicit: "saveAs" | undefined,
+    redirect: { album: string; baseName: string } | undefined
+  ): Promise<{ ctx: EditorSaveContext; kind: SaveKind; picked: boolean; replace: boolean } | null> {
+    let pick = !!redirect || this.askSaveTarget || !this.saveCtx;
+    let ctx: EditorSaveContext | null = this.saveCtx;
+    let kind: SaveKind = "overwrite";
+    // F-4: 既存アルバムのピッカー（＋新規フォルダ作成）で保存先を選ぶ
+    // M12-D: 保存済みのアルバムがあればそれ、無ければ **null（おまかせ）**。
+    // 以前は既定名の文字列を作って渡し、受け側が文字列比較していた
+    let defAlbum = redirect?.album ?? this.saveCtx?.album ?? null;
+    // V199 (A-106): 保存先が未定のとき（ドロップで開いた等）も、名前の分かるファイルならその名前
+    let defName =
+      redirect?.baseName ??
+      this.saveCtx?.baseName ??
+      exportBaseName(this.fileBase, this.project.meta.title, untitledTitle());
+    for (;;) {
+      if (pick) {
+        // 名前の既定は main.ts の画面が空いている名前にする（§2-1 の 6）
+        const picked = await this.cb.pickSaveTarget(defAlbum, defName);
+        if (!picked) return null;
+        ctx = { libRoot: this.saveCtx?.libRoot ?? "", album: picked.album, baseName: picked.baseName };
+        kind = explicit === "saveAs" ? "saveAs" : "first";
+      }
+      const target = ctx!;
+      const st = await this.saveTargetStatusOf(target);
+      if (st === "taken" || st === "reserved") {
+        const c = await this.askSameName(target, st);
+        if (c === "replace") return { ctx: target, kind, picked: pick, replace: true };
+        if (c === "other") {
+          // 同じアルバム・空いている名前の案（`名前 (2)`〜）で選ぶ画面を開き直す
+          pick = true;
+          defAlbum = target.album;
+          defName = target.baseName;
+          continue;
+        }
+        return null;
+      }
+      return { ctx: target, kind, picked: pick, replace: false };
+    }
+  }
+
+  /** V216b: 宛先の空き（口が無い・失敗は "free" とみなして進む＝書く所で Rust が置き換えずに断り、もう一度確かめる） */
+  private async saveTargetStatusOf(ctx: EditorSaveContext): Promise<SaveTargetStatus> {
+    if (!this.cb.saveTargetStatus) return "free";
+    try {
+      return await this.cb.saveTargetStatus(ctx, this.workFile?.path ?? null);
+    } catch {
+      return "free";
+    }
+  }
+
+  /** V216b (要件 §5): 同じ名前の確かめ。在る＝［別の名前で保存］［置き換える］／控えだけ＝［別の名前で保存］だけ。
+   *  背景を押した・キャンセル＝null（聞けない呼び出し側では置き換えない＝null） */
+  private async askSameName(ctx: EditorSaveContext, st: "taken" | "reserved"): Promise<"other" | "replace" | null> {
+    if (!this.cb.choose) return null;
+    const name = savedFileBase(ctx.baseName);
+    const options =
+      st === "taken"
+        ? [t("ed.save.exists.other.btn"), t("ed.save.exists.replace.btn")]
+        : [t("ed.save.exists.other.btn")];
+    const msg = st === "taken" ? t("ed.save.exists.msg", { name }) : t("ed.save.reserved.msg", { name });
+    const i = await this.cb.choose(msg, options);
+    return i === 0 ? "other" : i === 1 && st === "taken" ? "replace" : null;
   }
 
   /** V161 (A/B): 背景保存の本体。
@@ -8118,115 +5987,128 @@ export class Editor {
    *  （V160 S-2 で実証: 眠り控えの z は生成後不変・破棄は参照の付け替えなので clone は安全。
    *   起きている生バッファと音声データは clone がコピーする）。
    *
-   *  ★形式は2つ（V163・作者決定②）:
-   *   - 既定 "pv6": 現行形式。Worker が完成品（68.7MB 級）を1回で返す＝V161-B の
-   *     Rust 側 gzip（チャンク集積）は不要になったので撤去した
-   *   - `saveCtx.legacy` のとき "gzip": 旧形式（PV5）。v1.5.9 以前と同一のバイト列
-   *   どちらも書き込みは Rust の同じ `pclib::save_project`（tmp→.bak→rename→照合＝W-1 不変）。
+   *  ★形式は **PV6 だけ**（V197 (A-103)・作者決定 2026-10-07）: Worker が完成品（68.7MB 級）を1回で返す
+   *   ＝V161-B の Rust 側 gzip（チャンク集積）は V163 で撤去済み。V163 の旧形式（PV5・`saveCtx.legacy` の
+   *   "gzip" モード）は V197 でなくした。書き込みは Rust の `pclib::save_project`（tmp→.bak→rename→照合＝W-1 不変）。
    *
-   *  ★検証（C・Cowork 裁定）: 書く前の重複検証は落とし、**ディスクから読み戻す側だけ**残す
+   *  ★検証（C・要件の裁定）: 書く前の重複検証は落とし、**ディスクから読み戻す側だけ**残す
    *  （W-6 の魂＝「書けたものが読めるか」。Rust 側の byte 照合はその手前で従来どおり効いている） */
-  private async runBackgroundSave(): Promise<boolean> {
+  private async runBackgroundSave(kind: SaveKind, replaceConfirmed = false): Promise<boolean> {
     const t0 = performance.now();
     const ctx = this.saveCtx!;
+    // V216b: 書く所の確かめでキャンセル／［別の名前で保存］を選んだ（知らせを出さずに抜ける）
+    let declined = false;
+    // V216b: 書いたファイルの大きさと更新時刻（書いた直後に引いて、書けて確かめも通ったらその作品のファイルに控える）
+    let writtenStamp: { size: number; mtimeUs: number } | null = null;
     try {
       const worker = this.ensureSaveWorker();
       const seq = ++this.saveSeq;
+      // ★V201 (M-1a): 手順そのもの（書く値をそろえる → 基準点 → 写し → サムネ → 書く → 読み戻し → 途中の描き足しの判断）は
+      //  共通の部品 `saveWork`（saveCore.ts）へ移した。ここに残すのは編集画面にしかない所（眠らせの待ち・段の表示・
+      //  dirty と editEpoch・オートセーブの世代・左上の名前・トースト）と、それを部品へ渡す口だけ
       // ★V168 (S-1〜S-3): **写す前に見積もり、大きければ掃除を待ち、それでも大きければ断る。**
       //  2026-09-02: 56,860面（実際に使っている量 2.6GB）の写しが Chromium の実効上限 約2GiB を超え、
       //  `Data cannot be cloned, out of memory.` で失敗した。写しは確保である。
-      //  ここは**基準点（expectFrames / epoch0）より前**なので、v161 検査5（基準点→postMessage に
-      //  await 無し）は破らない。編集は止めない（V161-A）——掃除は描いている合間に只のものだけ進む。
+      //  見積りは部品の `prepare` の口＝**基準点より前**なので、基準点→写しに await 無しの約束は破らない。
+      //  編集は止めない（V161-A）——掃除は描いている合間に只のものだけ進む。
       //  ピルはこの時点から出す（待ちが長いときに「押したのに何も出ない」を作らない）
       this.updateSavePill(true);
-      const prep = await this.prepareSnapshot();
-      if (!prep) return false; // 断った（reportSnapshotTooBig が知らせ・ログ済み。dirty は残る）
-      // M10-14: 手動保存のときだけサムネコマを更新（従来どおり）
-      this.project.thumbFrame = Math.max(
-        0,
-        Math.min(this.project.frames.length - 1, this.frameIndex)
-      );
-      // ★スナップショットの基準点。「保存に入るのはこの瞬間まで」の3点セットを同時に取る。
-      // ここから下の postMessage まで **await は1つも無い**（v161_smoke 検査5 が固定）
-      const expectFrames = this.project.frames.length;
-      const epoch0 = this.editEpoch;
-      // ★リスナーは **postMessage より先に**張る。あとから張ると、小さい作品では
-      //  Worker のエンコードが下の `frameToPngBlob` の await より先に終わり、
-      //  `done` が**誰も聞いていないうちに**発火して保存が永遠に待ち続ける
-      // （ハーネスの故意破損テストで実際に踏んだ——大きい作品では出ない競合）。
-      const encodedPromise = new Promise<Uint8Array | null>((resolve, reject) => {
-        const onMsg = (ev: MessageEvent) => {
-          const d = ev.data as
-            | { kind: "done"; seq: number; bytes?: Uint8Array }
-            | { kind: "error"; seq: number; message: string };
-          if (!d || d.seq !== seq) return;
-          if (d.kind === "done") {
-            cleanup();
-            resolve(d.bytes ?? null);
-          } else {
-            cleanup();
-            reject(new Error(d.message));
-          }
-        };
-        const onErr = (ev: ErrorEvent) => {
-          cleanup();
-          reject(new Error(`worker error: ${ev.message}`));
-        };
-        const cleanup = () => {
-          worker.removeEventListener("message", onMsg);
-          worker.removeEventListener("error", onErr);
-        };
-        worker.addEventListener("message", onMsg);
-        worker.addEventListener("error", onErr);
-      });
-      // 拒否が thumb の await 中に起きても unhandledrejection にしない（実際の失敗は下の await が伝える）
-      void encodedPromise.catch(() => {});
-      worker.postMessage({
-        kind: "encode",
-        seq,
-        // V163: 既定は現行形式（PV6）。旧形式チェックの保存先だけ PV5（作者決定②）
-        mode: ctx.legacy ? "gzip" : "pv6",
+      const r = await saveWork({
         project: this.project,
+        kind,
+        baseName: ctx.baseName,
+        // サムネのコマは見積りを待ったあとのいまのコマ（待っている間にコマを移ったら移った先＝V201 の前と同じ）
+        currentFrame: () => this.frameIndex,
+        // 断ったら reportSnapshotTooBig が知らせ・ログ済み。dirty は残る
+        prepare: async () => (await this.prepareSnapshot()) !== null,
+        // ★基準点: 部品がここで編集の回数を控える（dirty 漏斗の editEpoch）
+        markEdits: () => {
+          const epoch0 = this.editEpoch;
+          return () => this.editEpoch !== epoch0;
+        },
+        // 写しは Worker への postMessage の structured clone（部品の encodeViaWorker がリスナーを先に張る）
+        encode: (p) => encodeViaWorker(worker, seq, p),
+        afterSnapshot: () => {
+          this.setSavePhase("save"); // V168: 写しに入った＝ピルは従来の「保存中」へ
+          this.updateSavePill(true);
+        },
+        // サムネは写しの直後に、いまの作品から描く（部品が写しのあとに呼ぶ）
+        thumb: async (p) => {
+          const blob = await frameToPngBlob(p, p.thumbFrame ?? 0);
+          const thumb = blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
+          return thumb;
+        },
+        // ★V216b (A-126 §2-1 の 5): 書く所（Rust）でも置き換えない。確かめのあとに同じ名前ができていたら「在る」と断られるので、
+        //  もう一度確かめる。［置き換える］は写しを作り直さずに同じ中身で書き直す。［別の名前で保存］・キャンセルは何も書かずに抜ける
+        //  （保存先と ID は替わったまま＝V201 の決まり・その作品のファイルは替えない）
+        write: async (w) => {
+          let replace = replaceConfirmed;
+          for (;;) {
+            try {
+              const path = await this.cb.saveProject(ctx, w.data, w.thumb, {
+                workFile: this.workFile?.path ?? null,
+                replace,
+              });
+              writtenStamp = await this.readWorkFileStamp(path);
+              return { path };
+            } catch (e) {
+              const kindHit = saveExistsKind(e);
+              if (!kindHit) throw e;
+              this.saveAsking = true;
+              let c: Awaited<ReturnType<Editor["askSameName"]>>;
+              try {
+                c = await this.askSameName(ctx, kindHit);
+              } finally {
+                this.saveAsking = false;
+              }
+              if (c === "replace" && !replace) {
+                replace = true;
+                continue;
+              }
+              declined = true;
+              if (c === "other") this.saveRedirect = { album: ctx.album, baseName: ctx.baseName };
+              throw new Error("save declined");
+            }
+          }
+        },
+        // V154 (W-6): 読み戻せなければ（口が無い・巨大すぎて読めない）部品が検査を省いて通す
+        readBack: this.cb.readSavedFile ? (w) => this.cb.readSavedFile!(w.path) : undefined,
+        onCommitted: (w) => {
+          this.askSaveTarget = false;
+          // ★V216b (A-126): その作品のファイル＝書いたファイル（Rust が返したパス）。次からはここへの上書きは確かめない
+          this.workFile = { path: w.path, size: writtenStamp?.size ?? null, mtimeUs: writtenStamp?.mtimeUs ?? null };
+          // ★V199 (A-106): いまのファイル＝書いたファイル。別名で保存したら左上も**すぐ**新しい名前に
+          this.fileBase = baseFromSavedPath(w.path) ?? savedFileBase(ctx.baseName);
+          this.refreshTitle();
+        },
+        onSettled: async () => {
+          // 保存中に編集が無かった＝ファイルは最新。従来どおり確定する
+          this.dirty = false;
+          // 進行中の古いオートセーブが保存後に復活しないよう世代を進めてから消す
+          await this.invalidateAutosave();
+        },
+        log: (line) => void this.cb.appendLog?.(line),
       });
-      // ---- ここから編集は自由（この await の間、メインスレッドは空いている） ----
-      this.setSavePhase("save"); // V168: 写しに入った＝ピルは従来の「保存中」へ
-      this.updateSavePill(true);
-      // サムネは postMessage の直後に読む（1コマの合成。スナップショットとほぼ同時点＝
-      // その一瞬に描かれた線がサムネだけに写る理屈上の窓はあるが、絵のデータには影響しない）
-      const blob = await frameToPngBlob(this.project, this.project.thumbFrame);
-      const thumb = blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
-      const encoded = await encodedPromise;
-      if (!encoded) return this.reportSaveBroken("encode", "worker returned no bytes");
-      const path = await this.cb.saveProject(ctx, encoded, thumb);
-      // V154 (W-6) → V161 (C): 検証は**ディスクから読み戻す側だけ**（書く前の重複は落とした）。
-      // 壊れたものを書いてしまう危険は Rust の byte 照合（verify_or_rollback・W-1）が塞いでいて、
-      // ここは「書けたものがアプリで開けるか」を確かめる最後の門
-      const post = await this.verifySavedFile(path, expectFrames);
-      if (!post.ok) return this.reportSaveBroken("read-back", post.reason);
-      this.askSaveTarget = false;
-      if (this.editEpoch === epoch0) {
-        // 保存中に編集が無かった＝ファイルは最新。従来どおり確定する
-        this.dirty = false;
-        // 進行中の古いオートセーブが保存後に復活しないよう世代を進めてから消す
-        await this.invalidateAutosave();
+      if (!r.ok) {
+        if (r.stage === "refused") return false; // 断った（知らせ・ログ済み。dirty は残る）
+        return this.reportSaveBroken(r.stage, r.reason);
       }
-      // else: 保存中に描いた＝ファイルはスナップショット時点の姿。dirty は残し、
-      // オートセーブにも触らない（あちらのほうが新しい状態を守っている。
-      // 次の15秒周期が最新の姿で上書きする）
+      const path = r.written.path;
       this.cb.appendLog?.(
-        `[V161] save ok frames=${expectFrames} fmt=${ctx.legacy ? "pv5" : "pv6"} ms=${Math.round(
+        `[V161] save ok frames=${r.frames} fmt=pv6 ms=${Math.round(
           performance.now() - t0
         )}`
       );
-      // Codex 指摘③: 保存中に描いた人が「いまの絵まで保存された」と誤解しないよう、文言を分ける
+      // 独立レビューの指摘③: 保存中に描いた人が「いまの絵まで保存された」と誤解しないよう、文言を分ける（どちらかは部品が決める）
       this.cb.toast(
-        this.editEpoch === epoch0
+        r.notice === "saved"
           ? t("ed.file.saved.toast", { path })
           : t("ed.file.savedPartial.toast", { path })
       );
       this.cb.onSaved(path);
       return true;
     } catch (e) {
+      if (declined) return false; // V216b: 書く所の確かめで書かないことを選んだ（知らせない・未保存の印は残る）
       return this.reportSaveBroken("exception", String(e), e);
     } finally {
       // V159 (G-1): 保存にかかった時間（保存先ピッカーを待った時間は `t0` の位置ゆえ入らない）。
@@ -8237,6 +6119,16 @@ export class Editor {
     }
   }
 
+  /** V216b (A-126): 書いたファイルの大きさと更新時刻（オートセーブの印）。分からなければ null（印を書かない＝戻すと「無い」） */
+  private async readWorkFileStamp(path: string): Promise<{ size: number; mtimeUs: number } | null> {
+    if (!this.cb.workFileStamp) return null;
+    try {
+      return await this.cb.workFileStamp(path);
+    } catch {
+      return null;
+    }
+  }
+
   /** V161 (A): 保存が終わるまで待つ（その間だけ中央表示）。
    *  **閉じる・別のメモへ移る・書き出しを始める前に必ず呼ぶ**（要件 A）。
    *  予約（saveQueued）は取り消す——ここから先は画面を離れる操作で、予約の中身
@@ -8244,8 +6136,14 @@ export class Editor {
   async waitForSave(): Promise<void> {
     if (!this.saveInFlight) return;
     this.saveQueued = false;
+    // ★V216b（第三者レビュー）: 書く所の確かめを出している間は、中央の表示（モーダル）を重ねない（重ねると確かめが押せず、保存が終わらない）。
+    //  確かめに答えると保存が終わるので、ここは待つだけ
+    if (this.saveAsking) {
+      await this.saveInFlight.catch(() => {});
+      return;
+    }
     // V168 (S-2): 掃除待ちの最中なら**同じ段階の文言**を出す（固まって見せない・文言の源は1つ）。
-    // ★Codex 指摘（中）: ここはモーダル（背面に触れない）なので「描き続けられます」とは言わない
+    // ★独立レビューの指摘（中）: ここはモーダル（背面に触れない）なので「描き続けられます」とは言わない
     //  ＝`savePhaseText("central")`。中央表示の文字は `renderSavePhase` が段階と進みに合わせて書き換える
     const hide = this.cb.busy?.(this.savePhaseText("central"));
     // 箱は次のタスクで DOM に入るので、1拍おいてから「これは保存の段階表示」と印を付ける
@@ -8263,125 +6161,6 @@ export class Editor {
     }
   }
 
-  // ================= V168 (S): 保存の写しを、写す前に見積もる・待つ・断る =================
-  //
-  // ★事故（2026-09-02・実機）: 56,860面（実際に使っている量 2.6GB）の Ctrl+S が
-  //   `Data cannot be cloned, out of memory.`。写し（structured clone）は 1本の連続バッファに
-  //   直列化され、実効上限は約 2GiB。貼り付け直後は貼ったコマが生のまま（掃除が追いつく前）なので太る。
-  //   掃除が済めば写しはファイル並み（約 0.2GB）＝**眠らせが追いついているかで通ったり落ちたりする**。
-  //
-  // ★作者決定: 「眠らせを待ってから写す ＋ 写す前の門番」
-  //   - 見積り（純関数 `snapshotBytes`）が soft（512MiB）を超えていたら、**基準点より前**で掃除を待つ
-  //   - 待っても max（1.5GiB）を超えていたら**断る**（例外にしない・W-6 と同じ道で知らせる）
-  //   - 編集は止めない（V161-A）。掃除は描いている合間に只のものだけ進む＝待ちは延びるが描ける
-  //   - v161 検査5（基準点→postMessage に await 無し）は破らない（待ちは基準点の**前**）
-
-  /** V168 (S-2): 掃除の1周を待つ（走っている周があればそれを待つ。無ければ1周頼む）。 */
-  private sweepPass(): Promise<void> {
-    if (this.sweepJob) return this.sweepJob;
-    return this.sweepSleep();
-  }
-
-  /** V168 (S-2): 掃除の進み具合を1回の走査で数える。
-   *  @returns n=片づいたコマ数（📌 以外が全部眠っている）／total=全コマ／
-   *           outside=**窓の外**でまだ起きているコマ数（0 ならこれ以上は減らない） */
-  private sweepProgress(keep: Set<string>): { n: number; total: number; outside: number } {
-    let n = 0;
-    let outside = 0;
-    const frames = this.project.frames;
-    for (let i = 0; i < frames.length; i++) {
-      const f = frames[i];
-      let awake = false;
-      for (const id of Object.keys(f.layers)) if (!keep.has(id)) { awake = true; break; }
-      if (!awake) n++;
-      else if (!this.inSleepWindow(i)) outside++;
-    }
-    return { n, total: frames.length, outside };
-  }
-
-  /** V168 (S-1〜S-3): 写す前の見積り → 待ち → 門番。
-   *  @returns 写してよい見積り。**断ったときは null**（知らせとログは済ませてある）。 */
-  private async prepareSnapshot(): Promise<{ est: SnapshotEstimate; waited: number; swept: number } | null> {
-    const t0 = performance.now();
-    const est0 = snapshotBytes(this.project);
-    let est = est0;
-    const plan = saveSnapshotPlan(est.est);
-    let swept = 0;
-    if (plan === "sweep" && this.sleepOn) {
-      const keep = this.sharedLayerIds();
-      let prog = this.sweepProgress(keep);
-      const startN = prog.n;
-      this.savePrep = { n: prog.n, total: prog.total };
-      this.setSavePhase("prepare");
-      let lastProgressAt = performance.now();
-      this.savePrepStalled = false;
-      this.sweepProgressCb = () => {
-        prog = this.sweepProgress(keep);
-        this.savePrep = { n: prog.n, total: prog.total };
-        lastProgressAt = performance.now();
-        this.savePrepStalled = false;
-        this.renderSavePhase();
-      };
-      // ★Codex 指摘（中）: 描き続けていると掃除は只のものしか進まず、数字が止まる。
-      //  3 秒動かなければ「手を離した合間に片づけが進みます」の文言へ切り替える（1 秒ごとに見る）
-      const stallTimer = window.setInterval(() => {
-        const stalled = performance.now() - lastProgressAt > Editor.SAVE_PREP_STALL_MS;
-        if (stalled !== this.savePrepStalled) {
-          this.savePrepStalled = stalled;
-          this.renderSavePhase();
-        }
-      }, 1000);
-      try {
-        // ★1周（scanned === total）ごとに条件を見直す。無限には回さない:
-        //  (a) est ≤ soft になった (b) 窓の外に起きているコマが無くなった（＝これ以上は減らない）
-        //  (c) 画面を離れた——のどれかで抜ける。進みが無かった周（描いている最中は只のものしか
-        //  片づかない）は少し間を空ける＝CPU を回し続けない
-        for (;;) {
-          if (!this.mounted) break;
-          if (saveSnapshotPlan(est.est) === "clone") break;
-          if (prog.outside === 0) break;
-          const before = prog.n;
-          await this.sweepPass();
-          prog = this.sweepProgress(keep);
-          this.savePrep = { n: prog.n, total: prog.total };
-          this.renderSavePhase();
-          est = snapshotBytes(this.project);
-          if (prog.n <= before) await new Promise((r) => setTimeout(r, 250));
-        }
-      } finally {
-        this.sweepProgressCb = null;
-        clearInterval(stallTimer);
-        this.savePrepStalled = false;
-      }
-      swept = Math.max(0, prog.n - startN);
-    }
-    const waited = Math.round(performance.now() - t0);
-    // S-4: 数値と決まった語だけ（W-10）
-    this.cb.appendLog?.(
-      `[V168] save prepare est=${est0.est} awake=${est0.awake} sleep=${est0.sleep} audio=${est0.audio} ` +
-        `faces=${est0.faces} plan=${plan} waited=${waited}ms swept=${swept} est2=${est.est}`
-    );
-    this.setSavePhase("save");
-    if (!saveSnapshotAllowed(est.est)) {
-      this.cb.appendLog?.(`[V168] save refused est=${est.est} max=${SAVE_SNAPSHOT_MAX_BYTES}`);
-      this.reportSnapshotTooBig(est.est);
-      return null;
-    }
-    return { est, waited, swept };
-  }
-
-  /** V168 (S-3): 断る。**何が・いくつ・どうすれば**を1文に。例外にしない（作品は消えていない）。 */
-  private reportSnapshotTooBig(est: number): false {
-    const gb = (n: number) => (n / 1024 / 1024 / 1024).toFixed(1);
-    const msg =
-      t("ed.save.tooBig.msg", { est: gb(est), max: gb(SAVE_SNAPSHOT_MAX_BYTES) }) +
-      "\n" +
-      t("ed.log.sendHint.msg");
-    if (this.cb.notice) void this.cb.notice(msg);
-    else this.cb.toast(msg);
-    return false; // dirty は true のまま／オートセーブも残したまま（W-6 と同じ）
-  }
-
   /** V168 (S-2): 段階を変えて、出ている表示を揃える。 */
   private setSavePhase(ph: "" | "prepare" | "save"): void {
     this.savePhase = ph;
@@ -8389,7 +6168,7 @@ export class Editor {
   }
 
   /** V168 (S-2): 掃除待ちの進みが止まって見えているか（描き続けている間は只のものしか片づかない）。
-   *  ★Codex 指摘（中）: 「そのまま描き続けられます」だけだと、数字が止まったときに固まったと誤解される。
+   *  ★独立レビューの指摘（中）: 「そのまま描き続けられます」だけだと、数字が止まったときに固まったと誤解される。
    *  数秒進まなかったら「手を離した合間に片づけが進みます」へ切り替える。 */
   private savePrepStalled = false;
   /** V168: 進みが止まったと見なすまでの時間（ms）。掃除は1コマ数十 ms なので、3 秒動かなければ描いている最中 */
@@ -8397,7 +6176,7 @@ export class Editor {
 
   /** V168 (S-2): **ピルと中央表示の文言はここ1つから**（源は1つ）。
    *  @param where "pill"=右下（触れる・描ける）／"central"=`waitForSave` のモーダル（**触れない**）。
-   *  ★Codex 指摘（中）: 中央表示はモーダルで背面が遮られるので「描き続けられます」と言ってはいけない。
+   *  ★独立レビューの指摘（中）: 中央表示はモーダルで背面が遮られるので「描き続けられます」と言ってはいけない。
    *   同じ関数の中で出し分ける＝文言の置き場は1つのまま。 */
   private savePhaseText(where: "pill" | "central" = "pill"): string {
     if (this.savePhase !== "prepare") return where === "central" ? t("ed.save.wait.label") : t("ed.save.bg.label");
@@ -8449,222 +6228,14 @@ export class Editor {
   /** 別名保存（M3.3-A）: ピッカーを強制して save() へ。以降の保存は新ファイルへ向く。
    *  ピッカーをキャンセルした場合は元のフラグへ戻す（次の Ctrl+S が別名扱いにならないように） */
   async saveAs() {
-    // V161（Codex 指摘①）: 飛行中に押すと `save()` が予約へ回し、**ピッカーを出さないまま
+    // V161（独立レビューの指摘①）: 飛行中に押すと `save()` が予約へ回し、**ピッカーを出さないまま
     // いつもの保存先に保存**されてしまう（利用者は「別名で保存した」と思っている）。
     // 先に飛行中の保存を待つ（そのときだけ中央表示が出る＝閉じるときと同じ見え方）
     await this.waitForSave();
     const prev = this.askSaveTarget;
     this.askSaveTarget = true;
-    const ok = await this.save();
+    const ok = await this.save("saveAs");
     if (!ok) this.askSaveTarget = prev;
-  }
-
-  // ---------------- ページ／複数ページ・クリップボード（M3.3-B） ----------------
-
-  /** 選択中のコマ（単一 or Shift範囲）をアプリ全体クリップボードへ（非破壊・履歴なし）
-   *  V166 (層2): **漏斗を通す。** 1,000コマの範囲コピーは全コマの写し取り＋圧縮で数秒かかる。 */
-  async copySelectedFrames() {
-    await this.runHeavy("frame.copy", t("ed.heavy.copy.msg"), () => this.copySelectedFramesInner());
-  }
-
-  private async copySelectedFramesInner() {
-    // 変形/選択移動の浮動中は、切り出されたピクセルが本体に無く欠損コピーになる
-    // M10-2c: 四隅変形中は未確定のプレビューをそのままコピーしてしまうので同様に止める
-    if (this.xformActive || this.floatBuf || this.cornerActive) {
-      this.cb.toast(t("ed.frameclip.xformGuard.toast"));
-      return;
-    }
-    const last = this.project.frames.length - 1;
-    const idxs: number[] = [];
-    if (this.rangeSel) {
-      // 範囲は現在のコマ数へクランプ（古い範囲の持ち越し対策の最終防衛線）
-      const a = Math.max(0, Math.min(this.rangeSel.a, last));
-      const b = Math.max(0, Math.min(this.rangeSel.b, last));
-      for (let i = a; i <= b; i++) idxs.push(i);
-    } else {
-      idxs.push(Math.max(0, Math.min(this.frameIndex, last)));
-    }
-    // ★★V166（Codex 指摘・優先度高②）: **コピー側にも見積もりが要る。**
-    //  見落としていた: `makeClip` は「選んだコマ × そのコマのレイヤー数」を `copyIndexBuf` する。
-    //  1,098コマ×20レイヤーなら **1.57GB**——**貼り付けとまったく同じ量**を、
-    //  コピーを押した時点で確保しに行く。事故は貼り付けで出たが、
-    //  **コピーでも同じ形で落ちる**（起こす処理もそのぶん展開するので、起こすより先に断る）。
-    {
-      const need = clipCopyBytes(this.project, idxs);
-      if (!this.allowBytes(need, "frame.copy", Math.round(need / Math.max(1, idxs.length)))) return;
-    }
-    // ★V156 (P-1): 選ばれたコマが眠っていると `makeClip` の `?? allocIndexBuf(p)` が
-    // **空バッファを写し取る**（＝真っ白なコマがコピーされる）。読みで起こしてから写す
-    if (this.sleepOn) {
-      for (const i of idxs) {
-        const f = this.project.frames[i];
-        if (f) await wakeFrame(this.project, f, "read");
-      }
-    }
-    Editor.frameClip = makeClip(this.project, idxs);
-    // V156 (P-5): 畳んで持つ。**捨てない**（メモをまたぐ貼り付けは仕様）——
-    // 圧縮するだけなので機能はそのまま、抱える量が 20〜30 分の1 になる
-    await packClip(Editor.frameClip);
-    this.updatePasteButton();
-    if (this.sleepOn) this.nudgeSweep(); // 起こしたぶんを片付け直す
-    // 大きな範囲は保持サイズも明示（静的保持のため）
-    const bytes = clipBytes(Editor.frameClip);
-    const mb = Math.round(bytes / 1024 / 1024);
-    const large = bytes > 20 * 1024 * 1024;
-    this.cb.toast(
-      idxs.length === 1
-        ? t("ed.tl.copiedOne.toast")
-        : large
-          ? t("ed.tl.copiedMultiLarge.toast", { count: idxs.length, mb })
-          : t("ed.tl.copiedMulti.toast", { count: idxs.length })
-    );
-  }
-
-  /** はりつけ: 1枚=現在ページに上書き（うごメモ準拠）／複数=現在コマの後ろに挿入（総集編）
-   *
-   *  ★V166: **2026-08-31 に落ちたのはここ。** 1,098コマ×20レイヤー（約1.69GB）を
-   *  確保しようとして `Array buffer allocation failed`、そのまま連打できたので8回繰り返し、
-   *  WebView ごと落ちた。いまは (1) 漏斗で入口が閉じる (2) 確保の前に見積もって断る。 */
-  async pasteFrames() {
-    await this.runHeavy("frame.paste", t("ed.heavy.paste.msg"), () => this.pasteFramesInner());
-  }
-
-  private async pasteFramesInner() {
-    const clip = Editor.frameClip;
-    if (!clip || clip.frames.length === 0) {
-      this.cb.toast(t("ed.tl.clipEmpty.toast"));
-      return;
-    }
-    if (this.xformGuard()) return; // E-4: copy側と統一（暗黙キャンセルしない）
-    // ★★V166（Codex 指摘・優先度高③）: **展開より先に断る。**
-    //  見落としていた: `unpackClip` は畳んだクリップを**全部生バッファへ展開する**ので、
-    //  1,098コマ×20レイヤーなら**見積もりに来る前に 1.57GB を確保**していた
-    //  ——断る意味が無かった。開いたら何バイトになるかは畳んだ側の枚数と幅で分かる
-    if (
-      !this.allowBytes(
-        clipUnpackedBytes(clip),
-        "frame.paste.unpack",
-        Math.round(clipUnpackedBytes(clip) / Math.max(1, clip.frames.length))
-      )
-    )
-      return;
-    // ★Codex 指摘・優先度高①: `unpack` したら**必ず**畳み直す。
-    //  以前は末尾で `void packClip(clip)` としていたので、漏斗が閉じたあとに再圧縮が走り、
-    //  連打防止・予算・例外捕捉の**外**でクリップを書き換え続けていた
-    await unpackClip(clip); // V156 (P-5): 畳んであるので開いてから使う
-    try {
-      await this.pasteFramesBody(clip);
-    } finally {
-      await packClip(clip); // 使い終わったらまた畳む（static なので抱えっぱなしにしない）
-    }
-  }
-
-  private async pasteFramesBody(clip: FrameClip) {
-    const self = this;
-    const bitsBefore = this.project.indexBits;
-
-    if (clip.frames.length === 1) {
-      // --- 単ページ: 現在ページに上書き ---
-      const frame = this.project.frames[this.frameIndex];
-      if (!frame) return;
-      // ★V166 (B): 単ページ経路も見積もる（要件 §2-B「単ページ経路にも」）。
-      //  **1コマの上書きでも「4コマぶん」を新しく確保する**——数えるとこうなる:
-      //   ① `beforeLayers`（全レイヤーぶんの写し・履歴が持ち続ける）
-      //   ② `buildFramesFromClip` が組む `built`（全レイヤーぶん）
-      //   ③ `afterLayers`（全レイヤーぶんの写し・履歴が持ち続ける）
-      //   ④ `restore()` の中で1枚ずつ張り替える `nb = allocIndexBuf`（全レイヤーぶん）
-      //  ★**少なく見積もらないこと**が要点。少なく見ると「断るべきものを通す」＝事故が戻る
-      if (!this.allowFrameAlloc(4, clip.palette.length, "frame.paste")) return;
-      // before 退避（色再マップ＝昇格の前に取得。widening は undo 側の alloc+set が担保）
-      const layerIds = this.project.layerDefs.map((l) => l.id);
-      const beforeLayers: Record<string, IndexBuf> = {};
-      for (const id of layerIds)
-        beforeLayers[id] = copyIndexBuf(frame.layers[id] ?? allocIndexBuf(this.project));
-      const beforePaper = frame.paper;
-      const beforeOrder = frame.order ? [...frame.order] : undefined;
-      // M5-1（Codex指摘#1）: SE配置も上書き対象（コピー元の配置を貼る・Undoで元の配置へ戻す）
-      const beforeSe = frame.se ? [...frame.se] : undefined;
-      // 色再マップ→構築（昇格し得る。関数内で「色解決→確保」順を保証）
-      const [built] = buildFramesFromClip(this.project, clip);
-      const afterLayers: Record<string, IndexBuf> = {};
-      for (const id of layerIds)
-        afterLayers[id] = copyIndexBuf(built.layers[id] ?? allocIndexBuf(this.project));
-      const afterPaper = built.paper;
-      const afterSe = built.se ? [...built.se] : undefined; // 貼り付け先に存在するidのみ（filter済み）
-      const restore = (
-        layers: Record<string, IndexBuf>,
-        paper: number,
-        order: string[] | undefined,
-        se: string[] | undefined
-      ) => {
-        for (const id of layerIds) {
-          const nb = allocIndexBuf(self.project);
-          nb.set(layers[id]);
-          frame.layers[id] = nb;
-        }
-        frame.paper = paper;
-        frame.order = order ? [...order] : undefined;
-        frame.se = se && se.length > 0 ? [...se] : undefined;
-        // ★昇格をまたぐ undo/redo の幅不整合防止（M3.3 ハンドオフ指定）
-        conformFrameWidth(self.project, frame);
-        self.afterStructuralChange();
-        self.updateFilmSeMarks();
-        self.redrawOverlay();
-      };
-      this.history.push({
-        colorRefs: () => ({ bufs: [...Object.values(beforeLayers), ...Object.values(afterLayers)], papers: [beforePaper, afterPaper] }), // V195 (A-99)
-        label: "ページ貼り付け",
-        bytes: entryBytes(beforeLayers, afterLayers), // V154 (W-2)
-        undo: () => restore(beforeLayers, beforePaper, beforeOrder, beforeSe),
-        redo: () => restore(afterLayers, afterPaper, undefined, afterSe),
-      });
-      restore(afterLayers, afterPaper, undefined, afterSe);
-      if (bitsBefore === 8 && this.project.indexBits === 16) {
-        this.noticePromote16(); // V154 (W-3)
-      }
-      this.cb.toast(t("ed.frameclip.pastedOne.toast"));
-      return; // V166: 畳み直しは呼び出し元の finally（Codex 指摘①）
-    }
-
-    // --- 複数ページ: 現在コマの後ろに挿入 ---
-    const n = clip.frames.length;
-    if (this.project.frames.length + n > 65535) {
-      this.cb.toast(t("ed.tl.pasteLimit.toast"));
-      return;
-    }
-    // ★V166 (B): **確保する前に**見積もる。ここが事故の急所だった
-    //  ——今までの防御は「65,535コマを超えるか」だけで、**1回で確保する量**を見ていなかった。
-    //  4,393コマの作品に 1,098コマを貼る操作はコマ数の上限にまったく触れないまま
-    //  1.69GB を確保しに行き、確保の途中で落ちた。
-    if (!this.allowFrameAlloc(n, clip.palette.length, "frame.paste")) return;
-    const newFrames = buildFramesFromClip(this.project, clip);
-    const at = this.frameIndex + 1;
-    const apply = () => {
-      // redo 時: 挿入待機中に16bit昇格が起きていると8bitのまま取り残されるため正規化
-      for (const f of newFrames) conformFrameWidth(self.project, f);
-      self.project.frames.splice(at, 0, ...newFrames);
-      self.frameIndex = at;
-      self.afterFrameStructureChange();
-    };
-    const revert = () => {
-      self.project.frames.splice(at, n);
-      self.frameIndex = Math.min(at - 1, self.project.frames.length - 1);
-      self.afterFrameStructureChange();
-    };
-    // V154 (W-2): 取り消したコマは履歴が抱える（同上）
-    this.history.push({
-      colorRefs: () => ({ frames: newFrames }), // V195 (A-99)
-      label: "ページ挿入",
-      bytesIfUndone: entryBytes(newFrames),
-      undo: revert,
-      redo: apply,
-    });
-    apply();
-    if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.noticePromote16(); // V154 (W-3)
-    }
-    this.cb.toast(t("ed.tl.insertedMulti.toast", { count: n }));
-    // V166: 畳み直しは呼び出し元の finally（Codex 指摘①）
   }
 
   // ---------------- キャンバス表示 ----------------
@@ -8691,10 +6262,12 @@ export class Editor {
     this.updateGridOverlay(z);
     // M12-C: カーソル層も同じ寸法で取り直す（格子と同じ集約点に乗せる）。
     // 指紋を捨ててから描き直すので、ズーム後に古い大きさの輪が残らない
-    this.cursorPainted = "";
-    this.paintCursorLayer();
+    // ★V209 (A-122): 最後のポインタの位置から引き直す（拡大縮小・回転反転のあと、ポインタを動かさなくても枠はポインタの下に）
+    this.syncCursorFrame();
     // M13-2b (T-6): 変形・四隅の枠とハンドルの層も同じ寸法で取り直す（ぼけない・ずれない）
     this.paintUiOverlay();
+    // V208 (A-119): 範囲選択の線の層も同じ寸法で取り直す（線は格子と同じ式で物理 px に丸める）
+    this.paintSelectionUi();
     this.refreshSelectionLauncher(); // M11-8: ズーム/リサイズ/回転反転に追従
   }
 
@@ -8731,8 +6304,15 @@ export class Editor {
   // ---------------- M12-C: カーソル（1階＝CSS / 2階＝#ed-cursor レイヤー） ----------------
 
   /** M12-C: キャンバスから出たらカーソル層を消す（点が置き去りにならないように） */
-  private cursorLeaveHandler = () => {
+  private cursorLeaveHandler = (ev?: Event) => {
+    const e = ev as PointerEvent | undefined;
     this.cursorDot = null;
+    // ★V209 (A-122): 外枠から出たら引き直す位置も無い。ただし、ポインタはまだ外枠の上で、上に出た別の要素（変形のモードの札など）へ
+    //  移っただけのときは位置を残す（その札が消えたあと、変形を Enter で抜けた直後などに枠をポインタの下へ出し直すため）
+    const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
+    const r = e && wrap ? wrap.getBoundingClientRect() : null;
+    const inside = !!r && !!e && e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
+    if (!inside) this.cursorClient = null;
     this.cancelCursorFrame();
     this.clearCursorLayer();
   };
@@ -8758,7 +6338,7 @@ export class Editor {
       this.cancelCursorFrame();
       this.clearCursorLayer();
     } else {
-      this.paintCursorLayer();
+      this.syncCursorFrame(); // ★V209 (A-122): 最後のポインタの位置から（設定を変えた直後もポインタの下に枠と none）
     }
   }
 
@@ -8803,10 +6383,60 @@ export class Editor {
   }
 
   private clearCursorLayer() {
+    // ★V209 (A-122): 枠を消すところで 1 階も戻す（枠を消すのと点に戻すのを同じ所で＝何も見えない瞬間を作らない）
+    this.setFrameCursor(false);
     const cv = document.querySelector("#ed-cursor") as HTMLCanvasElement | null;
     if (!cv || cv.hidden) return;
     cv.hidden = true;
     this.cursorPainted = "";
+  }
+
+  /** ★V209 (A-122): いま 1 階を none にしているか（枠を出している間だけ真） */
+  private frameCursorOn = false;
+  /** ★V209 (A-122): 最後のポインタの位置（クライアント座標）。枠を出し直すときに引き直す（パン・拡大縮小・スクロール・回転・反転・
+   *  変形の確定・Space を離したあと、ポインタを動かさなくても枠がポインタの下に出る）。外枠から出たら null */
+  private cursorClient: { x: number; y: number } | null = null;
+
+  /** ★V209 (A-122・REQ §2 (2)): 1 階の決まりは 1 つ——**枠を出している間は none、出していない間は none でない**。
+   *  枠を出すのと点を消すのを同じ所で、枠を消すのと点に戻すのを同じ所で行う。
+   *  描いている間（#ed-cvwrap が掴んでいる間）は掴んだ要素のカーソルが出るので、#ed-cvwrap も none にする。
+   *  ⚙ の形が「十字」「矢印」の人は none にしない（枠だけ新しい形）。
+   *  **戻すのは枠を出していた状態から消すときだけ**（消す道を通るたびに外枠を書き直すと、変形のドラッグ中に
+   *  beginTransformDrag が入れた当たり判定のカーソルを消す）。戻し先は updatePanCursor と同じ決め方 */
+  private setFrameCursor(on: boolean) {
+    const cv = document.querySelector("#ed-canvas") as HTMLElement | null;
+    const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
+    if (on && this.cursorCfg.style === "dot") {
+      if (cv && cv.style.cursor !== "none") cv.style.cursor = "none";
+      if (wrap && wrap.style.cursor !== "none") wrap.style.cursor = "none";
+      this.frameCursorOn = true;
+      return;
+    }
+    if (!this.frameCursorOn) return;
+    this.frameCursorOn = false;
+    const panning = !!this.panState;
+    const hand = this.tool === "hand" || this.spaceHeld;
+    if (wrap) wrap.style.cursor = panCursorFor(panning, hand);
+    if (this.tool === "transform" || this.xformActive) {
+      // 変形に入った（貼り付け・画像の配置・ツールの切り替え）: キャンバスが none なら、その位置の当たり判定のカーソルに
+      //（当たらなければ空＝CSS の十字）。以後、変形中は外枠に触らない（frameCursorOn は偽のまま）
+      if (cv && cv.style.cursor === "none") this.setCanvasCursor(this.cursorDot && this.floatBuf ? this.xformHitTest(this.cursorDot).cursor : "");
+      return;
+    }
+    if (panning) this.setCanvasCursor("grabbing");
+    else if (hand) this.setCanvasCursor("grab");
+    else this.applyCanvasCursor();
+  }
+
+  /** ★V209 (A-122): 枠と 1 階をその場で決め直す。最後のポインタの位置から引き直して描く（引き直せなければ枠を出さずに 1 階を戻す）。
+   *  Space の押す・離す・blur（updatePanCursor）・ツールの替わり（updateToolButtons＝setTool・貼り付け・画像の配置・endTransform）・
+   *  restoreCursor・拡大縮小と回転反転（applyZoom）・スクロールから呼ぶ */
+  private syncCursorFrame() {
+    if (!this.mounted) return;
+    const c = this.cursorClient;
+    this.cursorDot = c ? this.clientToPixel(c.x, c.y) : null;
+    this.cursorPainted = "";
+    this.paintCursorLayer();
   }
 
   /** M12-C: 2階の描画。**ここから `redrawOverlay()` を絶対に呼ばない**
@@ -8823,6 +6453,9 @@ export class Editor {
       this.cursorLive &&
       !!dot &&
       !cursorLayerHidden(this.tool) &&
+      // ★V209 (A-122): Space を押している間（押した瞬間から）・パン中は枠を出さない（手のひらのカーソルを none で上書きしない）
+      !this.spaceHeld &&
+      !this.panState &&
       dot.x >= 0 &&
       dot.y >= 0 &&
       dot.x < W &&
@@ -8831,17 +6464,25 @@ export class Editor {
       this.clearCursorLayer();
       return;
     }
-    const size = this.penSize;
+    // ★V209 (A-122): 枠は**実際に塗る太さ**で描く（ブラシは 3 より細く塗らない＝penOptions と同じ）
+    const size = paintedSize(this.tool, this.penSize);
     const ring = this.cursorCfg.ring && hasRing(this.tool);
-    // ★V178 (A-72・決-3 ②): 全レイヤー消しゴムのときだけ、輪の外側にもう 1 本（二重線）。
-    //  太さの輪はそのまま＝消える範囲は変わらない。輪を切っている設定なら二重線も出さない（輪の飾りなので）
+    // ★V178 (A-72・決-3 ②): 全レイヤー消しゴムのときだけ、枠の外側にもう 1 組（二重線）。
+    //  太さの枠はそのまま＝消える範囲は変わらない。輪を切っている設定なら二重線も出さない（輪の飾りなので）
     const dbl = ring && this.eraseAllOn();
-    // 同じ絵をもう一度描かない（位置・太さ・ツール・寸法が全部同じなら何もしない）
+    // ★V209 (A-122): 乗っているドットの枠は、同じ位置に新しい枠を描いているとき（輪オンのペン・消しゴムで塗る太さが 1）だけ出さない
+    const cell = this.cursorCfg.cell && !(ring && size === 1);
     const cssW = canvas.offsetWidth;
     const cssH = canvas.offsetHeight;
-    const key = `${dot!.x},${dot!.y},${size},${ring ? 1 : 0}${dbl ? "d" : ""},${this.cursorCfg.cell ? 1 : 0},${cssW}x${cssH}`;
+    if (!cssW || !cssH) {
+      this.clearCursorLayer();
+      return;
+    }
+    // ★V209 (A-122): 枠を出す所で 1 階を none に（同じ所＝何も見えない瞬間を作らない）
+    this.setFrameCursor(ring);
+    // 同じ絵をもう一度描かない（位置・太さ・ツール・寸法が全部同じなら何もしない）
+    const key = `${dot!.x},${dot!.y},${size},${ring ? 1 : 0}${dbl ? "d" : ""},${cell ? 1 : 0},${cssW}x${cssH}`;
     if (key === this.cursorPainted && !cv.hidden) return;
-    if (!cssW || !cssH) return;
     const dpr = window.devicePixelRatio || 1;
     const pw = Math.max(1, Math.round(cssW * dpr));
     const ph = Math.max(1, Math.round(cssH * dpr));
@@ -8855,43 +6496,27 @@ export class Editor {
     const py = (cssH * dpr) / H;
     const L = (dx: number) => Math.round((dot!.x + dx) * px);
     const T = (dy: number) => Math.round((dot!.y + dy) * py);
-    // ドット枠: カーソル直下の1ドットを囲む（格子と同じ Math.round(i*px) の位置に乗る）
-    if (this.cursorCfg.cell) {
+    // ★V209 (A-122): ペン先の枠: 塗られるドットの集まりの**外側**に、内側が黒・外側が白の 2 本線（中は何も描かない・位置で色を変えない）。
+    //  全レイヤー消しゴムは、さらに外側に間を空けてもう 1 組（外側の組を先に描く＝中を空ける描き方で内側の枠を消さない）
+    if (ring) {
+      const lw = frameLineWidth(dpr);
+      // 輪との間隔（物理 px）。細い線 2 組が離れて見える最小限（dpr 1 で 3px の隙間・V178 と同じ）
+      const g = dbl ? Math.max(3, Math.round(3 * dpr)) : null;
+      for (const op of cursorFrameOps(size, L, T, lw, g)) {
+        if (op.kind === "fill") {
+          ctx.fillStyle = op.color;
+          for (const r of op.rects) ctx.fillRect(r.x, r.y, r.w, r.h);
+        } else for (const r of op.rects) ctx.clearRect(r.x, r.y, r.w, r.h);
+      }
+    }
+    // ドット枠: カーソル直下の1ドットを囲む（格子と同じ Math.round(i*px) の位置に乗る・ドットの内側の縁＝枠の中を空けたあとに描く）
+    if (cell) {
       const x0 = L(0), x1 = L(1), y0 = T(0), y1 = T(1);
       ctx.fillStyle = antColor(dot!.x, dot!.y);
       ctx.fillRect(x0, y0, x1 - x0, 1);
       ctx.fillRect(x0, y1 - 1, x1 - x0, 1);
       ctx.fillRect(x0, y0, 1, y1 - y0);
       ctx.fillRect(x1 - 1, y0, 1, y1 - y0);
-    }
-    // ペン先の輪: いま置いたら塗られるドット集合の**外周だけ**を描く
-    if (ring) {
-      for (const e of footprintEdges(size)) {
-        const ax = dot!.x + e.dx;
-        const ay = dot!.y + e.dy;
-        const x0 = L(e.dx), x1 = L(e.dx + 1), y0 = T(e.dy), y1 = T(e.dy + 1);
-        ctx.fillStyle = antColor(ax, ay);
-        if (e.side === "top") ctx.fillRect(x0, y0, x1 - x0, 1);
-        else if (e.side === "bottom") ctx.fillRect(x0, y1 - 1, x1 - x0, 1);
-        else if (e.side === "left") ctx.fillRect(x0, y0, 1, y1 - y0);
-        else ctx.fillRect(x1 - 1, y0, 1, y1 - y0);
-      }
-    }
-    if (dbl) {
-      // 輪との間隔（物理 px）。細い線 2 本が離れて見える最小限（dpr 1 で 2px の隙間）
-      const g = Math.max(3, Math.round(3 * dpr));
-      for (const r of outerRingRuns(size, L, T, g)) {
-        // 色は輪と同じ黒／白の交互（キャンバスのドットで 4 周期）。帯を 1 ドットの境目で区切って塗る
-        const ay = Math.floor(r.y / py);
-        const end = r.x + r.w;
-        for (let x = r.x; x < end; ) {
-          const ax = Math.floor(x / px);
-          const next = Math.min(end, Math.max(x + 1, Math.ceil((ax + 1) * px)));
-          ctx.fillStyle = antColor(ax, ay);
-          ctx.fillRect(x, r.y, next - x, 1);
-          x = next;
-        }
-      }
     }
     this.cursorPainted = key;
   }
@@ -9033,60 +6658,19 @@ export class Editor {
     return { x: u * W, y: v * H };
   }
 
-  /** 描線に渡す座標。**`clientToPixelF` を半画素ずらしたもの**。
-   *
-   *  ★なぜ半画素引くのか（Codex のリリース前レビュー指摘・重大度 高）:
-   *  `clientToPixelF` は「画素 n が [n, n+1) を占める」座標系（＝`Math.floor` で画素に落ちる）。
-   *  ところが `raster.ts` の `strokeSegment` / `stamp` は **`Math.round` で画素に落とす**＝
-   *  「画素 n が [n−0.5, n+0.5) を占める」座標系。そのまま渡すと、
-   *  **カーソルが指す画素と、実際に描かれる画素が 1 ドットずれる**（10.75 → カーソルは 10・描線は 11）。
-   *  端でも `319.7` が `320` に丸まり、範囲外になってクリックだけでは描けなくなる。
-   *  半画素引けば `Math.round` の結果が `Math.floor` と一致するので、**従来と同じ画素**に着く。
-   *  この回で変えたいのは「関節ごとに丸め直すのをやめる」ことだけで、**線の位置ではない**。 */
-  private clientToStrokePt(cx: number, cy: number): { x: number; y: number } {
-    const p = this.clientToPixelF(cx, cy);
-    return { x: p.x - 0.5, y: p.y - 0.5 };
-  }
-
-  renderCanvas() {
-    // ★V156 (P-1): 描くのに要るコマ（表示中＋オニオンが読む前後3）がまだ眠っていたら、
-    //   **前の絵を消さずに**起こしてから描き直す。
-    //
-    //   ここを入口の1か所にしてあるので、`frameIndex` を直に動かす経路（コマの挿入・削除・
-    //   並べ替え・undo の中の12箇所）を1つも書き換えずに済む。白い一瞬も作らない——
-    //   起きるまでの十数 ms は前のコマが出たままで、揃ったら差し替わる。
-    //   `wakeGen` は追い越し対策（速く連打したとき、古い起こし結果で描き戻さない）。
-    if (this.sleepOn && !this.frameReady()) {
-      const gen = ++this.wakeGen;
-      // V156（Codex レビュー §4・優先度 中）: 前の絵を残すので白紙にはならないが、
-      // タイムラインの選択だけ先に進むので「押せていない」「違うコマを見ている」に見える余地がある。
-      // **目に見える長さ（150ms）を超えたときだけ**小さな札を出す。
-      // 中央の重い表示（W-8）も操作ロックもしない——ふつうは 30ms 台で終わるので、出ないのが既定
-      const badgeTimer = window.setTimeout(() => {
-        if (gen === this.wakeGen) this.showWaitBadge(true);
-      }, 150);
-      void this.ensureSleepWindow().then(() => {
-        clearTimeout(badgeTimer);
-        if (this.mounted && gen === this.wakeGen) {
-          this.showWaitBadge(false);
-          this.renderCanvas();
-        }
-      });
-      return;
-    }
-    compositeFrame(this.project, this.frameIndex, this.composite, {
-      onion: this.playing ? 0 : this.onionLevel,
-      // V164 (U-1): 向き。再生中は段数が 0 なので向きは効かない（再生中に描かない挙動は不変）
-      onionDir: this.onionDir,
+  override renderCanvas() {
+    // ★V214 (M-2b-1a): 眠ったコマを起こす・1px の線の仮・オニオンを決めて絵を作るのはコアの renderWork。
+    //  ここは見せる処理だけ（コアが 1px の仮を打ったまま呼ぶ＝本体とミニに仮の点が出る・例外でも仮は戻る）
+    this.renderWork((composite) => {
+        const cv = $("#ed-canvas") as unknown as HTMLCanvasElement;
+        presentToCanvas(composite, cv);
+        // M11-16: 透明の紙は合成バッファでは alpha=0（何も焼かない）。市松は**表示層**＝canvas 要素の
+        // 背景で出す（.paper-clear の CSS）。紙が実色ならクラスを外して従来の白背景（見えない）
+        cv.classList.toggle("paper-clear", this.project.frames[this.frameIndex]?.paper === 0);
+        // ミニプレビュー（オニオン無し）。M11-13: 隠している間は合成そのものを走らせない
+        //（compositeFrame は全レイヤーを毎回合成するので、描画1回ぶんまるごと省ける）
+        if (this.miniShown()) this.paintMini(); // M11-18: 収納ミニは hudHidden でも見えている
     });
-    const cv = $("#ed-canvas") as unknown as HTMLCanvasElement;
-    presentToCanvas(this.composite, cv);
-    // M11-16: 透明の紙は合成バッファでは alpha=0（何も焼かない）。市松は**表示層**＝canvas 要素の
-    // 背景で出す（.paper-clear の CSS）。紙が実色ならクラスを外して従来の白背景（見えない）
-    cv.classList.toggle("paper-clear", this.project.frames[this.frameIndex]?.paper === 0);
-    // ミニプレビュー（オニオン無し）。M11-13: 隠している間は合成そのものを走らせない
-    //（compositeFrame は全レイヤーを毎回合成するので、描画1回ぶんまるごと省ける）
-    if (this.miniShown()) this.paintMini(); // M11-18: 収納ミニは hudHidden でも見えている
   }
 
   private overlayCtx(): CanvasRenderingContext2D {
@@ -9094,43 +6678,25 @@ export class Editor {
     return cv.getContext("2d")!;
   }
 
-  redrawOverlay() {
+  override redrawOverlay() {
     const ctx = this.overlayCtx();
     ctx.clearRect(0, 0, W, H);
-    // 選択のマーチングアンツ（ドット風）
-    if (this.selMask && !this.xformActive) {
+    // V208 (A-119): 選択の境目の線は画面解像度の層（#ed-sel-ui・paintSelectionUi）へ移した（作者の決定 2026-10-24
+    //  ＝ドットより細い線。縁のドットを白黒で塗る M10-22 の形はやめた＝縁の絵を隠さない）。ここに残るのは
+    //  「色を付ける」がオンのときの中の色だけ
+    if (this.selMask && !this.xformActive && this.selMaskShow) {
       const img = ctx.createImageData(W, H);
-      // M13-2a (A-2): 内側の色付け。**同じ1回の走査**で、輪郭でない画素にだけ半透明の単色を置く
-      //（輪郭＝破線は従来どおり残す）。オーバーレイの ImageData に書くだけで索引には触れない
+      // M13-2a (A-2) → V208: 選んだ**全部の**ドット（縁も）に半透明の単色を置く。
+      // オーバーレイの ImageData に書くだけで索引には触れない
       const [mr, mg, mb, ma] = SEL_MASK_RGBA;
-      const tint = this.selMaskShow;
       for (let y = 0; y < H; y++)
         for (let x = 0; x < W; x++) {
           const i = y * W + x;
           if (!this.selMask[i]) continue;
-          const edge =
-            x === 0 ||
-            y === 0 ||
-            x === W - 1 ||
-            y === H - 1 ||
-            !this.selMask[i - 1] ||
-            !this.selMask[i + 1] ||
-            !this.selMask[i - W] ||
-            !this.selMask[i + W];
-          if (edge) {
-            // M10-22: 間引きをやめ全輪郭画素を黒/白交互（4px周期）で描く。
-            // どんな背景でも必ずどちらかが見える定番の作法（アニメーション不要）
-            const white = ((x + y) >> 2) % 2 === 1;
-            img.data[i * 4] = white ? 255 : 44;
-            img.data[i * 4 + 1] = white ? 255 : 38;
-            img.data[i * 4 + 2] = white ? 255 : 33;
-            img.data[i * 4 + 3] = 255;
-          } else if (tint) {
-            img.data[i * 4] = mr;
-            img.data[i * 4 + 1] = mg;
-            img.data[i * 4 + 2] = mb;
-            img.data[i * 4 + 3] = ma;
-          }
+          img.data[i * 4] = mr;
+          img.data[i * 4 + 1] = mg;
+          img.data[i * 4 + 2] = mb;
+          img.data[i * 4 + 3] = ma;
         }
       ctx.putImageData(img, 0, 0);
     }
@@ -9141,32 +6707,237 @@ export class Editor {
     // M10-2c → M13-2b (T-6): 四隅変形の枠とハンドルは画面解像度の層（`paintUiOverlay`）へ移した
     // M11-12: 浮動テキスト（実際のドット＋外接する薄い枠。選択範囲では切らない）
     if (this.textDraft) this.drawTextDraftPreview(ctx);
-    // 自由選択の軌跡
-    // V158 (C-2): ここは**作品の絵の上**に描くプレビュー。配色を変えても作品の色は変わらないので、
-    // 配色に追随させると逆に見えにくくなる（明るい絵の上で明るい線になる）。据え置きが正しい
-    if (this.lassoPts.length > 1) {
-      ctx.strokeStyle = "rgba(44,38,33,.8)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(this.lassoPts[0].x + 0.5, this.lassoPts[0].y + 0.5);
-      for (const p of this.lassoPts) ctx.lineTo(p.x + 0.5, p.y + 0.5);
-      ctx.stroke();
-    }
-    // M14 (S-2): 囲い塗りの軌跡（破線＋始点終点を結んだ閉じの目安）。離すと内側が塗られる
-    if (this.enclosePts.length > 1) {
-      ctx.save();
-      ctx.strokeStyle = "rgba(44,38,33,.85)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([2, 2]);
-      ctx.beginPath();
-      ctx.moveTo(this.enclosePts[0].x + 0.5, this.enclosePts[0].y + 0.5);
-      for (const p of this.enclosePts) ctx.lineTo(p.x + 0.5, p.y + 0.5);
-      ctx.closePath(); // 始点と終点を結んだ「閉じ」を見せる（塗られる範囲の目安）
-      ctx.stroke();
-      ctx.restore();
-    }
+    // V208 (A-119): 自由選択と囲い塗りの軌跡（囲んでいる途中の線）は画面解像度の層へ移した（paintSelectionUi・
+    //  ペンについてくる細い線。320×240 のここに引くと 1 ドットの太さのぼけた線になる）
     // M11-8 P-3: 選択の状態が変わる経路はすべてここを通るので、ランチャーもここで更新する
     this.refreshSelectionLauncher();
+    // V208 (A-119): 同じ理由で、範囲選択の線の層もここで整える。★M13-2b の「redrawOverlay の中から画面解像度の層の
+    //  描画を呼ばない」の**ただ 1 つの例外**（作者の決定 2026-10-24・REQ_selection_outline）。境目の線を作り直すのは
+    //  マスクの実体が替わったときだけ・出す／消す／点線のタイマー／描き直しは、呼ばれるたびに条件を見て決める
+    this.paintSelectionUi();
+  }
+
+  /**
+   * V208 (A-119): 範囲選択の線の層（#ed-sel-ui・画面解像度）を描く**ただ 1 つの関数**。
+   * 選んだあとの境目の線（白の線の上に黒の破線・動かす）と、囲んでいる途中の線（投げ縄・囲い塗り）を今の状態から両方描く。
+   * 出すか（層がある・寸法がある・選択がある・xformActive でない・出さない場面でない）は呼ばれるたびに決め、描く物が
+   * 無ければ隠してバッキングを小さくし、点線のタイマーも止める（タイマーの 1 回ごとにもここを通る）。
+   * 呼ぶのは redrawOverlay（最後の 1 行）・囲んでいる途中の pointermove（1 回につき 1 回）・点線のタイマー・applyZoom・
+   * 出さない場面に入るとき（previewSelectRect・redrawSelMovePreview）・redrawOverlay を通らずに selMask を null にする所
+   * （作品を替えるとき・endTransform）。renderCanvas も redrawOverlay も呼ばない。
+   */
+  protected override paintSelectionUi(): void {
+    const cv = document.querySelector("#ed-sel-ui") as HTMLCanvasElement | null;
+    const canvas = document.querySelector("#ed-canvas") as HTMLCanvasElement | null;
+    // 層が DOM にあり、寸法が 0 でないときだけ描く（Node の検査の台の偽の document はどんな字にも要素を返し、
+    // 寸法は 0・isConnected が無い＝ここで止まる。タイマーもここより先でしか始めない）
+    const live =
+      !!cv && !!canvas && cv.isConnected === true && canvas.offsetWidth > 0 && canvas.offsetHeight > 0;
+    const outline = live ? this.selUiOutlineNow() : null;
+    const trail = this.lassoPts.length > 1 ? this.lassoPts : this.enclosePts.length > 1 ? this.enclosePts : null;
+    if (!live || !canvas || !cv || (!outline && !trail)) {
+      this.stopSelUiTimer();
+      if (cv && cv.isConnected === true && !cv.hidden) {
+        // 隠すときはバッキングを小さくする（大きいズームでは 1 枚が約 79MB）。控えの絵も捨てる
+        cv.hidden = true;
+        cv.width = 1;
+        cv.height = 1;
+      }
+      this.selUiCache = null;
+      this.selUiCacheKey = "";
+      return;
+    }
+    const cssW = canvas.offsetWidth;
+    const cssH = canvas.offsetHeight;
+    const dpr = window.devicePixelRatio || 1;
+    const pw = Math.max(1, Math.round(cssW * dpr));
+    const ph = Math.max(1, Math.round(cssH * dpr));
+    if (cv.width !== pw) cv.width = pw;
+    if (cv.height !== ph) cv.height = ph;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    cv.hidden = false;
+    ctx.clearRect(0, 0, pw, ph);
+    // 1 ドットの物理 px（格子 updateGridOverlay と同じ式）・線の太さは 1 CSS px 相当を物理 px に丸める
+    const px = (cssW * dpr) / W;
+    const py = (cssH * dpr) / H;
+    const lw = Math.max(1, Math.round(dpr));
+    if (outline) {
+      const key = `${pw}x${ph}:${outline.dx},${outline.dy}`;
+      if (!this.selUiPath || this.selUiPathKey !== key) {
+        this.selUiPath = this.selOutlinePath(outline.o, outline.dx, outline.dy, pw, ph, px, py, lw);
+        this.selUiPathKey = key;
+        this.selUiCacheKey = "";
+      }
+      const still = outline.o.edges > SEL_UI_ANIM_MAX_EDGES;
+      if (!still) this.strokeSelOutline(ctx, this.selUiPath, lw, dpr);
+      else {
+        // 辺が多すぎる形（市松に近い✨など）は点線を止めたまま、描いた絵を控えて貼る（囲んでいる途中の
+        // pointermove のたびに 15 万本の辺を描き直さない）。控えは 1 枚だけ（大きいズームでは 1 枚が約 79MB）
+        const ckey = `${key}:${this.selUiPhase}`;
+        let cache = this.selUiCache;
+        if (!cache || this.selUiCacheKey !== ckey) {
+          cache = cache ?? document.createElement("canvas");
+          cache.width = pw;
+          cache.height = ph;
+          const cctx = cache.getContext("2d");
+          if (cctx) this.strokeSelOutline(cctx, this.selUiPath, lw, dpr);
+          this.selUiCache = cache;
+          this.selUiCacheKey = ckey;
+        }
+        ctx.drawImage(cache, 0, 0);
+      }
+    } else if (this.selUiCache) {
+      this.selUiCache = null; // 境目の線が無くなったら控えも捨てる
+      this.selUiCacheKey = "";
+    }
+    if (trail) this.strokeSelTrail(ctx, trail, px, py, lw, dpr);
+    // 点線を動かすのは境目の線が出ているときだけ（辺が多すぎるとき・視差効果を減らす設定のときは止めたまま）
+    if (outline && outline.o.edges <= SEL_UI_ANIM_MAX_EDGES && !this.reducedMotionNow()) this.startSelUiTimer();
+    else this.stopSelUiTimer();
+  }
+
+  /** V208 (A-119): 今出す境目の線（null＝出さない）。作り直すのはマスクの実体が替わったときだけ。
+   *  枠だけを動かすドラッグの間は、掴んだときのマスクの線をずらして描く（動くたびに作り直さない） */
+  private selUiOutlineNow(): { o: SelOutline; dx: number; dy: number } | null {
+    if (!this.selMask || this.xformActive || this.selUiHidden()) return null;
+    const drag = this.selMaskDrag;
+    const src = drag ? drag.base : this.selMask;
+    if (src !== this.selUiSrc || !this.selUiOutline) {
+      this.selUiSrc = src;
+      this.selUiOutline = selectionOutline(src, W, H);
+      this.selUiPath = null;
+    }
+    if (this.selUiOutline.edges === 0) return null;
+    return { o: this.selUiOutline, dx: drag ? drag.dx : 0, dy: drag ? drag.dy : 0 };
+  }
+
+  /** V208 (A-119): 今その間は線を出さない場面か（場面が終わっていたら印を捨てる） */
+  private selUiHidden(): boolean {
+    const h = this.selUiHideFor;
+    if (h === "rect" && this.tool === "select" && this.shapeStart) return true;
+    if (h === "selmove" && this.dragMode === "selmove") return true;
+    this.selUiHideFor = null;
+    return false;
+  }
+
+  /** V208 (A-119): 線を出さない場面に入る（矩形選択のドラッグ・移動ツールで範囲の絵を動かす）。今の線をここで消す */
+  private hideSelectionUiFor(scene: "rect" | "selmove"): void {
+    if (this.selUiHideFor === scene) return;
+    this.selUiHideFor = scene;
+    this.paintSelectionUi();
+  }
+
+  /** V208 (A-119): 境目の線の Path2D（物理 px）。頂点は格子と同じ式 Math.round(i × 1 ドットの物理 px) に丸め、
+   *  線はそこから lw 物理 px の幅（格子の 1 物理 px の線に重なる）。右端・下端の辺（i = W・H）は層の外に出るので内側に寄せる */
+  private selOutlinePath(
+    o: SelOutline,
+    dx: number,
+    dy: number,
+    pw: number,
+    ph: number,
+    px: number,
+    py: number,
+    lw: number
+  ): Path2D {
+    const half = lw / 2;
+    const X = (i: number) => (i === W ? pw - lw : Math.round(i * px)) + half;
+    const Y = (j: number) => (j === H ? ph - lw : Math.round(j * py)) + half;
+    const path = new Path2D();
+    const { pts, loops } = o;
+    // closePath は使わない（Chromium では輪の数の 2 乗で遅くなる＝市松で 4 秒）。輪は最初の辺の真ん中から始めて
+    // 真ん中で終える＝角はどれも線のつなぎ目（miter）になり、切れ目は辺の途中（butt どうしが突き合わさる）
+    for (let k = 0; k + 1 < loops.length; k++) {
+      const s = loops[k];
+      const e = loops[k + 1];
+      if (e - s < 2) continue;
+      const x0 = X(pts[2 * s] + dx);
+      const y0 = Y(pts[2 * s + 1] + dy);
+      const mx = (x0 + X(pts[2 * s + 2] + dx)) / 2;
+      const my = (y0 + Y(pts[2 * s + 3] + dy)) / 2;
+      path.moveTo(mx, my);
+      for (let q = s + 1; q < e; q++) path.lineTo(X(pts[2 * q] + dx), Y(pts[2 * q + 1] + dy));
+      path.lineTo(x0, y0);
+      path.lineTo(mx, my);
+    }
+    return path;
+  }
+
+  /** V208 (A-119): 境目の線（白の線の上に黒の破線 4・4 CSS px を重ねる・破線の位置は selUiPhase でずらす） */
+  private strokeSelOutline(ctx: CanvasRenderingContext2D, path: Path2D, lw: number, dpr: number): void {
+    ctx.save();
+    ctx.lineWidth = lw;
+    ctx.lineJoin = "miter";
+    ctx.lineCap = "butt";
+    ctx.strokeStyle = SEL_UI_PAPER;
+    ctx.stroke(path);
+    ctx.strokeStyle = SEL_UI_INK;
+    ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.lineDashOffset = -this.selUiPhase * dpr;
+    ctx.stroke(path);
+    ctx.restore();
+  }
+
+  /** V208 (A-119): 囲んでいる途中の線（ペンについてくる細い線: 1 CSS px 相当の黒・まわりに白の縁取り。今の点から始点へ
+   *  戻る「閉じる所」は細い点線）。点そのものに線を引く（+0.5 しない＝選ばれる範囲と半ドットずれない） */
+  private strokeSelTrail(
+    ctx: CanvasRenderingContext2D,
+    pts: { x: number; y: number }[],
+    px: number,
+    py: number,
+    lw: number,
+    dpr: number
+  ): void {
+    const path = new Path2D();
+    path.moveTo(pts[0].x * px, pts[0].y * py);
+    for (let i = 1; i < pts.length; i++) path.lineTo(pts[i].x * px, pts[i].y * py);
+    const last = pts[pts.length - 1];
+    const close = new Path2D();
+    close.moveTo(last.x * px, last.y * py);
+    close.lineTo(pts[0].x * px, pts[0].y * py);
+    ctx.save();
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.strokeStyle = SEL_UI_PAPER;
+    ctx.lineWidth = lw * 3;
+    ctx.stroke(path);
+    ctx.strokeStyle = SEL_UI_INK;
+    ctx.lineWidth = lw;
+    ctx.stroke(path);
+    ctx.lineCap = "butt";
+    ctx.strokeStyle = SEL_UI_PAPER;
+    ctx.stroke(close);
+    ctx.strokeStyle = SEL_UI_INK;
+    ctx.setLineDash([3 * dpr, 3 * dpr]);
+    ctx.stroke(close);
+    ctx.restore();
+  }
+
+  /** V208 (A-119): OS の「視差効果を減らす」。始めるとき・1 回ごとに読むだけ（変わったことを知らせる口は付けない） */
+  private reducedMotionNow(): boolean {
+    return (
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
+  }
+
+  /** V208 (A-119): 点線のタイマー。1 回ごとに paintSelectionUi を通して出す条件を見直す（外れていたらそこで止まる） */
+  private startSelUiTimer(): void {
+    if (this.selUiTimer != null) return;
+    this.selUiTimer = window.setTimeout(this.selUiTick, SEL_UI_TICK_MS);
+  }
+
+  private selUiTick = () => {
+    this.selUiTimer = null;
+    this.selUiPhase = (this.selUiPhase + 1) % 8;
+    this.paintSelectionUi();
+  };
+
+  private stopSelUiTimer(): void {
+    if (this.selUiTimer == null) return;
+    window.clearTimeout(this.selUiTimer);
+    this.selUiTimer = null;
   }
 
   private floatToCanvas(f: R.FloatBuf): HTMLCanvasElement {
@@ -9211,42 +6982,6 @@ export class Editor {
       ctx.drawImage(L.cv, -L.float.w / 2, -L.float.h / 2);
     }
     ctx.restore();
-  }
-
-  /** M11-11: 変形ハンドルのキャンバス座標。
-   *  M13-2b (T-3): 8ハンドル化。[0..3]=四隅, [4]=回転ノブ, [5]=上辺中央, [6]=右辺中央, [7]=下辺中央, [8]=左辺中央 */
-  private xformHandleWorld(): { x: number; y: number }[] {
-    const f = this.floatBuf!;
-    const t = this.xform;
-    const cx = f.ox + f.w / 2 + t.tx;
-    const cy = f.oy + f.h / 2 + t.ty;
-    const hw = Math.abs((f.w / 2) * t.sx);
-    const hh = Math.abs((f.h / 2) * t.sy);
-    const cos = Math.cos(t.angle);
-    const sin = Math.sin(t.angle);
-    const w = (lx: number, ly: number) => ({
-      x: cx + lx * cos - ly * sin,
-      y: cy + lx * sin + ly * cos,
-    });
-    return [
-      w(-hw, -hh),
-      w(hw, -hh),
-      w(hw, hh),
-      w(-hw, hh),
-      w(0, -hh - 12),
-      w(0, -hh),
-      w(hw, 0),
-      w(0, hh),
-      w(-hw, 0),
-    ];
-  }
-
-  /** M11-11: キャンバスの外へ出たハンドルを内側へ寄せた位置。外に出ていなければ null */
-  private clampedHandle(wx: number, wy: number): { x: number; y: number } | null {
-    const M = 6; // 端からの余白（ドット）。□の半径 2 より大きくして枠線に潜らせない
-    const x = Math.max(M, Math.min(W - M, wx));
-    const y = Math.max(M, Math.min(H - M, wy));
-    return x === wx && y === wy ? null : { x, y };
   }
 
   // ---------------- 入力（ポインタ） ----------------
@@ -9352,132 +7087,13 @@ export class Editor {
     this.flushInputLogSoon();
   };
 
-  private flushInputLogSoon() {
+  protected override flushInputLogSoon() {
     if (this.inputLogTimer != null) return;
     this.inputLogTimer = window.setTimeout(() => {
       this.inputLogTimer = null;
       const lines = this.inputLogBuf.splice(0);
       if (lines.length) this.cb.appendLog?.(lines.join("\n"));
     }, 400);
-  }
-
-  private activeBuffer(): IndexBuf | null {
-    const f = this.project.frames[this.frameIndex];
-    if (!f) return null;
-    return f.layers[this.activeLayerId] ?? null;
-  }
-
-  /** 色を索引に解決する。257色目で16bitへ自動昇格（トースト1回）。
-   *  ※ 昇格は全レイヤーバッファを差し替えるため、必ず「色解決 → バッファ取得」の順で使うこと。 */
-  private currentColorIndex(): number {
-    if (this.colorHex === "") return 0;
-    return this.resolveColorIndex(this.colorHex);
-  }
-
-  /** 任意の "#rrggbb" を colorTable の索引へ解決する（無ければ登録。257 色目で 16bit 昇格→トースト）。
-   *  M17: マイ柄の各色もここを通す（currentColorIndex と同じ規則・同じトースト）。
-   *  ★昇格でバッファが差し替わるので、呼んだ後に activeBuffer() を取り直すこと */
-  private resolveColorIndex(hex: string): number {
-    const bitsBefore = this.project.indexBits;
-    const lenBefore = this.project.colorTable.length;
-    const idx = ensureColor(this.project, hex);
-    if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.noticePromote16(); // V154 (W-3)
-      this.dirty = true;
-    } else if (lenBefore >= 65536 && this.project.colorTable[idx] !== hex.toLowerCase()) {
-      this.cb.toast(t("ed.color.paletteFull.toast"));
-    }
-    return idx;
-  }
-
-  /** M17: 道具ごとのトーン選択 id を「描画エンジンに渡す形」へ解決する。
-   *  - 既存トーン: `{tone, colorTile:null}`（従来どおり）
-   *  - マイ柄: `{tone:null, colorTile}`。かすり消しは常に形だけ（全部 0）。🎨オン＝登録色を**全色一括解決**、
-   *    オフ＝形として現在色。消えたマイ柄を指していたらベタ（tone null）扱い
-   *  ★色を解決する（昇格し得る）ので、**この戻り値を得てから** activeBuffer() を取ること */
-  private resolveToneFor(kind: "pen" | "brush" | "fill" | "eraser"): {
-    tone: R.ToneTile | null;
-    colorTile: R.ColorTile | null;
-  } {
-    const id =
-      kind === "pen" ? this.penToneId : kind === "brush" ? this.brushToneId : kind === "fill" ? this.fillToneId : this.eraserToneId;
-    const cid = CT.parseCustomToneKey(id);
-    if (cid !== null) {
-      const ct = this.customTones.find((c) => c.id === cid);
-      if (ct) {
-        if (kind === "eraser") return { tone: null, colorTile: CT.buildColorTile(ct, { color: 0 }) };
-        if (this.customToneColor)
-          return { tone: null, colorTile: CT.buildColorTile(ct, { resolve: (hex) => this.resolveColorIndex(hex) }) };
-        return { tone: null, colorTile: CT.buildColorTile(ct, { color: this.currentColorIndex() }) };
-      }
-      return { tone: null, colorTile: null }; // 消えたマイ柄＝ベタ
-    }
-    return { tone: kind === "pen" ? null : (R.toneById(id)?.tile ?? null), colorTile: null };
-  }
-
-  private penOptions(pressure: number): R.PenOptions {
-    let size = this.penSize;
-    if (this.pressureEnabled && pressure > 0 && pressure !== 0.5) {
-      size = Math.max(1, Math.round(this.penSize * (0.4 + pressure * 1.2)));
-    }
-    let texture = this.texture;
-    let tone: R.ToneTile | null | undefined;
-    let colorTile: R.ColorTile | null = null;
-    let color: number;
-    // M17: トーンの解決は「ストローク中は pointerdown で一括解決した strokeTone」を使う（move で再解決しない）。
-    // ストローク外（図形の penOptions(0.5) 等）は従来どおりその場で解決。
-    // strokeTone は**同じ道具のときだけ**使う（ストローク中にショートカットで道具が変わったら、前の道具の
-    // 色タイルを流用しない＝消しゴムが色を塗る事故の防止。setTool でも捨てる）
-    const sel = (kind: "pen" | "brush" | "eraser") =>
-      this.strokeTone && this.strokeTone.kind === kind ? this.strokeTone : this.resolveToneFor(kind);
-    if (this.tool === "eraser") {
-      // 消しゴムは色を解決しない（未使用色の登録＝不要な16bit昇格を避ける）
-      color = 0;
-      texture = "solid";
-      // M11-14: かすり消し — ベタ以外のトーンを選んでいたら、柄に当たる画素だけを
-      // 透明(0)にする（柄はキャンバス座標固定＝なぞり直しても位相が揃う）。
-      // ベタ（tile=null）なら tone を渡さない＝従来の全消しとビット単位で同じ経路
-      // M17: マイ柄なら colorTile（全部 0＝形で消す）。既存トーンは従来どおり tone
-      const s = sel("eraser");
-      tone = s.tone;
-      colorTile = s.colorTile;
-    } else {
-      color = this.currentColorIndex();
-      if (this.tool === "brush") {
-        // M5-4: ブラシ=うごメモ準拠トーンパターン（座標固定）。ベタ(tile=null)は solid で全塗り
-        texture = "solid";
-        const s = sel("brush");
-        tone = s.tone;
-        colorTile = s.colorTile;
-        size = Math.max(size, 3);
-      } else if (this.tool === "pen" && this.penToneId) {
-        // M17: ペンの「種類」でマイ柄を選んでいるとき（"" なら従来どおり texture＝この分岐に入らない）。
-        // texture は solid に落とす（点線 "dot" は strokeSegment 側で stamp を間引くので、残すと柄が途切れる）
-        texture = "solid";
-        colorTile = sel("pen").colorTile;
-      }
-    }
-    return {
-      size,
-      color,
-      texture,
-      seed: this.strokeSeed,
-      dashAcc: this.dashAcc,
-      tone: tone ?? undefined,
-      // M10-22: 選択中は選択範囲内にのみ描く（選択なしは undefined＝従来どおり・追加コストゼロ）
-      clip: this.selMask ?? undefined,
-      // M16 (D-1): コマ間シフト（トグルオフや tone なしのときは 0＝従来どおり）
-      toneShift: this.toneShiftForDraw(),
-      // M17: マイ柄（未使用なら undefined＝従来どおり）
-      colorTile: colorTile ?? undefined,
-    };
-  }
-
-  /** M16 (D-1): いま描くコマのトーン参照座標オフセット。トグルオフなら 0（＝従来と完全一致）。
-   *  オンなら **コマ番号 × 斜め定数**（両軸に同量足す＝斜め (+1,+1)/コマ・タイル周期は toneAt 側で折返し）。
-   *  📌全コマ共通レイヤーは全コマが1バッファなので f が変わっても同じ画素＝揺れない（仕様・title に明記）。 */
-  private toneShiftForDraw(): number {
-    return this.ditherFrameShift ? this.frameIndex * DITHER_SHIFT_STEP : 0;
   }
 
   /** E-1: 手のひら/Spaceパンのカーソル表示 */
@@ -9494,6 +7110,10 @@ export class Editor {
     if (panning) this.setCanvasCursor("grabbing");
     else if (hand) this.setCanvasCursor("grab");
     else this.applyCanvasCursor();
+    // ★V209 (A-122): Space の押す・離す・blur・パンの始めと終わりで、枠と 1 階を一緒に決め直す
+    //（押した瞬間に枠を消して手のひら・離した瞬間にポインタの下へ枠。今まではカーソル層を描き直していなかった）
+    this.frameCursorOn = false; // いま外枠とキャンバスに書いた値が戻し先そのもの
+    this.syncCursorFrame();
   }
 
   /** M11-5: 掴んでいるポインタを解放する（掴んでいなければ何もしない） */
@@ -9582,31 +7202,14 @@ export class Editor {
     // M11-5: 前の接触が pointerup 無しで終わっていたら、ここで畳んでから始める
     //（フォーカスを奪われて up が届かなかった場合の自己修復。正常時は何もしない）
     if (this.pointerDown || this.capturedPointerId !== null) this.endPointerSession("down");
-    // ★V178 (A-72・Codex 指摘): 網。全レイヤーの束が確定されないまま残っていたら（入口で畳み、ほかの履歴を積む直前にも
-    //  確定するので、知られている経路では起きない）、**次のストロークの pointermove が古い束（古いコマ）へ描く**ので、
-    //  ここで必ず確定してから始める
-    // ★V191 (A-89): 網。前のなぞりの 1px の仮が残っていたら、そのなぞりは pointerup を最後まで通っていない。
-    //  1 枚の経路の分は打たずに捨て（dropStaleLine1px・いま選んでいるコマ・レイヤーへ履歴の外に打たない）、
-    //  束の分は束がまだ残っていれば束の確定より先に打つ（束に入る＝Ctrl+Z 1 回で戻る）
-    this.dropStaleLine1px();
-    this.endLine1px();
-    if (this.eraseAllStroke) this.commitEraseAll(); // 取りこぼした束を先に確定（次の 1 枚の経路を乗っ取らせない）
+    // ★V213 (M-2a): 前のなぞりの後始末の網（全レイヤーの束・1px の仮）はコア（strokeSettle）
+    this.strokeSettle();
     this.shiftHeld = e.shiftKey; // M10-7: pointer 側の modifier を真実として同期
     this.syncAltFromEvent(e.altKey, "pointerdown"); // V166 (C): Alt も同じ作法で同期する
     this.closeStrip(); // M14 (S-1): キャンバスへ触れたら（描き始め）形式ストリップは畳む
-    // ★V157 (D-1): ロック中のレイヤーには描かせない。**捕捉する前に**戻る（掴みっぱなしを作らない）。
-    // 変形の途中（`xformActive`）は素通し——始められた時点でロックされていないと分かっているし、
-    // ここで止めると確定できずに宙に浮く
-    // ★V178 (A-72): 全レイヤー消しゴムは「いまのレイヤー」の 🔒 ではなく**対象の束**で決める
-    //  （🔒 のレイヤーは対象から外れるだけ＝移動・変形の `moveTargetLayerIds` と同じ線引き）。
-    //  対象 0 枚・眠り残りのときは、同じく**捕捉する前に**戻る（`eraseAllGuard`）
-    if (
-      !this.spaceHeld &&
-      !this.xformActive &&
-      Editor.PIXEL_TOOLS.has(this.tool) &&
-      (this.eraseAllOn() ? this.eraseAllGuard() : this.lockGuard())
-    )
-      return;
+    // ★V157 (D-1)・★V178 (A-72): ロック中のレイヤー・全レイヤーの束が作れないときは描かせない。**捕捉する前に**戻る
+    //（掴みっぱなしを作らない）。決めるのはコア（strokeLocked）。Space のパンは描かないので見ない
+    if (!this.spaceHeld && this.strokeLocked()) return;
     this.lastPointerEvent = e;
     try {
       ($("#ed-cvwrap") as HTMLElement).setPointerCapture(e.pointerId);
@@ -9628,212 +7231,21 @@ export class Editor {
       this.updatePanCursor(true);
       return;
     }
-    const pt = this.clientToPixel(e.clientX, e.clientY);
-    this.pointerDown = true;
-
-    if (this.xformActive && this.floatBuf) {
-      this.beginTransformDrag(pt);
+    // ★V213 (M-2a): 描き始めはコア（サンプルの画素への落とし方・道具ごとの始め方）。PC は画面の続きだけ
+    const r = this.strokeStart(this.sampleOf(e));
+    if (r === "xform") {
       // R-2: ドラッグ開始直後にモードラベルを表示（ペンでhoverが取れない環境でも判別できる）
       this.showXformModeLabel(this.dragMode, e.clientX, e.clientY);
-      return;
-    }
-
-    switch (this.tool) {
-      case "pen":
-      case "brush":
-      case "eraser": {
-        // 色解決（penOptions→currentColorIndex）が16bit昇格でバッファを差し替えることが
-        // あるため、必ずオプション解決後にバッファを取り直す
-        // M17: マイ柄はここで**全色を一括解決**して strokeTone に固定（move では再解決しない）。
-        // この順序（解決→penOptions→activeBuffer）が 257 色目を跨ぐストロークの安全の要
-        this.strokeTone = { kind: this.tool, ...this.resolveToneFor(this.tool) };
-        const o = this.penOptions(e.pressure);
-        // ★V178 (A-72): 全レイヤー消しゴムは「対象の束」へ打つ。オフなら multi=false＝ここから下は
-        //  従来の 1 枚の経路と同じ文の並び。束が作れないときも 1 枚の経路へは落とさない（buf2 は null のまま）
-        const multi = this.eraseAllOn();
-        const all = multi ? this.beginEraseAll() : null;
-        const buf2 = multi ? null : this.activeBuffer();
-        if (!all && !buf2) return;
-        this.strokeBefore = buf2 ? copyIndexBuf(buf2) : null;
-        this.strokeSeed = (Math.random() * 1e9) | 0;
-        this.dashAcc = { d: 0 };
-        o.seed = this.strokeSeed;
-        o.dashAcc = this.dashAcc;
-        // ★A-70: 描線の経路だけ**小数のまま**持つ（関節ごとの丸め誤差を無くす）。
-        //  ⚠ 最初の打点は**従来どおり整数の `pt`**（＝`floor`）で打つ。小数を丸め直すと
-        //   カーソルの指す画素と 1 ドットずれる（Codex 指摘）
-        const ptF = this.clientToStrokePt(e.clientX, e.clientY);
-        this.smoothPt = { x: ptF.x, y: ptF.y };
-        this.lastPt = { x: ptF.x, y: ptF.y };
-        if (buf2) R.stamp(buf2, pt.x, pt.y, o);
-        else if (all) this.eraseAllStamp(all, pt.x, pt.y, o);
-        // ★V191 (A-89): 太さ 1 なら、この打点（整数の pt＝round(lastPt) と同じ画素）を「確定した直前の画素」として
-        //  1px の道を始める。押した瞬間の打点そのものは今のまま
-        this.line1px = L1.uses1px(o) ? { st: L1.line1pxBegin(pt.x, pt.y), all } : null;
-        this.renderCanvas();
-        break;
-      }
-      case "fill": {
-        // M14 (S-2): 囲い塗り — ドラッグで軌跡を集め、離した瞬間に内側を塗る（確定は onPointerUp）。
-        // ここでは軌跡の起点を置くだけ（バケツのような即時 flood はしない）
-        if (this.fillMode === "enclose") {
-          this.enclosePts = [pt];
-          break;
-        }
-        // M17: マイ柄なら先に**全色を一括解決**（昇格し得る）。既存トーンは従来どおり tile を引くだけ
-        const fillSel = this.resolveToneFor("fill");
-        const color = this.currentColorIndex(); // 昇格し得るので先に解決
-        const buf2 = this.activeBuffer();
-        if (!buf2) return;
-        const before = copyIndexBuf(buf2);
-        // M10-19: 全レイヤー参照 — 領域判定は平坦化した参照バッファ・塗るのは編集レイヤーだけ
-        //（平坦化は色解決＝昇格の後に作る。ref 省略時は従来経路そのまま）
-        const ref = this.fillRefAll
-          ? flattenIndexFrame(this.project, this.frameIndex)
-          : undefined;
-        if (fillSel.colorTile) {
-          // M17: マイ柄のバケツ（領域確定は従来と同じ規則・塗り込みは色タイル）
-          CT.floodFillColorTile(buf2, pt.x, pt.y, fillSel.colorTile, ref, this.selMask ?? undefined, this.toneShiftForDraw());
-        } else {
-          // M5-5 T-3: トーン塗り（座標固定＝ブラシのトーンと柄が繋がる）。ベタ=従来どおり
-          // M10-22: 選択中は clip=0 を壁として範囲内だけ塗る
-          R.floodFill(
-            buf2,
-            pt.x,
-            pt.y,
-            color,
-            fillSel.tone,
-            ref,
-            this.selMask ?? undefined,
-            this.toneShiftForDraw() // M16 (D-1): コマ間シフト（オフ時 0＝従来どおり）
-          );
-        }
-        this.pushBufferHistory("塗り", buf2, before);
-        this.renderCanvas();
-        break;
-      }
-      case "shape":
-        this.shapeStart = pt;
-        this.shapeLastPt = pt;
-        break;
-      case "text": {
-        // M11-12: 浮いている文字の上を押したらドラッグ（移動）。
-        // それ以外の場所なら、今のものを確定してから新しい文字を始める
-        const d = this.textDraft;
-        const mask = d ? this.textDraftMask() : null;
-        const org = d ? this.textDraftOrigin(d) : null;
-        if (
-          d &&
-          mask &&
-          org &&
-          pt.x >= org.x &&
-          pt.y >= org.y &&
-          pt.x < org.x + mask.w &&
-          pt.y < org.y + mask.h
-        ) {
-          this.textDrag = { ox: pt.x - d.x, oy: pt.y - d.y };
-          // 入力欄からフォーカスを外す。ここを外さないと onKeyDown が isTextEntry で
-          // 早期 return し続けるので、**矢印キーでの微調整が一生できない**
-          //（入力欄にフォーカスがある間はカーソル移動が優先＝REQ の要求。
-          //   打ち直したくなったら入力欄をクリックすれば戻れる）
-          (document.querySelector("#ed-textinput") as HTMLTextAreaElement | null)?.blur();
-          break;
-        }
-        void this.beginTextDraft(pt);
-        break;
-      }
-      case "eyedrop": {
-        this.pickColor(pt);
-        // M10-21b: pick 後の同一接触では何も起きないようにする。pickColor → setTool で
-        // ツールが pen 等へ切り替わったまま pointerDown が立っていると、接触が続く同じペンが
-        // 「拾った色のストローク」を描いてしまう（実走ログ 1012–1015 行の実害）。
-        // pointerDown を下ろしてキャプチャも解放し、この接触の move/up を素通しにする
-        this.pointerDown = false;
-        this.lastPointerEvent = null;
-        this.releaseCapture(e.pointerId); // M11-5: 解放は1箇所に集約（掴んだ id も忘れる）
-        return;
-      }
-      case "move": {
-        // M11-8 P-2: 選択範囲があれば「範囲の中の絵だけ」、無ければレイヤー（フォルダなら中身全部）
-        if (this.selMask) this.beginSelectionMove(pt);
-        else this.beginLayerMove(pt);
-        break;
-      }
-      case "select": {
-        // M13-2a (A-1): 合成方法は**押した瞬間の修飾キー**で決める（途中で押し変えても変わらない）。
-        // Shift は図形ツールの拘束（`tool === "shape"` の分岐）とは別の経路＝衝突しない
-        this.selMod = e.shiftKey ? "add" : e.altKey ? "sub" : "replace";
-        if (this.selMod === "replace" && this.selMask && this.selMask[pt.y * W + pt.x]) {
-          // M11-8 P-1: 範囲内のドラッグは**枠だけ**が動く（絵は動かない）。
-          // 絵を動かすのは移動ツール（上の case "move"）。
-          // M13-2a: 足す／引くのときは枠を動かさず、新しい範囲を描き始める
-          this.beginSelMaskMove(pt);
-        } else if (this.selectKind === "auto") {
-          // M10-19: ✨自動 — クリックで即マスク生成。
-          // 生成した selMask の下流（点線・移動・コピー・削除・変形）は既存のまま
-          // M13-2a: 参照の「選択中」は、選択中のレイヤー（フォルダは展開・非表示は除外）の合成。
-          // 1枚だけ選んでいれば従来の `activeBuffer()` と同じ結果になる
-          const ref = this.selectRefAll
-            ? flattenIndexFrame(this.project, this.frameIndex)
-            : this.flattenSelectedLayers();
-          if (!ref) return;
-          this.applySelectionResult("auto", R.autoSelectMask(ref, pt.x, pt.y, this.selectAutoGlobal));
-        } else if (this.selectKind === "rect") {
-          this.shapeStart = pt;
-        } else {
-          this.lassoPts = [pt];
-        }
-        break;
-      }
-      case "warp": {
-        if (this.warpMode === "corner") {
-          // M10-2c: 四隅はモード開始時に場を用意済み。ここではハンドルを掴むだけ
-          if (!this.cornerActive) break;
-          // 一番近いハンドルを掴む。しきい値はドット単位で ±8
-          // （transform の四隅は ±6。四隅同士が近づいたときに取り違えないよう少し大きめ）。
-          // M13-2b (T-1): 8ハンドル（四隅4＋辺の中央4）。枠が小さくて重なるときは**近いほう**が勝つ＝仕様
-          //（当たり判定のしきい値で逃げる実装は入れない・REQ §6-1-4）
-          let best = -1;
-          let bestD = 8 * 8 + 1;
-          const hs = this.cornerHandles();
-          for (let i = 0; i < hs.length; i++) {
-            const hdx = hs[i].x - pt.x;
-            const hdy = hs[i].y - pt.y;
-            const d2 = hdx * hdx + hdy * hdy;
-            if (d2 < bestD) {
-              bestD = d2;
-              best = i;
-            }
-          }
-          this.cornerDrag = best >= 0 ? best : null;
-          this.cornerDragBase =
-            best >= 0 ? { pts: this.cornerPts.map((p) => ({ ...p })), start: { x: pt.x, y: pt.y } } : null;
-          break;
-        }
-        const f = this.project.frames[this.frameIndex];
-        if (!f) break;
-        // 適用元は**ストローク開始時のスナップショット**に固定する。
-        // 直前の適用結果へ再適用すると最近傍サンプルの誤差が積み上がってドットが溶ける。
-        // 非表示レイヤーも含める（除外すると絵の整合が崩れる）
-        const snap: Record<string, IndexBuf> = {};
-        for (const ld of this.project.layerDefs) {
-          const b = f.layers[ld.id];
-          if (b) snap[ld.id] = copyIndexBuf(b);
-        }
-        this.warpBefore = snap;
-        this.warpField = new WarpField();
-        // 選択範囲のフェードは重みマップとしてここで1回だけ作る（毎moveだと 3.7M ループ）
-        this.warpField.setRegionWeight(this.selMask, 3);
-        this.warpLastPt = { x: pt.x, y: pt.y };
-        // 液状化はここでは適用しない（クリックだけで絵が動かないように）。
-        // 色も解決しない（歪みは既存の索引を移すだけ＝不要な16bit昇格を招かない）
-        if (this.warpMode === "push") break;
-        // 魚眼: 中心を固定して1段階かける。以降は押しっぱなしで連続
-        this.warpCenter = { x: pt.x, y: pt.y };
-        this.stepFisheye();
-        this.scheduleFisheyeRepeat(250); // キーリピートと同じ流儀で最初だけ長めに待つ
-        break;
-      }
+    } else if (r === "textDrag") {
+      // 入力欄からフォーカスを外す。ここを外さないと onKeyDown が isTextEntry で
+      // 早期 return し続けるので、**矢印キーでの微調整が一生できない**
+      //（入力欄にフォーカスがある間はカーソル移動が優先＝REQ の要求。
+      //   打ち直したくなったら入力欄をクリックすれば戻れる）
+      (document.querySelector("#ed-textinput") as HTMLTextAreaElement | null)?.blur();
+    } else if (r === "picked") {
+      // M10-21b: スポイトで拾ったら、この接触の move/up を素通しにする（pointerDown はコアが下ろした）
+      this.lastPointerEvent = null;
+      this.releaseCapture(e.pointerId); // M11-5: 解放は1箇所に集約（掴んだ id も忘れる）
     }
   }
 
@@ -9851,6 +7263,8 @@ export class Editor {
     //   **別のポインタを動かすだけでは起こらない**。ここを緩めると、描いている最中に
     //   別のポインタがホバーしただけでストロークが終わってしまうため、この順序を選んでいる
     if (this.capturedPointerId !== null && e.pointerId !== this.capturedPointerId) return;
+    // ★V209 (A-122): 最後のポインタの位置（枠を出し直すときに引き直す）。パン中・変形中のホバーの早い return より前で覚える
+    this.cursorClient = { x: e.clientX, y: e.clientY };
     this.shiftHeld = e.shiftKey; // M10-7: pointer 側の modifier を真実として同期
     // ★V166 (C): **ここがいちばん効く。** 描いている最中に Alt の状態が食い違ったら
     //  （keyup が届かなかった／ドライバが掴んだまま）、動かした時点でイベント側へ合わせて直す
@@ -9883,382 +7297,14 @@ export class Editor {
     if (!this.pointerDown) return;
     const events =
       "getCoalescedEvents" in e ? (e as any).getCoalescedEvents() as PointerEvent[] : [e];
+    let trailMoved = false; // V208 (A-119): 囲んでいる途中の線を、ループの外で 1 回だけ描き直す
     for (const ev of events) {
-      const pt = this.clientToPixel(ev.clientX, ev.clientY);
-      if (this.xformActive && this.dragMode) {
-        this.updateTransformDrag(pt, ev.shiftKey);
-        this.showXformModeLabel(this.dragMode, ev.clientX, ev.clientY); // R-2: ラベル追従
-        continue;
-      }
-      switch (this.tool) {
-        case "pen":
-        case "brush":
-        case "eraser": {
-          // ★V178 (A-72): 全レイヤーのストロークは対象の束へ（null なら従来の 1 枚の経路そのまま）
-          const all = this.eraseAllStroke;
-          const buf = all ? null : this.activeBuffer();
-          if ((!all && !buf) || !this.lastPt) break;
-          // ★A-70: この経路だけ**小数のまま**受け取る（`pt` は整数版で、他の道具が使う）。
-          //  丸めるのは打点の瞬間だけ＝`strokeSegment` の中（`raster.ts` は触らない）
-          const ptF = this.clientToStrokePt(ev.clientX, ev.clientY);
-          let tx = ptF.x;
-          let ty = ptF.y;
-          if (this.stabilizer && this.smoothPt) {
-            // 手ブレ補正: EMA（OFF でも掛けないだけ＝3DS 準拠の生座標という約束はそのまま。
-            // ★A-70 で外したのは「丸め」であって EMA ではない。係数 0.35 も変えていない）
-            this.smoothPt.x += (ptF.x - this.smoothPt.x) * 0.35;
-            this.smoothPt.y += (ptF.y - this.smoothPt.y) * 0.35;
-            tx = this.smoothPt.x;
-            ty = this.smoothPt.y;
-          }
-          // ★V191 (A-89): 太さ 1 の線分は 1px の道（描く前に決める・`line1pxSegment`）。それ以外は今までどおり
-          //  strokeSegment。筆圧で太さが 1 以外になったら、仮の画素を打って状態を空にしてから（漏斗）今までの道で描き、
-          //  また太さ 1 の線分が来たら、その線分の始点から始め直す
-          if (buf) {
-            const o = this.penOptions(ev.pressure);
-            if (L1.uses1px(o)) this.line1pxSegment(this.lastPt.x, this.lastPt.y, tx, ty, o, buf, null);
-            else {
-              this.endLine1px();
-              R.strokeSegment(buf, this.lastPt.x, this.lastPt.y, tx, ty, o);
-            }
-          } else if (all && this.tool === "eraser") {
-            // ★V178: 途中でショートカットが道具を変えたら、束にはもう描かない（penOptions が新しい道具の
-            //  色を返す＝ペンの色で全レイヤーを塗る事故になる）。確定は pointerup（道具に関係なく）
-            const o = this.penOptions(ev.pressure);
-            if (L1.uses1px(o)) this.line1pxSegment(this.lastPt.x, this.lastPt.y, tx, ty, o, null, all);
-            else {
-              this.endLine1px();
-              this.eraseAllSegment(all, this.lastPt.x, this.lastPt.y, tx, ty, o);
-            }
-          }
-          this.lastPt = { x: tx, y: ty };
-          break;
-        }
-        case "shape": {
-          if (!this.shapeStart) break;
-          // M10-7: 生の終点を控えてから拘束をかける（Shift の即時反映で使う）
-          this.shapeLastPt = pt;
-          this.previewShape(this.shapeStart, this.shapeEnd(pt));
-          break;
-        }
-        case "fill": {
-          // M14 (S-2): 囲い塗りの軌跡を伸ばす（自由選択と同じ 2px 間引き）
-          if (this.fillMode === "enclose" && this.enclosePts.length) {
-            const last = this.enclosePts[this.enclosePts.length - 1];
-            if (Math.abs(last.x - pt.x) + Math.abs(last.y - pt.y) >= 2) this.enclosePts.push(pt);
-            this.redrawOverlay();
-          }
-          break;
-        }
-        case "text": {
-          // M11-12: 浮動テキストのドラッグ（1ドット単位・パラメータの x/y を動かすだけ）
-          if (!this.textDrag || !this.textDraft) break;
-          this.textDraft.x = pt.x - this.textDrag.ox;
-          this.textDraft.y = pt.y - this.textDrag.oy;
-          this.redrawOverlay();
-          break;
-        }
-        case "move": {
-          if (this.dragMode === "selmove") this.updateSelectionMove(pt);
-          else if (this.dragMode === "layermove") this.updateLayerMove(pt);
-          break;
-        }
-        case "select": {
-          if (this.dragMode === "selmask") {
-            this.updateSelMaskMove(pt); // M11-8 P-1: 枠だけ動かす
-          } else if (this.selectKind === "rect" && this.shapeStart) {
-            this.previewSelectRect(this.shapeStart, pt);
-          } else if (this.selectKind === "lasso" && this.lassoPts.length) {
-            const last = this.lassoPts[this.lassoPts.length - 1];
-            if (Math.abs(last.x - pt.x) + Math.abs(last.y - pt.y) >= 2)
-              this.lassoPts.push(pt);
-            this.redrawOverlay();
-          }
-          break;
-        }
-        case "warp": {
-          // coalesced の各点では**場に加算するだけ**。適用はループの外で1回だけ。
-          // レイヤー10枚なら1適用で 768K 画素のループになるので、点ごとに適用すると詰まる
-          if (this.warpMode === "corner") {
-            // M10-2c: 掴んでいるハンドルの位置を更新するだけ。適用はループの外で1回。
-            // M13-2b (T-1): 四隅＝その1点／辺＝両端2点を法線方向へ（`cornerTrial`）。
-            // キャンバスの外へ出す移動・非凸になる移動は受け付けない（直前の位置に留まる）
-            if (this.cornerDrag === null || !this.cornerDragBase) break;
-            const trial = this.cornerTrial(this.cornerDrag, this.cornerDragBase.pts, this.cornerDragBase.start, pt);
-            if (!trial) break;
-            if (trial.every((p, i2) => p.x === this.cornerPts[i2].x && p.y === this.cornerPts[i2].y)) break;
-            this.cornerPts = trial;
-            break;
-          }
-          if (this.warpMode !== "push") break; // 魚眼は中心固定・タイマー駆動
-          if (!this.warpField || !this.warpLastPt) break;
-          const vx = pt.x - this.warpLastPt.x;
-          const vy = pt.y - this.warpLastPt.y;
-          this.warpField.addLiquify(
-            pt.x,
-            pt.y,
-            vx,
-            vy,
-            this.warpRadius,
-            this.warpStrength
-          );
-          this.warpLastPt = { x: pt.x, y: pt.y };
-          break;
-        }
-      }
+      // ★V213 (M-2a): 1 点ずつコアへ（画素への落とし方・道具ごとの描き方はコア）
+      const r = this.strokeMoveOne(this.sampleOf(ev));
+      if (r === "xform") this.showXformModeLabel(this.dragMode, ev.clientX, ev.clientY); // R-2: ラベル追従
+      else if (r === "trail") trailMoved = true;
     }
-    // M10-2a: 適用はイベント1回につき1度だけ（coalesced ループの外）。
-    // M10-2b: 魚眼は中心固定・タイマー駆動なので、move での再適用は不要
-    // （場が変わっていないのに同じ結果を描き直すだけの無駄になる）
-    if (this.tool === "warp") {
-      if (this.warpMode === "push") this.applyWarpPreview();
-      else if (this.warpMode === "corner" && this.cornerDrag !== null)
-        this.updateCornerPreview();
-    }
-    if (["pen", "brush", "eraser"].includes(this.tool)) this.renderCanvas();
-  }
-
-  /** M10-2a: 変位場を現在のコマの全レイヤーへ適用してプレビューする。
-   *  適用元は常に warpBefore（ストローク開始時のスナップショット）で、
-   *  直前の適用結果には**絶対に**再適用しない（最近傍サンプルの誤差が積み上がってドットが溶ける）。 */
-  private applyWarpPreview(): void {
-    if (!this.warpField || !this.warpBefore) return;
-    const f = this.project.frames[this.frameIndex];
-    if (!f) return;
-    for (const ld of this.project.layerDefs) {
-      const src = this.warpBefore[ld.id];
-      const dst = f.layers[ld.id];
-      if (src && dst) applyWarp(src, dst, this.warpField, this.selMask);
-    }
-    this.renderCanvas();
-  }
-
-  // ---- M10-2c: 四隅変形（射影変換）。transform とは独立した状態機械 ----
-
-  /** 四隅モードに入る（transform が setTool で即開始するのと同じ流儀）。
-   *
-   *  M13-2b (T-1) で**適用先と枠が変わった**（既存の振る舞いの変更・REQ §6-1）:
-   *   - 適用先: 全レイヤー（非表示も含む） → **選択中レイヤーだけ**（M13-1 の純関数で解決・非表示は除外）
-   *   - 枠    : 選択範囲なしのとき キャンバス全体 → **対象レイヤーの描かれた部分の外接矩形**
-   *            （選択範囲ありは従来どおり選択範囲の外接矩形）
-   *   - 絵が無ければ `ed.xform.nothingToTransform.toast`（従来は全体の枠が出ていた） */
-  private beginCornerWarp(): void {
-    if (this.cornerActive) return;
-    const f = this.project.frames[this.frameIndex];
-    if (!f) return;
-    const tg = this.transformTargets();
-    if (!tg) {
-      this.cb.toast(t("ed.xform.nothingToTransform.toast"));
-      return;
-    }
-    // `transformTargets()` のマスク＝選択範囲があればそれ、無ければ対象の合成の非透明画素。
-    // その外接矩形が枠になる（選択した部分だけを台形にしたいときに、四隅が絵の近くに出るほうが操作しやすい）
-    const bb = R.maskBBox(tg.mask)!;
-    const x0 = bb.x;
-    const y0 = bb.y;
-    const x1 = bb.x + bb.w;
-    const y1 = bb.y + bb.h;
-    this.cornerRect = { x0, y0, x1, y1 };
-    this.cornerPts = [
-      { x: x0, y: y0 },
-      { x: x1, y: y0 },
-      { x: x1, y: y1 },
-      { x: x0, y: y1 },
-    ];
-    // 適用元は常にこのスナップショット。**対象レイヤーだけ**を持つ＝それ以外は1画素も触らない
-    const snap: Record<string, IndexBuf> = {};
-    for (const id of tg.ids) {
-      const b = f.layers[id];
-      if (b) snap[id] = copyIndexBuf(b);
-    }
-    this.cornerBefore = snap;
-    // 領域重み（setRegionWeight）は**設定しない**。重みで変位を減衰させると
-    // もはや射影でなくなり、四隅を結ぶ直線が曲がる。選択範囲は applyWarp のマスクだけで効かせる
-    this.warpField = new WarpField();
-    this.cornerActive = true;
-    this.muteFloatingOverlays(true);
-    this.updateXformBadge();
-    this.buildToolOptions();
-    this.redrawOverlay();
-    this.paintUiOverlay();
-  }
-
-  /** 四隅から場を作り直して**対象レイヤー**へ適用する。退化していたら何もしない（直前の絵が残る）。
-   *  適用元は常に `cornerBefore`（開始時のスナップショット）。直前の適用結果へは再適用しない */
-  private updateCornerPreview(): void {
-    if (!this.cornerActive || !this.warpField || !this.cornerBefore || !this.cornerRect)
-      return;
-    if (!this.warpField.setHomography(this.cornerPts, this.cornerRect)) return;
-    const f = this.project.frames[this.frameIndex];
-    if (!f) return;
-    // M13-2b (T-1): cornerBefore に入っているレイヤー＝対象だけ（それ以外は触らない）
-    for (const id of Object.keys(this.cornerBefore)) {
-      const src = this.cornerBefore[id];
-      const dst = f.layers[id];
-      if (src && dst) applyWarp(src, dst, this.warpField, this.selMask);
-    }
-    this.renderCanvas();
-    this.redrawOverlay();
-    this.paintUiOverlay();
-  }
-
-  /** M13-2b (T-1): 四隅モードの8ハンドルの位置。[0..3]=四隅（`cornerPts` そのもの）、[4..7]=辺の中央
-   *  （辺 i は点 i と点 (i+1)%4 を結ぶ）。**内部の点は4つのまま**（射影変換は4点で決まる） */
-  private cornerHandles(): { x: number; y: number }[] {
-    const p = this.cornerPts;
-    if (p.length !== 4) return [];
-    const mids = p.map((a, i) => {
-      const b = p[(i + 1) % 4];
-      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-    });
-    return [...p, ...mids];
-  }
-
-  /**
-   * M13-2b (T-1): 掴んだハンドル `idx` をポインタ `pt` へ動かしたときの新しい4点。
-   *  - 四隅（0..3）: その1点をポインタへ（従来どおり。キャンバス内にクランプ）
-   *  - 辺（4..7）  : ドラッグ量を**その辺の法線へ射影**し、両端2点へ同じだけ足す＝辺が平行に動く。
-   *                  辺の方向の成分は捨てる（せん断は四隅で。REQ §8-1 暫定案）
-   *  `base` はドラッグ開始時の4点、`start` はそのときのポインタ。**開始時からの差分で毎回作り直す**
-   *  （前回の位置に足し込んでいくと、辺の法線がずれていって平行でなくなる）。
-   *  非凸になる／キャンバスの外へ出る結果は null（＝受け付けない・直前の位置に留まる）
-   */
-  private cornerTrial(
-    idx: number,
-    base: { x: number; y: number }[],
-    start: { x: number; y: number },
-    pt: { x: number; y: number }
-  ): { x: number; y: number }[] | null {
-    let trial: { x: number; y: number }[];
-    if (idx < 4) {
-      const nx = Math.max(0, Math.min(W, pt.x));
-      const ny = Math.max(0, Math.min(H, pt.y));
-      trial = base.map((p, i) => (i === idx ? { x: nx, y: ny } : p));
-    } else {
-      const a = idx - 4;
-      const b = (a + 1) % 4;
-      const ex = base[b].x - base[a].x;
-      const ey = base[b].y - base[a].y;
-      const len = Math.hypot(ex, ey);
-      if (len < 1e-6) return null;
-      // 法線（辺に垂直な単位ベクトル）。向きはどちらでもよい＝射影で符号が決まる
-      const nx = -ey / len;
-      const ny = ex / len;
-      const d = (pt.x - start.x) * nx + (pt.y - start.y) * ny;
-      const mx = d * nx;
-      const my = d * ny;
-      trial = base.map((p, i) => (i === a || i === b ? { x: p.x + mx, y: p.y + my } : p));
-      if (trial.some((p) => p.x < 0 || p.x > W || p.y < 0 || p.y > H)) return null;
-      // 辺を対辺の**向こう側**まで押し込むと、四角形は凸のまま**裏返る**（`isConvexQuad` は向きを見ない）。
-      // そのまま通すと絵が鏡映になるので、符号付き面積の符号が変わる移動も受け付けない
-      const area = (q: { x: number; y: number }[]) =>
-        q.reduce((s, p, i) => s + p.x * q[(i + 1) % 4].y - q[(i + 1) % 4].x * p.y, 0);
-      if (Math.sign(area(trial)) !== Math.sign(area(base))) return null;
-    }
-    // 非凸になる移動は**受け付けない**。受け付けると消失線が矩形の内側に入り、
-    // 分母 w が 0 を跨いで写像が発散する（絵が壊れて Esc しか復帰手段が無くなる）
-    return isConvexQuad(trial) ? trial : null;
-  }
-
-  /** Enter=確定。ここで初めて履歴に積む（それまでは1件も積まない） */
-  /** V166 (層2): 四隅の歪みの確定。対象レイヤーぶんの全画素比較＋控えが動く。 */
-  private async commitCornerWarp(): Promise<void> {
-    await this.runHeavy("warp.commit", t("ed.heavy.warp.msg"), () => this.commitCornerWarpInner());
-  }
-
-  private commitCornerWarpInner(): void {
-    const before = this.cornerBefore;
-    const f = this.project.frames[this.frameIndex];
-    if (!before || !f) {
-      this.endCornerWarp();
-      return;
-    }
-    // **変化のあったレイヤーだけ** before/after を積む（M10-2a と同じ流儀）。
-    // M13-2b (T-1): 見るのは対象（before に入っているレイヤー）だけ
-    const bd: Record<string, IndexBuf> = {};
-    const ad: Record<string, IndexBuf> = {};
-    let changed = false;
-    for (const id of Object.keys(before)) {
-      const b = before[id];
-      const a = f.layers[id];
-      if (!b || !a) continue;
-      let diff = false;
-      for (let i = 0; i < PIXELS; i++)
-        if (a[i] !== b[i]) {
-          diff = true;
-          break;
-        }
-      if (!diff) continue;
-      bd[id] = b;
-      ad[id] = copyIndexBuf(a);
-      changed = true;
-    }
-    if (changed) {
-      // frameIndex は**キャプチャした値**で引く（確定後にコマが移動しても正しいコマへ戻すため）
-      const fi = this.frameIndex;
-      const cornerEntry = multiBufferChangeEntry(
-        "四隅変形",
-        (id) => this.project.frames[fi]?.layers[id] ?? null,
-        bd,
-        ad,
-        () => {
-          // M10-23: Undo/Redo もデータ変更なので dirty（＝オートセーブ対象）にする
-          //（bufferChangeEntry の onApply と同じ流儀。オートセーブ分割エンコードの
-          // 中断判定もこの不変条件に依る）
-          this.dirty = true;
-          this.renderCanvas();
-          this.paintFilmThumb(fi);
-        }
-      );
-      // ★V180 (A-78 ②): 取り消し・やり直しの前に、そのコマを**書きで起こす**（V178 の全レイヤー消しゴムと同じ形）。
-      //  大きい作品で窓の外へ出て眠ったコマは `layers[id]` が無く、起こさないと Ctrl+Z が黙って空振りする。
-      //  コマ番号で持つので、そのコマが無ければ何もしない（例外を投げない）
-      cornerEntry.prepare = () => {
-        const fr = this.project.frames[fi];
-        return fr ? wakeFrame(this.project, fr, "write") : Promise.resolve();
-      };
-      this.history.push(cornerEntry);
-      // M10-23 レビュー検出の既存バグ: 確定時に dirty を立てておらず、四隅変形だけでは
-      // オートセーブも終了警告も働かなかった（歪みストローク確定と同じ流儀に揃える）
-      this.dirty = true;
-    }
-    this.endCornerWarp();
-    this.paintFilmThumb(this.frameIndex);
-  }
-
-  /** Esc=取消。全画素をスナップショットへ完全復元し、履歴は1件も積まない。
-   *  `silent` は unmount 経由用（DOM が消えかけているので UI 更新を呼ばない） */
-  private cancelCornerWarp(silent = false): void {
-    const before = this.cornerBefore;
-    const f = this.project.frames[this.frameIndex];
-    if (before && f)
-      for (const id of Object.keys(before)) {
-        const b = before[id];
-        const a = f.layers[id];
-        if (b && a) a.set(b);
-      }
-    this.endCornerWarp(silent);
-    if (!silent) this.renderCanvas();
-  }
-
-  private endCornerWarp(silent = false): void {
-    this.cornerActive = false;
-    this.cornerPts = [];
-    this.cornerRect = null;
-    this.cornerBefore = null;
-    this.cornerDrag = null;
-    this.cornerDragBase = null;
-    this.warpField = null;
-    this.muteFloatingOverlays(false);
-    if (!silent) this.paintUiOverlay(); // M13-2b (T-6): 枠・ハンドルの層を消す
-    // 確定/取消のあとモードを「押す」へ戻す。`endTransform` が tool を pen へ戻すのと同じ流儀。
-    // 戻さないと warpMode==="corner" のまま cornerActive===false という**死んだモード**が残り、
-    // 同じボタンをもう一度押しても（next===warpMode で早期 return するので）何も起きなくなる
-    if (this.warpMode === "corner") this.warpMode = "push";
-    if (silent) return;
-    this.updateXformBadge();
-    this.buildToolOptions();
-    this.redrawOverlay();
+    this.strokeMoveDone(trailMoved);
   }
 
   /** M10-2c: 四隅ハンドルはキャンバスの隅ちょうどに出るが、×2 以上のズームでは
@@ -10266,7 +7312,7 @@ export class Editor {
    *  **右上と右下のハンドルが物理的に掴めない**（実機で確認）。
    *  四隅モードの間だけ pointer-events を切り、抜けるときに元の値へ必ず戻す。
    *  styles.css は触らない制約（§3.7-8）があるのでインラインで行う。 */
-  private muteFloatingOverlays(on: boolean): void {
+  protected override muteFloatingOverlays(on: boolean): void {
     if (on) {
       if (this.cornerMuted.length) return;
       for (const sel of MUTED_OVERLAY_SELECTORS) {
@@ -10318,13 +7364,14 @@ export class Editor {
    * 線は物理 px で引く＝ズームしても 1px 相当のまま。
    *
    * 描くのは **変形の枠・8ハンドル・回転ノブ／四隅モードの枠・8ハンドル** だけ。
-   * ドット粒度のもの（マーチングアンツ・M13-2a の色マスク・変形プレビューの絵）は従来の 320×240 に残す
-   * ＝**ドットで見えるのが正しい**。
+   * ドット粒度のもの（M13-2a の色マスク・変形プレビューの絵）は従来の 320×240 に残す。
+   * 選択の境目の線（旧マーチングアンツ）と囲んでいる途中の線は、V208 (A-119) で別の画面解像度の層
+   * （`#ed-sel-ui`・`paintSelectionUi`）へ移した（作者の決定 2026-10-24＝ドットより細い線。ここには同居させない）。
    *
    * `redrawOverlay()` の中からは呼ばない（M12-C の「2階の描画」規約と同じ分離）。変形・四隅の状態が
    * 変わる各所と `applyZoom()`（寸法の変化）から直接呼ぶ。描く物が無ければ hidden にする。
    */
-  private paintUiOverlay(): void {
+  protected override paintUiOverlay(): void {
     const cv = document.querySelector("#ed-overlay-ui") as HTMLCanvasElement | null;
     const canvas = document.querySelector("#ed-canvas") as HTMLCanvasElement | null;
     if (!cv || !canvas) return;
@@ -10424,41 +7471,6 @@ export class Editor {
     }
   }
 
-  /** M10-2b: 魚眼を1段階かけてプレビューする。符号はモードが決める（P-5） */
-  private stepFisheye(): void {
-    if (!this.warpField || !this.warpCenter) return;
-    const sign = this.warpMode === "pinch" ? -1 : 1;
-    this.warpField.addFisheye(
-      this.warpCenter.x,
-      this.warpCenter.y,
-      this.warpRadius,
-      sign * this.warpStrength
-    );
-    this.applyWarpPreview();
-  }
-
-  /** M10-2b: 次の1段階を予約する。**前の適用が終わってから**次を積むので、
-   *  適用が重い環境（レイヤー多数）でも呼び出しが溜まらない。
-   *  rAF は使わない — 60fps で秒60段階はドット絵に対して速すぎて制御できない。 */
-  private scheduleFisheyeRepeat(delayMs: number): void {
-    this.clearFisheyeRepeat();
-    this.warpTimer = window.setTimeout(() => {
-      this.warpTimer = null;
-      // タイマー側でも状態を毎回見る二重ガード（後始末が1つ漏れても暴走しない）
-      if (!this.pointerDown || this.tool !== "warp" || !this.warpField) return;
-      if (this.warpMode !== "bulge" && this.warpMode !== "pinch") return;
-      this.stepFisheye();
-      this.scheduleFisheyeRepeat(90);
-    }, delayMs);
-  }
-
-  private clearFisheyeRepeat(): void {
-    if (this.warpTimer !== null) {
-      window.clearTimeout(this.warpTimer);
-      this.warpTimer = null;
-    }
-  }
-
   private onPointerUp(e: PointerEvent) {
     // V154b (W-9): 重い処理の最中は描かない。`#screen-editor.ed-busy` の
     // `pointer-events:none` で普通は届かないが、**ポインタ捕捉中は届いてしまう**
@@ -10482,256 +7494,11 @@ export class Editor {
       this.updatePanCursor();
       return;
     }
-    // ★V191 (A-89): 1px の線の仮の 1 画素（ペン先）を、いまの道具に関係なく**ここで**打つ。束の確定（commitEraseAll）と
-    //  1 枚の履歴（pushBufferHistory）より**前**——後ろだと最後の 1 画素が取り消しの束に入らない（v191_smoke [S-4]・[S-11]）
-    this.endLine1px(); // ★V191 (A-89): 描き終わりの漏斗（pointerup）
-    // ★V178 (A-72): 全レイヤーのストロークは、いまの道具に関係なく**ここで**確定する
-    //  （途中でショートカットが道具を変えても、消した分を履歴に積まずに取り残さない）
-    if (this.eraseAllStroke) this.commitEraseAll();
-    const pt = this.clientToPixel(e.clientX, e.clientY);
-
-    if (this.xformActive && this.dragMode) {
-      this.dragMode = "";
-      this.hideXformModeLabel(); // R-2: ペンを離したらラベルを消す（hover環境では次のmoveで再表示）
-      const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
-      if (wrap) wrap.style.cursor = this.xformHitTest(pt).cursor;
-      this.setCanvasCursor(this.xformHitTest(pt).cursor); // M12-G: キャンバス上にも
-      this.buildToolOptions(); // 数値表示更新
-      return;
-    }
-
-    switch (this.tool) {
-      case "pen":
-      case "brush":
-      case "eraser": {
-        const buf = this.activeBuffer();
-        if (buf && this.strokeBefore) {
-          this.pushBufferHistory("描画", buf, this.strokeBefore);
-          this.strokeBefore = null;
-        }
-        this.lastPt = null;
-        this.smoothPt = null;
-        this.paintFilmThumb(this.frameIndex);
-        break;
-      }
-      case "text": {
-        // M11-12: 掴んでいた文字を離すだけ（確定ではない。履歴も積まない）。
-        // **フォーカスは入力欄へ戻さない** — 戻すと矢印キーでの1ドット調整ができなくなる
-        this.textDrag = null;
-        break;
-      }
-      case "warp": {
-        // M10-2c: 四隅はハンドルを離すだけ。確定は Enter なので履歴を積まない
-        if (this.warpMode === "corner") {
-          this.cornerDrag = null;
-          this.cornerDragBase = null;
-          break;
-        }
-        // M10-2b: 連続適用タイマーを最優先で止める（pointercancel もこの経路を通る）
-        this.clearFisheyeRepeat();
-        this.warpCenter = null;
-        const field = this.warpField;
-        const before = this.warpBefore;
-        this.warpField = null;
-        this.warpBefore = null;
-        this.warpLastPt = null;
-        if (!field || !before) break;
-        // 1画素も動いていなければ履歴を積まない（強さ0・クリックのみ）
-        if (field.isIdentity()) break;
-        const f = this.project.frames[this.frameIndex];
-        if (!f) break;
-        // **変化のあったレイヤーだけ** before/after を積む（メモリ節約）。
-        // 透明なレイヤーや変位が届かなかったレイヤーは1バイトも記録しない
-        const beforeDiff: Record<string, IndexBuf> = {};
-        const afterDiff: Record<string, IndexBuf> = {};
-        for (const ld of this.project.layerDefs) {
-          const b = before[ld.id];
-          const a = f.layers[ld.id];
-          if (!b || !a) continue;
-          let changed = false;
-          for (let i = 0; i < b.length; i++) {
-            if (b[i] !== a[i]) {
-              changed = true;
-              break;
-            }
-          }
-          if (!changed) continue;
-          beforeDiff[ld.id] = b;
-          afterDiff[ld.id] = copyIndexBuf(a);
-        }
-        if (Object.keys(afterDiff).length === 0) break;
-        // ストローク1回＝履歴1エントリ。実体は適用時に解決する（構造undo対策）。
-        // ★V180 (A-78 ①): 戻し先は**歪ませたコマ**（Frame オブジェクト `f`）で引く。以前は適用時の
-        //  `this.frameIndex`＝Ctrl+Z を押した時点で見ているコマで引いていたので、コマを移ってから取り消すと
-        //  **別のコマへ書き戻していた**（V178 の実測: コマ 5 の 6,800 画素がコマ 0 の絵で上書き）。
-        //  `pushBufferHistory`・変形・「消す」・全レイヤー消しゴムと同じ持ち方
-        const warpEntry = multiBufferChangeEntry(
-          "歪み",
-          (layerId) => f.layers[layerId] ?? null,
-          beforeDiff,
-          afterDiff,
-          () => {
-            // M10-23: Undo/Redo もデータ変更なので dirty にする（四隅変形と同じ）
-            this.dirty = true;
-            this.renderCanvas();
-            // ★V180: 塗り直すのも歪ませたコマのサムネ（見ているコマではない）
-            const fi = this.project.frames.indexOf(f);
-            if (fi >= 0) this.paintFilmThumb(fi);
-          }
-        );
-        // ★V180 (A-78 ②): 取り消し・やり直しの前に、そのコマを書きで起こす（眠っていると黙って空振りする）
-        warpEntry.prepare = () => wakeFrame(this.project, f, "write");
-        this.history.push(warpEntry);
-        this.dirty = true;
-        this.renderCanvas();
-        this.paintFilmThumb(this.frameIndex);
-        break;
-      }
-      case "fill": {
-        // M14 (S-2): 囲い塗りの確定。「軌跡＋始点終点を結んだ閉じ」の内側を、現在色（トーン選択中は柄）で塗る。
-        // 実装は自由選択のマスク生成（lassoMask=多角形→走査線）＋ A-3 の塗り込みエンジンの合成（新規ラスタライザなし）
-        if (this.fillMode === "enclose") {
-          const pts = this.enclosePts;
-          this.enclosePts = [];
-          if (pts.length >= 3) {
-            const mask = R.lassoMask(pts); // 始点と終点は自動で結ばれる（(i+1)%n）
-            // 選択範囲があればその中だけ（範囲外は1ドットも変えない）
-            if (this.selMask) for (let i = 0; i < PIXELS; i++) if (!this.selMask[i]) mask[i] = 0;
-            let cnt = 0;
-            for (let i = 0; i < PIXELS; i++) if (mask[i]) cnt++;
-            // 極小の囲いは何もしない（誤タッチ対策・トーストも出さない）
-            // M17: マイ柄なら resolveToneFor が全色を一括解決（昇格し得る）→ fillMaskWithCurrentColor 内でバッファ取得の順
-            if (cnt >= ENCLOSE_MIN_PX) this.fillMaskWithCurrentColor(mask, this.resolveToneFor("fill"), this.toneShiftForDraw());
-          }
-          // ドラッグ中の破線プレビューは**必ず**消す。fillMaskWithCurrentColor は「変化ゼロ」だと
-          // 早期 return して redrawOverlay を呼ばない（同じ色で二度囲う・透明で空領域を囲う等）ので、
-          // ここで無条件に描き直す（enclosePts は空にした後なので軌跡は消える・二度描画は無害）
-          this.redrawOverlay();
-        }
-        break;
-      }
-      case "shape": {
-        if (!this.shapeStart) break;
-        // M10-7: プレビューと**同一のヘルパー**で終点を出す（形がズレないように）
-        const end = this.shapeEnd(pt);
-        // 色解決が昇格でバッファを差し替え得るため、penOptions を先に解決
-        const o = this.penOptions(0.5);
-        const buf = this.activeBuffer();
-        if (buf) {
-          const before = copyIndexBuf(buf);
-          if (this.shapeKind === "line")
-            R.shapeLine(buf, this.shapeStart.x, this.shapeStart.y, end.x, end.y, o);
-          else if (this.shapeKind === "rect")
-            R.shapeRect(buf, this.shapeStart.x, this.shapeStart.y, end.x, end.y, o, this.shapeFill);
-          else
-            R.shapeEllipse(
-              buf,
-              this.shapeStart.x,
-              this.shapeStart.y,
-              end.x,
-              end.y,
-              o,
-              this.shapeFill
-            );
-          this.pushBufferHistory("図形", buf, before);
-        }
-        this.shapeStart = null;
-        this.shapeLastPt = null;
-        this.overlayCtx().clearRect(0, 0, W, H);
-        this.renderCanvas();
-        this.paintFilmThumb(this.frameIndex);
-        break;
-      }
-      case "move": {
-        if (this.dragMode === "selmove") this.commitSelectionMove();
-        else if (this.dragMode === "layermove") this.commitLayerMove();
-        break;
-      }
-      case "select": {
-        if (this.dragMode === "selmask") {
-          this.commitSelMaskMove(); // M11-8 P-1
-        } else if (this.selectKind === "rect" && this.shapeStart) {
-          if (this.shapeStart.x === pt.x && this.shapeStart.y === pt.y) {
-            // ドラッグなしの素クリック＝選択解除（1pxの見えない選択が clip で
-            // 全描画を無音で封じる事故の防止。マーキー系ツールの標準挙動でもある）。
-            // M13-2a: 足す／引くの素クリックは「何も足さない／引かない」＝何もしない
-            if (this.selMod === "replace") {
-              const selBefore = this.selMask ? this.selMask.slice() : null;
-              if (selBefore) this.pushSelectionHistory("選択解除", selBefore, null);
-              this.selMask = null;
-            }
-          } else {
-            // M10-22: 選択の作成・置換を履歴へ（applySelectionResult の中で before=直前のマスク）
-            this.applySelectionResult("drag", R.rectMask(this.shapeStart.x, this.shapeStart.y, pt.x, pt.y));
-          }
-          this.shapeStart = null;
-          this.redrawOverlay();
-        } else if (this.selectKind === "lasso" && this.lassoPts.length > 2) {
-          const lm = R.lassoMask(this.lassoPts);
-          if (lm.some((v) => v !== 0)) {
-            this.applySelectionResult("drag", lm);
-          } else if (this.selMod === "replace") {
-            // 囲めていない軌跡（面積ゼロ）＝選択解除（全0マスクはアンツが1画素も
-            // 出ず、clip で描けない原因が見えなくなるため選択として扱わない）
-            const selBefore = this.selMask ? this.selMask.slice() : null;
-            if (selBefore) this.pushSelectionHistory("選択解除", selBefore, null);
-            this.selMask = null;
-          }
-          this.lassoPts = [];
-          this.redrawOverlay();
-        } else {
-          this.lassoPts = [];
-          this.redrawOverlay();
-        }
-        break;
-      }
-    }
+    // ★V213 (M-2a): 確定はコア（1px の仮・全レイヤーの束・道具ごとの確定）
+    this.strokeFinish(this.sampleOf(e));
   }
 
-  /**
-   * M10-7: Shift 拘束をかけた終点を返す。**プレビューと確定の両方がこれを通る**
-   * （別々に計算すると、見えていた形と焼き込まれる形がズレる）。
-   *
-   * - rect / ellipse: 縦横のドラッグ量の**長いほう**に合わせた正方形／正円
-   * - line: 45°刻みの8方向へスナップ（長さはドラッグ距離を保つ）
-   * - 幅ゼロ（クリック1点）は素通し。既存の1ドットフォールバックを壊さない
-   */
-  private constrainShapeEnd(
-    a: { x: number; y: number },
-    b: { x: number; y: number },
-    kind: ShapeKind
-  ): { x: number; y: number } {
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    if (dx === 0 && dy === 0) return b;
-    if (kind === "line") {
-      const r = Math.hypot(dx, dy);
-      const step = Math.PI / 4;
-      const ang = Math.round(Math.atan2(dy, dx) / step) * step;
-      return {
-        x: a.x + Math.round(r * Math.cos(ang)),
-        y: a.y + Math.round(r * Math.sin(ang)),
-      };
-    }
-    const m = Math.max(Math.abs(dx), Math.abs(dy));
-    return { x: a.x + (dx < 0 ? -m : m), y: a.y + (dy < 0 ? -m : m) };
-  }
-
-  /** M10-7: Shift 状態を反映した図形の終点。プレビュー・確定の共通入口 */
-  private shapeEnd(b: { x: number; y: number }): { x: number; y: number } {
-    if (!this.shiftHeld || !this.shapeStart) return b;
-    return this.constrainShapeEnd(this.shapeStart, b, this.shapeKind);
-  }
-
-  /** M10-7: ドラッグ中に Shift が押された/離されたときだけプレビューを引き直す。
-   *  図形ツールでドラッグ中でなければ**何もしない**（他の Shift 機能に干渉しない） */
-  private refreshShapePreview(): void {
-    if (this.tool !== "shape" || !this.pointerDown) return;
-    if (!this.shapeStart || !this.shapeLastPt) return;
-    this.previewShape(this.shapeStart, this.shapeEnd(this.shapeLastPt));
-  }
-
-  private previewShape(a: { x: number; y: number }, b: { x: number; y: number }) {
+  protected override previewShape(a: { x: number; y: number }, b: { x: number; y: number }) {
     const ctx = this.overlayCtx();
     ctx.clearRect(0, 0, W, H);
     // V158 (C-2): ここは**作品の絵の上**に描くプレビュー。配色を変えても作品の色は変わらないので、
@@ -10765,7 +7532,8 @@ export class Editor {
     }
   }
 
-  private previewSelectRect(a: { x: number; y: number }, b: { x: number; y: number }) {
+  protected override previewSelectRect(a: { x: number; y: number }, b: { x: number; y: number }) {
+    this.hideSelectionUiFor("rect"); // V208 (A-119): ドラッグの間は選択の線も出さない（離すと redrawOverlay で戻る）
     const ctx = this.overlayCtx();
     ctx.clearRect(0, 0, W, H);
     ctx.setLineDash([2, 2]);
@@ -10779,249 +7547,8 @@ export class Editor {
     ctx.setLineDash([]);
   }
 
-  // ---------------- 選択の移動/コピー ----------------
-
-  private selMoveBefore: IndexBuf | null = null;
-
-  // ---------------- M11-8 P-1: 選択範囲（枠）だけの移動 ----------------
-  // 選択範囲ツールで範囲内をドラッグしても**絵は動かさない**。動くのは点線の枠だけ。
-  // 枠は画面外へ出てよい（`base` + dx/dy を保持し、見えている分だけを selMask に materialize
-  // するので、外へ出して戻せば形が復活する）。完全に外へ出たまま離したら解除する。
-  private selMaskDrag: {
-    start: { x: number; y: number };
-    /** 掴んだ時点のマスク（これを平行移動して毎回作り直す） */
-    base: Uint8Array;
-    /** 履歴用の before */
-    before: Uint8Array;
-    dx: number;
-    dy: number;
-  } | null = null;
-
-  private beginSelMaskMove(pt: { x: number; y: number }) {
-    if (!this.selMask) return;
-    this.selMaskDrag = {
-      start: pt,
-      base: this.selMask.slice(),
-      before: this.selMask.slice(),
-      dx: 0,
-      dy: 0,
-    };
-    this.dragMode = "selmask";
-    this.refreshSelectionLauncher(); // ドラッグ中は隠す（離したら再表示）
-  }
-
-  /** base を (dx, dy) だけ平行移動したマスクを作る（画面外は落ちる＝表示用） */
-  private shiftedMask(base: Uint8Array, dx: number, dy: number): Uint8Array {
-    const m = new Uint8Array(PIXELS);
-    for (let y = 0; y < H; y++) {
-      const ny = y + dy;
-      if (ny < 0 || ny >= H) continue;
-      for (let x = 0; x < W; x++) {
-        if (!base[y * W + x]) continue;
-        const nx = x + dx;
-        if (nx < 0 || nx >= W) continue;
-        m[ny * W + nx] = 1;
-      }
-    }
-    return m;
-  }
-
-  private updateSelMaskMove(pt: { x: number; y: number }) {
-    const d = this.selMaskDrag;
-    if (!d) return;
-    d.dx = pt.x - d.start.x;
-    d.dy = pt.y - d.start.y;
-    this.selMask = this.shiftedMask(d.base, d.dx, d.dy);
-    this.redrawOverlay();
-  }
-
-  /** M11-8: ドラッグ中の Escape ＝この移動だけ取り消す（掴んだ時点の枠へ戻す・履歴は積まない） */
-  private cancelSelMaskMove() {
-    const d = this.selMaskDrag;
-    if (!d) return;
-    this.selMaskDrag = null;
-    this.dragMode = "";
-    this.selMask = d.before;
-    this.redrawOverlay();
-  }
-
-  private commitSelMaskMove() {
-    const d = this.selMaskDrag;
-    this.selMaskDrag = null;
-    this.dragMode = "";
-    if (!d) return;
-    const moved = this.shiftedMask(d.base, d.dx, d.dy);
-    const empty = !moved.some((v) => v !== 0);
-    if (empty) {
-      // 完全に画面外へ出た＝解除（REQ E）
-      this.selMask = null;
-      this.pushSelectionHistory("選択解除", d.before, null);
-    } else if (d.dx !== 0 || d.dy !== 0) {
-      this.selMask = moved;
-      this.pushSelectionHistory("選択範囲の移動", d.before, moved.slice());
-    } else {
-      this.selMask = moved; // 動いていない＝履歴に積まない
-    }
-    this.redrawOverlay();
-  }
-
-  // ---------------- M11-8 P-2: レイヤー移動（絵そのものを動かす） ----------------
-  // 選択範囲が無いとき: 選択中のレイヤー1枚（フォルダ選択中はその中の全レイヤー）。
-  // 選択範囲があるとき: 既存の beginSelectionMove（extractFloat）へ委譲＝範囲内の絵だけ動く。
-  // はみ出しは**掴んだ時点のスナップショットから毎回描き直す**ので、外へ出して戻せば復活し、
-  // 離した時点（＝確定）で外に出ている分だけが落ちる。Undo は before スナップショットへ戻す。
-  private layerDrag: {
-    start: { x: number; y: number };
-    ids: string[];
-    before: Record<string, IndexBuf>;
-    /** 掴んだ時点のコマ。ドラッグ中に表示コマが変わっても**掴んだコマだけ**を書き換える */
-    frameIdx: number;
-    dx: number;
-    dy: number;
-  } | null = null;
-
-  /**
-   * M13-1: いま動かす対象のレイヤー id。
-   * 判定そのものは `layerTree.ts` の純関数（`m37_smoke` が展開・重複除去・非表示除外を検証する）。
-   * ここは UI 状態を渡すだけの薄い橋。**対象は掴んだ時点で確定**する
-   *（ドラッグ中に選択を変えても対象は変わらない＝表示コマを変えても掴んだコマだけ書き換える既存の流儀と揃える）。
-   */
-  private moveTargetLayerIds(): string[] {
-    return computeMoveTargetLayerIds(
-      this.project,
-      this.selectedNodeIds,
-      this.activeLayerId,
-      this.frameIndex
-    );
-  }
-
-  private beginLayerMove(pt: { x: number; y: number }) {
-    const f = this.project.frames[this.frameIndex];
-    if (!f) return;
-    // 純関数側で「そのコマにバッファが無いもの」まで落としているので、ここでの再フィルタは不要
-    const ids = this.moveTargetLayerIds();
-    if (ids.length === 0) {
-      this.cb.toast(t("ed.layer.move.noTarget.toast"));
-      return;
-    }
-    const before: Record<string, IndexBuf> = {};
-    for (const id of ids) before[id] = copyIndexBuf(f.layers[id]);
-    this.layerDrag = { start: pt, ids, before, frameIdx: this.frameIndex, dx: 0, dy: 0 };
-    this.dragMode = "layermove";
-    this.refreshSelectionLauncher(); // ドラッグ中は隠す（離したら再表示）
-  }
-
-  /** before スナップショットを (dx, dy) だけずらして書き直す（画面外は落ちる＝確定時の切り捨て） */
-  private applyLayerMove(dx: number, dy: number) {
-    const d = this.layerDrag;
-    // 掴んだコマを覚えておく（ドラッグ中に ←→ や再生でコマが変わっても、
-    // 別のコマの絵を「前のコマのスナップショット」で塗り潰さない）
-    const f = d ? this.project.frames[d.frameIdx] : null;
-    if (!d || !f) return;
-    for (const id of d.ids) {
-      const dst = f.layers[id];
-      const src = d.before[id];
-      if (!dst || !src) continue;
-      dst.fill(0);
-      for (let y = 0; y < H; y++) {
-        const ny = y + dy;
-        if (ny < 0 || ny >= H) continue;
-        for (let x = 0; x < W; x++) {
-          const v = src[y * W + x];
-          if (!v) continue;
-          const nx = x + dx;
-          if (nx < 0 || nx >= W) continue;
-          dst[ny * W + nx] = v;
-        }
-      }
-    }
-  }
-
-  private updateLayerMove(pt: { x: number; y: number }) {
-    const d = this.layerDrag;
-    if (!d) return;
-    d.dx = pt.x - d.start.x;
-    d.dy = pt.y - d.start.y;
-    this.applyLayerMove(d.dx, d.dy);
-    this.renderCanvas();
-  }
-
-  /** M11-8: ドラッグ中の Escape ＝この移動だけ取り消す（掴んだ時点の絵へ戻す・履歴は積まない） */
-  private cancelLayerMove() {
-    const d = this.layerDrag;
-    if (!d) return;
-    this.applyLayerMove(0, 0);
-    this.layerDrag = null;
-    this.dragMode = "";
-    this.renderCanvas();
-    this.paintFilmThumb(d.frameIdx);
-    this.refreshSelectionLauncher();
-  }
-
-  private commitLayerMove() {
-    const d = this.layerDrag;
-    this.layerDrag = null;
-    this.dragMode = "";
-    if (!d) return;
-    const frameIdx = d.frameIdx;
-    const f = this.project.frames[frameIdx];
-    if (!f) return;
-    if (d.dx === 0 && d.dy === 0) return; // 動いていない＝履歴に積まない
-    const after: Record<string, IndexBuf> = {};
-    for (const id of d.ids) if (f.layers[id]) after[id] = copyIndexBuf(f.layers[id]);
-    const moveEntry = multiBufferChangeEntry(
-      "レイヤーの移動",
-      (id) => this.project.frames[frameIdx]?.layers[id] ?? null,
-      d.before,
-      after,
-      () => {
-        // ★V180（指示からの追加・Codex 1 回目の穴から見つけた漏れ）: Undo/Redo もデータ変更なので dirty（M10-23 と同じ）。
-        //  これだけ立てていなかったので、保存した直後にレイヤーの移動を取り消しても未保存の印が立たず、
-        //  オートセーブも終了時の確認も働かなかった（Node 実測: 取り消し・やり直しのあと dirty=false のまま）
-        this.dirty = true;
-        this.renderCanvas();
-        this.redrawOverlay();
-        this.paintFilmThumb(frameIdx);
-      }
-    );
-    // ★V180 (A-78 ②): 取り消し・やり直しの前に、そのコマを書きで起こす（眠っていると黙って空振りする）。
-    //  コマ番号で持つので、そのコマが無ければ何もしない（例外を投げない）
-    moveEntry.prepare = () => {
-      const fr = this.project.frames[frameIdx];
-      return fr ? wakeFrame(this.project, fr, "write") : Promise.resolve();
-    };
-    this.history.push(moveEntry);
-    this.dirty = true;
-    this.renderCanvas();
-    this.paintFilmThumb(frameIdx);
-    this.refreshSelectionLauncher();
-  }
-
-  private beginSelectionMove(pt: { x: number; y: number }) {
-    if (this.lockGuard()) return; // V157 (D-1)
-    const buf = this.activeBuffer();
-    if (!buf || !this.selMask) return;
-    this.selMoveBefore = copyIndexBuf(buf);
-    this.floatBuf = R.extractFloat(buf, this.selMask, true);
-    if (!this.floatBuf) {
-      this.selMoveBefore = null;
-      return;
-    }
-    this.xform = { tx: 0, ty: 0, angle: 0, sx: 1, sy: 1, flipH: false, flipV: false };
-    this.dragMode = "selmove";
-    this.dragStart = pt;
-    this.renderCanvas();
-    this.redrawSelMovePreview();
-  }
-
-  private updateSelectionMove(pt: { x: number; y: number }) {
-    if (!this.dragStart) return;
-    this.xform.tx = pt.x - this.dragStart.x;
-    this.xform.ty = pt.y - this.dragStart.y;
-    this.redrawSelMovePreview();
-  }
-
-  private redrawSelMovePreview() {
+  protected override redrawSelMovePreview() {
+    this.hideSelectionUiFor("selmove"); // V208 (A-119): 絵を動かしている間は選択の線も出さない（離すと redrawOverlay で戻る）
     const ctx = this.overlayCtx();
     ctx.clearRect(0, 0, W, H);
     if (!this.floatBuf) return;
@@ -11031,438 +7558,6 @@ export class Editor {
       this.floatBuf.ox + this.xform.tx,
       this.floatBuf.oy + this.xform.ty
     );
-  }
-
-  private commitSelectionMove() {
-    const buf = this.activeBuffer();
-    this.dragMode = "";
-    if (!buf || !this.floatBuf || !this.selMoveBefore) return;
-    R.blitFloatTransformed(buf, this.floatBuf, this.xform);
-    // 選択マスクも移動（M10-22: 履歴に合成するため先に after を作ってから1エントリで積む）
-    const selBefore = this.selMask ? this.selMask.slice() : null;
-    const dx = Math.round(this.xform.tx);
-    const dy = Math.round(this.xform.ty);
-    if (this.selMask) {
-      const nm = new Uint8Array(PIXELS);
-      for (let y = 0; y < H; y++)
-        for (let x = 0; x < W; x++)
-          if (this.selMask[y * W + x]) {
-            const nx = x + dx;
-            const ny = y + dy;
-            if (nx >= 0 && nx < W && ny >= 0 && ny < H) nm[ny * W + nx] = 1;
-          }
-      this.selMask = nm;
-    }
-    // M10-22: 画素とマスク位置を1エントリに束ねる（Ctrl+Z 1回で両方戻る）
-    this.pushBufferHistory("選択移動", buf, this.selMoveBefore, {
-      before: selBefore,
-      after: this.selMask ? this.selMask.slice() : null,
-    });
-    this.floatBuf = null;
-    this.selMoveBefore = null;
-    this.overlayCtx().clearRect(0, 0, W, H);
-    this.renderCanvas();
-    this.redrawOverlay();
-    this.paintFilmThumb(this.frameIndex);
-  }
-
-  private copySelection(cut: boolean) {
-    // V157 (D-1): **コピーは通す**（絵は変わらない）。切り取りだけロックで弾く
-    if (cut && this.lockGuard()) return;
-    const buf = this.activeBuffer();
-    if (!buf || !this.selMask) {
-      this.cb.toast(t("ed.sel.needSelection.toast"));
-      return;
-    }
-    const before = cut ? copyIndexBuf(buf) : null;
-    const f = R.extractFloat(buf, this.selMask, cut);
-    if (!f) return;
-    Editor.clipboard = f;
-    if (cut && before) {
-      // M10-22: マスク自体は切り取りで変化しないが、undo/redo でその時点の選択状態へ
-      // 揃うように（時系列の一貫性）バッファと同じ1エントリに束ねる
-      const selNow = this.selMask ? this.selMask.slice() : null;
-      this.pushBufferHistory("切り取り", buf, before, { before: selNow, after: selNow });
-      this.renderCanvas();
-      this.paintFilmThumb(this.frameIndex);
-    }
-    this.cb.toast(cut ? t("ed.sel.cut.done.toast") : t("ed.sel.copy.done.toast"));
-  }
-
-  private pasteClipboard() {
-    if (!Editor.clipboard) {
-      this.cb.toast(t("ed.sel.paste.empty.toast"));
-      return;
-    }
-    // 16bitプロジェクト由来のクリップボード（索引255超を含み得る）を8bitプロジェクトへ
-    // 貼る場合は、truncate を避けるため先にプロジェクトを昇格させる
-    if (
-      Editor.clipboard.data instanceof Uint16Array &&
-      this.project.indexBits === 8 &&
-      Editor.clipboard.data.some((v) => v > 255)
-    ) {
-      promoteTo16(this.project);
-      this.noticePromote16(); // V154 (W-3)
-      this.dirty = true;
-    }
-    // 貼り付け → 変形モードで位置決め
-    this.floatBuf = {
-      ...Editor.clipboard,
-      data: copyIndexBuf(Editor.clipboard.data),
-    };
-    this.selMask = null;
-    this.xform = { tx: 0, ty: 0, angle: 0, sx: 1, sy: 1, flipH: false, flipV: false };
-    this.xformInitial = { ...this.xform }; // L-B
-    this.xformActive = true;
-    this.xformBefore = copyIndexBuf(this.activeBuffer()!);
-    this.xformCutDone = false;
-    // M13-2b: 貼り付けは従来どおり**アクティブ1枚**（REQ §3「貼り付けの複数レイヤー化はしない」）
-    this.xformLayers = [{ id: this.activeLayerId, float: this.floatBuf, before: this.xformBefore }];
-    this.tool = "transform";
-    this.updateToolButtons();
-    this.buildToolOptions();
-    this.redrawOverlay();
-    this.paintUiOverlay();
-  }
-
-  // ---------------- M8-2: 📷 画像配置（変換結果→浮動→変形経路を流用） ----------------
-
-  /** モーダルの「配置先: …」表示用（アクティブレイヤー名＋現在コマ番号） */
-  placementInfo(): { layerName: string; frameNo: number } {
-    const ld = this.project.layerDefs.find((l) => l.id === this.activeLayerId);
-    return { layerName: ld?.name ?? t("ed.img.place.noLayerName.label"), frameNo: this.frameIndex + 1 };
-  }
-
-  /** 変換済み1ページ（imageConvert の出力 Project）をアクティブレイヤーへ浮動配置する。
-   *  色索引の不変条件（N-2/M3.3 の作法）:
-   *  ①使用色の ensureColor を**全部先に**済ませる（途中で16bit昇格し得るため）
-   *  ②昇格後の幅で allocIndexBuf → remap 書き込み
-   *  ③あとは pasteClipboard と同一の浮動＋変形モード（Enter焼き込み/Esc/Undo規則は既存のまま） */
-  placeConvertedImage(src: Project, transparentPaper: boolean) {
-    const active = this.activeBuffer();
-    if (!active) {
-      this.cb.toast(t("ed.img.place.noLayer.toast"));
-      return;
-    }
-    if (this.xformActive) {
-      this.cb.toast(t("ed.img.place.xformBusy.toast"));
-      return;
-    }
-    const srcBuf = src.frames[0].layers["L1"];
-    const paperHex = (src.colorTable[src.frames[0].paper] || "#ffffff").toLowerCase();
-    // ① 色解決を全部先に（透過ONなら紙色一致の画素は登録しない＝パレット汚染防止）
-    const used = new Set<number>();
-    for (let i = 0; i < PIXELS; i++) if (srcBuf[i] > 0) used.add(srcBuf[i] as number);
-    const bitsBefore = this.project.indexBits;
-    const map = new Map<number, number>();
-    for (const si of used) {
-      const hex = src.colorTable[si].toLowerCase();
-      if (transparentPaper && hex === paperHex) continue; // 透明化されるので登録不要
-      map.set(si, ensureColor(this.project, hex));
-    }
-    let paperIdx = 0;
-    if (!transparentPaper) paperIdx = ensureColor(this.project, paperHex);
-    if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.noticePromote16(); // V154 (W-3)
-      this.dirty = true;
-    }
-    // ② 昇格後の幅でバッファ確保 → remap（index0=透明は FloatBuf の透明と同義）
-    const data = allocIndexBuf(this.project);
-    for (let i = 0; i < PIXELS; i++) {
-      const si = srcBuf[i] as number;
-      if (si > 0) data[i] = map.get(si) ?? 0; // 紙色一致（透過ON）は 0
-      else data[i] = paperIdx; // 透過ON時は 0 のまま
-    }
-    // ③ 浮動＋変形モード（pasteClipboard と同一の状態遷移）
-    this.floatBuf = { w: W, h: H, ox: 0, oy: 0, data };
-    this.selMask = null;
-    this.xform = { tx: 0, ty: 0, angle: 0, sx: 1, sy: 1, flipH: false, flipV: false };
-    this.xformInitial = { ...this.xform };
-    this.xformActive = true;
-    this.xformBefore = copyIndexBuf(this.activeBuffer()!);
-    this.xformCutDone = false;
-    this.xformLayers = [{ id: this.activeLayerId, float: this.floatBuf, before: this.xformBefore }]; // M13-2b: 1枚
-    this.tool = "transform";
-    this.updateToolButtons();
-    this.buildToolOptions();
-    this.redrawOverlay();
-    this.paintUiOverlay();
-    this.cb.toast(t("ed.img.place.done.toast"));
-  }
-
-  /** V151 (M8-3): 変換済み複数コマ（imageConvert の出力 Project）を**今のコマの後ろへ挿入**する（連番一括）。
-   *  - 色索引の不変条件は placeConvertedImage と同じ: ①全コマの使用色を ensureColor で**全部先に**解決
-   *    （途中で16bit昇格し得る）→ ②昇格後の幅で確保・remap。パレットは src が全コマ共通（convertToProject の既定）
-   *  - 挿入・履歴・上限ガードは pasteFrames の複数ページ挿入と同じ作法（Undo 1回で N コマ全部戻る）
-   *  - 変形は通さない（「おさめ方」に従った自動配置のまま焼く）。挿入されるコマは通常のコマと同一バイト */
-  async placeConvertedFrames(src: Project, transparentPaper: boolean) {
-    // V166 (層2): 連番一括は N コマぶんを一度に確保する＝貼り付けと同じ重さ
-    await this.runHeavy("image.frames", t("ed.heavy.imageFrames.msg"), () =>
-      this.placeConvertedFramesInner(src, transparentPaper)
-    );
-  }
-
-  private placeConvertedFramesInner(src: Project, transparentPaper: boolean) {
-    const active = this.activeBuffer();
-    if (!active) {
-      this.cb.toast(t("ed.img.place.noLayer.toast"));
-      return;
-    }
-    if (this.xformActive) {
-      this.cb.toast(t("ed.img.place.xformBusy.toast"));
-      return;
-    }
-    const ld = this.project.layerDefs.find((l) => l.id === this.activeLayerId);
-    if (ld?.shared === true) {
-      // 📌全コマ共通レイヤーは全コマが1バッファ＝コマごとに違う絵を持てない。
-      // 挿入後の relinkShared で絵が黙って消えるので、先に断る
-      this.cb.toast(t("ed.img.place.sharedBlocked.toast"));
-      return;
-    }
-    const n = src.frames.length;
-    if (this.project.frames.length + n > 65535) {
-      this.cb.toast(t("ed.tl.pasteLimit.toast")); // pasteFrames と同じ上限ガード
-      return;
-    }
-    // V166 (B): pasteFrames と同じ見積もり。★連番画像は**元画像のパレットを丸ごと持ち込む**ので、
-    //  16bit 昇格が起こり得る（Codex 指摘④）。持ち込む色数を渡して幅を決めさせる
-    if (!this.allowFrameAlloc(n, src.colorTable.length, "image.frames")) return;
-    if (this.playing) this.stopPlayback();
-    // ① 全コマの使用色を一括解決（透過ONなら紙色一致の画素は登録しない＝パレット汚染防止・1枚版と同じ規則）
-    const paperHex = (src.colorTable[src.frames[0].paper] || "#ffffff").toLowerCase();
-    const used = new Set<number>();
-    for (const f of src.frames) {
-      const b = f.layers["L1"];
-      for (let i = 0; i < PIXELS; i++) if (b[i] > 0) used.add(b[i] as number);
-    }
-    const bitsBefore = this.project.indexBits;
-    const map = new Map<number, number>();
-    for (const si of used) {
-      const hex = src.colorTable[si].toLowerCase();
-      if (transparentPaper && hex === paperHex) continue;
-      map.set(si, ensureColor(this.project, hex));
-    }
-    let paperIdx = 0;
-    if (!transparentPaper) paperIdx = ensureColor(this.project, paperHex);
-    if (bitsBefore === 8 && this.project.indexBits === 16) {
-      this.noticePromote16(); // V154 (W-3)
-      this.dirty = true;
-    }
-    // ② 昇格後の幅で新コマを組む（紙は今のコマを継承・アクティブレイヤーへ remap・他レイヤーは空）
-    const curPaper = this.project.frames[this.frameIndex]?.paper ?? 1;
-    const activeId = this.activeLayerId;
-    const newFrames = src.frames.map((sf) => {
-      const nf = makeEmptyFrame(this.project, curPaper);
-      const data = nf.layers[activeId] ?? allocIndexBuf(this.project);
-      const sb = sf.layers["L1"];
-      for (let i = 0; i < PIXELS; i++) {
-        const si = sb[i] as number;
-        if (si > 0) data[i] = map.get(si) ?? 0;
-        else data[i] = paperIdx; // 透過ONは 0 のまま＝紙が透ける（1枚版と同じ）
-      }
-      nf.layers[activeId] = data;
-      return nf;
-    });
-    // ③ 挿入（pasteFrames の複数ページ挿入と同じ履歴単位・redo は昇格跨ぎを正規化）
-    const at = this.frameIndex + 1;
-    const self = this;
-    const apply = () => {
-      for (const f of newFrames) conformFrameWidth(self.project, f);
-      self.project.frames.splice(at, 0, ...newFrames);
-      self.frameIndex = at; // 挿入した最初のコマへ移動
-      self.afterFrameStructureChange();
-    };
-    const revert = () => {
-      self.project.frames.splice(at, n);
-      self.frameIndex = Math.min(at - 1, self.project.frames.length - 1);
-      self.afterFrameStructureChange();
-    };
-    // V154 (W-2): 取り消したコマは履歴が抱える（同上）
-    this.history.push({
-      colorRefs: () => ({ frames: newFrames }), // V195 (A-99)
-      label: "連番挿入",
-      bytesIfUndone: entryBytes(newFrames),
-      undo: revert,
-      redo: apply,
-    });
-    apply();
-    this.cb.toast(t("ed.tl.insertedMulti.toast", { count: n }));
-  }
-
-  /** 選択範囲の中を消す。**選択は維持する**（M11-9 P-3）。
-   *  Delete / Backspace・側パネルの「削除」・ランチャーの「消去」の3つの入口が
-   *  同じ結果になるよう、実体はこの1つだけにしてある。
-   *  M10-22 では「画素の削除とマスク解除を1エントリに束ねる」形だったが、
-   *  解除しなくなったので履歴には**画素の変化だけ**を積む */
-  /**
-   * M13-2a (A-1): 新しく作った範囲 `next` を、ドラッグ開始時の修飾キー（`selMod`）に従って
-   * いまの選択へ合成する。矩形・自由・自動の**3つがすべてここを通る**。
-   *   replace … 置き換え（従来どおり）
-   *   add     … 和（`|`）
-   *   sub     … 差（`& ~`）
-   * 結果が全0なら**選択解除として扱う**（既存の流儀。1px の見えない選択で clip が全描画を封じる事故の防止）。
-   * 履歴は従来どおり `pushSelectionHistory(before, after)` の1エントリ＝Undo 1回で前の範囲へ戻る。
-   * `Uint8Array` の 0/1 を触るだけで索引バッファには一切触れない。
-   */
-  private applySelectionResult(kind: "auto" | "drag", next: Uint8Array) {
-    const before = this.selMask ? this.selMask.slice() : null;
-    let out = next;
-    if (this.selMod !== "replace" && this.selMask) {
-      out = new Uint8Array(PIXELS);
-      const cur = this.selMask;
-      if (this.selMod === "add") {
-        for (let i = 0; i < PIXELS; i++) out[i] = cur[i] | next[i];
-      } else {
-        for (let i = 0; i < PIXELS; i++) out[i] = cur[i] & (next[i] ^ 1);
-      }
-    } else if (this.selMod === "sub") {
-      // 何も選んでいない所から引く＝引く相手が無い。選択は無いまま（履歴にも積まない）
-      return;
-    }
-    const empty = !out.some((v) => v !== 0);
-    this.selMask = empty ? null : out;
-    // 変化が無いなら履歴に積まない（同じ範囲を足し直した等）
-    if (before && !empty && before.length === out.length && before.every((v, i) => v === out[i])) return;
-    if (!before && empty) return;
-    // 履歴ラベルは画面に出ない内部識別子（検査5 が `pushSelectionHistory` の第1引数として見逃す形に置く）
-    this.pushSelectionHistory(kind === "auto" ? "自動選択" : "範囲選択", before, empty ? null : out.slice());
-    if (empty && before) this.cb.toast(t("ed.sel.becameEmpty.toast"));
-  }
-
-  /**
-   * M13-2a (A-1): 自動選択の参照「選択中」＝選択中のレイヤーを合成した索引バッファ。
-   * 対象の解決は M13-1 の純関数（`moveTargetLayerIds`）と同じ規則＝フォルダは展開・重複は除去・
-   * 実効可視が false は除外・何も選んでいなければ `activeLayerId`。**必ず1枚以上**に解決される。
-   * 合成は「レイヤー順（下→上）で非0が勝つ」だけ。クリッピングは見ない＝**1枚だけなら
-   * 従来の `activeBuffer()` とビット単位で同じ**（既存の流儀を変えない）。
-   * 値は索引のコピーだけ。色計算・補間・平均・ブレンドはしない（IndexBuf の掟）。
-   */
-  private flattenSelectedLayers(): IndexBuf | null {
-    const ids = this.moveTargetLayerIds();
-    const frame = this.project.frames[this.frameIndex];
-    if (!frame) return null;
-    if (ids.length === 1) return frame.layers[ids[0]] ?? null;
-    if (ids.length === 0) return this.activeBuffer();
-    const want = new Set(ids);
-    const out = allocIndexBuf(this.project);
-    for (const ld of this.project.layerDefs) {
-      if (!want.has(ld.id)) continue;
-      const lb = frame.layers[ld.id];
-      if (!lb) continue;
-      for (let i = 0; i < PIXELS; i++) if (lb[i] !== 0) out[i] = lb[i];
-    }
-    return out;
-  }
-
-  /**
-   * M13-2a (A-3): 選択範囲を**いまの色**で塗る。この回の目玉。
-   *  - 対象は**アクティブレイヤー1枚**（既存の塗りツールと同じ流儀。複数レイヤーには塗らない）
-   *  - 選択マスクの立っている位置へ**現在の色の索引を書き込むだけ**（補間・平均・ブレンドはしない）
-   *  - 現在の色が「透明」（`colorHex === ""` → 索引0）なら、範囲が消える（`ed.sel.erase` と同じ結果でよい）
-   *  - ⚠ **色の解決を先に、バッファの取得を後に**（257色目で16bitへ昇格すると全バッファが差し替わる）
-   *  - 履歴1エントリ。変化ゼロなら積まない（`deleteSelection` と同じ作法）
-   */
-  /** M14 (S-4): A-3（v1.4.2）の「選択マスクを現在色で塗る」エンジンを一般化したもの。
-   *  「🪣 今の色で塗る」ボタンは M14 で廃止したが、この塗り込みエンジンは**囲い塗り（S-2）が使う**ので残す。
-   *  - `mask`: 塗る範囲（0/1）。囲い塗りは lassoMask、選択塗りは selMask を渡す
-   *  - `tone`: トーン柄（null=ベタ）。バケツと同じく**キャンバス座標固定**で toneAt 判定（＝同座標で同柄）
-   *  - 現在色が透明（index 0）なら消える（消し囲い）。索引の置き換えのみ・中間色は作らない。Undo 1回。
-   *  色解決（currentColorIndex）は 257 色目で 16bit 昇格しバッファを差し替え得るので**先に解決**する（A-3 と同じ注意）。 */
-  private fillMaskWithCurrentColor(
-    mask: Uint8Array,
-    sel: { tone: R.ToneTile | null; colorTile: R.ColorTile | null },
-    toneShift = 0
-  ) {
-    if (this.xformGuard()) return;
-    if (this.playing) this.stopPlayback();
-    // ★順序: sel（マイ柄の全色）は呼び出し側が解決済み → 現在色を解決 → それからバッファ（昇格で差し替わるため）
-    const color = this.currentColorIndex(); // 昇格し得るので先に解決（バケツ・A-3 と同じ順）
-    const buf = this.activeBuffer();
-    if (!buf) return;
-    if (sel.colorTile) {
-      // M17: マイ柄（色タイル）。変化ゼロなら履歴に積まない（従来と同じ作法）
-      const before = copyIndexBuf(buf);
-      if (!CT.applyColorTile(buf, mask, sel.colorTile, toneShift)) return;
-      this.pushBufferHistory("囲い塗り", buf, before);
-      this.renderCanvas();
-      this.redrawOverlay();
-      this.paintFilmThumb(this.frameIndex);
-      return;
-    }
-    const tone = sel.tone;
-    const hit = (i: number): boolean =>
-      mask[i] !== 0 && (!tone || R.toneAt(tone, i % W, (i / W) | 0, toneShift)); // M16 (D-1): コマ間シフト
-    let changed = false;
-    for (let i = 0; i < PIXELS; i++) {
-      if (hit(i) && buf[i] !== color) {
-        changed = true;
-        break;
-      }
-    }
-    if (!changed) return; // 変化ゼロは履歴に積まない（deleteSelection と同じ作法）
-    const before = copyIndexBuf(buf);
-    for (let i = 0; i < PIXELS; i++) if (hit(i)) buf[i] = color;
-    this.pushBufferHistory("囲い塗り", buf, before); // 履歴ラベル（画面に出ない内部識別子・検査5 除外）
-    this.renderCanvas();
-    this.redrawOverlay();
-    this.paintFilmThumb(this.frameIndex);
-  }
-
-  private deleteSelection() {
-    if (this.lockGuard()) return; // V157 (D-1)
-    const buf = this.activeBuffer();
-    if (!buf || !this.selMask) return;
-    // M11-9: 選択を維持するようになったので、**消すものが無ければ何もしない**。
-    // これが無いと Delete のキーリピートで空の履歴が積み上がり、64件の上限を押し出して
-    // 本物の履歴（＝消す前の絵）が戻せなくなる（「消す」の changed 判定と同じ作法）
-    let hit = false;
-    for (let i = 0; i < PIXELS; i++) {
-      if (this.selMask[i] && buf[i]) {
-        hit = true;
-        break;
-      }
-    }
-    if (!hit) return;
-    const before = copyIndexBuf(buf);
-    R.deleteMasked(buf, this.selMask);
-    this.pushBufferHistory("選択部分を消去", buf, before);
-    this.renderCanvas();
-    this.redrawOverlay();
-    this.paintFilmThumb(this.frameIndex);
-  }
-
-  /** M11-19: 線を太らせる／細らせる（1px モルフォロジー）。**3つの入口（ランチャー・サイドパネル・
-   *  コマンド）の唯一の実体**。対象はアクティブレイヤーの現在コマ、選択範囲があれば範囲内だけ
-   *  （入口によらず同じ規則）。規則は raster.ts thickenIndex / thinIndex（色番号コピーと透明化だけ）。
-   *  undo 1回（pushBufferHistory）・**変化ゼロは履歴に積まない**（deleteSelection と同じ作法） */
-  private morphActiveLayer(kind: "thicken" | "thin") {
-    if (this.xformGuard()) return; // 変形/歪み/浮動の未確定は先に確定させる（他の編集と同じ）
-    if (this.playing) this.stopPlayback();
-    const buf = this.activeBuffer();
-    if (!buf) {
-      this.cb.toast(t("ed.common.needLayer.toast"));
-      return;
-    }
-    const before = copyIndexBuf(buf); // src（読むだけ）。live の buf を dst にする
-    const t0 = performance.now();
-    const changed =
-      kind === "thicken"
-        ? R.thickenIndex(before, buf, this.selMask)
-        : R.thinIndex(before, buf, this.selMask);
-    const ms = performance.now() - t0;
-    if (this.inputLog) {
-      this.inputLogBuf.push(`[inputlog] morph ${kind} changed=${changed} ${ms.toFixed(2)}ms`);
-      this.flushInputLogSoon();
-    }
-    if (changed === 0) {
-      this.cb.toast(
-        kind === "thicken" ? t("ed.linew.thicken.none.toast") : t("ed.linew.thin.none.toast")
-      );
-      return;
-    }
-    this.pushBufferHistory(kind === "thicken" ? "太らせる" : "細らせる", buf, before);
-    this.renderCanvas();
-    this.paintFilmThumb(this.frameIndex);
   }
 
   // ---------------- M11-8 P-3: 選択範囲ランチャー ----------------
@@ -11489,19 +7584,6 @@ export class Editor {
   ];
 
   private launcherEl: HTMLElement | null = null;
-  /** 外接矩形のキャッシュ（マスクの実体が変わったときだけ再計算＝毎回の全画素走査を避ける） */
-  private selBBoxCache: {
-    mask: Uint8Array;
-    box: { x: number; y: number; w: number; h: number } | null;
-  } | null = null;
-
-  private selBBox(): { x: number; y: number; w: number; h: number } | null {
-    if (!this.selMask) return null;
-    if (this.selBBoxCache && this.selBBoxCache.mask === this.selMask) return this.selBBoxCache.box;
-    const box = R.maskBBox(this.selMask);
-    this.selBBoxCache = { mask: this.selMask, box };
-    return box;
-  }
 
   /** ドット座標 → クライアント座標（clientToPixel の逆写像。ドットの中心を返す） */
   private pixelToClient(x: number, y: number): { x: number; y: number } {
@@ -11565,7 +7647,7 @@ export class Editor {
 
   /** 表示/非表示と位置の更新。selMask が変わる経路（redrawOverlay）と
    *  表示が変わる経路（applyZoom・ステージのスクロール）から呼ぶ */
-  private refreshSelectionLauncher() {
+  protected override refreshSelectionLauncher() {
     if (!this.mounted) {
       this.hideSelectionLauncher();
       return;
@@ -11623,311 +7705,7 @@ export class Editor {
     this.launcherEl = null;
   }
 
-  /** ランチャーの8操作。すべて1操作＝履歴1エントリ */
-  private selOp(op: string) {
-    if (!this.selMask) return;
-    if (this.xformGuard()) return;
-    switch (op) {
-      case "deselect": {
-        const before = this.selMask.slice();
-        this.selMask = null;
-        this.pushSelectionHistory("選択解除", before, null);
-        this.dirty = true;
-        this.redrawOverlay();
-        break;
-      }
-      case "invert":
-        this.replaceSelection("選択範囲の反転", R.invertMask(this.selMask));
-        break;
-      case "expand":
-        this.replaceSelection("選択範囲の拡張", R.expandMask(this.selMask));
-        break;
-      case "contract":
-        this.replaceSelection("選択範囲の縮小", R.contractMask(this.selMask));
-        break;
-      case "erase":
-        this.deleteSelection(); // M11-9 P-3: Delete キーと同じ実体（選択は維持）
-        break;
-      case "thicken":
-        this.morphActiveLayer("thicken"); // M11-19: 範囲内だけ太らせる（3入口共通の実体）
-        break;
-      case "thin":
-        this.morphActiveLayer("thin");
-        break;
-      case "cut-layer":
-        this.selectionToNewLayer(true);
-        break;
-      case "copy-layer":
-        this.selectionToNewLayer(false);
-        break;
-      case "transform":
-        this.setTool("transform");
-        break;
-    }
-    this.refreshSelectionLauncher();
-  }
-
-  /** 反転/拡張/縮小の共通処理。空になったら解除する（REQ 表E） */
-  private replaceSelection(label: string, next: Uint8Array) {
-    if (!this.selMask) return;
-    const before = this.selMask.slice();
-    const empty = !next.some((v) => v !== 0);
-    this.selMask = empty ? null : next;
-    this.pushSelectionHistory(label, before, empty ? null : next.slice());
-    this.dirty = true;
-    if (empty) this.cb.toast(t("ed.sel.becameEmpty.toast"));
-    this.redrawOverlay();
-  }
-
-
-  /** ランチャー #6/#7。新規レイヤーは**全コマ**に作られ（レイヤーは作品全体の構造）、
-   *  絵が入るのは今のコマだけ。構造の変更と画素の移動を**1エントリ**に束ねるので
-   *  Undo 1回でレイヤーごと元に戻る */
-  private selectionToNewLayer(cut: boolean) {
-    const mask = this.selMask;
-    const src = this.activeBuffer();
-    const frame = this.project.frames[this.frameIndex];
-    if (!mask || !src || !frame) return;
-    const srcLayerId = this.activeLayerId;
-    const idx = this.project.layerDefs.findIndex((l) => l.id === srcLayerId);
-    if (idx < 0) return;
-    // 何も入らないなら作らない（空レイヤーが増えるだけ）
-    let any = false;
-    for (let i = 0; i < PIXELS; i++)
-      if (mask[i] && src[i]) {
-        any = true;
-        break;
-      }
-    if (!any) {
-      this.cb.toast(t("ed.sel.toLayer.noContent.toast"));
-      return;
-    }
-    const id = newLayerId(this.project);
-    // 「1つ上」＝ソースレイヤーの直上。親は**ソースと同じフォルダ**（REQ）
-    const parent = this.project.layerDefs[idx].parent;
-    const def: LayerDef = {
-      id,
-      name: `${layerBaseName()}${this.project.layerDefs.length + 1}`, // addLayer と同じ規則
-      visible: true,
-      opacity: 1,
-      parent,
-    };
-    const insertAt = idx + 1;
-    const frameIdx = this.frameIndex;
-    const prevActive = srcLayerId;
-    const beforeSrc = copyIndexBuf(src);
-    const self = this;
-    const apply = () => {
-      // M11-20 レビュー: 閉じ込めた def は「作成直後の雛形」として扱い、**コピー**を挿入する。
-      // 同一オブジェクトを入れると、履歴（clip トグル＝id 解決で配列内の実体を書く）と restoreStructure
-      //（配列をクローンに差し替える）を跨いだとき、孤児になった def が古い clip/parent を抱えたまま
-      // redo で復活してしまう（addLayer / pasteLayerToNew も同じ）
-      self.project.layerDefs.splice(insertAt, 0, { ...def });
-      for (const f of self.project.frames) {
-        f.layers[id] = allocIndexBuf(self.project);
-        if (f.order) f.order.push(id); // コマ固有描画順があれば最上位に追加（addLayer と同じ）
-      }
-      const fr = self.project.frames[frameIdx];
-      const s = fr?.layers[srcLayerId];
-      const d = fr?.layers[id];
-      if (s && d) {
-        for (let i = 0; i < PIXELS; i++) {
-          if (!mask[i] || !s[i]) continue;
-          d[i] = s[i];
-          if (cut) s[i] = 0;
-        }
-      }
-      self.activeLayerId = id;
-      self.afterLayerChange();
-      self.paintFilmThumb(frameIdx);
-      self.redrawOverlay();
-    };
-    const revert = () => {
-      const i = self.project.layerDefs.findIndex((l) => l.id === id);
-      if (i >= 0) self.project.layerDefs.splice(i, 1);
-      for (const f of self.project.frames) {
-        dropLayer(f, id); // V156: 眠っているぶん（f.sleep）も一緒に消す
-        if (f.order) f.order = f.order.filter((x) => x !== id);
-      }
-      const s = self.project.frames[frameIdx]?.layers[srcLayerId];
-      if (s) s.set(beforeSrc as unknown as ArrayLike<number>);
-      self.activeLayerId = self.project.layerDefs.some((l) => l.id === prevActive)
-        ? prevActive
-        : (self.project.layerDefs[self.project.layerDefs.length - 1]?.id ?? "");
-      self.afterLayerChange();
-      self.paintFilmThumb(frameIdx);
-      self.redrawOverlay();
-    };
-    this.history.push({
-      colorRefs: () => ({ bufs: [beforeSrc] }) /* mask は 0/1（色ではない）なので入れない */, // V195 (A-99)
-      label: cut ? "切り取って新規レイヤー" : "コピーして新規レイヤー",
-      bytes: entryBytes(beforeSrc, mask), // V154 (W-2)
-      // ★V180 (A-78 ②・指示からの追加): 元のレイヤーが眠っていると `s` が無く、取り消しでは切り取った絵が
-      //  元へ戻らないまま新しいレイヤーだけ外れて**絵が消え**、やり直しでは新しいレイヤーが空になる（Node 実測）。
-      //  取り消し・やり直しの前にそのコマを書きで起こす。コマ番号で持つので、そのコマが無ければ何もしない
-      prepare: () => {
-        const fr = self.project.frames[frameIdx];
-        return fr ? wakeFrame(self.project, fr, "write") : Promise.resolve();
-      },
-      undo: revert,
-      redo: apply,
-    });
-    apply();
-    this.cb.toast(cut ? t("ed.sel.cutToLayer.done.toast") : t("ed.sel.copyToLayer.done.toast"));
-  }
-
-  // ---------------- 変形 ----------------
-
-  private xformBefore: IndexBuf | null = null;
-  private xformCutDone = false;
-  /** M3.8 L-B: 変形モード開始時のパラメータ（Ctrl+Zリセットの戻し先） */
-  private xformInitial: R.Transform | null = null;
-
-  /** M3.8 L-B: Ctrl+Z / ↶。変形・浮動中はグローバル履歴に絶対に通さない */
-  private handleUndo() {
-    if (this.xformActive) {
-      const init = this.xformInitial ?? {
-        tx: 0, ty: 0, angle: 0, sx: 1, sy: 1, flipH: false, flipV: false,
-      };
-      const dirty =
-        this.xform.tx !== init.tx ||
-        this.xform.ty !== init.ty ||
-        this.xform.angle !== init.angle ||
-        this.xform.sx !== init.sx ||
-        this.xform.sy !== init.sy ||
-        this.xform.flipH !== init.flipH ||
-        this.xform.flipV !== init.flipV;
-      if (dirty) {
-        // 変更あり → パラメータをモード開始時にリセット（モードは維持）
-        this.xform = { ...init };
-        this.redrawOverlay();
-        this.paintUiOverlay();
-        this.buildToolOptions(); // 数値表示更新
-        this.cb.toast(t("ed.xform.reset.toast"));
-      } else {
-        // 変更なし → モード解除（キャンセルと同じ）
-        this.cancelTransform();
-      }
-      return;
-    }
-    if (this.cornerActive) {
-      // M10-2c: transform と同じ流儀。動かしていれば四隅リセット・未変更なら解除
-      const r = this.cornerRect;
-      const home = r
-        ? [
-            { x: r.x0, y: r.y0 },
-            { x: r.x1, y: r.y0 },
-            { x: r.x1, y: r.y1 },
-            { x: r.x0, y: r.y1 },
-          ]
-        : null;
-      const dirty =
-        !!home &&
-        this.cornerPts.some((p, i) => p.x !== home[i].x || p.y !== home[i].y);
-      if (dirty && home) {
-        this.cornerPts = home;
-        this.updateCornerPreview(); // 中で paintUiOverlay も呼ぶ
-        this.cb.toast(t("ed.xform.corner.reset.toast"));
-      } else {
-        this.cancelCornerWarp();
-      }
-      return;
-    }
-    if (this.floatBuf) {
-      // 選択移動の浮動中 → 浮動キャンセル（元位置に戻す）
-      this.cancelSelectionMove();
-      return;
-    }
-    // ★V178 (A-72・Codex 3 回目): ↶ ボタンは runCommand を通らない（フォーカスのあるボタンをキーで押しても来る）。
-    //  描きかけの束を**先に**確定する——でないと前の操作のほうが巻き戻り、あとで束を取り消すと巻き戻したはずのものが戻る。
-    //  peek より前に置く（いま確定した束が、この取り消しの対象になる）
-    if (this.eraseAllStroke) this.finishEraseAllNow();
-    this.queueHistory("undo");
-  }
-
-  /** M3.8 L-B: Ctrl+Y / ↷。変形・浮動中は無効 */
-  private handleRedo() {
-    if (this.xformActive || this.floatBuf || this.cornerActive) {
-      this.cb.toast(t("ed.xform.noRedo.toast"));
-      return;
-    }
-    // ★V178 (A-72・Codex 3 回目): ↷ も同じ。描きかけの束を先に確定する（新しい操作が積まれるので、やり直しは空になる）
-    if (this.eraseAllStroke) this.finishEraseAllNow();
-    this.queueHistory("redo");
-  }
-
-  /** ★V180 (A-78 [D]): 取り消し・やり直しの**列**。前の 1 回（眠ったコマを起こす `prepare` の待ちを含む）が
-   *  済むまで次を走らせず、どのエントリを待つかは**走る直前**に引く。
-   *
-   *  以前は押した瞬間に `peekUndo()` で引いてから `await prepare` していたので、Ctrl+Z の押しっぱなしで 2 回が
-   *  同じ瞬間に入ると、2 回とも一番上のエントリの `prepare`（同じコマを 2 か所から起こす）を待ち、2 回目の
-   *  `undo()` はその下のエントリを**起こさずに**走らせていた。V180 の [S-6] で実測: 眠ったコマ 2 つが**両方とも**
-   *  戻らない（上のコマは、あとから起き終わった古い控えが戻した絵を上書きし、下のコマは空振り）。
-   *  この回の前から prepare を持っていた全レイヤー消しゴム（V178）でも同じ形だった。
-   *
-   *  失敗した 1 回は列を止めない（`release` は finally）。拒否はこれまでどおり投げっぱなし（main.ts の
-   *  unhandledrejection の網がログに残す）。眠りの無い小さい作品では `prepare` がマイクロタスクで済むので、
-   *  次のキー入力より前に終わる（結果はこの回の前と 1 画素も変わらない＝[S-4]） */
-  private historyQueue: Promise<void> = Promise.resolve();
-  private queueHistory(dir: "undo" | "redo"): void {
-    const prev = this.historyQueue;
-    let release!: () => void;
-    this.historyQueue = new Promise<void>((r) => (release = r));
-    void prev.then(async () => {
-      try {
-        if (dir === "undo") await this.applyHistory(() => this.history.undo(), this.history.peekUndo());
-        else await this.applyHistory(() => this.history.redo(), this.history.peekRedo());
-      } finally {
-        release();
-      }
-    });
-  }
-
-  /** M11-8: 履歴の適用中は「コマ構造の変更＝選択解除」を働かせない
-   *（undo/redo が復元したマスクを afterFrameStructureChange が消してしまわないように） */
-  private applyingHistory = false;
-  private async applyHistory(run: () => void, entry?: HistoryEntry | null) {
-    // V156 (P-1): 全コマの画素を触るエントリは、眠っているコマを**起こしてから**動かす。
-    // 起こさずに走らせると `f.layers[id] ?? allocIndexBuf(p)` が空バッファを掴んで、
-    // 元に戻したはずの絵が白紙になる（＝静かな喪失）。`prepare` を持たないエントリは素通り
-    if (entry?.prepare) await entry.prepare();
-    this.applyingHistory = true;
-    try {
-      run();
-    } finally {
-      this.applyingHistory = false;
-    }
-    this.refreshSelectionLauncher();
-  }
-
-  /** M3.8 L-B: 選択移動の浮動をキャンセルして元位置に戻す（履歴には触れない） */
-  private cancelSelectionMove() {
-    const buf = this.activeBuffer();
-    if (buf && this.selMoveBefore) buf.set(this.selMoveBefore);
-    this.selMoveBefore = null;
-    this.floatBuf = null;
-    this.dragMode = "";
-    this.overlayCtx().clearRect(0, 0, W, H);
-    this.renderCanvas();
-    this.redrawOverlay();
-  }
-
-  /** E-4: 変形/浮動中は他操作をロック（true=ブロックした）。
-   *
-   *  M11-12: 「別のことを始める」入口はほぼすべてここを通っている（コマ移動・レイヤー切替・
-   *  保存・書き出し・画像で保存・エディタを離れる・クリップボード・消す…）。浮動テキストは
-   *  **ブロックではなく確定**なので、判定の前にここで焼き切る。確定後は textDraft が
-   *  null になるので、以降の判定は従来どおり。**確定経路を1箇所に集約する**ための配置 */
-  private xformGuard(): boolean {
-    if (this.textDraft) this.commitTextDraft();
-    if (this.xformActive || this.floatBuf || this.cornerActive) {
-      this.cb.toast(t("ed.xform.guard.toast"));
-      return true;
-    }
-    return false;
-  }
-
-  private updateXformBadge() {
+  protected override updateXformBadge() {
     const on = this.xformActive || this.cornerActive; // M10-2c: 四隅変形も「変形中」
     const b = document.querySelector("#ed-xform-badge") as HTMLElement | null;
     if (b) b.hidden = !on;
@@ -11943,167 +7721,6 @@ export class Editor {
         rb.disabled = !this.history.canRedo;
       }
     }
-  }
-
-  /**
-   * M13-2b (T-2): 変形の対象レイヤーと**共通マスク1枚**を決める（REQ §6-2 の手順 1〜2）。
-   *   対象   … M13-1 の純関数（展開・重複除去・実効可視で非表示を除外・空なら activeLayerId）
-   *   マスク … 選択範囲があればそれ。無ければ対象レイヤーの**合成**の非透明画素
-   * 戻り値は layerDefs の順（下→上）。対象が0件・マスクが空なら null。
-   * 1枚だけ選んでいれば、従来の「アクティブ1枚の非透明画素」とビット単位で同じマスクになる。
-   */
-  private transformTargets(): { ids: string[]; mask: Uint8Array } | null {
-    const frame = this.project.frames[this.frameIndex];
-    if (!frame) return null;
-    const want = new Set(this.moveTargetLayerIds());
-    const ids = this.project.layerDefs.map((l) => l.id).filter((id) => want.has(id) && !!frame.layers[id]);
-    if (ids.length === 0) return null;
-    let mask = this.selMask;
-    if (!mask) {
-      // 0/1 マスク。索引ではないので Uint8Array のまま（16bit 化しない）
-      mask = new Uint8Array(PIXELS);
-      for (const id of ids) {
-        const b = frame.layers[id];
-        for (let i = 0; i < PIXELS; i++) if (b[i] !== 0) mask[i] = 1;
-      }
-    }
-    if (!R.maskBBox(mask)) return null;
-    return { ids, mask };
-  }
-
-  private beginTransform() {
-    if (this.xformActive) return;
-    const frame = this.project.frames[this.frameIndex];
-    if (!frame) return;
-    // M13-2b (T-2): 対象 N 枚を**同じマスク**で切り出す。extractFloat は bbox を**マスク**から決めるので
-    // 全 float の ox/oy/w/h が一致し、回転・拡縮の中心が共通になる（raster.ts には触らない・REQ §4）。
-    // マスクの空判定を**切り出す前**に済ませるので、失敗時にバッファは1画素も動いていない
-    const tg = this.transformTargets();
-    if (!tg) {
-      this.cb.toast(t("ed.xform.nothingToTransform.toast"));
-      this.tool = this.prevTool;
-      this.updateToolButtons();
-      return;
-    }
-    this.xformLayers = [];
-    for (const id of tg.ids) {
-      const buf = frame.layers[id];
-      const before = copyIndexBuf(buf);
-      const float = R.extractFloat(buf, tg.mask, true);
-      if (!float) continue; // マスクは空でないと確かめてあるので来ない（型の都合）
-      this.xformLayers.push({ id, float, before });
-    }
-    // 幾何の基準は**アクティブレイヤーの float**（無ければ先頭）。寸法は全部同じなのでどれでも同じ
-    const primary = this.xformLayers.find((l) => l.id === this.activeLayerId) ?? this.xformLayers[0];
-    this.floatBuf = primary.float;
-    this.xformBefore = primary.before;
-    this.xformCutDone = true;
-    this.xform = { tx: 0, ty: 0, angle: 0, sx: 1, sy: 1, flipH: false, flipV: false };
-    this.xformInitial = { ...this.xform }; // L-B: Ctrl+Zリセットの戻し先
-    this.xformActive = true;
-    this.updateXformBadge();
-    this.renderCanvas();
-    this.redrawOverlay();
-    this.paintUiOverlay();
-  }
-
-  /** M6-5 Q-4: 変形ハンドルの2段ヒットテスト（発注者確定仕様）。
-   *  四隅の□（±6ドット）=拡縮 / 上辺中央の棒付き□=回転（残置・共存） /
-   *  **枠の内側=移動** / **枠の外側 12 ドットのリング=回転** / それ以外=何もしない。
-   *  単位はキャンバスのドット（表示倍率に応じて描画ハンドルと相似にスケール）。
-   *  座標は枠のローカル系（逆回転）で判定するので、回転後も□の位置と一致する。
-   *
-   *  M11-24: **回転を枠の外側だけに限定**した。以前は「四隅からの距離 ≤ 6+20」だけで見ていたので
-   *  枠の内側にも回転が効き、52×52 ドット以下の枠は中心まで 26 ドット圏内＝**全域が回転で移動できず**、
-   *  大きい枠でも四隅付近の内側が回転になっていた（作者の実使用フィードバック）。
-   *  判定順も「枠内の移動」を回転リングより先にして、内側が回転に飲まれないようにしている。 */
-  private xformHitTest(pt: { x: number; y: number }): {
-    mode: "" | "move" | "scale" | "scalex" | "scaley" | "rotate";
-    cursor: string;
-    /** M13-2b (T-3): 辺ハンドルのとき、掴んだ辺がローカル軸の +側か −側か */
-    side?: 1 | -1;
-  } {
-    const f = this.floatBuf;
-    if (!f) return { mode: "", cursor: "" };
-    const t = this.xform;
-    const cx = f.ox + f.w / 2 + t.tx;
-    const cy = f.oy + f.h / 2 + t.ty;
-    const hw = Math.abs((f.w / 2) * t.sx);
-    const hh = Math.abs((f.h / 2) * t.sy);
-    const cos = Math.cos(t.angle);
-    const sin = Math.sin(t.angle);
-    const dx = pt.x - cx;
-    const dy = pt.y - cy;
-    const lx = dx * cos + dy * sin;
-    const ly = -dx * sin + dy * cos;
-    const HIT = 6; // □の当たり半径（ドット）
-    const RING = 12; // M11-24: **枠の外側**の回転ゾーン幅（ドット。20→12 に狭めて誤作動を減らす）
-    // M13-2b (T-3): 辺ハンドルのカーソル。回転後のグローバル方位で ↔ / ↕ を選ぶ
-    const edgeCursor = (axisAngle: number) => {
-      const deg = ((((axisAngle * 180) / Math.PI) % 180) + 180) % 180;
-      return deg < 45 || deg >= 135 ? "ew-resize" : "ns-resize";
-    };
-    let best = Infinity;
-    let bestCorner: readonly [number, number] = [hw, hh];
-    for (const c of [
-      [-hw, -hh],
-      [hw, -hh],
-      [hw, hh],
-      [-hw, hh],
-    ] as const) {
-      const d = Math.hypot(lx - c[0], ly - c[1]);
-      if (d < best) {
-        best = d;
-        bestCorner = c;
-      }
-    }
-    if (best <= HIT) {
-      // カーソル向きは回転後のグローバル方位で選ぶ（↖↘=nwse / ↗↙=nesw）
-      const ga = Math.atan2(bestCorner[1], bestCorner[0]) + t.angle;
-      const deg = ((((ga * 180) / Math.PI) % 180) + 180) % 180;
-      return { mode: "scale", cursor: deg < 90 ? "nwse-resize" : "nesw-resize" };
-    }
-    if (Math.hypot(lx, ly - (-hh - 12)) <= HIT)
-      return { mode: "rotate", cursor: ROTATE_CURSOR }; // 上辺中央の棒付き□
-    // M13-2b (T-3): 辺の中央の□＝その方向だけ伸ばす（上下＝scaley・左右＝scalex）
-    if (Math.hypot(lx, ly + hh) <= HIT) return { mode: "scaley", cursor: edgeCursor(t.angle + Math.PI / 2), side: -1 };
-    if (Math.hypot(lx, ly - hh) <= HIT) return { mode: "scaley", cursor: edgeCursor(t.angle + Math.PI / 2), side: 1 };
-    if (Math.hypot(lx - hw, ly) <= HIT) return { mode: "scalex", cursor: edgeCursor(t.angle), side: 1 };
-    if (Math.hypot(lx + hw, ly) <= HIT) return { mode: "scalex", cursor: edgeCursor(t.angle), side: -1 };
-    // M11-11: キャンバスの外へ出たハンドルは内側へ寄せて**描いてある**ので、その位置でも掴める。
-    // 画面内にあるハンドルは上の判定で済んでいるので、ここは寄せたものだけを見る
-    // （回転ゾーンのリングより先に見る＝寄せたハンドルがリングに飲まれないように）
-    {
-      const hs = this.xformHandleWorld();
-      const locals: readonly (readonly [number, number])[] = [
-        [-hw, -hh],
-        [hw, -hh],
-        [hw, hh],
-        [-hw, hh],
-      ];
-      for (let i = 0; i < hs.length; i++) {
-        const cl = this.clampedHandle(hs[i].x, hs[i].y);
-        if (!cl) continue;
-        if (Math.hypot(pt.x - cl.x, pt.y - cl.y) > HIT) continue;
-        if (i === 4) return { mode: "rotate", cursor: ROTATE_CURSOR };
-        if (i === 5) return { mode: "scaley", cursor: edgeCursor(t.angle + Math.PI / 2), side: -1 };
-        if (i === 6) return { mode: "scalex", cursor: edgeCursor(t.angle), side: 1 };
-        if (i === 7) return { mode: "scaley", cursor: edgeCursor(t.angle + Math.PI / 2), side: 1 };
-        if (i === 8) return { mode: "scalex", cursor: edgeCursor(t.angle), side: -1 };
-        const c = locals[i];
-        const ga = Math.atan2(c[1], c[0]) + t.angle;
-        const deg = ((((ga * 180) / Math.PI) % 180) + 180) % 180;
-        return { mode: "scale", cursor: deg < 90 ? "nwse-resize" : "nesw-resize" };
-      }
-    }
-    // M11-24: 枠の内側は常に移動（四隅の□・棒付き□・寄せたハンドルは上で処理済み）
-    if (Math.abs(lx) <= hw && Math.abs(ly) <= hh)
-      return { mode: "move", cursor: "move" };
-    // 枠の外側リング＝回転。枠（矩形）からの距離で測るので、辺の外も角の外も同じ 12 ドット
-    const ox = Math.max(0, Math.abs(lx) - hw);
-    const oy = Math.max(0, Math.abs(ly) - hh);
-    if (Math.hypot(ox, oy) <= RING) return { mode: "rotate", cursor: ROTATE_CURSOR };
-    return { mode: "", cursor: "" };
   }
 
   /** M6-6 R-2: 変形モードラベル（「⤡ 拡縮」「⟳ 回転」をカーソル追従で表示）。
@@ -12153,348 +7770,16 @@ export class Editor {
     this.showXformModeLabel(hit.mode, e.clientX, e.clientY);
   }
 
-  private beginTransformDrag(pt: { x: number; y: number }) {
-    if (!this.floatBuf) return;
-    this.dragStart = pt;
-    this.dragBase = { ...this.xform };
-    // Q-4: ヒットしない場所からのドラッグは何もしない（意図しないモード切替の防止）
-    const hit = this.xformHitTest(pt);
-    this.dragMode = hit.mode || "";
-    this.dragSide = hit.side ?? 1; // M13-2b (T-3)
-    // R-2: 掴んだ瞬間からモードが分かるようカーソルも更新（回転中は grabbing）
-    const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
-    if (wrap) wrap.style.cursor = hit.mode === "rotate" ? "grabbing" : hit.cursor;
-    this.setCanvasCursor(hit.mode === "rotate" ? "grabbing" : hit.cursor); // M12-G
-  }
-
-  private updateTransformDrag(pt: { x: number; y: number }, shiftKey = false) {
-    if (!this.dragStart || !this.dragBase || !this.floatBuf) return;
-    const f = this.floatBuf;
-    const cx = f.ox + f.w / 2 + this.dragBase.tx;
-    const cy = f.oy + f.h / 2 + this.dragBase.ty;
-    if (this.dragMode === "move") {
-      this.xform.tx = this.dragBase.tx + (pt.x - this.dragStart.x);
-      this.xform.ty = this.dragBase.ty + (pt.y - this.dragStart.y);
-    } else if (this.dragMode === "scale") {
-      const r0 = Math.hypot(this.dragStart.x - cx, this.dragStart.y - cy);
-      const r1 = Math.hypot(pt.x - cx, pt.y - cy);
-      const s = Math.max(0.05, (r1 / Math.max(1, r0)) * this.dragBase.sx);
-      this.xform.sx = s;
-      this.xform.sy = Math.max(0.05, (r1 / Math.max(1, r0)) * this.dragBase.sy);
-    } else if (this.dragMode === "scalex" || this.dragMode === "scaley") {
-      // M13-2b (T-3): 辺ハンドル＝その軸だけ伸ばす。ポインタの**ローカル座標**（回転後の軸）で
-      // 掴んだ辺の位置を決め、**対辺が動かないように中心をずらす**（REQ §9: 中心基準で k 倍すると
-      // 対辺は半幅×(k−1) だけ外へ動くので、ローカル軸でその量だけ tx/ty を戻す）
-      const b = this.dragBase;
-      const cos = Math.cos(b.angle);
-      const sin = Math.sin(b.angle);
-      const dx = pt.x - cx;
-      const dy = pt.y - cy;
-      const isX = this.dragMode === "scalex";
-      // ポインタの、掴んだ軸方向のローカル座標（符号つき）
-      const l = isX ? dx * cos + dy * sin : -dx * sin + dy * cos;
-      const half0 = (isX ? f.w / 2 : f.h / 2) * Math.abs(isX ? b.sx : b.sy);
-      const s = this.dragSide;
-      // 掴んだ辺をポインタ l へ、**対辺（ローカル −s·half0）は固定**。新しい辺の長さは
-      // ポインタと対辺の距離 (s·l + half0) なので、半幅はその半分。対辺を越えたら最小幅で止める
-      //（反転は別の操作）。※「中心からの距離 s·l」を半幅にすると辺がポインタの2倍動く（実機で判明）
-      const half1 = Math.max(half0 * 0.05, 1, (s * l + half0) / 2);
-      const k = half1 / Math.max(1e-6, half0);
-      if (isX) this.xform.sx = Math.max(0.05, Math.abs(b.sx) * k);
-      else this.xform.sy = Math.max(0.05, Math.abs(b.sy) * k);
-      // 対辺を止める: 中心を掴んだ側へ (half1 − half0) だけ寄せる（ローカル軸を世界へ戻す）
-      const d = s * (half1 - half0);
-      if (isX) {
-        this.xform.tx = b.tx + d * cos;
-        this.xform.ty = b.ty + d * sin;
-      } else {
-        this.xform.tx = b.tx - d * sin;
-        this.xform.ty = b.ty + d * cos;
-      }
-    } else if (this.dragMode === "rotate") {
-      const a0 = Math.atan2(this.dragStart.y - cy, this.dragStart.x - cx);
-      const a1 = Math.atan2(pt.y - cy, pt.x - cx);
-      let ang = this.dragBase.angle + (a1 - a0);
-      // E-3: 自由回転＋Shift押下中は15°刻み（既存スナップトグルとも共存）
-      if (this.snap15 || shiftKey) {
-        const step = (15 * Math.PI) / 180;
-        ang = Math.round(ang / step) * step;
-      }
-      this.xform.angle = ang;
-    }
-    this.redrawOverlay();
-    this.paintUiOverlay(); // M13-2b (T-6): 枠・ハンドルは画面解像度の層
-  }
-
-  /** V166 (層2): 変形の焼き込み。M13-2b で**N枚のレイヤーへ同時に**当たるようになったので、
-   *  レイヤーの多い作品では一度の Enter で N×76,800 画素を書き換える。 */
-  private async commitTransform() {
-    await this.runHeavy("xform.commit", t("ed.heavy.xform.msg"), () => this.commitTransformInner());
-  }
-
-  private commitTransformInner() {
-    const frame = this.project.frames[this.frameIndex];
-    if (!frame || !this.floatBuf || this.xformLayers.length === 0) return;
-    // M13-2b (T-2): **1つの Transform を全 float に当てて** N 枚へ焼き込む（REQ §6-2 手順4）。
-    // 中心は全 float で共通（同じマスクで切り出したので ox/oy/w/h が同じ）
-    const before: Record<string, IndexBuf> = {};
-    const after: Record<string, IndexBuf> = {};
-    for (const L of this.xformLayers) {
-      const buf = frame.layers[L.id];
-      if (!buf) continue;
-      R.blitFloatTransformed(buf, L.float, this.xform);
-      before[L.id] = L.before;
-      after[L.id] = copyIndexBuf(buf);
-    }
-    // M10-22: 変形確定は endTransform で selMask が消えるため、画素とマスク解除を
-    // 1エントリに束ねる（選択なし変形では before/after とも null＝実質従来どおり）。
-    // M13-2b: N 枚ぶんを**1エントリ**に（手順5）。1枚のときも同じ経路＝中身は従来と同じ before/after。
-    // 実体は id で適用時に解決する＝構造 undo/redo でバッファが再生成されても正しい実体へ戻る
-    const self = this;
-    const base = multiBufferChangeEntry(
-      "変形",
-      (id) => frame.layers[id] ?? null,
-      before,
-      after,
-      () => {
-        self.dirty = true;
-        self.renderCanvas();
-        const fi = self.project.frames.indexOf(frame);
-        if (fi >= 0) self.paintFilmThumb(fi);
-      }
-    );
-    // ★V180 (A-78 ②): 取り消し・やり直しの前に、そのコマを書きで起こす（pushWithSelection が包むエントリへ運ぶ）
-    base.prepare = () => wakeFrame(this.project, frame, "write");
-    this.pushWithSelection(base, frame, {
-      before: this.selMask ? this.selMask.slice() : null,
-      after: null,
-    });
-    this.endTransform();
-    this.paintFilmThumb(this.frameIndex);
-  }
-
-  private cancelTransform() {
-    // M13-2b (T-2): 切り出した N 枚すべてをスナップショットへ戻す。貼り付け・画像配置（cutDone=false）は
-    // 元のバッファに触れていないので何もしない（従来どおり）
-    const frame = this.project.frames[this.frameIndex];
-    if (frame && this.xformCutDone)
-      for (const L of this.xformLayers) frame.layers[L.id]?.set(L.before);
-    this.endTransform();
-  }
-
-  private endTransform() {
-    this.xformActive = false;
-    this.xformInitial = null; // L-B
-    this.updateXformBadge();
-    this.hideXformModeLabel(); // R-2
-    const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
-    if (wrap) wrap.style.cursor = "";
-    // M12-G: 変形を抜けたらキャンバスは**今のツールのカーソル**へ戻す（空にはしない）
-    this.applyCanvasCursor();
-    this.xformBefore = null;
-    this.xformCutDone = false;
-    this.floatBuf = null;
-    this.xformLayers = [];
-    this.selMask = null;
-    this.overlayCtx().clearRect(0, 0, W, H);
-    this.paintUiOverlay(); // M13-2b (T-6): 枠・ハンドルの層を消す
-    this.renderCanvas();
-    if (this.tool === "transform") {
-      this.tool = "pen";
-      this.updateToolButtons();
-      this.buildToolOptions();
-    }
-  }
-
-  /**
-   * M13-2b: バッファ書き換えのエントリ `base` に**選択マスクの復元**を束ねて1エントリで積む
-   * （`pushBufferHistory` の合成エントリと同じ形。マスク復元の「そのコマを表示中のときだけ」規則も同じ）。
-   */
-  private pushWithSelection(
-    base: HistoryEntry,
-    frame: Frame,
-    sel: { before: Uint8Array | null; after: Uint8Array | null }
-  ) {
-    const self = this;
-    const onFrame = () => self.project.frames[self.frameIndex] === frame;
-    const selBefore = sel.before;
-    const selAfter = sel.after;
-    this.history.push({
-      colorRefs: base.colorRefs, // V195 (A-99)
-      label: base.label,
-      // ★V156 (P-2): **申告漏れその1**。ここは `base` を包んだ**新しいエントリ**を作るので、
-      //  `base.bytes`（ストロークの before/after ＝ 8bit で 153,600 B）が**運ばれずに落ちていた**。
-      //  範囲選択を伴う操作は全部ここを通るので、いちばん重い操作だけが予算をすり抜けていた。
-      //  選択マスク（`Uint8Array(PIXELS)` ×2）もこのクロージャが抱えるので一緒に数える
-      bytes: (base.bytes ?? 0) + entryBytes(selBefore, selAfter),
-      bytesIfUndone: base.bytesIfUndone,
-      bytesIfApplied: base.bytesIfApplied,
-      prepare: base.prepare,
-      undo() {
-        base.undo();
-        if (onFrame()) {
-          self.selMask = selBefore ? selBefore.slice() : null;
-          self.redrawOverlay();
-        }
-      },
-      redo() {
-        base.redo();
-        if (onFrame()) {
-          self.selMask = selAfter ? selAfter.slice() : null;
-          self.redrawOverlay();
-        }
-      },
-    });
-    this.dirty = true;
-  }
-
-  // ---------------- 文字/スポイト/紙色/複写/消す ----------------
-
-  /** M10-1c: 現在の文字設定（永続化用） */
-  textSettings(): TextSettings {
-    return {
-      family: this.textFamily,
-      size: this.textSize,
-      bold: this.textBold,
-      vertical: this.textVertical,
-    };
-  }
-
   /** M11-13/16: settings.json の `hudHidden` から復元する。**true 以外はすべて既定（表示）へ倒す**
    *  — 項目なし・null・文字列・数値など、何が入っていても起動する。旧 `miniHidden` は読まない（読み捨て） */
   restoreHudHidden(v: unknown) {
     this.hudHidden = v === true;
   }
 
-  /** M10-1c: settings.json から復元する。未知の値は fonts.ts 側で既定へ落とされる */
-  restoreTextSettings(
-    v: { family?: string; size?: number; bold?: boolean; vertical?: boolean } | null | undefined
-  ) {
-    const s = sanitizeTextSettings(v);
-    this.textFamily = s.family;
-    this.textSize = s.size;
-    this.textBold = s.bold;
-    this.textVertical = s.vertical;
-  }
 
-  // ---------------- M11-12: 浮動テキスト（確定するまで直せる文字） ----------------
-  //
-  // 確定は **commitTextDraft() 1つ**に集約し、あらゆる離脱経路から必ず呼ぶ
-  //（M11-5 の endPointerSession・M11-10 の endArrowSession と同じ作法）。
-  // 呼び出し元: 確定ボタン / Ctrl+Enter / 別ツールへの切替（setTool）/ キャンバスの別の場所を
-  // クリック / xformGuard()（＝コマ移動・レイヤー切替・保存・書き出し・エディタを離れる等、
-  // 「別のことを始める」入口すべてが既に通っている関門）/ unmount()。
-
-  /** 文字ツールでキャンバスを押した位置に浮動テキストを始める（既にあれば確定してから）。
-   *  @font-face は遅延ロードなので、measure より前に**明示的に**ロードを待つ
-   *  （これが無いと起動直後の1回目だけ幅がずれる。document.fonts.ready だけでは待たない） */
-  private async beginTextDraft(pt: { x: number; y: number }) {
-    await ensureFontsLoaded();
-    this.commitTextDraft();
-    this.textDraft = {
-      text: "",
-      x: pt.x,
-      y: pt.y,
-      family: this.textFamily,
-      size: this.textSize,
-      bold: this.textBold,
-      vertical: this.textVertical,
-    };
-    this.textDraftCache = null;
-    this.textDrag = null;
-    this.buildToolOptions(); // 入力欄を使える状態にして
-    this.focusTextInput(); //   そこへフォーカスを移す
-    this.redrawOverlay();
-  }
-
-  /** 浮動テキストのマスク（キャッシュつき）。位置だけ動かしたときは作り直さない */
-  private textDraftMask(): { w: number; h: number; data: Uint8Array } | null {
-    const d = this.textDraft;
-    if (!d) return null;
-    // 区切りは本文に現れない NUL（本文に空白や改行が入っても取り違えない）
-    const key = [d.text, d.family, d.size, d.bold, d.vertical].join("\u0000");
-    if (this.textDraftCache?.key === key) return this.textDraftCache.mask;
-    const mask = d.text
-      ? R.textToMask(d.text, d.size, { family: d.family, bold: d.bold, vertical: d.vertical })
-      : null;
-    this.textDraftCache = { key, mask, cv: null, cvColor: "" };
-    return mask;
-  }
-
-  /** マスクの左上を置く位置。
-   *
-   *  横書きは押した位置がそのまま左上。**縦書きは1列目（＝一番右の列）を押した位置に合わせる**ので、
-   *  列が増えたぶんだけ左へずらす。これが無いと、改行するたびに1列目が右へ飛び出してしまう
-   *  （「列が左へ進む」＝すでに書いた列はその場に留まり、新しい列が左に生える、が正しい見え方）。 */
-  private textDraftOrigin(d: NonNullable<Editor["textDraft"]>): { x: number; y: number } {
-    if (!d.vertical) return { x: d.x, y: d.y };
-    const cols = d.text.split("\n").length;
-    return { x: d.x - d.size * (cols - 1), y: d.y };
-  }
-
-  /** 浮動テキストを焼き込んで終わる。**すべての離脱経路はここを通す**。
-   *
-   *  - 入力欄が空 / 完全に画面外 / 選択範囲で全部そぎ落とされた → **何も焼かず履歴にも積まない**
-   *  - 一部だけはみ出している → 画面内の分だけ焼く（切り出しは `stampMask` の責務）
-   *  - 焼くときは履歴1エントリだけ（Undo 1回で完全に元へ戻る）
-   *  @param silent DOM を触らない（unmount 中など） */
-  commitTextDraft(silent = false) {
-    const d = this.textDraft;
-    if (!d) return;
-    const mask = this.textDraftMask();
-    this.textDraft = null;
-    this.textDrag = null;
-    this.textDraftCache = null;
-    // 画面と1画素も重ならないなら、色解決（＝16bit昇格し得る）にも触れずに終わる
-    const org = this.textDraftOrigin(d);
-    const overlaps =
-      !!mask && org.x < W && org.y < H && org.x + mask.w > 0 && org.y + mask.h > 0;
-    if (overlaps && mask) {
-      // 色解決（昇格でバッファ差し替えあり）→ バッファ取得の順を守る
-      const color = this.currentColorIndex();
-      const buf = this.activeBuffer();
-      if (buf) {
-        const before = copyIndexBuf(buf);
-        R.stampMask(buf, mask, org.x, org.y, color, this.selMask ?? undefined);
-        // 1画素も変わらなかったら履歴に積まない（選択範囲で全部そぎ落とされた場合など）。
-        // 空エントリで履歴（上限64）を押し流さないため — M11-9 の Delete 連打と同じ理由
-        let changed = false;
-        for (let i = 0; i < before.length; i++)
-          if (before[i] !== buf[i]) {
-            changed = true;
-            break;
-          }
-        if (changed) this.pushBufferHistory("文字", buf, before);
-      }
-    }
-    if (silent) return;
-    this.buildToolOptions(); // 入力欄を空にして押せない状態へ戻す
-    this.renderCanvas();
-    this.redrawOverlay();
-    this.paintFilmThumb(this.frameIndex);
-  }
-
-  /** 浮動テキストを捨てる（何も焼かない・履歴にも積まない） */
-  private cancelTextDraft() {
-    if (!this.textDraft) return;
-    this.textDraft = null;
-    this.textDrag = null;
-    this.textDraftCache = null;
-    this.buildToolOptions();
-    this.redrawOverlay();
-  }
-
-  /** 書体・サイズ・太さ・向きの変更を浮動テキストへ反映する（**位置は変えない**） */
-  private syncTextDraftStyle() {
-    if (!this.textDraft) return;
-    this.textDraft.family = this.textFamily;
-    this.textDraft.size = this.textSize;
-    this.textDraft.bold = this.textBold;
-    this.textDraft.vertical = this.textVertical;
-  }
 
   /** 入力欄へフォーカスを移し、末尾にカーソルを置く */
-  private focusTextInput() {
+  protected override focusTextInput() {
     const ta = document.querySelector("#ed-textinput") as HTMLTextAreaElement | null;
     if (!ta || ta.disabled) return;
     ta.focus();
@@ -12561,59 +7846,6 @@ export class Editor {
     ctx.restore();
   }
 
-  /** M16 (K-4): 色を拾うだけ（**ツールは切り替えない**）。スポイト tool と Alt＋クリックの共通の実体。 */
-  /** V167 (K-3): 直前に「色を拾いました」を出した時刻（間引き用）。 */
-  private lastPickNoticeAt = -Infinity;
-
-  /** V167 (K-3): 拾ったことを知らせる。**規則は `prefs.ts` の `shouldNoticePick` 1か所**。
-   *  @param via `"pointer"` なら「Alt＋クリックで」と**押した組み合わせを名指しする**
-   *    ——事故のときに「なぜ色が変わったか」が分かるのが目的なので、そこが要点。 */
-  private noticePick(prevHex: string, via: "tool" | "pointer" | "key", keys: string) {
-    const next = this.colorHex || "";
-    if (!shouldNoticePick(via, prevHex, next, this.lastPickNoticeAt, performance.now())) return;
-    this.lastPickNoticeAt = performance.now();
-    // ★Codex 指摘（中）: 透明の紙を拾うと `colorHex` は **`""`**。そのまま出すと
-    //  「色を拾いました（）」という**壊れて見える**知らせになる。事故を伝えるための
-    //  知らせがそれでは本末転倒なので、既存の「透明（消す）」の言い方を借りる
-    const color = next === "" ? t("ed.color.transparent.title") : next.toUpperCase();
-    this.cb.toast(
-      via === "pointer"
-        ? t("ed.pick.byKeys.toast", { keys, color })
-        : t("ed.pick.done.toast", { color })
-    );
-  }
-
-  private pickColorAt(pt: { x: number; y: number }, via: "tool" | "pointer" | "key" = "tool", keys = "") {
-    const f = this.project.frames[this.frameIndex];
-    if (!f) return;
-    // V167 (K-3): 変わったかどうかで知らせるので、拾う前の色を控える
-    const prevHex = this.colorHex || "";
-    const i = pt.y * W + pt.x;
-    // 上のレイヤーから順に
-    for (let L = this.project.layerDefs.length - 1; L >= 0; L--) {
-      const ld = this.project.layerDefs[L];
-      if (!ld.visible) continue;
-      const v = f.layers[ld.id]?.[i] ?? 0;
-      if (v !== 0) {
-        this.colorHex = this.project.colorTable[v];
-        this.rebuildPalette();
-        this.logPick(pt, `layer=${ld.id} idx=${v}`);
-        this.noticePick(prevHex, via, keys);
-        return;
-      }
-    }
-    this.colorHex = this.project.colorTable[f.paper];
-    this.rebuildPalette();
-    this.logPick(pt, "paper");
-    this.noticePick(prevHex, via, keys);
-  }
-
-  /** スポイト tool の1回ぶん: 色を拾って**元のツールへ戻す**（従来の挙動）。 */
-  private pickColor(pt: { x: number; y: number }) {
-    this.pickColorAt(pt);
-    this.setTool(this.prevTool === "eyedrop" ? "pen" : this.prevTool);
-  }
-
   /** M16 (K-4): pointerdown が修飾キー＋クリックの割り当てに一致すればそのコマンドIDを返す。
    *  素の左クリック（無修飾 button=0）は割り当て不可＝ keyLookup に無いので null（＝描画へ素通し）。 */
   private pointerCommandFor(e: PointerEvent): CommandId | null {
@@ -12634,997 +7866,75 @@ export class Editor {
     this.runCommand(id);
   }
 
-  /** M10-21: pickColor 到達と解決色の診断ログ（フラグ時のみ。通常は即 return） */
-  private logPick(pt: { x: number; y: number }, src: string) {
-    if (!this.inputLog) return;
-    this.inputLogBuf.push(
-      `[inputlog] pickColor (${pt.x},${pt.y}) ${src} -> ${this.colorHex || "(?)"} tool→${this.tool}`
-    );
-    this.flushInputLogSoon();
-  }
-
-  /** 紙色を変える。M11-16: `hex === ""` は**透明の紙**（paper=0）。透明は colorTable の
-   *  予約添字 0 を直接使い、`ensureColor` を通さない（色を登録しない＝16bit 昇格も起きない） */
-  private setPaper(hex: string) {
-    const f = this.project.frames[this.frameIndex];
-    if (!f) return;
-    const oldPaper = f.paper;
-    let newPaper: number;
-    if (hex === "") {
-      newPaper = 0;
-    } else {
-      const bitsBefore = this.project.indexBits;
-      newPaper = ensureColor(this.project, hex);
-      if (bitsBefore === 8 && this.project.indexBits === 16) {
-        this.noticePromote16(); // V154 (W-3)
-      }
-    }
-    if (oldPaper === newPaper) return;
-    const fi = this.frameIndex;
-    const self = this;
-    this.history.push({
-      colorRefs: () => ({ papers: [oldPaper, newPaper] }), // V195 (A-99)
-      label: "紙色",
-      undo() {
-        self.project.frames[fi].paper = oldPaper;
-        self.afterStructuralChange();
-      },
-      redo() {
-        self.project.frames[fi].paper = newPaper;
-        self.afterStructuralChange();
-      },
-    });
-    f.paper = newPaper;
-    this.afterStructuralChange();
-  }
-
-  private copyPrevFrame() {
-    if (this.frameIndex === 0) {
-      this.cb.toast(t("ed.tl.copyPrev.noSource.toast"));
-      return;
-    }
-    const cur = this.project.frames[this.frameIndex];
-    const prev = this.project.frames[this.frameIndex - 1];
-    const beforeLayers: Record<string, IndexBuf> = {};
-    for (const [k, v] of Object.entries(cur.layers)) beforeLayers[k] = copyIndexBuf(v);
-    const beforePaper = cur.paper;
-    for (const ld of this.project.layerDefs) {
-      const src = prev.layers[ld.id];
-      const dst = cur.layers[ld.id];
-      if (src && dst) dst.set(src);
-    }
-    cur.paper = prev.paper;
-    const afterLayers: Record<string, IndexBuf> = {};
-    for (const [k, v] of Object.entries(cur.layers)) afterLayers[k] = copyIndexBuf(v);
-    const afterPaper = cur.paper;
-    const self = this;
-    const fi = this.frameIndex;
-    this.history.push({
-      colorRefs: () => ({ bufs: [...Object.values(beforeLayers), ...Object.values(afterLayers)], papers: [beforePaper, afterPaper] }), // V195 (A-99)
-      label: "複写",
-      bytes: entryBytes(beforeLayers, afterLayers), // V154 (W-2)
-      // ★V180 (A-78 ②・指示からの追加): そのコマが眠っていると `f.layers[k]?.set(v)` が黙って空振りする
-      //  （Node 実測: 履歴は戻るのに 3 枚とも複写した絵のまま）。取り消し・やり直しの前に書きで起こす。
-      //  コマ番号で持つので、そのコマが無ければ何もしない
-      prepare: () => {
-        const fr = self.project.frames[fi];
-        return fr ? wakeFrame(self.project, fr, "write") : Promise.resolve();
-      },
-      undo() {
-        const f = self.project.frames[fi];
-        for (const [k, v] of Object.entries(beforeLayers)) f.layers[k]?.set(v);
-        f.paper = beforePaper;
-        self.afterStructuralChange();
-      },
-      redo() {
-        const f = self.project.frames[fi];
-        for (const [k, v] of Object.entries(afterLayers)) f.layers[k]?.set(v);
-        f.paper = afterPaper;
-        self.afterStructuralChange();
-      },
-    });
-    this.afterStructuralChange();
-    this.cb.toast(t("ed.tl.copyPrev.done.toast"));
-  }
-
-  /** M11-2: 「消す」は**選択中のレイヤーだけ**を対象にする（従来はページ全体だった）。
-   *  - フォルダ選択中は配下の全レイヤー（ネスト含む・再帰）。**レイヤー構造は残す**
-   *  - 選択範囲があるときは範囲内だけ（M10-22 のクリップ方針と揃える）
-   *  - **非表示レイヤーも消す**（表示状態は対象判定に使わない。「見えないから残った」ほうが事故）
-   *  - Undo は multiBufferChangeEntry で1エントリ（フォルダで何枚消しても Ctrl+Z 1回） */
-  private async clearFrame() {
-    if (this.xformGuard()) return; // E-4: 浮動中は焼き込み前なので消させない
-    // 確認ダイアログの間にコマが進むと「見ていたコマ」と対象がずれるので先に止める
-    //（📷 画像取り込みと同じ流儀）
-    if (this.playing) this.stopPlayback();
-    const frame = this.project.frames[this.frameIndex];
-    if (!frame) return;
-    const folder = this.selectedFolderId
-      ? this.folderById(this.selectedFolderId)
-      : undefined;
-    const targets = folder
-      ? this.project.layerDefs.filter((ld) => this.ancestorChain(ld.parent).includes(folder.id))
-      : this.project.layerDefs.filter((ld) => ld.id === this.activeLayerId);
-    if (targets.length === 0) {
-      this.cb.toast(folder ? t("ed.tl.clearFrame.emptyFolder.toast") : t("ed.tl.clearFrame.noLayer.toast"));
-      return;
-    }
-    // M12-1b-2（監査 #58）: 文の途中へ断片（{scope}）を差し込むのをやめ、
-    // フォルダ×全/範囲・レイヤー×全/範囲の**完全文4キー**にした（語順が変わる言語でも訳せる）
-    const hasSel = !!this.selMask;
-    // V151 (E-8): 「次回から表示しない」対象の1つ（id: clearFrame・4文面で1確認）
-    const ok = await this.confirmWithSkip(
-      "clearFrame",
-      folder
-        ? hasSel
-          ? t("ed.tl.clearFrame.folderSel.msg", { folder: folder.name, count: targets.length })
-          : t("ed.tl.clearFrame.folderAll.msg", { folder: folder.name, count: targets.length })
-        : hasSel
-          ? t("ed.tl.clearFrame.layerSel.msg", { layer: targets[0].name })
-          : t("ed.tl.clearFrame.layerAll.msg", { layer: targets[0].name })
-    );
-    if (!ok) return;
-    const mask = this.selMask;
-    const before: Record<string, IndexBuf> = {};
-    const after: Record<string, IndexBuf> = {};
-    for (const ld of targets) {
-      const buf = frame.layers[ld.id];
-      if (!buf) continue;
-      const b = copyIndexBuf(buf);
-      if (mask) R.deleteMasked(buf, mask);
-      else buf.fill(0);
-      let changed = false;
-      for (let i = 0; i < buf.length; i++)
-        if (buf[i] !== b[i]) {
-          changed = true;
-          break;
-        }
-      if (!changed) continue; // 元から空のレイヤーは履歴に含めない
-      before[ld.id] = b;
-      after[ld.id] = copyIndexBuf(buf);
-    }
-    if (Object.keys(before).length === 0) {
-      this.cb.toast(t("ed.tl.clearFrame.nothing.toast"));
-      return;
-    }
-    // バッファ実体は構造 undo/redo で作り直され得るので、Frame オブジェクト起点で適用時に解決する
-    const self = this;
-    const clearEntry = multiBufferChangeEntry(
-      "消す",
-      (id) => frame.layers[id] ?? null,
-      before,
-      after,
-      () => {
-        self.dirty = true;
-        self.renderCanvas();
-        const fi = self.project.frames.indexOf(frame);
-        if (fi >= 0) self.paintFilmThumb(fi);
-      }
-    );
-    // ★V180 (A-78 ②): 取り消し・やり直しの前に、そのコマを書きで起こす（眠っていると黙って空振りする）
-    clearEntry.prepare = () => wakeFrame(this.project, frame, "write");
-    this.history.push(clearEntry);
-    // afterStructuralChange は「今表示中のコマ」のサムネを塗るが、対象は確認ダイアログ前に
-    // 捉えたコマなので、ここは対象コマのサムネを塗る（矢印キー等でコマが動いていても整合）
-    this.dirty = true;
-    this.renderCanvas();
-    const fi = this.project.frames.indexOf(frame);
-    if (fi >= 0) this.paintFilmThumb(fi);
-  }
-
-  // ---------------- レイヤー操作 ----------------
-
-  // ---------------- M11-15: レイヤーのコピー＆ペースト（コマ1枚ぶん） ----------------
-
-  /** クリップボードを捨てる。**破棄はここ1箇所**（mount から呼ぶ＝作品を跨がない） */
-  private clearLayerClip() {
-    this.layerClip = null;
-    this.updateLayerClipButtons();
+  /** V199: いまボタンに出している範囲（"a-b"・無ければ ""）。範囲が変わったときだけ描き直す（再生中に毎コマ触らない） */
+  private pasteRangeKey = "";
+  /** V199: 貼り付けボタンの「→ コマ a〜b」を、タイムラインの範囲に追従させる */
+  protected override syncPasteRangeLabel() {
+    const r = pasteRange(this.rangeSel, this.project.frames.length);
+    if ((r ? `${r.a}-${r.b}` : "") !== this.pasteRangeKey) this.updateLayerClipButtons();
   }
 
   /** 貼り付け系ボタンの有効/無効を控えの有無に合わせる。
    *  M11-19: 「貼り付け」ボタンには**今の貼り先（アクティブレイヤー名）**を出す（レイヤー切替に追従＝
-   *  rebuildLayers からも呼ばれる）。長い名前は 8 文字＋…に省略。フォルダが選ばれていれば貼り先なし */
-  private updateLayerClipButtons() {
-    const on = !!this.layerClip;
-    for (const sel of ["#ed-lc-paste", "#ed-lc-paste-new", "#ed-lc-paste-all"]) {
+   *  rebuildLayers からも呼ばれる）。長い名前は 8 文字＋…に省略。
+   *  V199 (A-105): タイムラインで 2 コマ以上を選んでいれば「貼り付け → コマ a〜b」、
+   *  フォルダの控えなら「貼り付け → {フォルダ名}」（何を選んでいても貼り先は控えた同じレイヤー）。
+   *  V203 (A-109): 「重ね貼り」は、表示・有効と無効・貼り先の決め方を「貼り付け」と同じにする（文だけ違う） */
+  protected override updateLayerClipButtons() {
+    const clip = this.layerClip;
+    const on = !!clip;
+    for (const sel of ["#ed-lc-paste", "#ed-lc-paste-over", "#ed-lc-paste-new", "#ed-lc-paste-all"]) {
       const b = document.querySelector(sel) as HTMLButtonElement | null;
       if (b) b.disabled = !on;
     }
+    const range = pasteRange(this.rangeSel, this.project.frames.length);
+    this.pasteRangeKey = range ? `${range.a}-${range.b}` : "";
     const paste = document.querySelector("#ed-lc-paste") as HTMLButtonElement | null;
-    if (paste) {
-      const ld = this.project.layerDefs.find((l) => l.id === this.activeLayerId);
-      const full = ld?.name ?? "";
-      const cps = [...full]; // 判定も切り出しもコードポイント単位（絵文字名で「…」だけ付かないように）
-      const short = cps.length > 8 ? `${cps.slice(0, 8).join("")}…` : full;
-      setIconLabel(paste, "clipboard", ld ? t("ed.layerclip.pasteTo.btn", { layerShort: short }) : t("ed.layerclip.paste.btn")); // V171
-      paste.title = ld
-        ? t("ed.layerclip.pasteTo.title", { layer: full })
-        : t("ed.layerclip.paste.title");
+    const over = document.querySelector("#ed-lc-paste-over") as HTMLButtonElement | null;
+    if (!paste || !over) return;
+    // 判定も切り出しもコードポイント単位（絵文字名で「…」だけ付かないように）
+    const shortOf = (full: string) => {
+      const cps = [...full];
+      return cps.length > 8 ? `${cps.slice(0, 8).join("")}…` : full;
+    };
+    if (range) {
+      const from = range.a + 1;
+      const to = range.b + 1;
+      setIconLabel(paste, "clipboard", t("ed.layerclip.pasteToFrames.btn", { from, to }));
+      paste.title = t("ed.layerclip.pasteToFrames.title", { from, to, count: range.b - range.a + 1 });
+      setIconLabel(over, "clipboard", t("ed.layerclip.pasteOverToFrames.btn", { from, to }));
+      over.title = t("ed.layerclip.pasteOverToFrames.title", { from, to, count: range.b - range.a + 1 });
+      return;
     }
+    if (clip?.kind === "folder") {
+      const name = this.folderById(clip.folderId)?.name ?? clip.name;
+      setIconLabel(paste, "clipboard", t("ed.layerclip.pasteTo.btn", { layerShort: shortOf(name) }));
+      paste.title = t("ed.layerclip.pasteToFolder.title", { folder: name, count: clip.items.length });
+      setIconLabel(over, "clipboard", t("ed.layerclip.pasteOverTo.btn", { layerShort: shortOf(name) }));
+      over.title = t("ed.layerclip.pasteOverToFolder.title", { folder: name, count: clip.items.length });
+      return;
+    }
+    const ld = this.project.layerDefs.find((l) => l.id === this.activeLayerId);
+    const full = ld?.name ?? "";
+    setIconLabel(paste, "clipboard", ld ? t("ed.layerclip.pasteTo.btn", { layerShort: shortOf(full) }) : t("ed.layerclip.paste.btn")); // V171
+    paste.title = ld
+      ? t("ed.layerclip.pasteTo.title", { layer: full })
+      : t("ed.layerclip.paste.title");
+    setIconLabel(over, "clipboard", ld ? t("ed.layerclip.pasteOverTo.btn", { layerShort: shortOf(full) }) : t("ed.layerclip.pasteOver.btn"));
+    over.title = ld
+      ? t("ed.layerclip.pasteOverTo.title", { layer: full })
+      : t("ed.layerclip.pasteOver.title");
   }
 
   /** M11-19: 貼り付けボタン列（#ed-layerclip）が見えていなければ見える位置へスクロール
    *  （revealToolOptions と同じ流儀・スムーズにしない） */
-  private revealLayerClip() {
+  protected override revealLayerClip() {
     const side = document.querySelector("#ed-side") as HTMLElement | null;
     const host = document.querySelector("#ed-layerclip") as HTMLElement | null;
     if (!side || !host) return;
     const sr = side.getBoundingClientRect();
     const hr = host.getBoundingClientRect();
     if (hr.bottom > sr.bottom + 1 || hr.top < sr.top - 1) host.scrollIntoView({ block: "nearest" });
-  }
-
-  /** 控えが無いときの案内（全貼り付け経路で共通） */
-  private requireLayerClip(): IndexBuf | null {
-    if (!this.layerClip) {
-      this.cb.toast(t("ed.layerclip.noClip.toast"));
-      return null;
-    }
-    return this.layerClip;
-  }
-
-  /** アクティブレイヤーの現在コマを控えへコピーする（プロジェクトには触れない） */
-  private copyLayerFrame() {
-    if (this.xformGuard()) return; // 変形中の切り出し済みバッファをコピーしない
-    const buf = this.activeBuffer();
-    if (!buf) return;
-    this.layerClip = copyIndexBuf(buf);
-    this.updateLayerClipButtons();
-    this.revealLayerClip(); // M11-19: 貼り付けボタン列が画面外に押し出されていても見えるように
-    const name = this.project.layerDefs.find((l) => l.id === this.activeLayerId)?.name ?? layerBaseName();
-    this.cb.toast(t("ed.layerclip.copied.toast", { layer: name, frame: this.frameIndex + 1 }));
-  }
-
-  /** 控えを**置き換え**で書き込む（8/16bit 整合: dst が 16bit・src が 8bit でも .set は値を保つ。
-   *  逆＝dst 8bit・src 16bit は起きない — コピー後にプロジェクトが降格することは無い） */
-  private static writeClipInto(dst: IndexBuf, src: IndexBuf) {
-    dst.set(src as unknown as ArrayLike<number>);
-  }
-
-  /** ① 今のコマの選んだレイヤーへ（置き換え・履歴1エントリ） */
-  private pasteLayerFrame() {
-    if (this.xformGuard()) return; // E-4
-    const clip = this.requireLayerClip();
-    if (!clip) return;
-    const buf = this.activeBuffer();
-    if (!buf) return;
-    const before = copyIndexBuf(buf);
-    Editor.writeClipInto(buf, clip);
-    // 1画素も変わらなければ履歴に積まない（同じ絵を同じ所へ貼った）
-    let changed = false;
-    for (let i = 0; i < before.length; i++)
-      if (before[i] !== buf[i]) {
-        changed = true;
-        break;
-      }
-    if (!changed) {
-      this.cb.toast(t("ed.layerclip.same.toast"));
-      return;
-    }
-    this.pushBufferHistory("レイヤー貼り付け", buf, before);
-    this.renderCanvas();
-    this.paintFilmThumb(this.frameIndex);
-  }
-
-  /** ③ 新規レイヤーを作ってそこへ（addLayer と同じ規則で作成 → 貼り付け。**履歴1エントリ**） */
-  private pasteLayerToNew() {
-    if (this.xformGuard()) return; // E-4
-    const clip = this.requireLayerClip();
-    if (!clip) return;
-    const id = newLayerId(this.project);
-    const idx = this.project.layerDefs.findIndex((l) => l.id === this.activeLayerId);
-    // addLayer と同じ: 選択中フォルダの中 or 選択レイヤーと同じ親・選択レイヤーの直上
-    const selFolder = this.selectedFolderId ? this.folderById(this.selectedFolderId) : undefined;
-    const def: LayerDef = {
-      id,
-      name: `${layerBaseName()}${this.project.layerDefs.length + 1}`,
-      visible: true,
-      opacity: 1,
-      parent: selFolder
-        ? selFolder.id
-        : this.project.layerDefs.find((l) => l.id === this.activeLayerId)?.parent,
-    };
-    let insertAt = idx >= 0 ? idx + 1 : this.project.layerDefs.length;
-    if (selFolder) {
-      const members = this.folderLayerIndices(selFolder.id);
-      if (members.length > 0) insertAt = members[members.length - 1] + 1;
-    }
-    const frameIdx = this.frameIndex;
-    const prevActive = this.activeLayerId;
-    const clipCopy = copyIndexBuf(clip); // redo 時に控えが変わっていても同じ絵が入るように
-    const self = this;
-    const apply = () => {
-      // M11-20 レビュー: def は雛形＝コピーを挿入（理由は「選択→新規レイヤー」の apply と同じ）
-      self.project.layerDefs.splice(insertAt, 0, { ...def });
-      for (const f of self.project.frames) {
-        f.layers[id] = allocIndexBuf(self.project);
-        if (f.order) f.order.push(id); // コマ固有描画順があれば最上位に追加（addLayer と同じ）
-      }
-      const d = self.project.frames[frameIdx]?.layers[id];
-      if (d) Editor.writeClipInto(d, clipCopy);
-      self.activeLayerId = id;
-      self.afterLayerChange();
-      self.paintFilmThumb(frameIdx);
-    };
-    const revert = () => {
-      const i = self.project.layerDefs.findIndex((l) => l.id === id);
-      if (i >= 0) self.project.layerDefs.splice(i, 1);
-      for (const f of self.project.frames) {
-        dropLayer(f, id); // V156: 眠っているぶん（f.sleep）も一緒に消す
-        if (f.order) f.order = f.order.filter((x) => x !== id);
-      }
-      self.activeLayerId = self.project.layerDefs.some((l) => l.id === prevActive)
-        ? prevActive
-        : (self.project.layerDefs[self.project.layerDefs.length - 1]?.id ?? "");
-      self.afterLayerChange();
-      self.paintFilmThumb(frameIdx);
-    };
-    this.history.push({
-      colorRefs: () => ({ bufs: [clipCopy] }), // V195 (A-99)
-      label: "新規レイヤーへ貼り付け",
-      bytes: entryBytes(clipCopy), // V154 (W-2)
-      undo: revert,
-      redo: apply,
-    });
-    apply();
-  }
-
-  /** ④ 全コマの選んだレイヤーへ一括（ID・サイン用。**履歴1エントリ**＝undo 1回で全コマ戻る）。
-   *  before は**変化のあったコマだけ**控える（既に同じ絵のコマは触らない＝メモリと時間の節約）。
-   *  100コマ級でも数十msで終わる見込みだが、念のため長いときは終わりにトーストで知らせる */
-  private async pasteLayerAllFrames() {
-    if (this.xformGuard()) return; // E-4
-    const clip = this.requireLayerClip();
-    if (!clip) return;
-    const layerId = this.activeLayerId;
-    const name = this.project.layerDefs.find((l) => l.id === layerId)?.name ?? layerBaseName();
-    const n = this.project.frames.length;
-    if (n > 1) {
-      const ok = await this.cb.confirm(
-        t("ed.layerclip.pasteAll.msg", { count: n, layer: name })
-      );
-      if (!ok) return;
-    }
-    // ★V166 (層2): 確認は漏斗の外・全コマへの書き込みだけを中に入れる
-    await this.runHeavy("layer.allFrames", t("ed.heavy.layerAll.msg"), () =>
-      this.pasteLayerAllFramesInner(clip, layerId, name)
-    );
-  }
-
-  private async pasteLayerAllFramesInner(clip: IndexBuf, layerId: string, name: string) {
-    // V166 (B): 控えは「変化のあったコマ × 1枚」＝最大で全コマぶん。多いほうで見積もる
-    if (!this.allowBufferAlloc(this.project.frames.length, "layer.allFrames", [layerId])) return;
-    // ★V156 (P-1): 全コマの画素を読み書きするので、**このレイヤーだけ**全コマで起こす。
-    // 起こさないと `f.layers[id] ?? allocIndexBuf(p)` が空バッファを掴んで絵が静かに消える
-    await wakeLayersAllFrames(this.project, [layerId], "write");
-    const t0 = performance.now();
-    const clipCopy = copyIndexBuf(clip);
-    // 変化のあるコマだけ before を取る（Frame オブジェクトで持つ＝並べ替え/挿入があっても正しい実体へ戻す）
-    const touched: { frame: Frame; before: IndexBuf }[] = [];
-    for (const f of this.project.frames) {
-      const buf = f.layers[layerId];
-      if (!buf) continue;
-      let same = buf.length === clipCopy.length;
-      if (same) for (let i = 0; i < buf.length; i++) if (buf[i] !== clipCopy[i]) { same = false; break; }
-      if (same) continue;
-      touched.push({ frame: f, before: copyIndexBuf(buf) });
-    }
-    if (touched.length === 0) {
-      this.cb.toast(t("ed.layerclip.sameAll.toast"));
-      return;
-    }
-    const self = this;
-    // フィルムは全コマの絵が変わるので rebuildFilm（可視分だけ遅延描画＝F-0 の流儀のまま）
-    const apply = () => {
-      for (const t of touched) {
-        const b = t.frame.layers[layerId];
-        if (b) Editor.writeClipInto(b, clipCopy);
-      }
-      self.dirty = true;
-      self.renderCanvas();
-      self.rebuildFilm();
-    };
-    const revert = () => {
-      for (const t of touched) {
-        const b = t.frame.layers[layerId];
-        if (b) Editor.writeClipInto(b, t.before);
-      }
-      self.dirty = true;
-      self.renderCanvas();
-      self.rebuildFilm();
-    };
-    // V154 (W-2): 全コマぶんの before スナップショットを抱える（コマ数ぶん効く）
-    this.history.push({
-      colorRefs: () => ({ bufs: [...touched.map((x) => x.before), clipCopy] }), // V195 (A-99)
-      label: "全コマへレイヤー貼り付け",
-      // V156 (P-1): undo/redo が全コマの画素を書き戻すので、先にそのレイヤーだけ起こす
-      prepare: () => wakeLayersAllFrames(self.project, [layerId], "write"),
-      bytes: entryBytes(touched.map((x) => x.before), clipCopy),
-      undo: revert,
-      redo: apply,
-    });
-    apply();
-    const ms = Math.round(performance.now() - t0);
-    this.cb.toast(
-      ms >= 500
-        ? t("ed.layerclip.pasteAllDoneSlow.toast", { count: touched.length, layer: name, ms })
-        : t("ed.layerclip.pasteAllDone.toast", { count: touched.length, layer: name })
-    );
-  }
-
-  private addLayer() {
-    if (this.xformGuard()) return; // E-4
-    const id = newLayerId(this.project);
-    const idx = this.project.layerDefs.findIndex((l) => l.id === this.activeLayerId);
-    // M3.7: 選択中フォルダ（実在するもののみ）の中 or 選択レイヤーと同じ親に作成
-    // （Codexレビュー指摘#2/#3: stale な selectedFolderId を parent に採用しない・
-    //  フォルダ内作成時は既存ブロック末尾へ挿入して連続性を守る）
-    const selFolder = this.selectedFolderId
-      ? this.folderById(this.selectedFolderId)
-      : undefined;
-    const def: LayerDef = {
-      id,
-      name: `${layerBaseName()}${this.project.layerDefs.length + 1}`,
-      visible: true,
-      opacity: 1,
-      parent: selFolder
-        ? selFolder.id
-        : this.project.layerDefs.find((l) => l.id === this.activeLayerId)?.parent,
-    };
-    let insertAt = idx >= 0 ? idx + 1 : this.project.layerDefs.length;
-    if (selFolder) {
-      const members = this.folderLayerIndices(selFolder.id);
-      if (members.length > 0) insertAt = members[members.length - 1] + 1;
-    }
-    const self = this;
-    const apply = () => {
-      // M11-20 レビュー: def は雛形＝コピーを挿入（理由は「選択→新規レイヤー」の apply と同じ）
-      self.project.layerDefs.splice(insertAt, 0, { ...def });
-      for (const f of self.project.frames) {
-        f.layers[id] = allocIndexBuf(self.project);
-        // コマ固有描画順があれば最上位に追加
-        if (f.order) f.order.push(id);
-      }
-      self.activeLayerId = id;
-      self.afterLayerChange();
-    };
-    const revert = () => {
-      const i = self.project.layerDefs.findIndex((l) => l.id === id);
-      if (i >= 0) self.project.layerDefs.splice(i, 1);
-      for (const f of self.project.frames) {
-        dropLayer(f, id); // V156: 眠っているぶん（f.sleep）も一緒に消す
-        if (f.order) f.order = f.order.filter((x) => x !== id);
-      }
-      if (self.activeLayerId === id)
-        self.activeLayerId = self.project.layerDefs[self.project.layerDefs.length - 1]?.id ?? "";
-      self.afterLayerChange();
-    };
-    this.history.push({ colorRefs: NO_COLOR_REFS, label: "レイヤー追加", undo: revert, redo: apply });
-    const _t0 = perfNow();
-    apply();
-    perfDone("layer.add", _t0);
-  }
-
-  private async deleteLayer() {
-    if (this.xformGuard()) return; // E-4
-    if (this.project.layerDefs.length <= 1) {
-      this.cb.toast(t("ed.layer.deleteLastBlocked.toast"));
-      return;
-    }
-    const idx = this.project.layerDefs.findIndex((l) => l.id === this.activeLayerId);
-    if (idx < 0) return;
-    const def = this.project.layerDefs[idx];
-    if (this.lockGuard(def.id)) return; // V157 (D-1): ロック中のレイヤーは消させない
-    // V151 (E-8): 「次回から表示しない」対象の1つ（id: layerDelete）
-    const ok = await this.confirmWithSkip("layerDelete", t("ed.layer.delete.msg", { layer: def.name }));
-    if (!ok) return;
-    // ★V166 (層2): ここから先が重い（全コマを起こして全コマぶんの画素を控える＝
-    //  1,000コマなら 76MB の写しが動く）。確認は漏斗の外・作業だけを中に入れる
-    await this.runHeavy("layer.del", t("ed.heavy.delLayer.msg"), () =>
-      this.deleteLayerInner(def, idx)
-    );
-  }
-
-  private async deleteLayerInner(def: LayerDef, idx: number) {
-    // V166 (B): 控えは「全コマ × 1枚」。確保する前に見積もる
-    if (!this.allowBufferAlloc(this.project.frames.length, "layer.del", [def.id])) return;
-    // ★V156 (P-1): 下の `saved` が全コマの画素を控えるので、先に起こす（このレイヤーだけ）
-    await wakeLayersAllFrames(this.project, [def.id], "write");
-    const saved: IndexBuf[] = this.project.frames.map((f) =>
-      copyIndexBuf(f.layers[def.id] ?? allocIndexBuf(this.project))
-    );
-    const savedOrders = this.project.frames.map((f) => (f.order ? [...f.order] : undefined));
-    const self = this;
-    const apply = () => {
-      const i = self.project.layerDefs.findIndex((l) => l.id === def.id);
-      if (i >= 0) self.project.layerDefs.splice(i, 1);
-      for (const f of self.project.frames) {
-        dropLayer(f, def.id); // V156: 眠りぶんも
-        if (f.order) f.order = f.order.filter((x) => x !== def.id);
-      }
-      self.activeLayerId = self.project.layerDefs[Math.max(0, i - 1)]?.id ?? "";
-      self.afterLayerChange();
-    };
-    const revert = () => {
-      self.project.layerDefs.splice(idx, 0, def);
-      self.project.frames.forEach((f, fi) => {
-        // 削除後にプロジェクトが16bit昇格していても幅が揃うよう、現在幅で確保して復元
-        const nb = allocIndexBuf(self.project);
-        nb.set(saved[fi]);
-        f.layers[def.id] = nb;
-        f.order = savedOrders[fi] ? [...savedOrders[fi]!] : undefined;
-      });
-      self.activeLayerId = def.id;
-      self.afterLayerChange();
-    };
-    // V154 (W-2 ②): 消したレイヤーの実体は**履歴が抱えたまま**なので申告する
-    //（「削除したのに減らない」の正体。ここを黙っているとメーターが嘘をつく）
-    this.history.push({
-      colorRefs: () => ({ bufs: saved }), // V195 (A-99)
-      label: "レイヤー削除",
-      bytes: entryBytes(saved),
-      // V156 (P-1): 巻き戻しは全コマへバッファを配り直す（起こしてからでないと取りこぼす）
-      prepare: () => wakeLayersAllFrames(self.project, [def.id], "write"),
-      undo: revert,
-      redo: apply,
-    });
-    apply(); // V166: 計測は漏斗が持つ（`layer.del`）
-  }
-
-  /**
-   * M15 (K-1): レイヤーの「全コマ共通」を切り替える。
-   *  ON: いま見ているコマの絵で全コマを統一する。**他のコマに絵があって内容が違うときだけ**確認する
-   *      （空 or 同一なら黙って ON）。以後どのコマで描いても全コマに反映（全コマが同一バッファを参照）。
-   *  OFF: 各コマが**自分のコピー**を持つ（見た目は変わらない）。
-   *  履歴は1エントリ: ON/OFF フラグ ＋ 全コマのこのレイヤーの before バッファ（copy）を持ち、Undo で完全復元。
-   *  ★索引の複製だけ（混色なし）。フォルダには出さない（レイヤー行だけ）。
-   */
-  private async toggleLayerShared(id: string) {
-    if (this.xformGuard()) return;
-    const ld = this.project.layerDefs.find((l) => l.id === id);
-    if (!ld) return;
-    const turningOn = ld.shared !== true;
-    // ★V166 (層2): この操作は**重い区間が確認をはさんで2つある**（前＝全コマの見比べ／
-    //  後＝全コマへの配り直し）。確認は待ち時間なので**どちらの漏斗にも入れない**
-    if (turningOn) {
-      const scan = await this.runHeavy("layer.allFrames", t("ed.heavy.layerAll.msg"), () =>
-        this.sharedScanOthersDiffer(id)
-      );
-      if (scan === undefined || scan === null) return; // 入口が閉じていた／現在コマに実体が無い
-      // 他コマに「今と違う絵」があるときだけ確認（空 or 同一なら黙って ON）
-      if (scan && !(await this.cb.confirm(t("ed.layer.shared.replace.msg")))) return;
-    }
-    await this.runHeavy("layer.allFrames", t("ed.heavy.layerAll.msg"), () =>
-      this.toggleLayerSharedInner(id, turningOn)
-    );
-  }
-
-  /** V166: 「他のコマに今と違う絵があるか」だけを見る（全コマ走査＝重い側）。
-   *  現在コマに実体が無ければ `null`（呼び出し側は中止する）。 */
-  private async sharedScanOthersDiffer(id: string): Promise<boolean | null> {
-    // V166 (B): 走査も全コマを展開する＝確保する。先に見積もる
-    if (!this.allowBufferAlloc(0, "layer.sharedScan", [id])) return null;
-    // ★V156 (P-1): 全コマの画素を現在コマと比べるので、**このレイヤーだけ**先に起こす。
-    //  ★V166（Codex 指摘⑤）: ここは **"read"**。以前は "write" だったが、
-    //   これは**確認ダイアログの前の見比べ**で、利用者が「いいえ」を押せば何も変えない。
-    //   "write" は `invalidateFrame` で**圧縮控えを捨てる**ので、取り消した場合でも
-    //   眠り控えだけが失われ、次の掃除で圧縮し直す無駄が出ていた（絵は変わらない）
-    await wakeLayersAllFrames(this.project, [id], "read");
-    const frames = this.project.frames;
-    const cur = frames[this.frameIndex]?.layers[id];
-    if (!cur) return null;
-    for (let fi = 0; fi < frames.length; fi++) {
-      if (fi === this.frameIndex) continue;
-      const b = frames[fi].layers[id];
-      if (!b) continue;
-      let empty = true;
-      let same = true;
-      for (let i = 0; i < PIXELS; i++) {
-        if (b[i] !== 0) empty = false;
-        if (b[i] !== cur[i]) same = false;
-        if (!empty && !same) break;
-      }
-      if (!empty && !same) return true;
-    }
-    return false;
-  }
-
-  private async toggleLayerSharedInner(id: string, turningOn: boolean) {
-    const ld = this.project.layerDefs.find((l) => l.id === id);
-    if (!ld) return;
-    // ★V166 (B): 控えは「全コマ × 1枚」。**起こすより先に**見積もる——
-    //  起こす処理そのものが全コマぶんを展開する（＝確保する）ので、
-    //  そのあとで断っても「断る前に確保してしまった」ことになる
-    if (!this.allowBufferAlloc(this.project.frames.length, "layer.shared", [id])) return;
-    // ★V156 (P-1): OFF は全コマへコピーを配る。全コマの中身が要るので先に起こす
-    // （ON 側は走査ですでに起きているが、`wakeLayersAllFrames` は起きているコマを素通りする）
-    await wakeLayersAllFrames(this.project, [id], "write");
-    const frames = this.project.frames;
-    // 履歴: 全コマの before バッファ（copy）＋ 元の shared 状態
-    const beforeBufs = frames.map((f) => copyIndexBuf(f.layers[id] ?? allocIndexBuf(this.project)));
-    const wasShared = ld.shared === true;
-    const curFrame = this.frameIndex;
-    const self = this;
-    const apply = () => {
-      const p = self.project;
-      const ldNow = p.layerDefs.find((l) => l.id === id);
-      if (!ldNow) return;
-      if (turningOn) {
-        ldNow.shared = true;
-        // いま見ているコマの絵を canonical にして全コマへ同一参照
-        const canonical = copyIndexBuf(p.frames[curFrame]?.layers[id] ?? allocIndexBuf(p));
-        for (const f of p.frames) f.layers[id] = canonical;
-      } else {
-        delete ldNow.shared;
-        // 各コマに独立コピーを持たせる（現状は全コマ同一参照なので、同じ内容の別実体に分ける）
-        const src = p.frames[0]?.layers[id] ?? allocIndexBuf(p);
-        for (const f of p.frames) f.layers[id] = copyIndexBuf(src);
-      }
-      self.dirty = true;
-      self.afterLayerChange();
-      self.rebuildFilm();
-    };
-    const revert = () => {
-      const p = self.project;
-      const ldNow = p.layerDefs.find((l) => l.id === id);
-      if (!ldNow) return;
-      if (wasShared) ldNow.shared = true; else delete ldNow.shared;
-      p.frames.forEach((f, fi) => {
-        const nb = allocIndexBuf(p);
-        nb.set(beforeBufs[fi]);
-        f.layers[id] = nb;
-      });
-      // wasShared のときは全コマ同一参照へ張り直す（relinkShared と同じ不変条件）
-      relinkShared(p);
-      self.dirty = true;
-      self.afterLayerChange();
-      self.rebuildFilm();
-    };
-    this.history.push({
-      colorRefs: () => ({ bufs: beforeBufs }), // V195 (A-99)
-      label: turningOn ? "全コマ共通ON" : "全コマ共通OFF",
-      // V156 (P-2): **申告漏れその2**。`revert` は 全コマぶんの `copyIndexBuf`（beforeBufs）を
-      // クロージャで抱えているのに `bytes` が無く、1,098コマなら **80 MiB** が予算から見えていなかった
-      bytes: entryBytes(beforeBufs),
-      // V156 (P-1): apply/revert とも全コマの画素を読み書きする
-      prepare: () => wakeLayersAllFrames(self.project, [id], "write"),
-      undo: revert,
-      redo: apply,
-    });
-    apply();
-  }
-
-  /**
-   * M15 (K-2): レイヤーカラー（表示色）を切り替える。未設定→いまの色を設定・設定中→解除。
-   *  絵の索引は1ドットも変えない（合成時に置換するだけ）。履歴は可視トグルと同じ流儀
-   *  （id で解決する軽いエントリ・afterLayerChange で即追従）。 */
-  /** V157 (D-2): レイヤーカラーの色チップを押したとき。
-   *
-   *  **適用先を押す前に選ばせる**（要件: 「全コマ」か「選択中のコマ」かを操作の時点で分かること）。
-   *  誤爆すると全コマの色が変わる操作なので、既定を勝手に決めない。
-   *  すでに色が付いている側は「外す」に文言が変わる＝これまでのチップの押し味（トグル）と同じ。 */
-  private async chooseLayerColorScope(id: string) {
-    if (this.xformGuard()) return;
-    const ld = this.project.layerDefs.find((l) => l.id === id);
-    if (!ld) return;
-    const sel = this.selectedFrameIndices();
-    const hasLayerColor = !!ld.displayColor;
-    const withColor = sel.filter((i) => this.project.frames[i]?.layerColors?.[id]).length;
-    const allSelHave = sel.length > 0 && withColor === sel.length;
-    const optAll = hasLayerColor
-      ? t("ed.layer.color.clearAll.btn")
-      : t("ed.layer.color.applyAll.btn");
-    // V157（Codex レビュー §1・優先度 高）: **どのコマなのかを文言で言い切る。**
-    // 「{n} コマに付ける」だけだと「選んでいるコマ」なのか「いまのコマ」なのか分からない。
-    // コマを選んでいないときは `selectedFrameIndices()` が現在コマ1つを返すので、
-    // そこは「このコマだけ」と**言い方を変える**（「1 コマに付ける」は読みにくい）
-    const one = sel.length === 1;
-    const scopeKey = allSelHave
-      ? one
-        ? "clearOne"
-        : "clearFrames"
-      : one
-        ? "applyOne"
-        : "applyFrames";
-    const optSel = t(Editor.COLOR_SCOPE[scopeKey].msgKey, { n: sel.length });
-    // V157（Codex レビュー §1）: **狭いほう（このコマ／選んだコマ）を先頭＝primary にする。**
-    // 先頭が推奨に見えるので、影響の大きい「全コマ」を勧める並びにしない
-    const pick = this.cb.choose
-      ? await this.cb.choose(t("ed.layer.color.scope.msg", { layer: ld.name }), [optSel, optAll])
-      : 1;
-    if (pick === null || pick === undefined) return;
-    if (pick === 1) await this.toggleLayerDisplayColor(id);
-    else this.applyFrameLayerColor(id, sel, allSelHave ? undefined : this.colorHex || UGO_COLORS.black);
-  }
-
-  /** V157 (D-2): **選択中のコマだけ**にレイヤーの表示色を付ける／外す（履歴1エントリ）。
-   *
-   *  ★索引（`IndexBuf`）には1ビットも触らない。`frames[i].layerColors` という
-   *  コマ側の任意キーを足す/消すだけなので、外せばレイヤー既定へ完全に戻る。
-   *
-   *  ★V156 の眠りとの関係: ここが触るのは**画素ではない**ので、圧縮控え（`sleep`）は
-   *  古くならない（控えに入っているのは索引バイト列だけ）。眠っているコマにもそのまま付く——
-   *  `f.layers` を一切見ずに `frames[i]` を直に触るのがその要（`f.layers[id]` の有無で
-   *  絞ると、眠っているコマだけ**静かに飛ばされる**）。`v157_smoke` §5 が睡眠サイクルで確かめる。 */
-  private applyFrameLayerColor(id: string, frames: number[], color: string | undefined) {
-    if (frames.length === 0) return;
-    const self = this;
-    // 元の値を控える（undo で「元から付いていた色」まで正しく戻す）
-    const before = frames.map((i) => self.project.frames[i]?.layerColors?.[id]);
-    const set = (vals: (string | undefined)[]) => {
-      frames.forEach((fi, k) => {
-        const f = self.project.frames[fi];
-        if (!f) return;
-        const v = vals[k];
-        if (v) {
-          if (!f.layerColors) f.layerColors = {};
-          f.layerColors[id] = v;
-        } else if (f.layerColors) {
-          delete f.layerColors[id];
-          if (Object.keys(f.layerColors).length === 0) delete f.layerColors;
-        }
-      });
-      self.dirty = true;
-      self.renderCanvas();
-      self.rebuildFilm();
-    };
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label: color ? "コマのレイヤーカラー" : "コマのレイヤーカラー解除",
-      // 抱えているのは色の文字列だけ（画素はゼロ）。コマ数ぶんの目安を申告する
-      bytes: frames.length * 16,
-      undo: () => set(before),
-      redo: () => set(frames.map(() => color)),
-    });
-    set(frames.map(() => color));
-    this.cb.toast(
-      color
-        ? t("ed.frameColor.applied.toast", { n: frames.length })
-        : t("ed.frameColor.cleared.toast", { n: frames.length })
-    );
-  }
-
-  /** V166 (層2): レイヤーカラーは**全コマの見た目**が変わる＝`rebuildFilm` が全コマぶん走る。
-   *  画素は1つも書き換えないので確保の見積もりは要らないが、時間は作品の大きさに比例する。 */
-  private async toggleLayerDisplayColor(id: string) {
-    await this.runHeavy("layer.allFrames", t("ed.heavy.layerAll.msg"), () =>
-      this.toggleLayerDisplayColorInner(id)
-    );
-  }
-
-  private toggleLayerDisplayColorInner(id: string) {
-    if (this.xformGuard()) return;
-    const ld = this.project.layerDefs.find((l) => l.id === id);
-    if (!ld) return;
-    const before = ld.displayColor;
-    // 現在の色（透明のときは黒に倒す＝透明を表示色にはできない。索引0は「透明」の予約）
-    const after = before ? undefined : (this.colorHex || UGO_COLORS.black);
-    const self = this;
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label: before ? "レイヤーカラー解除" : "レイヤーカラー",
-      undo() {
-        const l = self.project.layerDefs.find((x) => x.id === id);
-        if (!l) return;
-        if (before) l.displayColor = before; else delete l.displayColor;
-        self.dirty = true;
-        self.afterLayerChange();
-        self.rebuildFilm();
-      },
-      redo() {
-        const l = self.project.layerDefs.find((x) => x.id === id);
-        if (!l) return;
-        if (after) l.displayColor = after; else delete l.displayColor;
-        self.dirty = true;
-        self.afterLayerChange();
-        self.rebuildFilm();
-      },
-    });
-    if (after) ld.displayColor = after; else delete ld.displayColor;
-    this.dirty = true;
-    this.afterLayerChange();
-    this.rebuildFilm();
-  }
-
-  private async mergeLayerDown() {
-    if (this.xformGuard()) return; // E-4
-    const idx = this.project.layerDefs.findIndex((l) => l.id === this.activeLayerId);
-    if (idx <= 0) {
-      this.cb.toast(t("ed.layer.mergeNoTarget.toast"));
-      return;
-    }
-    const top = this.project.layerDefs[idx];
-    const bottom = this.project.layerDefs[idx - 1];
-    // M15 (K-1): 共通レイヤーを含む結合は禁止（片方が全コマ共通だと、統合先が
-    // 「あるコマだけ違う」状態になり共有の意味が壊れる）。共通を解除してから結合する
-    // V157 (D-1): 統合は**両方の絵**を変える。どちらかがロック中なら弾く
-    if (this.lockGuard(top.id) || this.lockGuard(bottom.id)) return;
-    if (top.shared === true || bottom.shared === true) {
-      this.cb.toast(t("ed.layer.mergeSharedBlocked.toast"));
-      return;
-    }
-    // ★V166 (層2): ここから先が重い（全コマ×2枚の控え＝1,000コマなら 153MB）
-    await this.runHeavy("layer.merge", t("ed.heavy.mergeLayer.msg"), () =>
-      this.mergeLayerDownInner(top, bottom, idx)
-    );
-  }
-
-  private async mergeLayerDownInner(top: LayerDef, bottom: LayerDef, idx: number) {
-    // V166 (B): 控えは「全コマ × 2枚」。7,687コマなら 1.18GB＝貼り付けと同じ確保量
-    if (!this.allowBufferAlloc(this.project.frames.length * 2, "layer.merge", [top.id, bottom.id])) return;
-    // ★V156 (P-1): 下の2つの控えが全コマの画素を読むので、関わる2枚だけ先に起こす
-    // （起こさないと `?? allocIndexBuf(p)` が空バッファを掴んで、統合で絵が消える）
-    await wakeLayersAllFrames(this.project, [top.id, bottom.id], "write");
-    const savedBottom: IndexBuf[] = this.project.frames.map((f) =>
-      copyIndexBuf(f.layers[bottom.id] ?? allocIndexBuf(this.project))
-    );
-    const savedTop: IndexBuf[] = this.project.frames.map((f) =>
-      copyIndexBuf(f.layers[top.id] ?? allocIndexBuf(this.project))
-    );
-    const savedOrders = this.project.frames.map((f) => (f.order ? [...f.order] : undefined));
-    const self = this;
-    const apply = () => {
-      for (const f of self.project.frames) {
-        const tb = f.layers[top.id];
-        const bb = f.layers[bottom.id];
-        if (tb && bb) {
-          for (let i = 0; i < PIXELS; i++) if (tb[i] !== 0) bb[i] = tb[i];
-        }
-        dropLayer(f, top.id); // V156: 眠りぶんも
-        if (f.order) f.order = f.order.filter((x) => x !== top.id);
-      }
-      const i = self.project.layerDefs.findIndex((l) => l.id === top.id);
-      if (i >= 0) self.project.layerDefs.splice(i, 1);
-      self.activeLayerId = bottom.id;
-      self.afterLayerChange();
-    };
-    const revert = () => {
-      self.project.layerDefs.splice(idx, 0, top);
-      self.project.frames.forEach((f, fi) => {
-        // 統合後の昇格に備え、現在幅で確保して復元
-        const nb = allocIndexBuf(self.project);
-        nb.set(savedTop[fi]);
-        f.layers[top.id] = nb;
-        f.layers[bottom.id]?.set(savedBottom[fi]);
-        f.order = savedOrders[fi] ? [...savedOrders[fi]!] : undefined;
-      });
-      self.activeLayerId = top.id;
-      self.afterLayerChange();
-    };
-    // V154 (W-2): **統合しても履歴が統合前の実体を握っている**（要件 §2-W-2 の欠陥②）。
-    // ここを申告することで「作品」は減っても「元に戻す」が減らないことが数字に出る
-    this.history.push({
-      colorRefs: () => ({ bufs: [...savedTop, ...savedBottom] }), // V195 (A-99)
-      label: "レイヤー統合",
-      // V156 (P-1): apply（＝redo）は全コマで top を bottom へ焼き込み、revert は全コマへ
-      // 書き戻す。どちらも中身が要るので、関わる2枚だけ全コマで起こしてから動かす
-      prepare: () => wakeLayersAllFrames(self.project, [top.id, bottom.id], "write"),
-      bytes: entryBytes(savedTop, savedBottom),
-      undo: revert,
-      redo: apply,
-    });
-    apply();
-  }
-
-  // ---------------- コマ操作 ----------------
-
-  /** @param atEnd M11-14: true=常に最後尾へ追加（フィルム末尾の「＋」＝うごメモ仕様）。
-   *  false=選択中のコマの次（ヘッダの「＋ ついか」・複製・ショートカット＝従来どおり）。
-   *  上限ガード・履歴・afterFrameStructureChange は同じ経路を通る */
-  /** V166 (層2): コマの追加・複製も漏斗を通す。1枚でも**複製は全レイヤーぶんの写し**なので、
-   *  レイヤーの多い作品では一瞬で終わらない（＝50ms を超えれば表示が出る）。 */
-  private async addFrame(duplicate: boolean, atEnd = false) {
-    await this.runHeavy("frame.add", t("ed.heavy.addFrame.msg"), () =>
-      this.addFrameInner(duplicate, atEnd)
-    );
-  }
-
-  private addFrameInner(duplicate: boolean, atEnd = false) {
-    if (this.xformGuard()) return; // E-4
-    if (this.project.frames.length >= 65535) {
-      this.cb.toast(t("ed.tl.addFrame.limit.toast"));
-      return;
-    }
-    if (this.project.frames.length >= 2000) {
-      this.cb.toast(t("ed.common.manyFrames.toast"));
-    }
-    // V166 (B): 1枚でも確保の前に見積もる。複製も空コマも**新しい色は増えない**ので昇格しない
-    if (!this.allowFrameAlloc(1, 0, "frame.add")) return;
-    const at = atEnd ? this.project.frames.length : this.frameIndex + 1;
-    const cur = this.project.frames[this.frameIndex];
-    const nf = duplicate ? cloneFrame(cur) : makeEmptyFrame(this.project, cur.paper);
-    const self = this;
-    const apply = () => {
-      // redo時: undo中にプロジェクトが16bit昇格していると nf が8bitのまま取り残される
-      conformFrameWidth(self.project, nf);
-      self.project.frames.splice(at, 0, nf);
-      self.frameIndex = at;
-      self.afterFrameStructureChange();
-    };
-    const revert = () => {
-      self.project.frames.splice(at, 1);
-      self.frameIndex = Math.min(self.frameIndex, self.project.frames.length - 1);
-      self.afterFrameStructureChange();
-    };
-    // V154 (W-2): 取り消すと、このコマの実体は履歴のクロージャだけが持つ（Codex レビュー指摘）
-    this.history.push({
-      colorRefs: () => ({ frames: [nf] }), // V195 (A-99)
-      label: duplicate ? "コマ複製" : "コマ追加",
-      bytesIfUndone: entryBytes(nf),
-      undo: revert,
-      redo: apply,
-    });
-    // V166: 計測は漏斗（`runHeavy`→`runWithBusy`）が持つので、ここでは測らない
-    // ——同じ操作が `frame.add` として2行出ると、ログの合計が実際の倍になる
-    apply();
-  }
-
-  // ---------------- V164 (U-4): コマをまとめて追加 ----------------
-
-  /** V164 (U-4): いまのコマの後ろへ N 枚まとめて足す。**履歴は1エントリ**（Ctrl+Z 一回で全部戻る）。
-   *
-   *  ★V156 の眠りは起こさない。空コマは新しく作るだけ・複製はいま見ているコマ（＝窓の中で
-   *   必ず起きている）を写すだけなので、遠くのコマに触れる経路が1つも無い。 */
-  private async addFrames(count: number, duplicate: boolean) {
-    await this.runHeavy("frame.addMany", t("ed.heavy.addFrames.msg"), () =>
-      this.addFramesInner(count, duplicate)
-    );
-  }
-
-  private addFramesInner(count: number, duplicate: boolean) {
-    if (this.xformGuard()) return; // E-4
-    const total = this.project.frames.length;
-    if (total >= 65535) {
-      this.cb.toast(t("ed.tl.addFrame.limit.toast"));
-      return;
-    }
-    // ★枚数の丸めは `prefs.ts` の1か所（上限を超えるぶんは「超えないところまで」で止めて
-    //  **知らせる**。途中まで入って黙って終わるのが最悪＝要件 U-4）
-    const { n, clamped } = clampAddFrames(count, total);
-    if (n <= 0) {
-      this.cb.toast(t("ed.tl.addFrame.limit.toast"));
-      return;
-    }
-    const at = this.frameIndex + 1;
-    // ★取り消したときに**押す前のコマへ戻る**ために覚えておく（Codex V164 指摘①）。
-    //  `Math.min(this.frameIndex, …)` で戻すと、追加後の位置（＝最大100コマ先）に
-    //  居座ってしまい、「誤って足した→取り消した」人が遠くへ飛ばされる
-    const beforeIndex = this.frameIndex;
-    const cur = this.project.frames[this.frameIndex];
-    if (!cur) return;
-    // V166 (B): 確保の前に見積もる。まとめて追加も新しい色は増えない
-    if (!this.allowFrameAlloc(n, 0, "frame.addMany")) return;
-    const added: Frame[] = [];
-    for (let i = 0; i < n; i++)
-      added.push(duplicate ? cloneFrame(cur) : makeEmptyFrame(this.project, cur.paper));
-    const self = this;
-    const apply = () => {
-      // redo 時に 16bit 昇格を跨いでいる可能性があるので正規化（ゆらゆら・はりつけと同じ）
-      for (const f of added) conformFrameWidth(self.project, f);
-      self.project.frames.splice(at, 0, ...added);
-      self.frameIndex = at + added.length - 1; // 足した最後のコマへ（＋ついかと同じ「増えた先に居る」）
-      self.afterFrameStructureChange();
-    };
-    const revert = () => {
-      self.project.frames.splice(at, added.length);
-      // 押す前に見ていたコマへ戻す（クランプは念のため。構造が変わっていても範囲外にしない）
-      self.frameIndex = Math.max(0, Math.min(beforeIndex, self.project.frames.length - 1));
-      self.afterFrameStructureChange();
-    };
-    // V154 (W-2): 取り消すと、足したコマの実体は履歴のクロージャだけが持つ（N 枚ぶんの合計）
-    this.history.push({
-      colorRefs: () => ({ frames: added }), // V195 (A-99)
-      label: duplicate ? "コマ複製（まとめて）" : "コマ追加（まとめて）",
-      bytesIfUndone: entryBytes(added),
-      undo: revert,
-      redo: apply,
-    });
-    apply(); // V166: 計測は漏斗が持つ（`frame.addMany`）
-    if (clamped) this.cb.toast(t("ed.tl.addFrames.clamped.toast", { count: n }));
-    else this.cb.toast(t("ed.tl.addFrames.done.toast", { count: n }));
-    // 既存の注意はそのまま通す（2,000 コマ超え）
-    if (this.project.frames.length >= 2000) this.cb.toast(t("ed.common.manyFrames.toast"));
   }
 
   /** V164 (U-4): まとめて追加のダイアログ。`openWobbleDialog` と同じ作法
@@ -13650,7 +7960,7 @@ export class Editor {
         </div>`;
       document.body.appendChild(back);
       const input = box.querySelector("#af-n") as HTMLInputElement;
-      // ★上限への丸めを**押す前に目で見せる**（Codex V164 指摘②）。1000 と打ったら
+      // ★上限への丸めを**押す前に目で見せる**（独立レビュー V164 指摘②）。1000 と打ったら
       //  その場で 100 になるので、「頼んだ数と足された数が黙って食い違う」が起きない。
       //  入力中は直さない（"10" を打つ途中の "1" を潰さないため）＝確定した瞬間だけ
       input.addEventListener("change", () => {
@@ -13709,441 +8019,6 @@ export class Editor {
     await this.addFrames(opt.count, opt.duplicate);
   }
 
-  /** V166 (層2): まとめて削除は範囲ぶんの実体を履歴へ移す（＝コマ数ぶんの写しが動く）。
-   *
-   *  ★**確認ダイアログは漏斗の外**に置いてある。中に入れると
-   *  「利用者が読んでいる時間」に『けしています』の箱が重なって出る（V154b W-8 と同じ理由）。
-   *  漏斗が包むのは**実際に動いている区間だけ**。 */
-  private async deleteFrame() {
-    if (this.xformGuard()) return; // E-4
-    const total = this.project.frames.length;
-    if (total <= 1) {
-      this.cb.toast(t("ed.tl.deleteFrame.lastBlocked.toast"));
-      return;
-    }
-    // M11-9 P-4: フィルムで範囲選択（Shift+クリック）しているときは、その範囲をまとめて削除する。
-    // ただし範囲は ←→ や再生でコマが動いても残る（SE配置やページコピーがその前提で使う）ので、
-    // **いま見ているコマが範囲の中にあるときだけ**まとめて削除する。外にいるときは
-    // 従来どおり「いま見ているコマ」1枚（見ていない場所が黙って消えるのを防ぐ）
-    const sel = this.rangeSel;
-    const selA = sel ? Math.max(0, Math.min(sel.a, sel.b)) : -1;
-    const selB = sel ? Math.min(total - 1, Math.max(sel.a, sel.b)) : -1;
-    const useRange = sel != null && this.frameIndex >= selA && this.frameIndex <= selB;
-    const at = useRange ? selA : this.frameIndex;
-    const end = useRange ? selB : this.frameIndex;
-    const count = end - at + 1;
-    if (count >= total) {
-      this.cb.toast(t("ed.tl.deleteFrame.allBlocked.toast"));
-      return;
-    }
-    // M13-2a (A-4): ⚙「コマを消すときに確認する」がオフなら確認を省く。**ダイアログを呼ぶ側は消さない**
-    //（オン＝従来どおり）。上の「最後の1枚」「全部」の制止は設定に関係なく生きる。
-    // 1枚の削除には元から確認が無い（Undo で戻せるため）ので、この設定が効くのは範囲削除だけ
-    if (count > 1 && this.frameDeleteConfirm) {
-      const ok = await this.cb.confirm(
-        t("ed.tl.deleteFrame.range.msg", { count, from: at + 1, to: end + 1 })
-      );
-      if (!ok) return;
-      // 確認の間にコマ構造が変わっていたら中止（ダイアログ中の変更は無いはずだが保険）
-      if (this.project.frames.length !== total) return;
-    }
-    // ★ここから先が「実際に動く区間」＝漏斗の中
-    await this.runHeavy("frame.del", t("ed.heavy.delFrame.msg"), () =>
-      this.deleteFrameInner(at, count)
-    );
-  }
-
-  private deleteFrameInner(at: number, count: number) {
-    // 削除するコマの実体を保持しておく（SEの配置 Frame.se も frame ごと持ち帰る＝undo で戻る）
-    const removed = this.project.frames.slice(at, at + count);
-    const self = this;
-    const apply = () => {
-      self.project.frames.splice(at, count);
-      // 1枚のときは従来どおり「詰まってきたコマ」、複数のときは削除範囲の直前
-      self.frameIndex =
-        count > 1
-          ? Math.max(0, Math.min(at - 1, self.project.frames.length - 1))
-          : Math.min(at, self.project.frames.length - 1);
-      self.afterFrameStructureChange();
-    };
-    const revert = () => {
-      // 削除中にプロジェクトが16bit昇格していると frame が8bitのまま取り残される
-      for (const f of removed) conformFrameWidth(self.project, f);
-      self.project.frames.splice(at, 0, ...removed);
-      self.frameIndex = at;
-      self.afterFrameStructureChange();
-    };
-    // V154 (W-2): 消したコマは履歴が丸ごと抱えている（600コマ削除なら 138MB がここに残る）。
-    // Undo で戻すと実体はプロジェクト側へ帰るので、そのときは数えない（`bytesIfApplied`）
-    this.history.push({
-      colorRefs: () => ({ frames: removed }), // V195 (A-99)
-      label: count > 1 ? `コマ削除（${count}枚）` : "コマ削除",
-      bytesIfApplied: entryBytes(removed),
-      undo: revert,
-      redo: apply,
-    });
-    apply(); // V166: 計測は漏斗が持つ（`frame.del`）
-  }
-
-  /** V166 (層2): 並べ替えそのものは splice 1回だが、そのあとの
-   *  `afterFrameStructureChange`（フィルムの作り直し・メーター）が大作品では重い。 */
-  private async reorderFrame(from: number, to: number) {
-    if (from === to) return;
-    if (this.xformGuard()) return; // E-4
-    await this.runHeavy("frame.reorder", t("ed.heavy.reorder.msg"), () =>
-      this.reorderFrameInner(from, to)
-    );
-  }
-
-  private reorderFrameInner(from: number, to: number) {
-    const self = this;
-    const apply = () => {
-      const [f] = self.project.frames.splice(from, 1);
-      self.project.frames.splice(to, 0, f);
-      self.frameIndex = to;
-      self.afterFrameStructureChange();
-    };
-    const revert = () => {
-      const [f] = self.project.frames.splice(to, 1);
-      self.project.frames.splice(from, 0, f);
-      self.frameIndex = from;
-      self.afterFrameStructureChange();
-    };
-    this.history.push({ colorRefs: NO_COLOR_REFS, label: "コマ並べ替え", undo: revert, redo: apply });
-    apply(); // V166: 計測は漏斗が持つ（`frame.reorder`）
-  }
-
-  /** M11-8 P-4（REQ 表E）: 「コマが移動した」ときの選択解除。解除の入口をここ1つに集約する
-   *（gotoFrame＝←→キー/タイムライン、startPlayback＝再生、afterFrameStructureChange＝
-   *  コマの追加・削除・並べ替え）。履歴には積まない（従来の gotoFrame と同じ） */
-  private clearSelectionOnFrameMove() {
-    if (!this.selMask) return;
-    this.selMask = null;
-    if (this.mounted) this.redrawOverlay();
-  }
-
-  gotoFrame(i: number) {
-    // ★V195 (A-97・BUG-004): **再生中にコマへ移ったら、先に再生を止める**（⏸ ではなく停止＝BGM も SE も止まり、
-    //  続きは捨てる）。止まり方はキャンバスに触れたとき（M11-9 P-2）と同じでトーストも出さない。
-    //  今までは `frameIndex` を書き換えるだけで再生のタイマーと BGM が走り続け、絵だけ飛んで音は流れ続けた。
-    //  ★入口はここ 1 か所（タイムラインのコマ・Shift＋クリック・◀▶・⏮⏭・←→ キー・frame.prev/next が全部ここを通る）。
-    //  呼び出し元ごとに書かない＝足した入口が漏れない。範囲外（先頭で ◀）でも止める＝押した合図は必ず返す
-    if (this.playing) this.stopPlayback();
-    if (i < 0 || i >= this.project.frames.length) return;
-    // M11-10: コマが動く前に、矢印キーの移動セッションを確定する（下のドラッグ判定より先。
-    // セッションは layerDrag / selMaskDrag を使うので、確定させてから通す）
-    this.endArrowSession();
-    if (this.xformGuard()) return; // E-4: 変形中はコマ移動をブロック
-    // M11-8: ドラッグ中にコマが変わると、掴んだコマ以外の絵を壊す/選択が宙に浮く
-    if (this.pointerDown || this.layerDrag || this.selMaskDrag) return;
-    const _t0 = perfNow();
-    this.clearSelectionOnFrameMove();
-    // M11-1: 別の位置へ飛んだら、前の位置で鳴り始めたSEは止める（BGMには触れない。
-    // 再生ループはここを通らず frameIndex を直接進めるので、通常再生のSEは切れない）
-    this.audioPreview.stopSe();
-    this.frameIndex = i;
-    this.renderCanvas();
-    this.redrawOverlay();
-    this.updateFilmSelection();
-    this.seSectionRefresh?.(); // M5-1: 音声パネルの「配置先」表示を追従
-    // V156 (P-1): 動いた先で窓が変わった＝窓から出たコマを片付ける（軽く促すだけ）
-    this.nudgeSweep();
-    perfDone("frame.goto", _t0);
-  }
-
-  // ---------------- 再生 ----------------
-
-  togglePlayback() {
-    // M11-2: ストローク中（ペンが接地したまま）に再生を始めると、コマが進んだ先で
-    // 描き続けたストロークが「開始コマの before」で履歴に積まれ、Ctrl+Z が別コマを
-    // 壊す（レビュー検出）。キー操作から呼ばれ得るようになったので入口で塞ぐ
-    if (this.pointerDown) return;
-    if (!this.playing && this.xformGuard()) return; // E-4
-    // M11-9 P-1: ⏸ は「一時停止」＝SEは続きから鳴らせるように畳む（▶ で続きから）
-    if (this.playing) {
-      this.stopPlayback(true);
-      return;
-    }
-    // ★V195 (A-96・BUG-003): ループしない作品で**最後のコマにいるときの ▶ は先頭から**。
-    //  ループしない再生は終端で止まり、`frameIndex` は最後のコマのまま残る。そこから始めると
-    //  最後のコマを 1 回出して終端で止まっていた。先頭へは `gotoFrame` で移る＝SE の続き（⏸ で畳んだ分）を捨て、
-    //  選択を解き、眠っているコマを起こす道も今までのコマ移動と同じ。BGM は startPlayback が
-    //  `frameIndex / fps`（＝0 秒）から頭出しする。判断は `playStartFrame`（ライブラリの再生 2 か所と同じ 1 つ）
-    const at = playStartFrame(this.frameIndex, this.project.frames.length, this.project.loop);
-    if (at !== this.frameIndex) this.gotoFrame(at);
-    void this.startPlayback();
-  }
-
-  /** M5-1: 指定コマに配置されたSEを発火（多重可・muted/volumeはトラック別）。
-   *  M11-9: skipIds に入っているものは鳴らさない（一時停止から続きを鳴らしたSEの二重発火を防ぐ） */
-  private fireFrameSe(i: number, skipIds?: string[]) {
-    const a = this.project.audio;
-    if (!a || a.se.length === 0) return;
-    const ids = this.project.frames[i]?.se;
-    if (!ids) return;
-    for (const id of ids) {
-      if (skipIds && skipIds.includes(id)) continue;
-      const t = a.se.find((s) => s.id === id);
-      if (t) this.audioPreview.fireSe(t);
-    }
-  }
-
-  private async startPlayback() {
-    if (this.playing) return;
-    const _t0 = perfNow();
-    this.playing = true;
-    // M11-8 P-4（REQ 表E）: 再生はコマを進めるので選択を解除する
-    //（再生ループは gotoFrame を通らず frameIndex を直接進めるため、ここで1回だけ）
-    this.clearSelectionOnFrameMove();
-    $("#ed-play").replaceChildren(icon("pause")); // V171: 状態ペア play / pause
-    const fps = FPS_TABLE[this.project.speedIndex] || 8;
-    // M6-2/3: BGMプレビュー（開始フレーム位置に頭出し・ループ毎リセット）
-    // M5-1: 速度連動 rate（ピッチも変わる=原作準拠）＋SEのコマ発火
-    const a = this.project.audio ?? null;
-    const rate = a?.bgm ? bgmPlaybackRate(this.project.speedIndex, a.bgm.baseSpeedIndex) : 1;
-    // ★V157 (D-4): **音の用意を待ってからコマを進め始める**（A-28・Culoe さんの報告）。
-    //
-    //  これまでは `void audioPreview.start(...)` と投げっぱなしにして、その直後に
-    //  コマ送りのタイマーを張っていた。`start()` の中は初回だけ `decodeAudioData` を待つので、
-    //  **その間コマだけ進み、音が遅れて始まる**。2周目からはバッファがキャッシュされていて
-    //  ほぼ 0ms で鳴るので合ってくる——「最初はズレて、ループを重ねると合う」の正体。
-    //
-    //  実測（Chromium・実作品の BGM 2.1MiB / 55 秒）: 初回 decode **174.9ms**
-    //    → 8fps で 1.4 コマ・24fps で 4.2 コマ・30fps で 5.2 コマぶん絵が先行
-    //    2周目以降は 0.2ms（ズレ ほぼ 0）
-    //
-    //  待つと再生の開始が初回だけ 0.2 秒ほど遅れるが、**ズレたまま流れるより良い**
-    //  （同じ音源なら2回目からは待ちもゼロ）。
-    //  エディタの再生も同じ形（ライブラリのプレビューだけ直しても、こちらが残る）。
-    await this.audioPreview.start(a?.bgm ?? null, this.frameIndex / fps, rate);
-    if (!this.playing) return; // 待っている間に止められた
-    // M11-9 P-1: 一時停止で畳んだSEを続きから鳴らす。start() は同期的に「鳴っているSE」だけを
-    // 止めて畳んだ分には触れないので、この順で呼べる
-    const resumedSe = this.audioPreview.resumeSe();
-    // Codex指摘#3: デコードは「配置済みかつ非ミュート」のSEだけ（未使用SEをキャッシュしない）
-    if (a && a.se.length > 0) {
-      const used = new Set<string>();
-      for (const f of this.project.frames) for (const id of f.se ?? []) used.add(id);
-      void this.audioPreview.prepareSe(a.se.filter((s) => !s.muted && used.has(s.id)));
-    }
-    // 開始コマのSEも鳴らす（続きから鳴らしたものは頭から鳴らし直さない）
-    this.fireFrameSe(this.frameIndex, resumedSe);
-    this.playTimer = window.setInterval(() => {
-      let next = this.frameIndex + 1;
-      if (next >= this.project.frames.length) {
-        if (this.project.loop) {
-          next = 0;
-          // A-1: アニメが先頭に戻るたび音も頭出しから鳴り直す（モード共通）。
-          // 1コマ作品は毎tickラップするため除外（音が鳴れなくなる）
-          if (this.project.frames.length > 1) this.audioPreview.restart();
-        } else {
-          this.stopPlayback();
-          return;
-        }
-      }
-      this.frameIndex = next;
-      this.fireFrameSe(next); // M5-1: SEはコマ進行で発火（ループ毎周も自然に発火）
-      this.renderCanvas();
-      this.updateFilmSelection();
-      // V156 (P-1): 再生は窓が全コマを通り抜ける。**出ていったコマをその場で片付ける**
-      //（読みで起こしてあるので只＝生を手放すだけ）。ここを掃除の巡回に任せると、
-      // 1周するころには全コマが生に戻ってしまう
-      void this.evictBehind(next);
-    }, 1000 / fps);
-    // V159 (G-1): ▶ を押してから**最初のコマが動き出すまで**。V157 (D-4) で音の用意を
-    // 待つようにしたので、ここが伸びていれば「押しても始まらない」の正体はデコード
-    perfDone("play.start", _t0);
-  }
-
-  /** pause=true は ⏸（あとで ▶ で続きから）。それ以外の停止経路（画面を離れる・書き出し・
-   *  キャンバスに触れた・ループしない作品が終端に達した等）は**続きを捨てる**（M11-9 P-1） */
-  private stopPlayback(pause = false) {
-    this.playing = false;
-    if (pause) this.audioPreview.pause();
-    else this.audioPreview.stop();
-    if (this.playTimer != null) {
-      clearInterval(this.playTimer);
-      this.playTimer = null;
-    }
-    const btn = document.querySelector("#ed-play");
-    if (btn) btn.replaceChildren(icon("play")); // V171
-    if (this.mounted) this.renderCanvas();
-    this.refreshSelectionLauncher();
-  }
-
-  // ---------------- 共通 ----------------
-
-  private pushBufferHistory(
-    label: string,
-    buf: IndexBuf,
-    before: IndexBuf,
-    // M10-22: バッファとマスクが**同時に**変わる操作（選択移動確定・切り取り・選択削除・
-    // 変形確定）は、マスクの before/after を同じエントリに合成して Ctrl+Z 1回で両方戻す。
-    // 省略時は従来どおりバッファのみ（selMask には一切触れない）
-    sel?: { before: Uint8Array | null; after: Uint8Array | null }
-  ) {
-    const after = copyIndexBuf(buf);
-    // Frame オブジェクトと layerId で適用時に解決する（構造 undo/redo でバッファが
-    // 再生成されても正しい実体に書き戻す）。Frame の同一性はコマ並べ替え等でも保たれる。
-    const frame = this.project.frames[this.frameIndex];
-    const layerId = this.activeLayerId;
-    const self = this;
-    const base = bufferChangeEntry(
-      label,
-      () => frame.layers[layerId] ?? null,
-      before,
-      after,
-      () => {
-        // Undo/Redo もデータ変更なので dirty（＝オートセーブ対象）にする
-        self.dirty = true;
-        self.renderCanvas();
-        const fi = self.project.frames.indexOf(frame);
-        if (fi >= 0) self.paintFilmThumb(fi);
-      }
-    );
-    // ★V180 (A-78 ②): 描画・塗り・図形・文字・選択の移動／切り取り／消去…**ほぼ全部の 1 枚の操作**がここを通る。
-    //  取り消し・やり直しの前に、そのコマを書きで起こす（大きい作品で窓の外へ出て眠ったコマは `layers[id]` が
-    //  無く、起こさないと Ctrl+Z が黙って空振りする＝V178 の実測で 123 画素が消えたまま）。V178 と同じ形
-    base.prepare = () => wakeFrame(self.project, frame, "write");
-    if (!sel) {
-      this.history.push(base);
-    } else {
-      // 合成エントリ: バッファ復元（resolve 方式は base がそのまま担う）＋マスク復元。
-      // マスク復元は**エントリ作成時のコマを表示中のときだけ**行う（Frame オブジェクト同一性で
-      // 判定＝resolve と同じ原理）。gotoFrame が守る「コマ移動＝選択解除」の不変条件を
-      // undo/redo が破らないように（別コマ表示中はバッファだけ静かに戻る）
-      const selBefore = sel.before;
-      const selAfter = sel.after;
-      const onFrame = () => self.project.frames[self.frameIndex] === frame;
-      this.history.push({
-        colorRefs: base.colorRefs, // V195 (A-99)
-        label,
-        // V154 (W-2): base（バッファのスナップショット）を包むので、その申告を引き継ぐ
-        //（マスクは 0/1 の Uint8Array・76.8KB に対して十分小さいが、同じ流儀で足す）
-        bytes: (base.bytes ?? 0) + entryBytes(selBefore, selAfter),
-        // ★V180 (A-78 ②): 包んだエントリにも起こす準備を運ぶ（pushWithSelection と同じ。運ばないと選択の移動・
-        //  切り取りだけ眠ったコマで空振りする）
-        prepare: base.prepare,
-        undo() {
-          base.undo();
-          if (onFrame()) {
-            self.selMask = selBefore ? selBefore.slice() : null;
-            self.redrawOverlay();
-          }
-        },
-        redo() {
-          base.redo();
-          if (onFrame()) {
-            self.selMask = selAfter ? selAfter.slice() : null;
-            self.redrawOverlay();
-          }
-        },
-      });
-    }
-    this.dirty = true;
-  }
-
-  /** M10-22: 選択マスクの作成・置換・解除を履歴に積む（before/after はコピー・null 許容）。
-   *  undo/redo は selMask の復元と点線の再描画のみ（バッファには触れない。
-   *  選択はツール非依存の状態なので、redo 時にツールが select 以外でも復元する）。
-   *  ただしマスクは**そのコマ上の状態**なので、エントリ作成時のコマを表示中のときだけ
-   *  復元する（Frame オブジェクト同一性＝resolve と同じ原理。別コマでは何もしない＝
-   *  gotoFrame の「コマ移動＝選択解除」の不変条件を守る） */
-  private pushSelectionHistory(
-    label: string,
-    before: Uint8Array | null,
-    after: Uint8Array | null
-  ) {
-    const self = this;
-    const frame = this.project.frames[this.frameIndex];
-    const onFrame = () => self.project.frames[self.frameIndex] === frame;
-    this.history.push({
-      colorRefs: NO_COLOR_REFS /* 選択マスクだけ（0/1 は色ではない） */, // V195 (A-99)
-      label,
-      // ★V156 (P-2): **申告漏れその3**。before/after の選択マスク（`Uint8Array(PIXELS)` ×2＝
-      //  最大 153,600 B）をクロージャが抱えているのに `bytes` が無かった
-      bytes: entryBytes(before, after),
-      undo() {
-        if (!onFrame()) return;
-        self.selMask = before ? before.slice() : null;
-        self.redrawOverlay();
-      },
-      redo() {
-        if (!onFrame()) return;
-        self.selMask = after ? after.slice() : null;
-        self.redrawOverlay();
-      },
-    });
-  }
-
-  private afterStructuralChange() {
-    this.dirty = true;
-    this.renderCanvas();
-    this.paintFilmThumb(this.frameIndex);
-  }
-
-  private afterLayerChange() {
-    this.dirty = true;
-    this.rebuildLayers();
-    this.renderCanvas();
-    this.paintFilmThumb(this.frameIndex);
-    this.updateSizeMeter(); // V154 (W-2): レイヤーの増減で実体の数が変わる
-  }
-
-  /** M11-20: レイヤーのクリッピング on/off。**履歴に積む（undo 1回）**。
-   *  フォルダ不透明度（rebuildLayers 内）と同じ「id 解決型」のエントリ＝restoreStructure でオブジェクトが
-   *  差し替わっても id で引き直すので安全・他の属性（visible 等）を巻き戻さない。
-   *  表示側は afterLayerChange（行の再構築＋本体＋ミニ＋現コマのフィルムサムネ）で即追従。
-   *  バッファは触らない（clip は表示時のマスクだけ・REQ_M11_20 §1） */
-  private toggleLayerClipping(id: string) {
-    const ld = this.project.layerDefs.find((l) => l.id === id);
-    if (!ld) return;
-    const to = ld.clip !== true;
-    const apply = (v: boolean) => {
-      const l = this.project.layerDefs.find((x) => x.id === id);
-      if (!l) return;
-      if (v) l.clip = true;
-      else delete l.clip; // false は「キーなし」で表す（保存ファイルにも書かない）
-      this.afterLayerChange();
-    };
-    this.history.push({
-      colorRefs: NO_COLOR_REFS, // V195 (A-99)
-      label: to ? "クリッピング ON" : "クリッピング OFF",
-      undo: () => apply(!to),
-      redo: () => apply(to),
-    });
-    apply(to);
-  }
-
-  private afterFrameStructureChange() {
-    this.dirty = true;
-    // M15 (K-1): コマの追加・複製・削除・並べ替え・挿入でバッファ参照が枝分かれし得るので、
-    // 共通レイヤーを全コマ同一参照へ張り直す（共通でないレイヤーには触れない・参照代入のみ）
-    relinkShared(this.project);
-    // コマの追加/削除/並べ替え/挿入で範囲選択はインデックスがずれるためリセット
-    this.rangeSel = null;
-    this.rangeAnchor = null;
-    // M11-9: コマ構造が変わったら、鳴っているSEと畳んだ「続き」を捨てる（gotoFrame と同じ扱い。
-    // 消えたコマに置かれていた音が鳴り続けたり、あとから続きが鳴ったりしないように）
-    this.audioPreview.stopSe();
-    // M11-8 P-4（REQ 表E）: コマの追加・削除・並べ替えは「コマの移動」を伴うので選択を解除する。
-    // ここは undo/redo のクロージャからも呼ばれるため、履歴の適用中だけは触らない
-    //（pushSelectionHistory が復元したマスクを直後に消してしまわないように）
-    if (!this.applyingHistory) this.clearSelectionOnFrameMove();
-    this.rebuildFilm();
-    this.renderCanvas();
-    this.redrawOverlay();
-    this.updateSizeMeter(); // V154 (W-2): コマの増減で実体の数が変わる
-  }
-
-  private refreshAll() {
-    this.rebuildLayers();
-    this.rebuildPalette();
-    this.rebuildFilm();
-    this.renderCanvas();
-    this.redrawOverlay();
-  }
-
   /** M11-2: ダイアログ（確認・保存先ピッカー・音声パネル等）が開いているか。
    *  `modalDepth` はゆらゆらダイアログしか増やさないため、main.ts の `modal()` が作る
    *  `.modal-back` の実在も見る。**再生トグルを裏で走らせないための番人**（レビュー検出） */
@@ -14175,14 +8050,17 @@ export class Editor {
   private static readonly SIDE_FOLD_TITLE = {
     fold: { msgKey: "ed.side.fold.title" },
     expand: { msgKey: "ed.side.expand.title" },
+    // ★V215 (A-124): 色の段を畳むときの説明（ひらくときは上の expand をそのまま使う）
+    colFold: { msgKey: "ed.side.colFold.title" },
   } as const;
 
   /** V158 (L-1): 右パネルの段を畳む／開く。**両方は畳まない**（畳むとき相手を必ず開く）ので、
    *  「全部畳んで何も出せない」が起きない。畳んだ段の見出しは残るので、そこを押せば戻せる。 */
-  private setSideFold(which: "top" | "bot", v: boolean) {
+  private setSideFold(which: "top" | "bot" | "col", v: boolean) {
     if (this.sideFold[which] === v) return;
     this.sideFold[which] = v;
-    if (v) this.sideFold[which === "top" ? "bot" : "top"] = false;
+    // ★V215: 色の段の畳みは top・bot とは別に覚える（相手を開く決まりは top・bot の間だけ）
+    if (v && which !== "col") this.sideFold[which === "top" ? "bot" : "top"] = false;
     this.finishSplitDrag(false);
     this.applyLayout();
     this.refreshSideFoldButtons();
@@ -14191,12 +8069,13 @@ export class Editor {
 
   /** 畳みボタンの見た目（矢印と説明）を状態に合わせる。 */
   private refreshSideFoldButtons() {
-    for (const which of ["top", "bot"] as const) {
+    for (const which of ["top", "bot", "col"] as const) {
       const b = document.getElementById(`ed-sfold-${which}`);
       if (!b) continue;
       const folded = this.sideFold[which];
+      // ★V215: 色の段は下段と同じ向き（畳むと見出しが下＝仕切りのすぐ上へ寄る）
       b.replaceChildren(icon(folded ? (which === "top" ? "chev-down" : "chev-up") : which === "top" ? "chev-up" : "chev-down")); // V171
-      b.title = t(Editor.SIDE_FOLD_TITLE[folded ? "expand" : "fold"].msgKey);
+      b.title = t(Editor.SIDE_FOLD_TITLE[folded ? "expand" : which === "col" ? "colFold" : "fold"].msgKey);
       b.classList.toggle("onb", folded);
     }
   }
@@ -14259,7 +8138,7 @@ export class Editor {
 
   /** V165 (D-4): keydown 側。候補を立てる／壊す（**発動はしない**）。
    *
-   *  ★Codex 指摘①: **候補を立てる時点**で「描いている最中か」を見る。
+   *  ★独立レビューの指摘①: **候補を立てる時点**で「描いている最中か」を見る。
    *   ここを keyup 側だけで見ていると、**描きながらサイドスイッチで Alt を押し、
    *   ペンを先に離してから Alt を離す**と、離した時点では `pointerDown` が false なので
    *   発動してしまう（ペンタブでいちばん起こりやすい誤爆）。 */
@@ -14291,9 +8170,9 @@ export class Editor {
     if (!this.mounted || this.dialogOpen() || this.isTextEntry(e.target) || this.pointerDown) return;
     const ids = this.keyLookup.get(tapEventKey(key));
     if (!ids || ids.length === 0) return; // ★既定では何も割り当てていない＝ここで必ず抜ける
-    // Codex 指摘③: 道具どうしの同キー巡回は**押したときと同じ規則**で選ぶ（先頭固定にしない）
+    // 独立レビューの指摘③: 道具どうしの同キー巡回は**押したときと同じ規則**で選ぶ（先頭固定にしない）
     const id = this.pickCommandFromIds(ids);
-    // Codex 指摘④: 「押している間だけ」の操作はタップでは動かさない（透かしが戻らなくなる）。
+    // 独立レビューの指摘④: 「押している間だけ」の操作はタップでは動かさない（透かしが戻らなくなる）。
     // 設定画面でも割り当てを断っているので、ここは保存データを手で書いた場合の保険
     if (isHoldOnlyCommand(id)) return;
     // ★V157 (D-3) の二重発火防御（A-27）を**そのまま通す**。ドライバが keyup を2回送っても
@@ -14306,7 +8185,7 @@ export class Editor {
     this.runCommand(id);
   }
 
-  /** V181（Codex 1 回目・中）: 一致した打鍵を**押しっぱなしのくり返しだから走らせない**とき、Mac でだけ既定の動きを止める。
+  /** V181（独立レビュー 1 回目・中）: 一致した打鍵を**押しっぱなしのくり返しだから走らせない**とき、Mac でだけ既定の動きを止める。
    *  WKWebView はページが止めなかった ⌘ のキーを既定のメニュー（Edit の Copy / Cut / Paste…）へ回し、メニューに無い
    *  ⌘S などは警告音になる。一致した以上はアプリのキーなので、走らせなくても止める（⌘C を押しっぱなしにしても
    *  2 回目以降がメニューの Copy にならない）。**Windows は今までどおり止めない**（1 か所も変えない） */
@@ -14315,7 +8194,7 @@ export class Editor {
   }
 
   /** M11-15: 同じキーを複数の道具が共有しているときの選び方（末尾→先頭へ循環）。
-   *  V165 (D-4・Codex 指摘③): 押したとき（`onKeyDown`）とタップとで**同じ規則**を使うため関数にした */
+   *  V165 (D-4・独立レビューの指摘③): 押したとき（`onKeyDown`）とタップとで**同じ規則**を使うため関数にした */
   private pickCommandFromIds(ids: CommandId[]): CommandId {
     if (ids.length <= 1) return ids[0];
     const curId = `tool.${this.tool}`;
@@ -14340,70 +8219,10 @@ export class Editor {
 
   /** M11-10: コマンドの実行。**既存のボタンと同じ処理を呼ぶだけ**（新機能は作らない） */
   private runCommand(id: CommandId) {
-    // ★V178 (A-72・Codex 2 回目): コマンドが作品を変える前に、全レイヤーの束を確定して終える（finishEraseAllNow）
-    if (this.eraseAllStroke) this.finishEraseAllNow();
+    // ★V214 (M-2b-1a): 先頭の全レイヤーの束の確定（どのコマンドでも）と、作品と描く状態だけで決まるコマンドはコアの runCoreCommand。
+    //  受け取ったらここで終わり。残りはファイル・書き出し・表示・ダイアログ・最後のポインタの位置を使うもの
+    if (this.runCoreCommand(id)) return;
     switch (id) {
-      // 道具
-      case "tool.pen":
-      case "tool.brush":
-      case "tool.eraser":
-      case "tool.fill":
-      case "tool.shape":
-      case "tool.text":
-      case "tool.eyedrop":
-      case "tool.hand":
-      case "tool.move":
-      case "tool.select":
-      case "tool.transform":
-      case "tool.warp":
-        this.setTool(id.slice(5) as Tool);
-        break;
-      // ペンの太さ
-      case "pen.sizeDown":
-      case "pen.sizeUp": {
-        const i = PEN_SIZES.indexOf(this.penSize);
-        const ni = Math.max(
-          0,
-          Math.min(PEN_SIZES.length - 1, (i < 0 ? 2 : i) + (id === "pen.sizeUp" ? 1 : -1))
-        );
-        this.penSize = PEN_SIZES[ni];
-        this.refreshSizePicker();
-        break;
-      }
-      case "pen.size1":
-      case "pen.size2":
-      case "pen.size3":
-      case "pen.size4":
-      case "pen.size5":
-      case "pen.size6":
-        this.penSize = PEN_SIZES[Number(id.slice(8)) - 1];
-        this.refreshSizePicker();
-        break;
-      // 編集
-      case "edit.undo":
-        this.handleUndo();
-        break;
-      case "edit.redo":
-        this.handleRedo();
-        break;
-      case "edit.copy":
-        this.copySelection(false);
-        break;
-      case "edit.cut":
-        this.copySelection(true);
-        break;
-      case "edit.paste":
-        this.pasteClipboard();
-        break;
-      case "edit.deleteSelection":
-        if (this.selMask) this.deleteSelection();
-        break;
-      case "edit.copyPrev":
-        this.copyPrevFrame();
-        break;
-      case "edit.clearFrame":
-        void this.clearFrame();
-        break;
       // M16 (K-4): 主にポインタ割り当て（Alt＋クリック）用。キーに割り当てられたときは直近のカーソル位置で拾う
       case "edit.pickColor":
         if (this.lastPointerEvent)
@@ -14411,26 +8230,6 @@ export class Editor {
           this.clientToPixel(this.lastPointerEvent.clientX, this.lastPointerEvent.clientY),
           "key"
         );
-        break;
-      // M11-19: 線を太らせる／細らせる（非 repeatable＝キーリピートでは1回だけ）
-      case "edit.thicken":
-        this.morphActiveLayer("thicken");
-        break;
-      case "edit.thin":
-        this.morphActiveLayer("thin");
-        break;
-      // M11-15: レイヤーのコピー＆ペースト
-      case "layer.copy":
-        this.copyLayerFrame();
-        break;
-      case "layer.paste":
-        this.pasteLayerFrame();
-        break;
-      case "layer.pasteNew":
-        this.pasteLayerToNew();
-        break;
-      case "layer.pasteAll":
-        void this.pasteLayerAllFrames();
         break;
       // ファイル
       case "file.save":
@@ -14448,34 +8247,8 @@ export class Editor {
       case "file.audio":
         this.clickUi('#ed-tools .tool[data-tool="audio"]');
         break;
-      // コマ
-      case "frame.prev":
-        this.gotoFrame(this.frameIndex - 1);
-        break;
-      case "frame.next":
-        this.gotoFrame(this.frameIndex + 1);
-        break;
-      case "frame.add":
-        void this.addFrame(false);
-        break;
-      case "frame.duplicate":
-        void this.addFrame(true);
-        break;
-      case "frame.delete":
-        void this.deleteFrame();
-        break;
-      case "frame.copyPage":
-        void this.copySelectedFrames();
-        break;
-      case "frame.pastePage":
-        void this.pasteFrames();
-        break;
       case "frame.wobble":
         void this.onWobbleClick();
-        break;
-      // 再生・表示
-      case "play.toggle":
-        this.togglePlayback();
         break;
       case "play.loop":
         this.clickUi("#ed-loop");
@@ -14508,133 +8281,17 @@ export class Editor {
   }
 
   // ---------------- M11-10: 矢印キーの1ドット移動（移動セッション） ----------------
-  // キーボードには「離す」が無いので、ドラッグと違ってセッションを持たざるを得ない。
-  // 確定は **endArrowSession() 1つ**に集約し、あらゆる離脱経路から必ず呼ぶ
-  //（M11-5 の endPointerSession と同じ作法）。加えて 800ms の自動確定で状態を長く残さない。
-
-  /** 進行中の移動セッションの種類（""＝無し） */
-  private arrowKind: "" | "layer" | "selmask" | "selmove" = "";
-  private arrowDx = 0;
-  private arrowDy = 0;
-  private arrowTimer: number | null = null;
-  /** 最後の矢印キーからこの時間が経ったら自動で確定する（仮の値・REQ 未決6） */
-  private static readonly ARROW_COMMIT_MS = 800;
+  // ★V214 (M-2b-1a): セッション（arrowKind・たまった量・800ms の自動確定・確定と取り消し）はコア（editorCore.ts）へ移した。
   /** Shift＋矢印の移動量（仮の値・REQ 未決7） */
   private static readonly ARROW_BIG_STEP = 10;
 
-  /** 移動セッションを確定する（履歴は1エントリ）。セッションが無ければ何もしない */
-  endArrowSession() {
-    const kind = this.arrowKind;
-    if (this.arrowTimer != null) {
-      clearTimeout(this.arrowTimer);
-      this.arrowTimer = null;
-    }
-    if (!kind) return;
-    this.arrowKind = "";
-    this.arrowDx = 0;
-    this.arrowDy = 0;
-    if (kind === "layer") this.commitLayerMove();
-    else if (kind === "selmask") this.commitSelMaskMove();
-    else if (kind === "selmove") this.commitSelectionMove();
-  }
-
-  /** 移動セッションを取り消す（動かす前の位置へ戻す・履歴には積まない） */
-  private cancelArrowSession() {
-    const kind = this.arrowKind;
-    if (this.arrowTimer != null) {
-      clearTimeout(this.arrowTimer);
-      this.arrowTimer = null;
-    }
-    if (!kind) return;
-    this.arrowKind = "";
-    this.arrowDx = 0;
-    this.arrowDy = 0;
-    if (kind === "layer") this.cancelLayerMove();
-    else if (kind === "selmask") this.cancelSelMaskMove();
-    else if (kind === "selmove") this.cancelSelectionMove();
-  }
-
-  private scheduleArrowCommit() {
-    if (this.arrowTimer != null) clearTimeout(this.arrowTimer);
-    this.arrowTimer = window.setTimeout(() => {
-      this.arrowTimer = null;
-      this.endArrowSession();
-    }, Editor.ARROW_COMMIT_MS);
-  }
-
-  /** 矢印キー（割り当て対象外・モードで意味が変わる固定キー） */
+  /** 矢印キー（割り当て対象外・モードで意味が変わる固定キー）。★V214: 中身（どの枝で何を動かすか）はコアの nudgeArrow。
+   *  キーの照合と Shift で 10 はここ（キーボードの事情）。受け取ったときだけ既定の動きを止める（前と同じ） */
   private handleArrowKey(e: KeyboardEvent) {
     const step = e.shiftKey ? Editor.ARROW_BIG_STEP : 1;
     const dx = e.code === "ArrowLeft" ? -step : e.code === "ArrowRight" ? step : 0;
     const dy = e.code === "ArrowUp" ? -step : e.code === "ArrowDown" ? step : 0;
-    if (dx === 0 && dy === 0) return;
-    // ① 変形モード中: 平行移動量を ±1 するだけ（確定は既存の Enter / 取消は Esc）。
-    //    何回押しても履歴は確定時の1つ
-    if (this.xformActive && this.floatBuf) {
-      e.preventDefault();
-      this.xform.tx += dx;
-      this.xform.ty += dy;
-      this.redrawOverlay();
-      this.buildToolOptions(); // 数値表示を追従
-      return;
-    }
-    // ①'' 浮動テキスト中: 位置（パラメータの x/y）を動かすだけ。確定は Ctrl+Enter / 取消は Esc
-    //     なので、何回押しても履歴は確定時の1つ。
-    //     **入力欄にフォーカスがある間はここへ来ない**（onKeyDown が isTextEntry で早期 return
-    //     する＝文字カーソルの移動が優先。REQ の要求どおり）
-    if (this.textDraft) {
-      e.preventDefault();
-      this.textDraft.x += dx;
-      this.textDraft.y += dy;
-      this.redrawOverlay();
-      return;
-    }
-    // ①' 四隅変形中: 4点をまとめて平行移動する（形は変えずに位置だけ動かす）。
-    //     確定/取消は既存のまま（Enter / Esc）なので、履歴はやはり確定時の1つ
-    if (this.cornerActive) {
-      e.preventDefault();
-      this.cornerPts = this.cornerPts.map((p) => ({ x: p.x + dx, y: p.y + dy }));
-      this.updateCornerPreview();
-      return;
-    }
-    // ② 移動ツール / ③ 選択範囲ツール（枠だけ）
-    const kind: "" | "layer" | "selmask" | "selmove" =
-      this.tool === "move"
-        ? this.selMask
-          ? "selmove"
-          : "layer"
-        : this.tool === "select" && this.selMask
-          ? "selmask"
-          : "";
-    if (kind) {
-      e.preventDefault();
-      if (this.arrowKind !== kind) {
-        // 種類が変わったら前のセッションを確定してから始める
-        this.endArrowSession();
-        const at = { x: 0, y: 0 };
-        if (kind === "layer") this.beginLayerMove(at);
-        else if (kind === "selmask") this.beginSelMaskMove(at);
-        else this.beginSelectionMove(at);
-        // begin が失敗した（動かす対象が無い）ときはセッションを持たない
-        const started =
-          kind === "layer" ? !!this.layerDrag : kind === "selmask" ? !!this.selMaskDrag : !!this.floatBuf;
-        if (!started) return;
-        this.arrowKind = kind;
-        this.arrowDx = 0;
-        this.arrowDy = 0;
-      }
-      this.arrowDx += dx;
-      this.arrowDy += dy;
-      const at = { x: this.arrowDx, y: this.arrowDy };
-      if (kind === "layer") this.updateLayerMove(at);
-      else if (kind === "selmask") this.updateSelMaskMove(at);
-      else this.updateSelectionMove(at);
-      this.scheduleArrowCommit();
-      return;
-    }
-    // ④ それ以外は従来どおり前後のコマ（↑↓ は従来どおり何もしない）
-    if (dx < 0) this.gotoFrame(this.frameIndex - 1);
-    else if (dx > 0) this.gotoFrame(this.frameIndex + 1);
+    if (this.nudgeArrow(dx, dy)) e.preventDefault();
   }
 
   private onKeyDown(e: KeyboardEvent) {
@@ -14657,7 +8314,8 @@ export class Editor {
     //  ショートカットの表を通らない固定のキー（Backspace の選択消去・Enter でフォーカスのあるボタンを押す…）も、ここなら先に通る。
     //  修飾キーと Space（描きながら押さえて使う）と、押しっぱなしのくり返しでは終えない。ダイアログ・文字入力欄・IME 変換中の
     //  キーはエディタの操作ではないので上の関所で抜ける（そこから作品が変わっても、履歴を積む直前の網＝EditorHistory が拾う）
-    if (this.eraseAllStroke && !e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.finishEraseAllNow();
+    //  ★V214: 確定そのものはコアの settleEraseAll（どのキーで確定するかはここ＝キーボードの事情）
+    if (!e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.settleEraseAll();
 
     // ---- 予約キー（割り当ての対象外。従来どおりの固定の分岐で受ける） ----
     if (e.code === "Space") {
@@ -14693,34 +8351,9 @@ export class Editor {
         this.cancelSplitDrag(); // M11-17: スプリッター中の Esc は掴む前の寸法へ戻して終わる
         return;
       }
-      // M11-12: 浮動テキストは取り消して終わり（何も焼かない）。選択解除まで走らせない
-      //（入力欄にフォーカスがあるときは、そちらの keydown が同じことをする）
-      if (this.textDraft) {
-        this.cancelTextDraft();
-        return;
-      }
-      // M11-10: 矢印キーでの移動セッション中は、そのセッションだけ取り消す
-      if (this.arrowKind) {
-        this.cancelArrowSession();
-        return;
-      }
-      // M11-8: 枠の移動／レイヤーの移動も「ドラッグ中の Esc はそのドラッグだけ取り消す」
-      //（これが無いと、Esc で選択を消したのに指を離した時点で復活する）
-      if (this.selMaskDrag) {
-        this.cancelSelMaskMove();
-        return;
-      }
-      if (this.layerDrag) {
-        this.cancelLayerMove();
-        return;
-      }
-      if (this.xformActive) this.cancelTransform();
-      // M10-2c: 取消の復元を選択解除より**先に**走らせる（順序を入れ替えないこと。
-      // cancelCornerWarp は selMask を読まないが、transform と流儀を揃えてある）
-      if (this.cornerActive) this.cancelCornerWarp();
-      this.selMask = null;
-      this.lassoPts = [];
-      this.redrawOverlay();
+      // ★V214 (M-2b-1a): ここから先（文字の下書き→矢印の移動→選択の枠の移動→レイヤーの移動は、それだけ取り消して戻る／
+      //  最後に変形と四隅を取り消し、選択も外す）はコアの escapeKey（作品に効く所・取り消す順は前と同じ）
+      this.escapeKey();
       return;
     }
     if (e.code.startsWith("Arrow")) {
@@ -14732,40 +8365,17 @@ export class Editor {
       // M11-15: 選択範囲があるときの選択消去は**固定の最優先**のまま。選択が無いときだけ
       // 下の割り当て（キー → コマンド）へ流す＝Backspace に「このコマを消す」等を当てられる。
       // 未割り当てなら keyLookup に無いので何も起きない（従来と同じ）
-      if (this.selMask) {
+      // ★V214: 中身（選択を消す）はコアの backspaceKey。受け取ったときだけ既定の動きを止める（前と同じ）
+      if (this.backspaceKey(e.repeat)) {
         e.preventDefault();
-        // M11-9: 押しっぱなしのキーリピートで履歴を空エントリで埋めない
-        if (!e.repeat) {
-          this.endArrowSession(); // M11-10: 消す前に移動を確定（別の操作）
-          this.deleteSelection();
-        }
         return;
       }
       // 選択が無い → 割り当てへフォールスルー
     }
     if (e.code === "Enter" || e.code === "NumpadEnter") {
-      // M11-12: Ctrl+Enter=浮動テキストの確定（入力欄の外にフォーカスがある場合。
-      // 入力欄の中では、そちらの keydown が同じことをする）。V181: Mac は ⌘Enter でも（`primaryMod`）
-      if (this.textDraft && primaryMod(e)) {
+      // ★V214: 文字の確定（Ctrl／⌘＋Enter）→ 変形 → 四隅 → 矢印の移動の確定はコアの enterKey（確定する順は前と同じ）
+      if (this.enterKey(primaryMod(e))) {
         e.preventDefault();
-        this.commitTextDraft();
-        return;
-      }
-      // E-4: Enter=変形確定（変形中・四隅変形中は確定が優先）
-      if (this.xformActive) {
-        e.preventDefault();
-        void this.commitTransform();
-        return;
-      }
-      if (this.cornerActive) {
-        e.preventDefault();
-        void this.commitCornerWarp();
-        return;
-      }
-      // M11-10: 矢印キーでの移動セッションの明示的な確定
-      if (this.arrowKind) {
-        e.preventDefault();
-        this.endArrowSession();
         return;
       }
       // M11-2: ボタンにフォーカスがあるときはブラウザ既定の「Enter でそのボタンを押す」を
@@ -14804,7 +8414,233 @@ export class Editor {
     this.endArrowSession();
     this.runCommand(id);
   }
-}
+
+
+  // ================= ★V213 (M-2a): コアの画面の口（フック）の上書き =================
+  // 前はコアへ移したメソッドの中にあった画面の行。呼ばれる時と順番は前と同じ（コアのその行の位置から呼ばれる）
+
+  /** コアの `pointerDown` の書き込み口から呼ばれる（前は setter の中にあった 1 行） */
+  protected override pointerDownChanged(v: boolean): void {
+    // 手のひら/Space のパンは「描いている」わけではないので薄くしない（倍率表示を見ながら動かせる）。
+    // panState は pointerDown=true より前に立つ（onPointerDown のパン分岐）ので、ここで判定できる
+    this.setStrokeHud(v && !this.panState);
+  }
+
+  /** 太さ・全レイヤーの消しゴムが変わったので、カーソルの輪を描き直す（前はコアへ移した 2 か所の 2 行） */
+  protected override repaintCursor(): void {
+    this.cursorPainted = "";
+    this.paintCursorLayer();
+  }
+
+  /** 図形・選択の移動・変形の下書きの層を消す（前は `this.overlayCtx().clearRect(0, 0, W, H)` の 1 行） */
+  protected override clearOverlay(): void {
+    this.overlayCtx().clearRect(0, 0, W, H);
+  }
+
+  /** setTool の途中（道具を替えた直後・変形や四隅を始める前）: 前の道具のストリップを畳み、太さの表示を合わせる */
+  protected override toolChanging(t: Tool): void {
+    // M14 (S-1): 別ツールへ切り替えたら、前のツール用に開いていたストリップは畳む
+    if (this.stripOpenFor && this.stripOpenFor !== t) this.closeStrip();
+    // M11-2: 太さの実体は sizeByTool なので、ここは表示（.sz の on）を合わせるだけ
+    this.refreshSizePicker();
+  }
+
+  /** setTool の終わり: 道具の列・オプション・カーソルを今の道具に合わせる */
+  protected override toolChanged(): void {
+    this.updateToolButtons();
+    this.buildToolOptions();
+    this.rebuildTexPicker(); // M5-4: ペン⇄ブラシでピッカー切替（各自の選択を記憶）
+    this.redrawOverlay();
+    // M12-C: 1階（CSS の cursor）と2階（輪・枠）をツールに合わせ直す。
+    // ここは既にある redrawOverlay の直後で、ホバー経路とは無関係（頻度はツール切替のときだけ）
+    this.applyCanvasCursor();
+    // A-21: 手のひら/Space パンで `#ed-cvwrap` に残った grab/grabbing を、切り替えた道具に合わせて畳む。
+    // ペンで pointerdown すると外枠が setPointerCapture でカーソルの決定権を握るので、
+    // canvas 側だけ直しても掴んだ瞬間に外枠の grab が出てしまう（capture の仕様）
+    this.updatePanCursor();
+    this.cursorPainted = "";
+    this.paintCursorLayer();
+    this.revealToolOptions();
+  }
+
+  /** 束の確定（finishEraseAllNow）が押している接触を終えた: 終端の控えを捨てて捕捉を放す */
+  protected override pointerReleased(): void {
+    this.lastPointerEvent = null;
+    this.releaseCapture();
+  }
+
+  /** 重い処理に入った（busyKind はコアが立てた）: ポインタを止める（キーは dialogOpen() が見る）。**遅延なしで即座に**——
+   *  進捗が出るまでの 450ms に触られたら、そこで混ざったものが保存される */
+  protected override busyStarted(): void {
+    document.querySelector("#screen-editor")?.classList.add("ed-busy");
+    this.updateBusyButtons();
+  }
+
+  /** 重い処理から出る直前（busyKind を下ろす前）: 遅れて出す進捗の待ちと、出ている進捗を畳む */
+  protected override busyClosing(): void {
+    if (this.busyTimer) {
+      clearTimeout(this.busyTimer);
+      this.busyTimer = 0;
+    }
+    this.busyHide?.();
+    this.busyHide = null;
+  }
+
+  /** 重い処理から出た（busyKind を下ろしたあと）: ポインタとボタンを戻す */
+  protected override busyEnded(): void {
+    document.querySelector("#screen-editor")?.classList.remove("ed-busy");
+    this.updateBusyButtons();
+  }
+
+  /** 再生の ▶／⏸ のボタン */
+  protected override playStateShown(playing: boolean): void {
+    if (playing) {
+      $("#ed-play").replaceChildren(icon("pause")); // V171: 状態ペア play / pause
+      return;
+    }
+    const btn = document.querySelector("#ed-play");
+    if (btn) btn.replaceChildren(icon("play")); // V171
+  }
+
+  /** 変形を抜けた: モードの札を消し、外枠のカーソルを空に・キャンバスは今のツールのカーソルへ */
+  protected override xformCursorReset(): void {
+    this.hideXformModeLabel(); // R-2
+    const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
+    if (wrap) wrap.style.cursor = "";
+    // M12-G: 変形を抜けたらキャンバスは**今のツールのカーソル**へ戻す（空にはしない）
+    this.applyCanvasCursor();
+  }
+
+  /** 変形の取っ手を掴んだ: 掴んだ瞬間からモードが分かるようカーソルも更新（回転中は grabbing） */
+  protected override xformDragCursor(cursor: string): void {
+    const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
+    if (wrap) wrap.style.cursor = cursor;
+    this.setCanvasCursor(cursor); // M12-G
+  }
+
+  /** 変形の取っ手を離した: モードの札を消し、カーソルをいまの当たりに合わせる */
+  protected override xformDragEnded(pt: { x: number; y: number }): void {
+    this.hideXformModeLabel(); // R-2: ペンを離したらラベルを消す（hover環境では次のmoveで再表示）
+    const wrap = document.querySelector("#ed-cvwrap") as HTMLElement | null;
+    if (wrap) wrap.style.cursor = this.xformHitTest(pt).cursor;
+    this.setCanvasCursor(this.xformHitTest(pt).cursor); // M12-G: キャンバス上にも
+  }
+
+  /** 進みが止まったと見なす基準の時刻と、それを見るタイマー（`savePrepShow` の中だけ） */
+  private savePrepLastAt = 0;
+  private savePrepStallTimer = 0;
+  /** 保存の前の片付け（コアの prepareSnapshot）の進み具合を「保存の準備…」に出す（前は prepareSnapshot の中） */
+  protected override savePrepShow(stage: "begin" | "moved" | "pass" | "end" | "save", prog: { n: number; total: number } | null): void {
+    switch (stage) {
+      case "begin":
+        if (prog) this.savePrep = { n: prog.n, total: prog.total };
+        this.setSavePhase("prepare");
+        this.savePrepLastAt = performance.now();
+        this.savePrepStalled = false;
+        // ★独立レビューの指摘（中）: 描き続けていると掃除は只のものしか進まず、数字が止まる。
+        //  3 秒動かなければ「手を離した合間に片づけが進みます」の文言へ切り替える（1 秒ごとに見る）
+        this.savePrepStallTimer = window.setInterval(() => {
+          const stalled = performance.now() - this.savePrepLastAt > Editor.SAVE_PREP_STALL_MS;
+          if (stalled !== this.savePrepStalled) {
+            this.savePrepStalled = stalled;
+            this.renderSavePhase();
+          }
+        }, 1000);
+        return;
+      case "moved":
+        if (prog) this.savePrep = { n: prog.n, total: prog.total };
+        this.savePrepLastAt = performance.now();
+        this.savePrepStalled = false;
+        this.renderSavePhase();
+        return;
+      case "pass":
+        if (prog) this.savePrep = { n: prog.n, total: prog.total };
+        this.renderSavePhase();
+        return;
+      case "end":
+        clearInterval(this.savePrepStallTimer);
+        this.savePrepStalled = false;
+        return;
+      case "save":
+        this.setSavePhase("save");
+        return;
+    }
+  }
+
+  /** 重い処理の前に 1 拍譲る（始まったら返ってこない同期の処理でも、「受け付けた・押せなくなった」は必ず見える） */
+  protected override heavyYield(): Promise<void> {
+    return yieldToPaint();
+  }
+
+  /** 重い処理の「◯◯しています」の箱と計測（`ui/busy.ts` の漏斗） */
+  protected override heavyBox<T>(op: PerfOp, msg: string, fn: () => Promise<T>, delayMs: number): Promise<T> {
+    return runWithBusy(op, msg, fn, delayMs);
+  }
+
+  /** 画面の出来事 → コアのサンプル。x・y は `clientToPixelF`（拡大・回転・左右反転の逆写像）の結果そのもの。
+   *  `pointerType` は渡さない（描いた結果を入力の種類で変えない） */
+  private sampleOf(e: PointerEvent): StrokeSample {
+    const p = this.clientToPixelF(e.clientX, e.clientY);
+    return { x: p.x, y: p.y, pressure: e.pressure, button: e.button, shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey };
+  }
+
+  /** ★V213 (M-2a): メーターの中身と、大きさの帯が上がったときの知らせ（前は updateSizeMeter の後ろ半分。
+   *  眠りの始まりと履歴の予算はコアの updateSizeMeter が決めて、ここへ数を渡す） */
+  protected override paintSizeMeter(proj: number, real: number, _t0: number): void {
+    const host = document.querySelector("#ed-szmeter") as HTMLElement | null;
+    if (!host) return;
+    // ★V214 (M-2b-1a): 段の決め方（と性能の口が読む面数）はコアの sizeVerdict。段が上がったときのログと知らせはコアの noticeSizeLevel
+    const { hist, total, level, faces } = this.sizeVerdict(proj);
+    host.className = "szmeter lv-" + level;
+    const row = (label: string, n: number, cls = "") =>
+      `<div class="szrow ${cls}"><span>${label}</span><b>${formatSize(n)}</b></div>`;
+    // V154b: **面数（レイヤー×コマ）**。バイト数より分かりやすい（作者の指示）。
+    //
+    // V155（独立レビュー §1・優先度 高）: 出す数字は同じだが、**言葉を変えた**。
+    // V154b では「開ける上限 約5,242面」「保存できても開き直せません」と書いていた。
+    // 分割読み込みにした今、それは**嘘**になる（21,960面の再現データが実際に開く）。
+    // 「画面が示すことと実際に起きることが食い違う」＝要件が名指しで避けろと言っている形。
+    // いまは同じ数字を**重くなる目安**として出し、「分けると軽い」で終える（脅さない）
+    const faceMax = loadWallFaces(this.project.indexBits === 16 ? 16 : 8);
+    const overWall = faces > faceMax;
+    host.innerHTML =
+      row(t("ed.size.project.label"), proj) +
+      // V156（独立レビュー §5・優先度 高）: 「200回戻れる」と読んで危ない操作を試した人が、
+      // 実際には減っていることにボタンが灰色になるまで気づけなかった。**いま何回戻れるか**を出す
+      row(t("ed.size.history.steps.label", { n: this.history.undoDepth }), hist) +
+      row(t("ed.size.total.label"), total, "tot") +
+      // V156 (P-1): 眠りが効いている作品だけ、**実際に使っている量**をもう1行出す。
+      // 上の3行は論理サイズ（＝作品の大きさの目安）のままで、意味は変えていない。
+      // V156（独立レビュー §2）: 片付けの最中はそれが分かるようにする（27 秒かかるので、
+      // 数字が動いていること自体が「壊れていない」の合図になる）
+      (this.sleepOn
+        ? row(this.sweeping ? t("ed.size.real.busy.label") : t("ed.size.real.label"), real)
+        : "") +
+      `<p class="sznote${overWall ? " adv" : ""}">${t("ed.size.faces.msg", {
+        n: faces.toLocaleString(),
+        max: faceMax.toLocaleString(),
+      })}</p>` +
+      // 目安を超えている＝開くのも保存も重い。**開けなくなるとは言わない**（V155）
+      (overWall ? `<p class="sznote adv">${t("ed.size.overWall.msg")}</p>` : "") +
+      // 「統合したのに『元に戻す』が減らない」を**説明なしで**分かるようにする1行（要件 §2-W-2）
+      `<p class="sznote">${t("ed.size.history.msg")}</p>` +
+      // V156（独立レビュー §5）: 200 回という約束と「自動で減る」の関係を、**約束のそばに**書く
+      `<p class="sznote">${t("ed.size.undo.msg")}</p>` +
+      // V156（独立レビュー §1・優先度 高）: 同じ箱に**論理サイズ**と**実メモリ**が並ぶので、
+      // 「どっちが本当のメモリなのか」が分からなくなる。眠りが効いているときだけ1行で分ける
+      (this.sleepOn ? `<p class="sznote">${t("ed.size.twoNumbers.msg")}</p>` : "") +
+      (level === "ok" ? "" : `<p class="sznote adv">${t(Editor.SIZE_ADVICE[level].msgKey)}</p>`);
+    // 右パネルは縦に長い＝**下端のメーターは画面の高さによっては見えない**（900×540 で実測: 内容 943px /
+    // 見える高さ 458px）。色が付いても気づかない人がいるので、**帯が上がったときだけ一度知らせる**。
+    // 失われた 500〜600コマの作品はちょうど「注意」の帯（132〜264MB）だった＝ここで黙っていると
+    // 今回の事故と同じことが起きる（独立レビューの指摘・優先度 高）。
+    // 1つの作品で最大2回（注意で1回・警告に上がってもう1回）・小さい作品では絶対に出ない・
+    // 閉じるだけで何も起きない（止めない）
+    this.noticeSizeLevel(level, proj, hist, total);
+    // V159 (G-1): メーターは全コマを走査する（面数・実メモリ）。**呼ばれる回数が多い場所**なので、
+    // ここが 50ms を超えて何度も出るなら、それ自体が「操作が重い」の一因
+    perfDone("meter.update", _t0);
+  }}
 
 
 

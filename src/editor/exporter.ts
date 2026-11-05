@@ -8,11 +8,15 @@ import GIF from "gif.js";
 import UPNG from "upng-js";
 import gifWorkerUrl from "gif.js/dist/gif.worker.js?url";
 import { W, H, PIXELS } from "./model";
-import { repeatWav } from "./audio"; // M16 (X-1): ループ時の音声（1周ミックスを N 連結）
+import { mp4LoopPlan } from "./audio"; // M16 (X-1)→V216b (A-134): ループ時の映像と音声の並べ方（純関数）
 import { t } from "../i18n";
 // V168 (E): フレーム供給は DOM に依存しない `frameSource.ts` へ切り出した（Node のスモークが
 // 直接叩けるように）。既存の import 元（main.ts / library.ts）のために、ここから再輸出する
 import type { FrameSource } from "./frameSource";
+// ★V213 (M-2a): formatBytes は描く操作のコアも使うので、書き出しを引かない置き場へ移した（ここは同じ名前で出し直す）
+// ★V214 (M-2b-1a): formatSize も同じ（大きさの知らせの文がコアへ来た）
+import { formatBytes, formatSize } from "./core/formatBytes";
+export { formatBytes, formatSize };
 export { projectSource, noteSource, withRange, type FrameSource } from "./frameSource";
 
 export type ExportFormat = "mp4" | "gif" | "apng" | "pngzip";
@@ -26,6 +30,8 @@ export interface ExportAudio {
   durationSec: number;
   /** animToAudio のとき映像を尺までループさせる判断に使う */
   syncMode: "audioToAnim" | "animToAudio";
+  /** ★V216b (A-134・C-28): 曲が主（「曲の長さ」で BGM がある＝出力の長さが曲で決まる）。回数つきの書き出しの並べ方に使う */
+  songPrimary?: boolean;
 }
 
 /** M5-1: エクスポートダイアログへ渡す音声ソース（UI表示＋範囲確定後のミックス生成） */
@@ -219,22 +225,6 @@ export function formatDuration(sec: number): string {
     : t("export.eta.minutes.label", { n: m });
 }
 
-/** M11-23: バイト数の表示（見積もり用・GB/MB） */
-export function formatBytes(n: number): string {
-  const gb = n / (1024 * 1024 * 1024);
-  if (gb >= 1) return `${gb.toFixed(1)}GB`;
-  return `${Math.round(n / (1024 * 1024))}MB`;
-}
-
-/** V154: 小さい値も読める表示（KB/MB/GB）。
- *  `formatBytes` は書き出しの見積もり用で 1MB 未満が全部「0MB」になる。
- *  作品の大きさメーターや復元の一覧は**小さい作品でも意味のある数字**を出したいので、
- *  1MB 未満は KB で出す（見積もり側の表示は変えない＝既存の画面は1文字も動かない）。 */
-export function formatSize(n: number): string {
-  if (n < 1024 * 1024) return `${Math.round(n / 1024)}KB`;
-  return formatBytes(n);
-}
-
 /**
  * M11-23: 残り時間の目安。`onProgress` のたびに `update()` を呼び、表示する文字列（""=まだ出さない）を返す。
  * 時刻は呼び出し側から渡す（純粋・スモークで検査できる）。
@@ -354,7 +344,7 @@ export interface ExportOptions {
   /** M16 (X-1): MP4 のループ回数（1〜10・既定1）。映像はフレーム供給を N 周、音声は1周ミックスを N 連結。
    *  **MP4 以外は無視**。1（既定）のときはエンコーダ入力が従来と完全に同一（x1 バイト一致） */
   loopCount?: number;
-  /** V168（Codex 指摘・中）: GIF の固定パレット。**見積り（M11-23）で数えた結果をそのまま渡す**と、
+  /** V168（独立レビューの指摘・中）: GIF の固定パレット。**見積り（M11-23）で数えた結果をそのまま渡す**と、
    *  `exportGif` が全コマをもう一度走査しない。V168 後は走査が「眠ったコマを起こす→戻す」を伴うので、
    *  大きい作品で二重に走ると体感で重い。`undefined`＝自分で数える（従来）／`null`＝257色以上（NeuQuant） */
   gifPalette?: number[] | null;
@@ -520,7 +510,9 @@ export const MP4_COLOR_TAGS = [
 ];
 
 /** M11-21: `exportMp4` が ffmpeg に渡す引数列（純関数・スモークで pin する）。
- *  色以外（-framerate/-i/-t/-c:v/-c:a/-b:a/-pix_fmt/-movflags/-stream_loop の並びと値）は M5-1/M6-1 と同一。 */
+ *  色と -bf 0 以外（-framerate/-i/-t/-c:v/-c:a/-b:a/-pix_fmt/-movflags/-stream_loop の並びと値）は M5-1/M6-1 と同一。
+ *  A-123（V210）: -bf 0＝B フレームを使わない。使うと x264 は映像の頭を 2 コマ後ろに置き、編集リスト（elst）で戻す形になる。
+ *  編集リストを読まないプレーヤー（Windows の標準のプレーヤー）では絵が 2 コマ遅れる＝音が先に聞こえる（12fps で 0.15 秒）。 */
 export function mp4ExecArgs(
   fps: number,
   audio: { durationSec: number; syncMode: "audioToAnim" | "animToAudio" } | null
@@ -537,6 +529,8 @@ export function mp4ExecArgs(
       "yuv420p",
       "-c:v",
       "libx264",
+      "-bf",
+      "0",
       ...MP4_COLOR_TAGS,
       "-movflags",
       "+faststart",
@@ -555,6 +549,8 @@ export function mp4ExecArgs(
     audio.durationSec.toFixed(3),
     "-c:v",
     "libx264",
+    "-bf",
+    "0",
     "-c:a",
     "aac",
     "-b:a",
@@ -644,7 +640,7 @@ export async function exportGif(src: FrameSource, o: ExportOptions): Promise<Blo
   // M11-22: 実使用色が 256 色以下なら固定パレット（NeuQuant を通らない＝色は完全一致・全コマ同一パレット・
   // 2 コマ目以降のローカル色表なし）。257 色以上は従来どおり（オプションも従来と同一＝出力バイト列不変）
   o.onProgress(0, src.count * 2, "countColors");
-  // V168（Codex 指摘・中）: 見積りで数えたパレットが渡されていれば、全コマの再走査をしない
+  // V168（独立レビューの指摘・中）: 見積りで数えたパレットが渡されていれば、全コマの再走査をしない
   //（同じ供給元・同じ whiteBg で数えた結果なので出力は同一。渡されなければ従来どおり自分で数える）
   const palette = o.gifPalette !== undefined ? o.gifPalette : await collectGifPalette(src, o.whiteBg);
   if (o.cancel.cancelled) return CANCELLED;
@@ -709,7 +705,9 @@ export async function exportApng(src: FrameSource, o: ExportOptions): Promise<Bl
 export async function exportMp4(src: FrameSource, o: ExportOptions): Promise<Blob | null> {
   // M16 (X-1): ループ回数（1〜10）。1（既定）のとき下は従来と完全に同一の経路を通る（x1 バイト一致）
   const loops = Math.max(1, Math.min(10, Math.floor(o.loopCount ?? 1)));
-  const total = src.count * loops;
+  // ★V216b (A-134・C-28): 並べ方は mp4LoopPlan（曲が主で回数 2 回以上は 1 回ぶんを曲の長さ×fps の切り上げのコマに）。回数 1 は今と同じ
+  const lp = mp4LoopPlan(src.count, src.fps, loops, o.audio ?? null);
+  const total = lp.total;
   o.onProgress(0, total + 1, "encoderInit");
   // ffmpeg.wasm core はアプリに同梱（オフライン動作・実行時ネットワーク取得なし）
   const [{ FFmpeg }, { toBlobURL }, coreJs, coreWasm] = await Promise.all([
@@ -728,7 +726,7 @@ export async function exportMp4(src: FrameSource, o: ExportOptions): Promise<Blo
     // M16 (X-1): フレーム供給を N 周（i%count で元コマへ）。loops=1 なら i=0..count-1＝従来と同一の書き出し
     for (let i = 0; i < total; i++) {
       if (o.cancel.cancelled) return CANCELLED;
-      const blob = await scaler.toPngBlob(await src.getFrameRgba(i % src.count)); // V168 (E-1)
+      const blob = await scaler.toPngBlob(await src.getFrameRgba(lp.frameOf(i))); // V168 (E-1)
       if (!blob) throw new Error(t("export.pngGenFailed.msg"));
       await ffmpeg.writeFile(`f${pad4(i)}.png`, new Uint8Array(await blob.arrayBuffer()));
       o.onProgress(i + 1, total + 1, "frameWrite");
@@ -747,12 +745,9 @@ export async function exportMp4(src: FrameSource, o: ExportOptions): Promise<Blo
     });
     // フレームは拡大済みのため scale 不要（M11-21 の scale フィルタは色変換の指定だけで解像度は触らない）。
     // 分数fps（0.2等）も -framerate で正確。引数列は mp4ExecArgs（純関数・スモークで pin）
-    const audio = o.audio ?? null;
     // M16 (X-1): ループ時は音声も N 連結（周ごとに頭から）＋尺を N 倍。loops=1 なら audio をそのまま使う＝従来と同一
-    const effAudio: ExportAudio | null =
-      audio && loops > 1
-        ? { wav: repeatWav(audio.wav, loops), durationSec: audio.durationSec * loops, syncMode: audio.syncMode }
-        : audio;
+    //  V216b (A-134): 曲が主のときは 1 回ぶんを映像の長さまで無音で足してから N 連結（mp4LoopPlan）
+    const effAudio: ExportAudio | null = lp.audio;
     if (!effAudio) {
       // 無音経路（M6-1 と同一・M11-21 で色引数だけ追加）
       await ffmpeg.exec(mp4ExecArgs(src.fps, null));

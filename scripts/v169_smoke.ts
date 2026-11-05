@@ -17,8 +17,13 @@
 //    5z 反証: 片方の登録を外した写しは赤になる
 // 6. `[V167 C] alt unbalanced` の行が残っている（直ったことを同じ行で確かめる道を消していない）
 // 7. Rust 側コメント（B-4）・inputlog の dp=（A-3）・perf 行を足していない（B-5）
+// 8. V201 (P-3): オートセーブも生のバイト列で受け取る（load_autosave の呼び出し元の固定・数の配列で受け取る所が 0・Rust の戻り値の形）
+//    8z 反証: 数の配列に戻す・呼び出しを足す・Rust を JSON に戻すと赤
+// 9. V202 (M-1a): モバイルの開く道（mobile_read_work・mobile_autosave_read）も生のバイト列（呼び出し元の固定・数の配列で受け取る所が 0）
+//    9z 反証: 数の配列に戻す・呼び出しを足す・Rust を JSON に戻すと赤
 import fs from "node:fs";
 import path from "node:path";
+import { readEditorSource } from "./editorSource";
 
 let pass = 0;
 let fail = 0;
@@ -36,7 +41,8 @@ const read = (p: string) => fs.readFileSync(path.join(root, p), "utf8");
 const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "").replace(/[ \t]\/\/[^\n"'`]*$/gm, "");
 const mainRaw = read("src/main.ts");
 const libRaw = read("src/library.ts");
-const edRaw = read("src/editor/editor.ts");
+// ★V213 (M-2a): editor.ts の描く処理はコア（src/editor/core/editorCore.ts）へ移った＝editor.ts とコアの字を並べて見る
+const edRaw = readEditorSource(root);
 const main = strip(mainRaw);
 const lib = strip(libRaw);
 const ed = strip(edRaw);
@@ -81,7 +87,7 @@ const SRC = listSrc();
 // ================= 1. read_file_bytes の呼び出し元一覧（増えたら赤） =================
 {
   const all: { file: string; fn: string }[] = [];
-  // Codex 指摘（低）: 型引数なしの `invoke("read_file_bytes"` も拾う
+  // 独立レビューの指摘（低）: 型引数なしの `invoke("read_file_bytes"` も拾う
   for (const f of SRC) all.push(...sitesOf(strip(read(f)), f, /invoke(?:<[^>]*>)?\("read_file_bytes"/));
   const got = all.map((s) => `${s.file}:${s.fn}`).sort();
   // 薄いラッパー（`const CMD = "read_file_bytes"` 等）経由も見逃さない: コメントを除いた **文字列の出現数** が呼び出し数と一致
@@ -193,7 +199,7 @@ const SRC = listSrc();
   check("4 ★showLoadError は TOO_LARGE を人が読める文（lib.open.tooLarge.msg）に置き換える", /tooLargeBytes\(msg\)/.test(sle) && /t\("lib\.open\.tooLarge\.msg"/.test(sle));
   check("4 それ以外の失敗は従来の文言（lib.meta.loadError.label）のまま", /t\("lib\.meta\.loadError\.label", \{ err: msg \}\)/.test(sle));
   check("4 上限の数字は門番の定数から作る（別の数字を手で書かない）", /IMPORT_MAX_BYTES/.test(sle));
-  check("4 約 X MB は切り上げ（Codex 指摘・中: 四捨五入だと 512MiB+1B が「約 512 MB・上限 512 MB」になる）", /Math\.ceil\(tooLarge \/ 1024 \/ 1024\)/.test(sle) && !/toFixed\(0\)/.test(sle));
+  check("4 約 X MB は切り上げ（独立レビューの指摘・中: 四捨五入だと 512MiB+1B が「約 512 MB・上限 512 MB」になる）", /Math\.ceil\(tooLarge \/ 1024 \/ 1024\)/.test(sle) && !/toFixed\(0\)/.test(sle));
   // 7言語
   const LANGS = ["ja", "en", "es", "ko", "pt-BR", "zh-Hans", "zh-Hant"];
   for (const l of LANGS) {
@@ -252,6 +258,116 @@ check("6 ★`[V167 C] alt unbalanced` の行が残っている", /\[V167 C\] alt
   // ⚠ **コメントを落とした側**（`main`）で見る——説明文の中に旧い行の引用が残っているため
   check("7 開く失敗のログは大きさと理由だけ（size は showLoadError の logNote へ畳んだ）", /showLoadError\(errText\(e\), \[item\.path\], false, `size=\$\{item\.size\}`\)/.test(main));
   check("7 ★理由を素の String(e) でログへ書く道が開く経路に無い（伏せ字の外を通らない）", !/open failed/.test(main));
+}
+
+// ================= 8. V201 (P-3): オートセーブも生のバイト列で受け取る（数の配列で受け取る所が 0） =================
+//  前は Rust の load_autosave が {meta, data, path} の data を JSON の数の配列で返し、JS が number[] で受けていた
+//  （大きい作品のオートセーブで、起動のたびにレンダラが同じ所で落ちる＝検査1 と同じ形）。read_file_raw と同じく生のバイト列にした。
+//  モバイルの開く道（V202）はこの回では作らない（要件 A8 のモバイルの分は V202 で足す）
+{
+  /** load_autosave の呼び出し元（file:関数名）とコメント以外の語の数 */
+  const sites = (files: [string, string][]) => {
+    const all: { file: string; fn: string }[] = [];
+    let mentions = 0;
+    for (const [f, src] of files) {
+      all.push(...sitesOf(src, f, /invoke(?:<[^>]*>)?\("load_autosave"/));
+      mentions += (src.match(/load_autosave/g) ?? []).length;
+    }
+    return { got: all.map((x) => `${x.file}:${x.fn}`).sort(), mentions };
+  };
+  const files: [string, string][] = SRC.map((f) => [f, strip(read(f))]);
+  const s8 = sites(files);
+  const ok81 = (x: { got: string[]; mentions: number }) => JSON.stringify(x.got) === JSON.stringify(["src/main.ts:checkAutosave"]) && x.mentions === 1;
+  check("8 ★load_autosave の呼び出し元は main.ts の checkAutosave の 1 か所だけ（語はコメント以外では呼び出しにしか現れない）", ok81(s8), `${s8.got.join(" | ")} 語=${s8.mentions}`);
+  /** checkAutosave の受け方: ArrayBuffer で受けて共通の部品の readAutosaveEnvelope に渡す・数の配列の形が無い */
+  const recvOk = (mainSrc: string) => {
+    const at = mainSrc.indexOf("async function checkAutosave(");
+    const body = at < 0 ? "" : mainSrc.slice(at, mainSrc.indexOf("\n}\n", at));
+    return (
+      body !== "" &&
+      /payload = readAutosaveEnvelope\(await invoke<ArrayBuffer>\("load_autosave"\)\);/.test(body) &&
+      !/number\[\]/.test(body) &&
+      !/new Uint8Array\(payload\.data\)/.test(body) &&
+      !/Array\.from\(/.test(body) &&
+      /projectFromBytes\(payload\.data\)/.test(body)
+    );
+  };
+  check("8 ★checkAutosave は生のバイト列（ArrayBuffer）で受けて readAutosaveEnvelope で分ける・数の配列で受け取る形（number[]・new Uint8Array(配列)）が無い", recvOk(main));
+  const core = strip(read("src/editor/saveCore.ts"));
+  const env = core.slice(core.indexOf("export function readAutosaveEnvelope("), core.indexOf("\n}\n", core.indexOf("export function readAutosaveEnvelope(")));
+  check(
+    "8 封筒を分ける関数は ArrayBuffer／Uint8Array だけを受け、作品のバイト列は写さない（subarray）・数の配列の逃げ道が無い",
+    env !== "" && /raw: ArrayBuffer \| Uint8Array \| null \| undefined/.test(env) && /data: b\.subarray\(4 \+ headLen\)/.test(env) && !/number\[\]|Array\.isArray|Array\.from/.test(env)
+  );
+  // Rust: 生のバイト列（tauri::ipc::Response）で返す・数の配列（JSON の data）を作らない
+  const rsAll = read("src-tauri/src/lib.rs");
+  const rsOk = (rs: string) => {
+    const at = rs.indexOf("fn load_autosave(");
+    const body = at < 0 ? "" : rs.slice(at, rs.indexOf("\n}\n", at));
+    return (
+      /fn load_autosave\(app: tauri::AppHandle\) -> Result<tauri::ipc::Response, String> \{/.test(rs) &&
+      /tauri::ipc::Response::new\(pack_autosave_payload\(&meta, &p, data\)\)/.test(body) &&
+      /Ok\(tauri::ipc::Response::new\(Vec::new\(\)\)\)/.test(body) &&
+      !/"data":/.test(rs.slice(rs.indexOf("fn parse_autosave("), rs.indexOf("fn load_autosave(")))
+    );
+  };
+  check("8 ★Rust の load_autosave は生のバイト列（tauri::ipc::Response）で返す・無ければ空の本体・JSON の data（数の配列）を作らない", rsOk(rsAll));
+  check(
+    "8 読む順（本体 → 控え）と控えに回る条件（読めない・形が違う）は前と同じ",
+    /for p in \[file\.clone\(\), dir\.join\("current\.asv\.bak"\)\] \{\n\s*if p\.is_file\(\) \{\n\s*if let Ok\(bytes\) = fs::read\(&p\) \{\n\s*if let Some\(\(meta, data\)\) = parse_autosave\(&bytes\) \{/.test(rsAll)
+  );
+  // 反証
+  check("8z ★反証: checkAutosave の受け方を数の配列に戻した写しは赤", !recvOk(main.replace('payload = readAutosaveEnvelope(await invoke<ArrayBuffer>("load_autosave"));', 'payload = await invoke<{ meta: any; data: number[]; path: string }>("load_autosave");')));
+  check("8z ★反証: 作品を new Uint8Array(payload.data) で写す形に戻した写しは赤", !recvOk(main.replace("projectFromBytes(payload.data)", "projectFromBytes(new Uint8Array(payload.data))")));
+  check(
+    "8z ★反証: load_autosave の呼び出しを 1 つ足した写しは赤",
+    !ok81(sites(files.map(([f, src]) => [f, f === "src/library.ts" ? src + '\nvoid invoke("load_autosave");\n' : src] as [string, string])))
+  );
+  check(
+    "8z ★反証: Rust を JSON（Option<serde_json::Value>）で返す形に戻した写しは赤",
+    !rsOk(rsAll.replace("fn load_autosave(app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {", "fn load_autosave(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {"))
+  );
+}
+
+// ================= 9. V202 (M-1a・A8 のモバイルの分): モバイルの開く道も生のバイト列（数の配列で受け取る所が 0） =================
+//  モバイルだけの読む命令（mobile_read_work＝作品と保存元の指紋・mobile_autosave_read＝開いた作品ごとのオートセーブ）は、Rust が
+//  tauri::ipc::Response で返し、JS の口（src/mobile/port.ts）は ArrayBuffer で受けて readAutosaveEnvelope で分ける（写さない）。
+//  読む前の大きさの門番（512MiB）は Rust の定数（JS から受けない）。モバイルの道は read_file_bytes も read_file_raw も呼ばない
+{
+  const READS = /invoke(?:<[^>]*>)?\("mobile_(?:read_work|autosave_read)"/;
+  const sites9 = (files: [string, string][]) => {
+    const all: { file: string; fn: string }[] = [];
+    let mentions = 0;
+    for (const [f, src] of files) {
+      all.push(...sitesOf(src, f, READS));
+      mentions += (src.match(/mobile_(?:read_work|autosave_read)\b/g) ?? []).length;
+    }
+    return { got: all.map((x) => `${x.file}:${x.fn}`).sort(), mentions };
+  };
+  const files9: [string, string][] = SRC.map((f) => [f, strip(read(f))]);
+  const s9 = sites9(files9);
+  const ok91 = (x: { got: string[]; mentions: number }) =>
+    JSON.stringify(x.got) === JSON.stringify(["src/mobile/port.ts:makeMobilePort", "src/mobile/port.ts:makeMobilePort"]) && x.mentions === 2;
+  check("9 ★モバイルの読む命令（mobile_read_work・mobile_autosave_read）の呼び出し元は src/mobile/port.ts の口の 2 か所だけ（語は呼び出しにしか現れない）", ok91(s9), `${s9.got.join(" | ")} 語=${s9.mentions}`);
+  const port = strip(read("src/mobile/port.ts"));
+  const recv9 = (p: string) =>
+    /readWork: async \(album, name\) => \{\n\s*const raw = await call<ArrayBuffer>\(invoke\("mobile_read_work", \{ args: \{ album, name \} \}\)\);\n\s*const env = readAutosaveEnvelope\(raw\);/.test(p) &&
+    /autosaveRead: async \(session\) => \{\n\s*const raw = await call<ArrayBuffer>\(invoke\("mobile_autosave_read", \{ args: \{ session \} \}\)\);\n\s*const env = readAutosaveEnvelope\(raw\);/.test(p) &&
+    !/number\[\]|Array\.from\(|Array\.isArray|new Uint8Array\([a-z]+\.data\)/.test(p) &&
+    !/read_file_bytes|read_file_raw/.test(p);
+  check("9 ★JS の口は ArrayBuffer で受けて readAutosaveEnvelope で分ける・数の配列で受け取る形が 0・read_file_bytes／read_file_raw を呼ばない", recv9(port));
+  const mobileSrc = SRC.filter((f) => f.startsWith("src/mobile/")).map((f) => strip(read(f))).join("\n");
+  check("9 src/mobile は read_file_bytes・read_file_raw・load_autosave を呼ばない（モバイルの読む道は 9 の 2 つだけ）", SRC.some((f) => f.startsWith("src/mobile/")) && !/"(read_file_bytes|read_file_raw|load_autosave)"/.test(mobileSrc));
+  const rs9 = read("src-tauri/src/pclib/mobile/commands.rs");
+  const rsOk9 = (rs: string) =>
+    /pub fn mobile_read_work\(app: tauri::AppHandle, args: WorkArgs\) -> Result<tauri::ipc::Response, String> \{\n\s*let d = dirs_from_app\(&app\)\?;\n\s*args_read_work\(&d, &args\)\.map\(tauri::ipc::Response::new\)/.test(rs) &&
+    /pub fn mobile_autosave_read\(app: tauri::AppHandle, args: SessionArgs\) -> Result<tauri::ipc::Response, String> \{\n\s*let d = dirs_from_app\(&app\)\?;\n\s*args_autosave_read\(&d, &args\)\.map\(tauri::ipc::Response::new\)/.test(rs);
+  check("9 ★Rust のモバイルの読む命令は生のバイト列（tauri::ipc::Response）で返す", rsOk9(rs9));
+  check("9 読む前の大きさの門番は Rust の定数 512MiB（PC の IMPORT_MAX_BYTES と同じ値・JS から受けない）", /pub const READ_MAX_BYTES: u64 = 512 \* 1024 \* 1024;/.test(read("src-tauri/src/pclib/mobile/ops.rs")) && !/maxBytes/.test(port));
+  // 反証
+  check("9z ★反証: 口を数の配列で受ける形に戻した写しは赤", !recv9(port.replace('const raw = await call<ArrayBuffer>(invoke("mobile_read_work"', 'const raw = await call<number[]>(invoke("mobile_read_work"')));
+  check("9z ★反証: 読む命令の呼び出しを src/library.ts に 1 つ足した写しは赤", !ok91(sites9(files9.map(([f, src]) => [f, f === "src/library.ts" ? src + '\nvoid invoke("mobile_read_work", { args: {} });\n' : src] as [string, string]))));
+  check("9z ★反証: Rust を JSON（Vec<u8>）で返す形に戻した写しは赤", !rsOk9(rs9.replace("pub fn mobile_read_work(app: tauri::AppHandle, args: WorkArgs) -> Result<tauri::ipc::Response, String> {", "pub fn mobile_read_work(app: tauri::AppHandle, args: WorkArgs) -> Result<Vec<u8>, String> {")));
 }
 
 console.log(`v169 smoke: pass=${pass} fail=${fail}`);

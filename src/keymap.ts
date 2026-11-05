@@ -135,7 +135,7 @@ export function tapEventKey(key: TapMod): string {
  *  値は Space の単押し（`Editor.SPACE_TAP_MS`）と同じ 250ms＝このアプリの「タップ」の定義を割らない。 */
 export const MOD_TAP_MS = 250;
 
-/** V165 (D-4・Codex 指摘①⑤): 修飾キーの単体タップを見張る小さな状態機械。
+/** V165 (D-4・独立レビューの指摘①⑤): 修飾キーの単体タップを見張る小さな状態機械。
  *
  *  ★**編集画面と設定画面とホーム画面で同じ実体を使う**（同じ条件・同じしきい値）。
  *   Node から import できるので、条件の抜けはスモークが直接叩いて見張れる。
@@ -148,7 +148,7 @@ export class ModTapWatcher {
   constructor(private now: () => number = () => performance.now()) {}
 
   /** keydown。候補を立てる／壊す。**`blocked` が真の間は候補を立てない**
-   *  （描画中・ダイアログ中・文字入力中・IME 変換中＝Codex 指摘①）。
+   *  （描画中・ダイアログ中・文字入力中・IME 変換中＝独立レビューの指摘①）。
    *  V183 (A-82): **ほかの修飾キーが押されている間も立てない**（`mods`＝その keydown のフラグ）。立てるかどうかは
    *  設定画面の取得と同じ `tapCandidateOf` が決める。
    *  ★型では `mods` を必須にしてある（アプリの呼び出し元が渡し忘れたら build が落ちる）。実行時は無くても動く
@@ -186,7 +186,7 @@ export class ModTapWatcher {
   }
 }
 
-/** V165 (D-4・Codex 指摘④): **押している間だけ効く操作**は単体タップに割り当てられない。
+/** V165 (D-4・独立レビューの指摘④): **押している間だけ効く操作**は単体タップに割り当てられない。
  *  タップは「離した瞬間」に発動するので、押しっぱなしの意味を持てない
  *  （`xform.peek` を割り当てると透かしが入りっぱなしで戻らなくなる）。 */
 export function isHoldOnlyCommand(id: string): boolean {
@@ -241,9 +241,10 @@ export const COMMANDS = [
   // ---- 編集 ----
   { id: "edit.undo", labelKey: "keys.cmd.editUndo.label", group: "edit", repeatable: true },
   { id: "edit.redo", labelKey: "keys.cmd.editRedo.label", group: "edit", repeatable: true },
-  { id: "edit.copy", labelKey: "keys.cmd.editCopy.label", group: "edit" },
+  // V199 (A-105): 範囲選択が無いときの Ctrl+C はレイヤー（フォルダ）のコピー・Ctrl+V は最後にコピーしたほう（editor の runCommand）
+  { id: "edit.copy", labelKey: "keys.cmd.editCopy.label", group: "edit", noteKey: "keys.cmd.editCopy.hint" },
   { id: "edit.cut", labelKey: "keys.cmd.editCut.label", group: "edit" },
-  { id: "edit.paste", labelKey: "keys.cmd.editPaste.label", group: "edit" },
+  { id: "edit.paste", labelKey: "keys.cmd.editPaste.label", group: "edit", noteKey: "keys.cmd.editPaste.hint" },
   {
     id: "edit.deleteSelection",
     labelKey: "keys.cmd.editDeleteSelection.label",
@@ -271,6 +272,7 @@ export const COMMANDS = [
   // ---- M11-15: レイヤーのコピー＆ペースト（コマ1枚ぶん・レイヤー専用の控え） ----
   { id: "layer.copy", labelKey: "keys.cmd.layerCopy.label", group: "edit", noteKey: "keys.cmd.layerCopy.hint" },
   { id: "layer.paste", labelKey: "keys.cmd.layerPaste.label", group: "edit", noteKey: "keys.cmd.layerPaste.hint" },
+  { id: "layer.pasteOver", labelKey: "keys.cmd.layerPasteOver.label", group: "edit", noteKey: "keys.cmd.layerPasteOver.hint" }, // V203 (A-109): 重ね貼り
   { id: "layer.pasteNew", labelKey: "keys.cmd.layerPasteNew.label", group: "edit" },
   { id: "layer.pasteAll", labelKey: "keys.cmd.layerPasteAll.label", group: "edit", noteKey: "keys.cmd.layerPasteAll.hint" },
   // ---- ファイル ----
@@ -530,7 +532,7 @@ export function keyLabel(b: KeyBinding | null | undefined): string {
 function keyLabelText(b: KeyBinding): string {
   // V165 (D-4): 「Alt（タップ）」。キーの刻印そのもの（Ctrl/Shift/Alt）は訳さず、注記だけ訳す
   //（`codeLabel` の「記号・英数は刻印なので訳さない」と同じ考え方）。
-  // Codex 指摘⑦: `KeyboardEvent.key` は "Control" だが、この画面と案内文の表記は "Ctrl" なので揃える
+  // 独立レビューの指摘⑦: `KeyboardEvent.key` は "Control" だが、この画面と案内文の表記は "Ctrl" なので揃える
   if (b.tap) return t("keys.tap.label", { key: b.tap === "Control" ? "Ctrl" : b.tap });
   const mods = [b.ctrl ? "Ctrl" : "", b.shift ? "Shift" : "", b.alt ? "Alt" : ""].filter(Boolean);
   // M16 (K-4): ポインタ割り当ては「Alt＋クリック」等（末尾がボタン名）
@@ -899,7 +901,7 @@ export function findConflict(
   return null;
 }
 
-/** V167（Codex 指摘・低）: これから入れる割り当て `b` と**取り合う相手を全部**返す。
+/** V167（独立レビューの指摘・低）: これから入れる割り当て `b` と**取り合う相手を全部**返す。
  *
  *  ★1つとは限らない。古い設定に `Alt（タップ）` と `Alt＋左クリック` と `Alt＋右クリック` が
  *   同居していると、`findConflict` が返す1つだけを消しても**取り合いが残る**

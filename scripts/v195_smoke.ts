@@ -48,6 +48,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
+import { editorFileHaving, readEditorSource } from "./editorSource";
 
 let pass = 0;
 let fail = 0;
@@ -311,8 +312,42 @@ G.setInterval = (fn: () => void) => {
 G.clearInterval = (id: number) => {
   intervals.delete(id);
 };
+// ★V209 (A-121・R-5): 再生は経過時間からコマを決める形（playClock.ts の PlayClock・requestAnimationFrame）になった。
+//  時計（performance.now()・音の時計・描く合図）を偽物にして、tickAll は「1 コマぶんの時間を進めて描く合図を回す」にする。
+//  前の版の木（V195 の前・v1.9.0・写し）は今までどおり setInterval の拍を回す（両方を 1 回ずつ）
+const clockNow = { ms: 1000 };
+const rafQ: (() => void)[] = [];
+let curFps = 8;
+const fakeCtxV209 = { state: "running", currentTime: 0, baseLatency: 0, outputLatency: 0, destination: {} };
 function tickAll() {
   for (const fn of [...intervals.values()]) fn();
+  // 1 コマぶん（＋1 ms）進めて、描く合図を回す（音の時計も同じだけ進む）
+  const d = 1000 / curFps + 1;
+  clockNow.ms += d;
+  fakeCtxV209.currentTime += d / 1000;
+  for (const f of rafQ.splice(0)) f();
+}
+/** V209: 木の playClock.ts の時計を偽物に（その木に playClock.ts があるときだけ）。PlayClock.start を包んで始めた秒を記録する */
+const wrappedPC = new WeakSet<object>();
+let curAudioRec: Any[] | null = null;
+function fakeClockFor(T: Tree) {
+  const PC = T.PC;
+  if (!PC?.playEnv) return;
+  PC.playEnv.now = () => clockNow.ms;
+  PC.playEnv.raf = (cb: () => void) => (rafQ.push(cb), rafQ.length);
+  PC.playEnv.caf = () => {
+    rafQ.length = 0;
+  };
+  PC.playEnv.ctx = () => fakeCtxV209;
+  if (!wrappedPC.has(PC)) {
+    wrappedPC.add(PC);
+    const st0 = PC.PlayClock.prototype.start;
+    PC.PlayClock.prototype.start = function (this: Any, o: Any) {
+      // 前の版の start(bgm, offset) の記録と同じ形（BGM の頭出しの秒＝始めた位置）
+      curAudioRec?.push(["start", o.t0]);
+      return st0.call(this, o);
+    };
+  }
 }
 const flush = async (n = 8) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
@@ -332,6 +367,7 @@ interface Tree {
   SL: Any; // sleep
   R: Any; // render
   I: Any; // i18n
+  PC: Any; // V209: playClock（無い木は null）
   editorSrc: string;
   libSrc: string;
   css: string;
@@ -356,7 +392,10 @@ async function loadTree(dir: string, label: string, opts: { pure?: boolean } = {
     SL: await imp("src/editor/sleep.ts"),
     R: await imp("src/editor/render.ts"),
     I: await imp("src/i18n/index.ts"),
-    editorSrc: rd("src/editor/editor.ts"),
+    PC: await imp("src/editor/playClock.ts"), // V209 (A-121): 再生の時計（前の版の木には無い）
+    // ★V213: 描く処理（gotoFrame・this.history.push の多く）はコア src/editor/core/editorCore.ts へ字を変えずに移った。
+    //  editor.ts とコアの字を順に並べたものを読む（コアの無い前の木では editor.ts だけ＝数え方は同じ）
+    editorSrc: readEditorSource(dir),
     libSrc: rd("src/library.ts"),
     css: rd("src/styles.css"),
     html: rd("index.html"),
@@ -396,14 +435,22 @@ interface Edit {
   to: string;
 }
 let mutSeq = 0;
+const ED = "src/editor/editor.ts";
+/** ★V213: editor.ts を的にした書き換えは、書き換える字のあるファイル（editor.ts かコア src/editor/core/editorCore.ts）へ当てる。
+ *  描く処理はコアへ字を変えずに移った。どちらにも無い・両方にあるときは editor.ts のまま（＝当たらない数で赤） */
+function editTarget(dir: string, e: Edit): string {
+  if (e.file !== ED) return e.file;
+  return editorFileHaving(dir, e.from) ?? e.file;
+}
 async function mutant(edits: Edit[]): Promise<{ tree: Tree | null; why: string }> {
   const dir = path.join(WORK, `m${++mutSeq}`);
   copySrc(dir);
   for (const e of edits) {
-    const f = path.join(dir, e.file);
+    const file = editTarget(dir, e);
+    const f = path.join(dir, file);
     const text = fs.readFileSync(f, "utf8");
     const n = text.split(e.from).length - 1;
-    if (n !== 1) return { tree: null, why: `書き換えが当たらない（${n} 箇所）: ${e.file}: ${e.from.trim().slice(0, 80)}` };
+    if (n !== 1) return { tree: null, why: `書き換えが当たらない（${n} 箇所）: ${file}: ${e.from.trim().slice(0, 80)}` };
     fs.writeFileSync(f, text.replace(e.from, () => e.to));
   }
   return { tree: await loadTree(dir, `m${mutSeq}`), why: "" };
@@ -452,6 +499,19 @@ function fakeAudio(rec: Any[]) {
     fireSe: (t: { id: string }) => void rec.push(["fireSe", t.id]),
     restart: () => void rec.push(["restart"]),
     invalidate() {},
+    // ★V209 (A-121): 新しい音の口（PlayClock が予約する）。SE の予約は前の fireSe と同じ記録にする（鳴らした SE の id）
+    preparePlay: async () => ({ ctx: null, bgm: null }),
+    seBuffer: () => ({ duration: 1 }),
+    scheduleSe: (_c: unknown, _b: unknown, t: { id: string } | null) => void (t && rec.push(["fireSe", t.id])),
+    scheduleBgm: () => {},
+    stopBgm: () => {},
+    cancelBgmFrom: () => {},
+    cancelSeFrom: () => {},
+    restopBgm: () => {},
+    recutSe: () => {},
+    pauseSe: () => {},
+    discardPausedSe: () => {},
+    setBgmVolume: () => {},
   };
 }
 /** 作りものの作品。frames 枚・layers 枚。fill(fi, li) で各レイヤーの中身を作る */
@@ -503,6 +563,11 @@ function makeEd(T: Tree, p: Any, frame = 0) {
   ed.evictBehind = async () => {};
   ed.updateSizeMeter = () => {};
   intervals.clear();
+  // V209: 時計を偽物に・始めた秒の記録先・1 コマぶんの長さ
+  rafQ.length = 0;
+  fakeClockFor(T);
+  curAudioRec = rec.audio;
+  curFps = T.M.FPS_TABLE[p.speedIndex] || 8;
   return { ed, rec };
 }
 const tt = (T: Tree, key: string, vars?: Any) => T.I.t(key, vars);
@@ -585,7 +650,13 @@ function libToggle(libSrc: string, playStartFrame: Any) {
   const text = fnText(libSrc, "togglePreviewPlayback");
   if (!text) throw new Error("togglePreviewPlayback が無い");
   const js = ts.transpileModule(`function ${text}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  return new Function("playStartFrame", `"use strict"; ${js}; return togglePreviewPlayback;`)(playStartFrame);
+  // ★V209 (A-121): 「曲の長さで書き出す」の形かを LibraryScreen.songModeWanted で見るようになった。本物の本文を取り出して渡す
+  //  （前の版の木には無い＝いつも偽）
+  const sm = fnText(libSrc, "songModeWanted");
+  const songModeWanted = sm
+    ? new Function(`"use strict"; ${ts.transpileModule(`function ${sm.replace(/^\s*(?:private |public )?static /, "")}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText}; return songModeWanted;`)()
+    : () => false;
+  return new Function("playStartFrame", "LibraryScreen", `"use strict"; ${js}; return togglePreviewPlayback;`)(playStartFrame, { songModeWanted });
 }
 function a96libProject(T: Tree, fn?: Any): V {
   const toggle = fn ?? libToggle(T.libSrc, T.PS?.playStartFrame ?? ((c: number) => c));
@@ -711,7 +782,8 @@ async function a97goto(T: Tree): Promise<V> {
   if (ed.frameIndex !== 4) return ng(`gotoFrame(4) → コマ ${ed.frameIndex}`);
   if (!rec.audio.some((a: Any) => a[0] === "stop")) return ng(`音が止まらない（${JSON.stringify(rec.audio)}）`);
   if (rec.audio.some((a: Any) => a[0] === "pause")) return ng("⏸（pause）で止めている＝続きが残る");
-  if (intervals.size !== 0) return ng("再生のタイマーが残っている");
+  // V209: 再生のタイマー（前の版）も時計（今の版）も残っていない
+  if (intervals.size !== 0 || ed.playClock?.running || rafQ.length !== 0) return ng("再生のタイマー（時計）が残っている");
   const n = rec.toasts.length;
   if (n !== 0) return ng(`トーストが出た: ${rec.toasts.join()}`);
   // ▶ でそこから音と絵が揃って始まる
@@ -797,7 +869,9 @@ function a97static(T: Tree): V {
   if (!click || /stopPlayback/.test(click)) why.push("フィルムの click に stopPlayback（または見つからない）");
   const ak = noComments(fnText(T.editorSrc, "handleArrowKey") ?? "");
   if (!ak || /stopPlayback/.test(ak)) why.push("handleArrowKey に stopPlayback（または見つからない）");
-  const rc = noComments(fnText(T.editorSrc, "runCommand") ?? "");
+  // ★V214 (M-2b-1a): frame.prev / next の分岐は PC の runCommand からコアの runCoreCommand へ移った（中身は同じ・PC の runCommand は
+  //  先にコアへ渡す）。frame.prev〜frame.add の間を見るのは同じ
+  const rc = noComments(fnText(T.editorSrc, "runCoreCommand") ?? "");
   const seg = rc.slice(rc.indexOf('case "frame.prev"'), rc.indexOf('case "frame.add"'));
   if (!seg || /stopPlayback/.test(seg)) why.push("frame.prev/next に stopPlayback（または見つからない）");
   return why.length ? ng(why.join("／")) : ok();
@@ -1311,13 +1385,21 @@ async function a99scan(T: Tree): Promise<V> {
 }
 
 /** 本物の Editor の deletePaletteColor */
+/** ★V213: 範囲のコピー（static clipboard）を置く。`clipboard` はコアの `EditorCore` の static へ移り、コアは
+ *  `EditorCore.clipboard` を読む。`T.Editor.clipboard = …` と書くと `Editor` に自前の値ができてコアの値と別になる
+ *  （読む側は見ない）。だから持ち主（プロトタイプの鎖で `clipboard` を自前で持つクラス）に書く。前の木では `Editor` 自身 */
+function setClipboard(T: Tree, v: unknown): void {
+  let o: Any = T.Editor;
+  while (o && !Object.prototype.hasOwnProperty.call(o, "clipboard")) o = Object.getPrototypeOf(o);
+  (o ?? T.Editor).clipboard = v;
+}
 async function a99editor(T: Tree): Promise<V> {
   const why: string[] = [];
   const RED = "#ff1717";
   const fresh = (o: { frames?: number; bits?: 8 | 16 } = {}) => {
     const p = build(T, { frames: o.frames ?? 3, layers: 2, bits: o.bits });
     const { ed, rec } = makeEd(T, p, 0);
-    T.Editor.clipboard = null;
+    setClipboard(T, null);
     ed.layerClip = null;
     ed.history.clear();
     return { p, ed, rec };
@@ -1435,11 +1517,12 @@ async function a99editor(T: Tree): Promise<V> {
     const k = idx(p, RED);
     const d = T.M.allocIndexBuf(p);
     d[0] = k;
-    T.Editor.clipboard = { w: 1, h: 1, x: 0, y: 0, data: d };
+    setClipboard(T, { w: 1, h: 1, x: 0, y: 0, data: d });
     await ed.deletePaletteColor(RED);
     if (p.colorTable[k] !== RED || rec.toasts.at(-1) !== tt(T, "ed.color.usedClip.toast")) why.push(`⑨ 範囲のコピー: ${rec.toasts.at(-1)}`);
-    T.Editor.clipboard = null;
-    ed.layerClip = d;
+    setClipboard(T, null);
+    // V199 (A-105): レイヤーの控えは { kind, …, buf } の形になった（フォルダの控えは items[].buf）。調べるのは同じ（clipBuffers）
+    ed.layerClip = { kind: "layer", frame: 0, layerId: "A", name: "A", buf: d };
     await ed.deletePaletteColor(RED);
     if (p.colorTable[k] !== RED || rec.toasts.at(-1) !== tt(T, "ed.color.usedClip.toast")) why.push(`⑨ レイヤーのコピー: ${rec.toasts.at(-1)}`);
     ed.layerClip = null;
@@ -1575,7 +1658,10 @@ function a99inventory(T: Tree): V {
   visit(s);
   const bad = sites.filter((x) => !x.ok);
   if (REPORT) log(`  [A99-5] this.history.push ${sites.length} か所（object ${sites.filter((x) => x.what === "object").length}・工場 ${sites.filter((x) => x.what !== "object").length}）`);
-  if (sites.length !== 42) return ng(`this.history.push の数が ${sites.length}（V195 時点 42。増えたら colorRefs を申告して数を直す）`);
+  // V199 (A-105): 42 → 43。レイヤーの貼り付け（このコマ・範囲・全コマ）を 1 本の pushLayerPasteHistory にまとめ（-1 +1）、
+  //  フォルダの控えの「新規レイヤーへ」（pasteFolderToNew）が 1 つ増えた。どれも colorRefs を申告している（下の bad で見る）
+  // ★V215 (A-125): 43 → 44。［整理］（tidyPaletteColors・使っていない色をまとめて消す）の取り消しが 1 つ増えた。colorRefs を申告している（下の bad で見る）
+  if (sites.length !== 44) return ng(`this.history.push の数が ${sites.length}（V215 時点 44。増えたら colorRefs を申告して数を直す）`);
   if (bad.length) return ng(`colorRefs の申告が無い: ${bad.map((b) => `${b.line}(${b.what})`).join(", ")}`);
   // 工場（history.ts）が申告していること
   const h = fnText(fs.readFileSync(path.join(T.dir, "src/editor/history.ts"), "utf8"), "bufferChangeEntry") ?? "";
@@ -1646,7 +1732,6 @@ interface Mut {
   edits: Edit[];
   checks: string[];
 }
-const ED = "src/editor/editor.ts";
 const MUTS: Mut[] = [
   { id: "X1", what: "編集画面の ▶ で playStartFrame を呼ばない", checks: ["A96-2"], edits: [{ file: ED, from: "    if (at !== this.frameIndex) this.gotoFrame(at);\n", to: "" }] },
   { id: "X2", what: "ライブラリ .memoanima の巻き戻しを消す", checks: ["A96-3"], edits: [{ file: "src/library.ts", from: "          if (at !== this.previewFrame) {\n            this.previewFrame = at;", to: "          if (false) {\n            this.previewFrame = at;" }] },

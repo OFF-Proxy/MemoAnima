@@ -42,6 +42,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { editorFileHaving, readEditorSource } from "./editorSource";
 
 let pass = 0;
 let fail = 0;
@@ -121,7 +122,8 @@ async function loadTree(dir: string, label: string): Promise<Tree> {
   const E = await import(u("src/editor/editor.ts"));
   const M = await import(u("src/editor/model.ts"));
   const R = await import(u("src/editor/raster.ts"));
-  const editorSrc = fs.readFileSync(path.join(dir, "src/editor/editor.ts"), "utf8");
+  // ★V213 (M-2a): 描く処理はコア（src/editor/core/editorCore.ts）へ移った＝editor.ts とコアの字を順に並べたもの（[S-11] が読む）
+  const editorSrc = readEditorSource(dir);
   return { label, dir, Editor: E.Editor, M, R, editorSrc };
 }
 
@@ -719,6 +721,11 @@ async function checkS4(T: Tree): Promise<V> {
     if (popcount(drawnMask(B)) !== 0) return ng("★次のなぞりを Ctrl+Z しても B に画素が残る（履歴の外に書かれた）");
   }
   // (i) 押した位置 pt と round(lastPt) が一致する（A-70 の半画素ずらし）。本物の clientToPixel / clientToStrokePt で
+  // ★V213 (M-2a): PC の clientToStrokePt は消えた。lastPt に入る座標は、PC の sampleOf（clientToPixelF の結果をそのまま
+  //  サンプルの x・y に）→ コアの sampleStrokePt（半画素ずらす）で作られる＝描線の経路が実際に通る道。その道で同じ値を作る
+  //  （クライアント座標は ev() の +0.5 を通さずにそのまま渡す）
+  const strokePtOf = (ed: Mod, cx: number, cy: number): { x: number; y: number } =>
+    ed.sampleStrokePt(ed.sampleOf({ ...ev(0, 0), clientX: cx, clientY: cy }));
   {
     const { ed } = makeEd(T, build(T, [0]));
     const rr = mulberry32(4);
@@ -726,13 +733,13 @@ async function checkS4(T: Tree): Promise<V> {
       const cx = -3 + rr() * 326;
       const cy = -3 + rr() * 246;
       const a = ed.clientToPixel(cx, cy);
-      const b = ed.clientToStrokePt(cx, cy);
+      const b = strokePtOf(ed, cx, cy);
       if (a.x !== Math.round(b.x) || a.y !== Math.round(b.y)) return ng(`★pt と round(lastPt) がずれる (${cx}, ${cy})`);
     }
     for (let k = 0; k <= 320 * 16; k++) {
       const cx = k / 16; // 半画素・画素の境目ちょうども
       const a = ed.clientToPixel(cx, cx * 0.75);
-      const b = ed.clientToStrokePt(cx, cx * 0.75);
+      const b = strokePtOf(ed, cx, cx * 0.75);
       if (a.x !== Math.round(b.x) || a.y !== Math.round(b.y)) return ng(`★pt と round(lastPt) がずれる（境目 ${cx}）`);
     }
   }
@@ -1033,16 +1040,27 @@ function methodBodyML(src: string, name: string): string {
   return "";
 }
 const FUNNEL = "this.endLine1px();";
+// ★V213 (M-2a): PC の onPointerDownInner / onPointerMove / onPointerUp の描く中身はコアの片へ移った（PC は同じ順で片を呼ぶだけ）:
+//  pointerdown の網（dropStaleLine1px・漏斗・束の確定の 3 行）→ strokeSettle／pointermove の道具ごとの中身 → strokeMoveOne／
+//  pointerup の確定（漏斗・束の確定・道具ごとの確定）→ strokeFinish。順の縛りは片の中で、PC がその片を**1 回だけ**呼ぶことと
+//  PC の側に漏斗・1px の呼び出しが無いこと（2 か所に割れていない）を縛る
+function callsOnce(body: string, call: string): boolean {
+  return body.split(call).length - 1 === 1;
+}
 function checkS11(src: string): V {
-  const up = methodBody(src, "onPointerUp");
-  if (up === "") return ng("onPointerUp を切り出せない（検査が黙る）");
+  const upPC = methodBody(src, "onPointerUp");
+  if (upPC === "") return ng("onPointerUp を切り出せない（検査が黙る）");
+  if (!callsOnce(upPC, "this.strokeFinish(this.sampleOf(e));")) return ng("★onPointerUp が確定（strokeFinish）を 1 回だけ呼んでいない");
+  if (upPC.includes(FUNNEL)) return ng("★onPointerUp で漏斗を 2 回呼んでいる（どちらが効くか分からない）");
+  const up = methodBody(src, "strokeFinish");
+  if (up === "") return ng("strokeFinish を切り出せない（検査が黙る）");
   const f = up.indexOf(FUNNEL);
   if (f < 0) return ng("★onPointerUp で漏斗を呼んでいない");
   if (up.indexOf(FUNNEL, f + 1) >= 0) return ng("★onPointerUp で漏斗を 2 回呼んでいる（どちらが効くか分からない）");
   const c = up.indexOf("this.commitEraseAll()");
   const h = up.indexOf('this.pushBufferHistory("描画"');
   const s = up.indexOf("switch (this.tool)");
-  if (c < 0 || h < 0 || s < 0) return ng("onPointerUp の commitEraseAll / pushBufferHistory / switch が見つからない（検査が黙る）");
+  if (c < 0 || h < 0 || s < 0) return ng("onPointerUp（strokeFinish）の commitEraseAll / pushBufferHistory / switch が見つからない（検査が黙る）");
   if (!(f < c)) return ng("★onPointerUp: 漏斗が commitEraseAll() より後ろ");
   if (!(f < h)) return ng('★onPointerUp: 漏斗が pushBufferHistory("描画" より後ろ');
   if (!(f < s)) return ng("★onPointerUp: 漏斗が道具の分岐（switch）の中にある（いまの道具に関係なく通らない）");
@@ -1052,14 +1070,22 @@ function checkS11(src: string): V {
   const fc = fin.indexOf("this.commitEraseAll()");
   if (ff < 0) return ng("★finishEraseAllNow で漏斗を呼んでいない");
   if (fc < 0 || !(ff < fc)) return ng("★finishEraseAllNow: 漏斗が commitEraseAll() より後ろ");
-  const down = methodBody(src, "onPointerDownInner");
+  const downPC = methodBody(src, "onPointerDownInner");
+  if (downPC === "") return ng("onPointerDownInner を切り出せない（検査が黙る）");
+  if (!callsOnce(downPC, "this.strokeSettle();")) return ng("★pointerdown が網（strokeSettle）を 1 回だけ呼んでいない");
+  if (downPC.includes(FUNNEL) || downPC.includes("this.dropStaleLine1px();")) return ng("★pointerdown の網が PC とコアの 2 か所に割れている");
+  const down = methodBody(src, "strokeSettle");
   const df = down.indexOf(FUNNEL);
   const dc = down.indexOf("if (this.eraseAllStroke) this.commitEraseAll();");
   if (df < 0 || dc < 0 || !(df < dc)) return ng("★pointerdown の網で、漏斗が commitEraseAll() より前に無い");
   // ★pointermove の 1px の呼び出しは**小数の lastPt をそのまま**渡す（A-70。丸めて渡す後戻りは L の数にも端にも出ないので、
   //  形で縛る＝v176 [S-3] が strokeSegment の呼び出しに掛けているのと同じ縛りを、1px の呼び出しにも掛ける）
-  const move = methodBody(src, "onPointerMove");
-  if (move === "") return ng("onPointerMove を切り出せない（検査が黙る）");
+  const movePC = methodBody(src, "onPointerMove");
+  if (movePC === "") return ng("onPointerMove を切り出せない（検査が黙る）");
+  if (!callsOnce(movePC, "this.strokeMoveOne(this.sampleOf(ev))")) return ng("★pointermove が動いた点（strokeMoveOne）を 1 回だけ呼んでいない");
+  if (/this\.line1pxSegment\(/.test(movePC)) return ng("★pointermove の 1px の呼び出しが PC とコアの 2 か所に割れている");
+  const move = methodBody(src, "strokeMoveOne");
+  if (move === "") return ng("strokeMoveOne を切り出せない（検査が黙る）");
   const MOVE_1PX = [
     "this.line1pxSegment(this.lastPt.x, this.lastPt.y, tx, ty, o, buf, null);",
     "this.line1pxSegment(this.lastPt.x, this.lastPt.y, tx, ty, o, null, all);",
@@ -1074,12 +1100,21 @@ function checkS11(src: string): V {
   const dd = down.indexOf("this.dropStaleLine1px();");
   if (dd < 0 || !(dd < df)) return ng("★pointerdown の網で、漏斗より前に 1 枚の経路の取り残しを捨てていない");
   const drop = methodBody(src, "dropStaleLine1px");
-  if (!/if \(this\.line1px && !this\.line1px\.all\) this\.line1px = null;/.test(drop)) return ng("★dropStaleLine1px の中身が違う（1 枚の経路だけを捨てる）");
-  const mount = methodBodyML(src, "mount");
+  // V209 (A-122): 捨てたとき、見せていた仮の 1 ドットを画面に残さないよう描き直す形になった（捨てる条件と捨て方は同じ）
+  if (!/if \(this\.line1px && !this\.line1px\.all\) \{[^}]*?this\.line1px = null;/.test(drop)) return ng("★dropStaleLine1px の中身が違う（1 枚の経路だけを捨てる）");
+  // ★V214 (M-2b-1a): mount の「描きかけの束と 1px の仮を捨てる」2 行はコアの openWorkReset へ移った（PC の mount は同じ位置で
+  //  openWorkReset を呼ぶだけ）。PC の mount がその片を**1 回だけ**呼ぶことと、片の中で捨てていることを縛る（V213 の片と同じ形）
+  const mountPC = methodBodyML(src, "mount");
+  if (mountPC === "") return ng("mount を切り出せない（検査が黙る）");
+  if (!callsOnce(mountPC, "this.openWorkReset(project, cb);")) return ng("★mount が作品の状態の初期化（openWorkReset）を 1 回だけ呼んでいない");
+  const mount = methodBody(src, "openWorkReset");
   if (!/this\.eraseAllStroke = null;/.test(mount)) return ng("mount を切り出せない（検査が黙る）");
   if (!/this\.line1px = null;/.test(mount)) return ng("★mount で 1px の状態を捨てていない（別の作品へ持ち越す）");
   // 新しいモジュールを呼ぶのはペン系の道だけ（直線・図形・塗りには入らない＝K-5）
-  const allowed = new Set(["onPointerDownInner", "onPointerMove", "endLine1px", "line1pxSegment", "line1pxPlot"]);
+  // V209 (A-122・R-5): peekLine1px は 1px の線（ペン系の道）の仮の 1 ドットを合成のときだけ見せる所（描き終わりと同じ打ち方＝plot1px を位相の写しで）。
+  //  直線・図形・塗りの道ではない（状態 this.line1px はペン系の道でしか作られない）ので、ここに並べる
+  // ★V213: ペン系の道の onPointerDownInner / onPointerMove の中身はコアの strokeStart / strokeMoveOne へ移った（名前の置き換えだけ）
+  const allowed = new Set(["strokeStart", "strokeMoveOne", "endLine1px", "line1pxSegment", "line1pxPlot", "peekLine1px"]);
   for (const m of src.matchAll(/\bL1\.\w+\(/g)) {
     // その呼び出しを含むメソッドの名前（直前のメソッド宣言）
     const head = src.slice(0, m.index);
@@ -1087,7 +1122,8 @@ function checkS11(src: string): V {
     const name = decl?.[1] ?? "?";
     if (!allowed.has(name)) return ng(`★新しいモジュールを ${name} から呼んでいる（ペン系の道だけのはず）`);
   }
-  if (!/import \* as L1 from "\.\/line1px";/.test(src)) return ng("新しいモジュールを import していない");
+  // ★V213: L1 を呼ぶのはコア（src/editor/core/）＝相対の置き場所が 1 段深い
+  if (!/import \* as L1 from "\.\.?\/line1px";/.test(src)) return ng("新しいモジュールを import していない");
   return ok();
 }
 {
@@ -1187,7 +1223,8 @@ const MUTS: Mut[] = [
     id: "⑥",
     what: "pointerup を最後まで通らずに終わったなぞりの、1 枚の経路の仮を捨てない（dropStaleLine1px を空にする）",
     target: "S-4",
-    edits: [{ file: ED, from: "    if (this.line1px && !this.line1px.all) this.line1px = null;\n", to: "" }],
+    // V209 (A-122): 捨てる所は描き直しを足したブロックになった。捨てる 1 行を外す（捨てない）
+    edits: [{ file: ED, from: "      this.line1px = null;\n      if (shown && this.mounted) this.renderCanvas();\n", to: "      if (shown && this.mounted) this.renderCanvas();\n" }],
   },
   {
     id: "⑦",
@@ -1215,6 +1252,9 @@ const MUTS: Mut[] = [
     ],
   },
 ];
+// ★V213 (M-2a): 書き換える字（字そのものは変えない）がコアへ移ったものは、的のファイルをコアにする
+//  （editor.ts とコアのどちらにちょうど 1 回あるか。どちらにも無い・両方にあるときは editor.ts のまま＝当たらずに赤）
+for (const m of MUTS) for (const e of m.edits) if (e.file === ED) e.file = editorFileHaving(root, e.from) ?? ED;
 for (const m of MUTS) {
   const { tree, why } = await mutant(m.edits);
   if (!tree) {

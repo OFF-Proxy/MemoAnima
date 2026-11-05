@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "npm run dev:mobile",
+    "devUrl": "http://localhost:1430",
+    "beforeBuildCommand": "npm run build:mobile",
+    "frontendDist": "../dist-mobile"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "メモアニマ (MemoAnima)",
+        "url": "mobile.html",
+        "useHttpsScheme": true
+      }
+    ]
+  },
+  "bundle": {
+    "android": {
+      "minSdkVersion": 29
+    }
+  }
+}

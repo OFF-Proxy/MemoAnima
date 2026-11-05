@@ -136,8 +136,17 @@ async function asleepHasAny(
   slots: readonly number[],
   cc: ContentCache
 ): Promise<boolean> {
+  const vals = await asleepValues(p, f, id, cc);
+  if (!vals) return false;
+  for (const k of slots) if (vals.includes(k)) return true;
+  return false;
+}
+
+/** 眠っているレイヤーに入っている番号の一覧（起こさない・控えの実体に覚える・同じ中身の控えは 1 回だけ展開する）。
+ *  ★V215 (A-125): `asleepHasAny` の中身をそのまま切り出した（全部の色を 1 回で調べる `scanAllColorUse` も同じ道を通る） */
+async function asleepValues(p: Project, f: Frame, id: string, cc: ContentCache): Promise<Uint16Array | null> {
   const e = f.sleep?.[id];
-  if (!e) return false;
+  if (!e) return null;
   let vals: Uint16Array | null | undefined = sleepValues.get(e.z);
   if (!vals) {
     const key = sampleKey(e.bits, e.z);
@@ -156,11 +165,10 @@ async function asleepHasAny(
       cc.set(key, list);
       vals = await pr;
     }
-    if (!vals) return false;
+    if (!vals) return null;
     sleepValues.set(e.z, vals);
   }
-  for (const k of slots) if (vals.includes(k)) return true;
-  return false;
+  return vals;
 }
 
 /** 1 コマ（紙・起きているレイヤー・眠っている控え）にその番号のどれかがあるか。
@@ -255,4 +263,117 @@ export async function scanColorUse(
   // ④ コピー中の絵
   for (const b of src.clips) if (b && bufHasAny(b, slots, b instanceof Uint8Array)) use.clip = true;
   return use;
+}
+
+// ---------------- V215 (A-125): 全部の色を 1 回で調べる（［整理］） ----------------
+//
+// ★調べる範囲・借り方・覚え方は `scanColorUse` と同じ（① 全コマ〔紙・起きているレイヤー・眠っている控え〕② 取り消しの記録
+//   〔bufs・frames・papers・申告の無いものは網〕③ コピー中の絵）。違うのは「この番号があるか」ではなく「どの番号があるか」を
+//   1 回で集めること。眠っている控えは `asleepValues`（＝`scanColorUse` と同じ道・同じ覚え方）で起こさずに番号の一覧を得る。
+//   覚えるのは眠っている控えの番号の一覧（sleepValues）だけ。起きているレイヤー・記録の絵・コピー中の絵は毎回見る。
+// ★判断は `colorDeleteVerdict(scanColorUse(...))` と同じになる（`allColorVerdict`・v215_smoke [P] が乱数の作品で総当たり）:
+//   コマで使っていれば "frames"、そうでなく記録で使っている（申告の無いものがある）なら "history"、
+//   そうでなくコピー中の絵で使っていれば "clip"、どれでもなければ "ok"。
+
+/** 番号ごとの印（`AllColorUse.flags` の値） */
+export const USE_FRAMES = 1;
+export const USE_HISTORY = 2;
+export const USE_CLIP = 4;
+
+/** 全部の色を調べた結果 */
+export interface AllColorUse {
+  /** 番号 → 印（USE_FRAMES | USE_HISTORY | USE_CLIP）。長さは 65,536（どの番号でも引ける） */
+  flags: Uint8Array;
+  /** 取り消しの記録に、画素を抱えているのに申告の無いものがある（網: どの色も消さない） */
+  unknown: boolean;
+}
+
+/** その色（同じ hex の番号の全部）を 1 つずつ調べたときと同じ判断 */
+export function allColorVerdict(u: AllColorUse, slots: readonly number[]): ColorVerdict {
+  if (slots.length === 0) return "ok";
+  let or = 0;
+  for (const k of slots) or |= u.flags[k] ?? 0;
+  if (or & USE_FRAMES) return "frames";
+  if (u.unknown || or & USE_HISTORY) return "history";
+  if (or & USE_CLIP) return "clip";
+  return "ok";
+}
+
+/** 索引バッファに入っている番号に印を付ける（同じバッファ実体は 1 回だけ数える＝📌 全コマ共通レイヤー） */
+function markBuf(buf: IndexBuf, flags: Uint8Array, bit: number, seen: Map<IndexBuf, Uint16Array>): void {
+  let vals = seen.get(buf);
+  if (!vals) {
+    vals = uniqueValues(buf);
+    seen.set(buf, vals);
+  }
+  for (let i = 0; i < vals.length; i++) flags[vals[i]] |= bit;
+}
+
+/** 1 コマ（紙・起きているレイヤー・眠っている控え）に入っている番号に印を付ける */
+async function markFrame(
+  p: Project,
+  f: Frame,
+  flags: Uint8Array,
+  bit: number,
+  seen: Map<IndexBuf, Uint16Array>,
+  cc: ContentCache,
+  tick: () => Promise<void>
+): Promise<void> {
+  flags[f.paper] |= bit;
+  const asleep: string[] = [];
+  for (const id of frameLayerIds(f)) {
+    const b = f.layers[id];
+    if (b) markBuf(b, flags, bit, seen);
+    else asleep.push(id);
+  }
+  if (asleep.length) {
+    // そのコマのぶんを並べて展開する（frameHasAny と同じ形）
+    const vs = await Promise.all(asleep.map((id) => asleepValues(p, f, id, cc)));
+    for (const vals of vs) if (vals) for (let i = 0; i < vals.length; i++) flags[vals[i]] |= bit;
+  }
+  await tick();
+}
+
+/** 全部の色の使われ方を 1 回で調べる（［整理］）。`yieldNow`・`budgetMs` は `scanColorUse` と同じ */
+export async function scanAllColorUse(
+  p: Project,
+  src: ColorScanSources,
+  yieldNow: () => Promise<void>,
+  budgetMs = 12
+): Promise<AllColorUse> {
+  const flags = new Uint8Array(65536);
+  const u: AllColorUse = { flags, unknown: false };
+  let t0 = performance.now();
+  const tick = async () => {
+    if (performance.now() - t0 < budgetMs) return;
+    await yieldNow();
+    t0 = performance.now();
+  };
+  const seen = new Map<IndexBuf, Uint16Array>();
+  const cc: ContentCache = new Map();
+  // ① 全コマ（紙・全レイヤー・眠っている控え）
+  for (const f of p.frames) await markFrame(p, f, flags, USE_FRAMES, seen, cc, tick);
+  // ② 取り消し・やり直しの記録（作品にいま入っているコマは ① で見たので飛ばす）
+  const live = new Set<Frame>(p.frames);
+  for (const e of src.history) {
+    if (colorRefsUnknown(e)) {
+      u.unknown = true; // 網: 画素を抱えているのに申告が無い＝分からないので、どの色も消さない
+      break;
+    }
+    const r = e.colorRefs?.();
+    if (!r) continue;
+    for (const pp of r.papers ?? []) flags[pp] |= USE_HISTORY;
+    for (const b of r.bufs ?? []) {
+      if (!b) continue;
+      markBuf(b, flags, USE_HISTORY, seen);
+      await tick();
+    }
+    for (const f of r.frames ?? []) {
+      if (live.has(f)) continue;
+      await markFrame(p, f, flags, USE_HISTORY, seen, cc, tick);
+    }
+  }
+  // ③ コピー中の絵
+  for (const b of src.clips) if (b) markBuf(b, flags, USE_CLIP, seen);
+  return u;
 }

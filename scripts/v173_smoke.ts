@@ -190,7 +190,7 @@ const checkS6 = (src: string): { ok: boolean; why: string } => {
   if (b === "") return { ok: false, why: "fix_renamed_projects が見つからない" };
   if (!/path_taken\(/.test(b)) return { ok: false, why: "★宛先の門番（path_taken）が無い（上書きし得る）" };
   if (!/skipped/.test(b)) return { ok: false, why: "飛ばした件数を数えていない" };
-  // ★Codex 指摘（高）: `fs::rename` は宛先が在っても**黙って置き換える**（Windows も Unix も）。
+  // ★独立レビューの指摘（高）: `fs::rename` は宛先が在っても**黙って置き換える**（Windows も Unix も）。
   //  アプリ内のロックは同期クライアントやエクスプローラーには効かないので、
   //  「見てから改名するまで」の隙で上書きし得る。**宛先が在れば必ず失敗する** hard_link で行う
   if (/fs::rename/.test(b)) return { ok: false, why: "★fs::rename を使っている（宛先を黙って置き換える）" };
@@ -298,10 +298,10 @@ if (!gz) {
   // 呼び出し側が使っている（純関数だけ直しても意味が無い）
   check("[S-10] importDroppedProjects が importBaseName を使っている", /importBaseName\(/.test(fnBody(main, "importDroppedProjects")));
 
-  // ============= [S-15] ログの伏せ字を Node で叩く（W-10・Codex 指摘 高②の再発防止） =============
+  // ============= [S-15] ログの伏せ字を Node で叩く（W-10・独立レビューの指摘 高②の再発防止） =============
   const { importLogSafe } = gz;
-  // ★Codex が見つけた漏れ方: **名前に空白がある作品**だと、語単位の伏せ字では断片が残った
-  //   `C:\Users\me\作品 1.memoanima` → `<path> 1.memoanima`（「作品」は消えるが「1.memoanima」が残る）
+  // ★独立レビューが見つけた漏れ方: **名前に空白がある作品**だと、語単位の伏せ字では断片が残った
+  //   `D:\Users\me\作品 1.memoanima` → `<path> 1.memoanima`（「作品」は消えるが「1.memoanima」が残る）
   const leaky = "取り込み元が見つかりません: C:\\Users\\me\\作品 1.memoanima";
   const safe = importLogSafe(leaky, ["C:\\Users\\me\\作品 1.memoanima"]);
   check("[S-15] ★空白を含む作品名が 1 文字も残らない（分かっているパスは完全一致で先に消す）",
@@ -310,8 +310,9 @@ if (!gz) {
   const safe2 = importLogSafe(leaky);
   check("[S-15] known を渡し忘れても .memoanima の語は残らない", !safe2.includes(".memoanima"), safe2);
   // `.kwz` / `.ppm` は**ファイル名を残す**（どれが失敗したかの手掛かり・W-10 で許されている）
-  const kwz = importLogSafe("読み込み失敗: C:\\Users\\me\\3DS\\ABCD1234.kwz", ["C:\\Users\\me\\3DS\\ABCD1234.kwz"]);
-  check("[S-15] .kwz はファイル名が残り、フォルダは消える", kwz.includes("ABCD1234.kwz") && !kwz.includes("Users") && !kwz.includes("me"), kwz);
+  // ★V216b (A-133): 残すのは 3DS が付ける名前の形のときだけ（材料を 3DS の形の名前にした。改名した形は v216b_smoke [N] が見る）
+  const kwz = importLogSafe("読み込み失敗: C:\\Users\\me\\3DS\\abcd1234efgh1234ijkl1234mnop.kwz", ["C:\\Users\\me\\3DS\\abcd1234efgh1234ijkl1234mnop.kwz"]);
+  check("[S-15] .kwz はファイル名が残り、フォルダは消える", kwz.includes("abcd1234efgh1234ijkl1234mnop.kwz") && !kwz.includes("Users") && !kwz.includes("me"), kwz);
   // 保険の伏せ字が診断文を壊しすぎない（`mp3/wav` のような語は残す）
   check("[S-15] `mp3/wav` のような語は潰さない", importLogSafe("対応していない形式です: mp3/wav/ogg のみ").includes("mp3/wav/ogg"));
   // パスは known を渡さなくても落ちる（ドライブ文字・UNC・POSIX）

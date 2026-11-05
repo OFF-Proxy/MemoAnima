@@ -46,10 +46,18 @@ export interface ImportedProject {
   placedOffset: { x: number; y: number } | null;
 }
 
+/** V200 (A-100): 取り込みの途中で呼ぶ口（どれも省略可。省略したときの動きは今までと 1 つも変わらない）。 */
+export interface ImportFlipnoteOpts {
+  /** 解析（ヘッダだけ）のあと・**コマの絵を 1 枚も確保する前**に呼ぶ。投げればそこで止まる（何も確保していない）。
+   *  まとめ変換が「見積もりを全部の確保より前に置く」ために使う。手作業で開く道（openEditorWithNote）は渡さない */
+  beforeAlloc?: (info: { frames: number; layers: number }) => void;
+}
+
 /** .kwz/.ppm バイト列からプロジェクトを生成する */
 export async function importFlipnote(
   buf: ArrayBuffer,
-  title: string
+  title: string,
+  opts?: ImportFlipnoteOpts
 ): Promise<ImportedProject> {
   const note: any = await parse(buf);
   const numLayers: number = note.numLayers;
@@ -61,6 +69,8 @@ export async function importFlipnote(
   const ih: number = note.imageHeight;
   const globalPalette: [number, number, number, number][] = note.globalPalette;
   const frameCount: number = note.frameCount;
+  // V200: 確保の前の見積もり（コマ数 × レイヤー数が分かった時点。ここより下で初めて絵の面を確保する）
+  opts?.beforeAlloc?.({ frames: frameCount, layers: numLayers });
 
   // 320×240 未満（.ppm 256×192）は中央配置
   const px0 = Math.floor((W - iw) / 2);
@@ -180,13 +190,14 @@ export async function importFlipnote(
         muted: false,
       });
     }
-    // コマ別のSE配置（getSoundEffectFlags(): frameごとの [SE1..SE4] boolean）
+    // コマ別のSE配置（getSoundEffectFlags(): frameごとに **1〜4 を鍵にしたオブジェクト** {1: SE1, …, 4: SE4}。
+    //  鍵は FlipnoteSoundEffectTrack の値。.ppm は SE4 が常に false。n は 0〜3 なので鍵は n + 1）
     if (seTracks.length > 0) {
-      const flags: boolean[][] = note.getSoundEffectFlags?.() ?? [];
+      const flags: Record<number, boolean>[] = note.getSoundEffectFlags?.() ?? [];
       for (let f = 0; f < Math.min(frameCount, flags.length); f++) {
         const ids: string[] = [];
         for (let n = 0; n < 4; n++) {
-          if (flags[f]?.[n] && seIdBySlot[n]) ids.push(seIdBySlot[n]!);
+          if (flags[f]?.[n + 1] && seIdBySlot[n]) ids.push(seIdBySlot[n]!);
         }
         if (ids.length > 0) p.frames[f].se = ids;
       }

@@ -9,6 +9,7 @@ import { Player, parse } from "flipnote.js";
 import { Project, FPS_TABLE } from "./editor/model";
 import { compositeFrame, frameToPngBlob } from "./editor/render";
 import { playStartFrame } from "./editor/playStart"; // V195 (A-96): ▶ を押したときに始めるコマ（編集画面と同じ 1 つ）
+import { PlayClock, startTimeOf, type PlayHost, type BgmPlan } from "./editor/playClock"; // ★V209 (A-121): 経過時間からコマを決める時計
 // V192 (A-93): 320×240 を画面に出すときは「実際の画素」で——縮めるときは面積平均・広げるときは整数倍（表示だけ）
 import { presentFit, fitFor, fitKey, watchFit, rgbaOf, contentBox, currentDpr, decodeImageRgba, releaseCanvas, type DisplayFit } from "./editor/scaledView";
 import { fitDisplay } from "./editor/downscale";
@@ -16,17 +17,19 @@ import { fitDisplay } from "./editor/downscale";
 // compositeFrame は眠りを知らない（`if (!lb) continue` で白紙になる）ので、
 // プレビューと書き出しはここで起こしてから使う
 import { wakeFrame, sleepFrame, frameHasAsleep } from "./editor/sleep"; // V168 (E-3): 全コマ起こしを撤去
+import type { Frame } from "./editor/model";
+import { createSlider, type SliderHandle } from "./ui/slider"; // V204 (A-110): 再生バー（編集画面の不透明度のつまみと同じ部品）
 import { projectFromBytes } from "./editor/serialize";
 import { FrameSource, ExportAudioSource, noteSource, projectSource, formatSize } from "./editor/exporter";
-import { AudioPreview, pcmS16ToWav, bgmPlaybackRate, renderExportMix } from "./editor/audio";
-import type { BgmTrack } from "./editor/model";
+import { AudioPreview, pcmS16ToWav, bgmPlaybackRate, normalizeTrim, renderExportMix } from "./editor/audio";
+import type { BgmTrack, SeTrack } from "./editor/model";
 import { t, getLang } from "./i18n";
 import { errText, tooLargeBytes, isUnreadableSource } from "./ui/errText"; // V169 (B-3): 門番の TOO_LARGE を人が読める文へ／V173b: 解析ライブラリの英語を画面に出さない
-import { importLogSafe, logSafeFileLabel } from "./gzname"; // V173b (W-10): ログへ書く前にパスと作品名を伏せる
+import { importLogSafe, logSafeFileLabel, bulkImportErrorLogSafe } from "./gzname"; // V173b (W-10): ログへ書く前にパスと作品名を伏せる
 import { icon, setIconLabel } from "./icons"; // V171: 線画アイコン（絵文字は OS で絵が変わる）
 // V159 (G-3): 長くかかりうる処理の共通入口（読み込み中の表示・遅延・計測はここに1つ）
 import { runWithBusy } from "./ui/busy";
-import { collabAlbumName, defaultAlbumName, newAlbumName } from "./i18n/defaults";
+import { defaultAlbumName, newAlbumName } from "./i18n/defaults";
 
 export type LibraryView = {
   kind: "note" | "project";
@@ -65,10 +68,21 @@ export interface LibraryCallbacks {
   openEditorWithNote: (item: LibraryView) => void;
   openEditorWithProject: (item: LibraryView) => void;
   newNote: (album: string) => void;
-  /** M6-1/2: エクスポートダイアログを開く（M5-1: ミックス生成つき音声ソース） */
-  openExport: (source: FrameSource, baseName: string, audio?: ExportAudioSource | null) => void;
+  /** V200 (A-100): アルバムの 3DS 作品（.kwz／.ppm）をまとめて .memoanima にする（確認・進み具合・結果は main.ts） */
+  convertAlbumNotes?: (album: string) => void;
+  /** V200 (A-100): まとめ変換が走っているか（確認の前の数えの間も）。そのあいだはフォルダ・1 件の取り込みを始めない */
+  kwzBatchBusy?: () => boolean;
+  /** M6-1/2: エクスポートダイアログを開く（M5-1: ミックス生成つき音声ソース）。
+   *  V198 (A-104 E-2): `work`＝書き出しのあとの「保存先を開く」が指す作品（アルバムとファイル名）。
+   *  作品ファイル（.memoanima/.animemo）のときだけ渡す。.kwz/.ppm は null＝ボタンを出さない */
+  openExport: (
+    source: FrameSource,
+    baseName: string,
+    audio?: ExportAudioSource | null,
+    work?: { album: string; name: string } | null
+  ) => void;
   /** V154: ボタンの語を指定できる（`main.ts` の `confirmDialog` は元から対応している）。
-   *  復元の提案は「はい/いいえ」だと**押した結果が想像できない**（Codex レビュー指摘・優先度 高） */
+   *  復元の提案は「はい/いいえ」だと**押した結果が想像できない**（独立レビューの指摘・優先度 高） */
   confirm: (msg: string, labels?: { yes: string; no: string }) => Promise<boolean>;
   prompt: (msg: string, def: string) => Promise<string | null>;
   toast: (msg: string) => void;
@@ -124,10 +138,30 @@ export class LibraryScreen {
   private player: Player | null = null;
   private keydownBound = false;
   private unlistenProgress: UnlistenFn | null = null;
-  private previewTimer: number | null = null;
+  /** ★V209 (A-121): プレビューの時計（経過時間からコマを決める・音の時計で BGM と SE を予約する）。再生中だけ持つ */
+  private previewClock: PlayClock | null = null;
+  /** V209: 「曲の長さで書き出す」の形で ⏸ したとき、止めた周のそのコマの頭（▶ でそこから＝曲の位置が 1 周目に戻らない）。
+   *  ほかの形は今と同じくそのコマの頭から（覚えない）。選び直す・◀▶・⏮・再生バー・書き出す・離れるで捨てる */
+  private previewResume: { pp: Project; frame: number; t: number; fps: number; n: number } | null = null;
+  /** V209: 「曲の長さで書き出す」の形でループしない作品が曲の終わりで止まった（そのコマから動かさずに ▶ は頭から） */
+  private previewEnded: { pp: Project; frame: number } | null = null;
   private previewProject: Project | null = null;
   private previewFrame = 0;
   private previewPlaying = false;
+  /** V204 (A-110): startPreview の世代。startPreview と stopPreview で進め、音の用意を待ったあとで最新でなければ降りる
+   *  （待っている間に押す→離すをすると、待ちから戻った古い start も setInterval を張り、止められないタイマーが残っていた） */
+  private previewGen = 0;
+  /** V204 (A-110): 再生バー（createSlider・値は 0 から数えたコマ）。コマ数が変わったら作り直す */
+  private seek: SliderHandle | null = null;
+  private seekN = 0;
+  /** V204 (A-110): バーが今選んでいる作品を指してよいか（読めた作品だけ。選び直した直後・読み込み中・読めなかった作品は隠す） */
+  private seekReady = false;
+  /** V204 (A-110): バーを押している間（押した時点で再生していたか・押した時点の作品・片付け） */
+  private seekDrag: { wasPlaying: boolean; sel: LibraryView; end: () => void } | null = null;
+  /** V204 (A-110・第三者レビュー記録 3): バーを動かしている間に、飛んだ先を起こしている途中か（途中なら新しく起こさず、終わったら今の位置を起こす） */
+  private seekWaking = false;
+  /** V204 (A-110・第三者レビュー記録 2): 前に先回りしたときの作品と位置（飛んだかどうかを見る） */
+  private prewakeAt: { pp: Project; at: number } | null = null;
   /** ステージの表示モード（note=.kwz/.ppm・映像は自前キャンバス / project=.animemo） */
   private stageMode: "note" | "project" = "note";
   /** M6-2: .animemo プレビューの音声（.kwz は Player が音声担当・現状維持） */
@@ -153,6 +187,7 @@ export class LibraryScreen {
     this.cb = cb;
     this.bindHeader();
     this.bindAlbumOps();
+    this.seekLabels(); // V204 (A-110): 言語を変えると mount が呼び直される（バーの説明を今の言語に）
     if (!this.fitWatchBound) {
       // V192 (R-1・R-2): 枠の大きさか devicePixelRatio が変わったら作り直す（画面の実際の画素で出しているので）。
       // ライブラリは閉じずに裏へ回るだけ（エディタを開くと hidden）＝アプリの間ずっと持つ
@@ -183,13 +218,19 @@ export class LibraryScreen {
         //（エディタ側は M11-7 で塞いだが、ライブラリ側は素通りしていた）
         if (document.querySelector(".modal-back")) return;
         const tag = (e.target as HTMLElement).tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        // ★V204 (A-110): 再生バー（input type="range"）だけは通す。←/→・Space は今のキーと同じ動きにする
+        //  （←/→ は下の preventDefault が input の 1 つ送りを止め、stepPreviewFrame を 1 回呼ぶ）
+        const onSeek = !!(e.target as HTMLElement | null)?.closest?.("#stage-seek");
+        if (!onSeek && (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT")) return;
         if ((e.target as HTMLElement).isContentEditable) return;
         if (e.isComposing || e.keyCode === 229) return;
         if (e.key === "Delete" && this.selected) {
           e.preventDefault();
           void this.deleteSelected();
         }
+        // V204 (A-110): バーにフォーカスがあるときの矢印・PageUp／PageDown・Home／End は input に動かさせない
+        //  （黙って飛ぶと再生中に止めずに動く。←/→ は下で今のコマ送りになる・ほかは使わない）
+        if (onSeek && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(e.key)) e.preventDefault();
         // M11-10: Space はホームでも再生／一時停止（作品未選択なら何も起きない）。
         // 長押しの手のひらはエディタだけの作法なので、こちらは単純なトグル。
         // ボタンにフォーカスがあるときはブラウザ既定（Space でそのボタンを押す）を優先する
@@ -299,7 +340,7 @@ export class LibraryScreen {
     if (list.length > shown.length)
       lines.push(t("lib.recover.more.msg", { count: list.length - shown.length }));
     // 保存途中の `.tmp` が残っているものがあれば一言添える。**中身が欠けている可能性がある**ので
-    // 自動では戻さない（Codex レビュー指摘: 画面に出ないと「新しいほうがあるのに」を見落とす）
+    // 自動では戻さない（独立レビューの指摘: 画面に出ないと「新しいほうがあるのに」を見落とす）
     if (list.some((r) => r.tmp_files.length > 0)) lines.push(t("lib.recover.tmp.msg"));
     const ok = await this.cb.confirm(
       t("lib.recover.ask.msg", { count: list.length }) + "\n\n" + lines.join("\n"),
@@ -327,7 +368,7 @@ export class LibraryScreen {
   }
 
   suspend() {
-    // V159（Codex 指摘①）: ライブラリ画面を離れる（エディタを開く・削除する等）ときは、
+    // V159（独立レビューの指摘①）: ライブラリ画面を離れる（エディタを開く・削除する等）ときは、
     // **走っている読み込みを全部「古い」にする**。これが無いと、エディタへ移ったあとに
     // 読み終わった前のプレビューが `p.play()` まで進み、**エディタの裏で音が鳴り出す**
     this.selectSeq++;
@@ -533,6 +574,16 @@ export class LibraryScreen {
         this.cb.toast(errText(e)); // V155 (A-33)
       }
     };
+    // V200 (A-100・REQ-007): 「このアルバムの 3DS 作品をまとめて .memoanima にする」（アルバムの操作の並び・✏ と 🗑 のあいだ）。
+    // フォルダからの取り込み（下の帯）の最中は走らせない——一覧の取り直し（scan_library）は取り込みと同じロックを待つ
+    $("#album-kwzbatch").onclick = () => {
+      if (!this.currentAlbum) return;
+      if (!$("#import-footer").hidden) {
+        this.cb.toast(t("imp.busy.toast"));
+        return;
+      }
+      this.cb.convertAlbumNotes?.(this.currentAlbum);
+    };
     $("#album-delete").onclick = async () => {
       if (!this.currentAlbum) return;
       // M11-1: 削除できる条件が「空のフォルダ」から「作品が入っていない」に変わり、
@@ -555,6 +606,11 @@ export class LibraryScreen {
   // ---------------- 取り込み ----------------
 
   private async importFolder() {
+    // V200: まとめ変換の最中は始めない（同じライブラリのロックを待って画面が固まらないように）
+    if (this.cb.kwzBatchBusy?.()) {
+      this.cb.toast(t("lib.kwzBatch.busy.toast"));
+      return;
+    }
     const src = await open({
       directory: true,
       multiple: false,
@@ -575,7 +631,8 @@ export class LibraryScreen {
       // W-10: ここの理由は `<.kwz/.ppm のファイル名>: <理由>`。3DS の kwz は英数字のハッシュ名で
       // **作品名ではない**ので、ファイル名ごと残してよい（`.memoanima` は名前＝作品名なので書かない）
       failed = Array.isArray(res.errors) ? (res.errors as string[]) : [];
-      for (const e of failed) this.cb.logError?.("import", `bulk: ${e}`);
+      // ★V216b (A-133): 名前は 3DS の形のときだけ残す（改名したものは拡張子だけ）
+      for (const e of failed) this.cb.logError?.("import", `bulk: ${bulkImportErrorLogSafe(e)}`);
       // M12-1c-1: 「完了: …」＋「/ 失敗 …件」の連結をやめ、状態ごとの完全文にした
       const msg = res.cancelled
         ? t("lib.import.cancelled.toast", { imported: res.imported })
@@ -617,8 +674,12 @@ export class LibraryScreen {
     )}%`;
   }
 
-  /** 単発 .kwz/.ppm（合作受け取り）: ライブラリへ取り込んで開く */
+  /** 単発 .kwz/.ppm（ドロップ・［ファイルを開く］）: 今のアルバムへ聞かずに取り込んで開く（V208 A-118） */
   async openSingleFile(path?: string) {
+    if (this.cb.kwzBatchBusy?.()) {
+      this.cb.toast(t("lib.kwzBatch.busy.toast")); // V200: まとめ変換の最中は始めない
+      return;
+    }
     if (!path) {
       const sel = await open({
         multiple: false,
@@ -628,9 +689,8 @@ export class LibraryScreen {
       if (!sel || typeof sel !== "string") return;
       path = sel;
     }
-    // 第2引数（既定名）は**アルバム名になるユーザーのデータ**なので訳さない（master §5）
-    const album = await this.cb.prompt(t("lib.openFile.album.msg"), collabAlbumName());
-    if (album == null) return;
+    // V208 (A-118): 取り込み先は聞かない。新規メモと同じく今のアルバム（1 つも無いときは既定のアルバム名）
+    const album = this.currentAlbum || defaultAlbumName();
     try {
       const [destPath, hash] = await invoke<[string, string]>("import_single_file", {
         libRoot: this.libRoot,
@@ -1218,6 +1278,7 @@ export class LibraryScreen {
   /** 現在フレームを #preview-host に描く。V192 (R-2): 実画素で・CSS の object-fit・引き伸ばしには任せない（presentFit）。
    *  V192b: 枠いっぱい（半端な倍率は境目を混ぜる・ちょうど整数倍は最近傍・枠が元より小さければ面積平均で縮める） */
   private drawNoteFrame() {
+    this.syncSeekbar(); // V204 (A-110): 早い return より前（枠が見えなくても数字は今のコマ）
     if (this.stageMode !== "note" || !this.player) return;
     const note: any = (this.player as any).note;
     if (!note) return;
@@ -1266,7 +1327,7 @@ export class LibraryScreen {
     });
   }
 
-  /** V159（Codex 指摘①）: 選択の世代。**古い読み込みが後から画面を乗っ取らない**ための番号。
+  /** V159（独立レビューの指摘①）: 選択の世代。**古い読み込みが後から画面を乗っ取らない**ための番号。
    *
    *  棚のクリックは `void this.select(it)` で投げっぱなし＝**前の読み込みが終わる前に次が始まる**。
    *  重い作品ほど読み込みが長いので、A（重い）→ B（軽い）の順に押すと、
@@ -1282,6 +1343,11 @@ export class LibraryScreen {
     this.updateShelfSelection();
     $("#stage-title").textContent = it.name;
     $("#stage-author").textContent = it.album;
+    // V204 (A-110): 前の作品の数字を新しい題名の下に出さない（読めたら出す・読めなければ隠したまま）
+    this.seekReady = false;
+    this.seekWaking = false;
+    this.prewakeAt = null;
+    this.syncSeekbar();
     this.stopPreview();
     const previewHost = $("#preview-host") as unknown as HTMLCanvasElement;
     // V159 (G-3): **ここが「クリックしてから何も出ない」の正体だった。**
@@ -1301,6 +1367,7 @@ export class LibraryScreen {
           //  古い読み込みが鳴り始めないよう、鳴らす直前でもう一度確かめる
           if (stale()) return;
           const note: any = (p as any).note;
+          this.seekReady = true; // V204 (A-110)
           this.renderMeta([
             `${(note?.format ?? it.ext).toString().toUpperCase()}`,
             `${note?.imageWidth ?? "?"} × ${note?.imageHeight ?? "?"}`,
@@ -1327,6 +1394,7 @@ export class LibraryScreen {
           if (stale()) return;
           this.previewProject = proj;
           this.previewFrame = 0;
+          this.seekReady = true; // V204 (A-110)
           this.renderMeta([
             t("app.name.label"),
             "320 × 240",
@@ -1365,7 +1433,7 @@ export class LibraryScreen {
   showLoadError(msg: string, known: string[] = [], logOnly = false, logNote = "") {
     // ★まずログへ。**画面より先**に書くので、下のどの分岐へ進んでも 1 行は必ず残る。
     // 原文（解析ライブラリの英語）はそのまま残す——画面と用途が違い、原因を追うのはこちら側。
-    // Codex 指摘（低）: 解析には `ArrayBuffer` を渡すので理由にファイル名が入らない。
+    // 独立レビューの指摘（低）: 解析には `ArrayBuffer` を渡すので理由にファイル名が入らない。
     // `.kwz` / `.ppm` のときだけ**頭に名前を付ける**＝壊れたものが複数あっても見分けがつく
     const label = known.map(logSafeFileLabel).find(Boolean);
     this.cb?.logError?.(
@@ -1380,7 +1448,7 @@ export class LibraryScreen {
     const text =
       tooLarge !== null
         ? t("lib.open.tooLarge.msg", {
-            // Codex 指摘（中）: 四捨五入だと 512MiB+1B が「約 512 MB・上限 512 MB を超えています」になる。切り上げる
+            // 独立レビューの指摘（中）: 四捨五入だと 512MiB+1B が「約 512 MB・上限 512 MB を超えています」になる。切り上げる
             mb: String(Math.ceil(tooLarge / 1024 / 1024)),
             max: String(IMPORT_MAX_BYTES / 1024 / 1024),
           })
@@ -1490,7 +1558,8 @@ export class LibraryScreen {
       this.cb.openExport(
         projectSource(pp),
         baseName,
-        this.audioSourceFor(pp.audio?.bgm ?? null, pp, pp.frames.length, FPS_TABLE[pp.speedIndex] || 8)
+        this.audioSourceFor(pp.audio?.bgm ?? null, pp, pp.frames.length, FPS_TABLE[pp.speedIndex] || 8),
+        { album: it.album, name: it.name } // V198 (E-2): この作品の .memoanima（.animemo なら同じ名前の .memoanima）
       );
     }
   }
@@ -1541,6 +1610,11 @@ export class LibraryScreen {
           // （`defaultRange` は初期値の指定にすぎず、範囲UI自体は常に出る）、
           // エディタ側と同じ式で範囲先頭を渡す。全範囲なら lo=0 → 0
           rangeStartSec: lo / (fps > 0 ? fps : 8),
+          // V216b (A-134・C-29): 範囲の頭より前のコマの SE（曲が主でないとき、まだ鳴っているものを途中から鳴らす）
+          preRangeSe: Array.from({ length: lo }, (_, i) => {
+            const ids = proj?.frames[i]?.se;
+            return ids && ids.length > 0 ? [...ids] : undefined;
+          }),
         });
       },
     };
@@ -1594,6 +1668,9 @@ export class LibraryScreen {
     // ステージ表示を停止・クリア
     this.suspend();
     this.previewProject = null;
+    this.seekReady = false; // V204 (A-110): 段ごと隠す（場所を取らない）
+    this.prewakeAt = null; // 消した作品を持ち続けない（第三者レビュー 2 周目の記録 4）
+    this.syncSeekbar();
     $("#stage-title").textContent = t("lib.stage.empty.label");
     $("#stage-author").textContent = "";
     $("#stage-meta").innerHTML = "";
@@ -1646,14 +1723,21 @@ export class LibraryScreen {
    *  作品を選んでいないときは何も起きない */
   togglePreviewPlayback() {
     if (this.selected?.kind === "project") {
-      if (this.previewPlaying) this.stopPreview();
+      if (this.previewPlaying) this.stopPreview(true);
       else {
         // ★V195 (A-96・BUG-003): ループしない作品が終端で止まると `previewFrame` は最後のコマのまま残る。
         //  そこから ▶ を押すと最後のコマを 1 回出してすぐ止まっていた。**最後のコマの ▶ は先頭から**
         //  （判断は編集画面・.kwz と同じ `playStartFrame`）。音は startPreview が `previewFrame / fps`（＝0 秒）から鳴らす
+        //  ★V209 (A-121): 「曲の長さで書き出す」で BGM がある形では使わない（アニメは最後のコマのあとも続く）。
+        //  曲の終わりで止まったあと、コマを動かさずに ▶ なら頭から
         const pp = this.previewProject;
         if (pp) {
-          const at = playStartFrame(this.previewFrame, pp.frames.length, pp.loop);
+          const ended = this.previewEnded;
+          const at = LibraryScreen.songModeWanted(pp)
+            ? ended && ended.pp === pp && ended.frame === this.previewFrame
+              ? 0
+              : this.previewFrame
+            : playStartFrame(this.previewFrame, pp.frames.length, pp.loop);
           if (at !== this.previewFrame) {
             this.previewFrame = at;
             this.drawPreview();
@@ -1692,6 +1776,7 @@ export class LibraryScreen {
     if (this.selected.kind === "project") {
       if (!this.previewProject) return;
       if (this.previewPlaying) this.stopPreview();
+      this.dropPreviewLap(); // ★V209: ⏮ は何周目かを捨てる（曲もアニメも頭から）
       this.previewFrame = 0;
       this.drawPreview();
     } else if (this.player) {
@@ -1721,6 +1806,7 @@ export class LibraryScreen {
       const pp = this.previewProject;
       if (!pp || pp.frames.length === 0) return;
       if (this.previewPlaying) this.stopPreview();
+      this.dropPreviewLap(); // ★V209: ◀▶ は何周目かを捨てる
       const n = pp.frames.length;
       this.previewFrame = (((this.previewFrame + dir) % n) + n) % n;
       this.drawPreview();
@@ -1744,6 +1830,168 @@ export class LibraryScreen {
     this.updatePlayButton();
   }
 
+  // ---------------- V204 (A-110): 再生バー ----------------
+
+  /** V204 (A-110・REQ §2-1): つまみと「今 / 全部」を今のコマに合わせる**1 つの入口**。drawPreview・drawNoteFrame の頭（早い return より前）
+   *  から呼ぶ＝再生中・［先頭へ］・［前のコマ］［次のコマ］・←/→・バーのどれで動いても同じ所で合う。
+   *  ★描かない（drawImage・putImageData・src は使わない＝v192 [S-4]）。作品を選んでいない・読み込み中・読めなかった作品では段ごと隠す */
+  private syncSeekbar() {
+    const row = document.getElementById("stage-seek");
+    if (!row) return;
+    let n = 0;
+    let cur = 0;
+    if (this.seekReady && this.selected) {
+      if (this.selected.kind === "project") {
+        if (this.stageMode === "project" && this.previewProject) {
+          n = this.previewProject.frames.length;
+          cur = this.previewFrame;
+        }
+      } else if (this.stageMode === "note") {
+        const p = this.player as any;
+        if (p?.note) {
+          n = Number(p.frameCount ?? 0) || 0;
+          cur = Number(p.currentFrame ?? 0) || 0;
+        }
+      }
+    }
+    if (!(n > 0)) {
+      if (!row.hidden) row.hidden = true;
+      return;
+    }
+    cur = Math.max(0, Math.min(n - 1, cur));
+    if (!this.seek || this.seekN !== n) this.buildSeek(n);
+    this.seek?.set(cur); // set() は合図を出さない（再生中に合わせても飛ばない）
+    const text = `${cur + 1} / ${n}`;
+    const cnt = document.getElementById("seek-count");
+    if (cnt && cnt.textContent !== text) cnt.textContent = text;
+    if (row.hidden) row.hidden = false;
+  }
+
+  /** V204 (A-110): バーを作る（値は 0 から数えたコマ・コマが 1 つなら最小＝最大で動かない）。説明は title と読み上げ */
+  private buildSeek(n: number) {
+    const host = document.getElementById("seek-host");
+    if (!host) return;
+    const s = createSlider({
+      min: 0,
+      max: Math.max(0, n - 1),
+      step: 1,
+      value: 0,
+      className: "seek-bar",
+      onDown: () => this.seekPress(),
+      onInput: (v) => this.seekTo(v),
+    });
+    host.replaceChildren(s.root);
+    this.seek = s;
+    this.seekN = n;
+    this.seekLabels();
+  }
+
+  /** V204 (A-110): バーの説明（言語を変えたら mount から呼び直す） */
+  private seekLabels() {
+    const root = this.seek?.root;
+    if (!root) return;
+    const label = t("lib.tp.seek.title");
+    root.title = label;
+    root.querySelector("input")?.setAttribute("aria-label", label);
+  }
+
+  /** V204 (A-110・REQ §2-2): バーを押した（つまみ・溝のどこでも）。再生中なら一時停止し、離したら離した所から続ける。
+   *  止まっていたら止まったまま。離したのは窓の pointerup で拾う（値が変わらずに離しても・change との順番に頼らない） */
+  private seekPress() {
+    const sel = this.selected;
+    if (!sel) return;
+    // 前に押したときの「離した」が届かなかった（pointerup・pointercancel が来なかった）なら、続けずに片付けてから始める（第三者レビュー記録 5）
+    this.seekDrag?.end();
+    let wasPlaying = false;
+    if (sel.kind === "project") {
+      wasPlaying = this.previewPlaying;
+      if (wasPlaying) this.stopPreview();
+      this.dropPreviewLap(); // ★V209: 再生バーは何周目かを捨てる（離した所のコマの 1 周目から）
+    } else if (this.player) {
+      wasPlaying = !this.player.paused;
+      if (wasPlaying) {
+        try {
+          this.player.pause();
+        } catch {
+          /* ノート未ロード等 */
+        }
+        this.updatePlayButton();
+      }
+    }
+    const drag = { wasPlaying, sel, end: () => {} };
+    const up = () => {
+      drag.end();
+      if (this.selected !== sel || !this.seek) return;
+      this.seekTo(this.seek.value()); // 離した所
+      if (wasPlaying) this.seekResume();
+    };
+    drag.end = () => {
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      if (this.seekDrag === drag) this.seekDrag = null;
+    };
+    this.seekDrag = drag;
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
+  /** V204 (A-110): バーの位置のコマへ飛ぶ（音は鳴らさない＝［前のコマ］［次のコマ］と同じ）。
+   *  .memoanima は飛んだ先だけを起こし（drawPreview）、窓の外で起きているコマは只で眠らせ直す。
+   *  .kwz/.ppm は止めてから setCurrentFrame（止まっている間は再生位置の秒も動く＝play() がそこから鳴らす）し、
+   *  stepPreviewFrame と同じく `_hasEnded` を下ろす（最後まで再生して止まったあとでも、▶ が飛んだ所から鳴る） */
+  private seekTo(v: number) {
+    const sel = this.selected;
+    if (!sel) return;
+    if (sel.kind === "project") {
+      const pp = this.previewProject;
+      if (!pp || pp.frames.length === 0) return;
+      if (this.previewPlaying) this.stopPreview();
+      const to = Math.max(0, Math.min(pp.frames.length - 1, Math.round(v)));
+      if (to !== this.previewFrame) {
+        this.previewFrame = to;
+        this.trimPreviewWindow();
+      }
+      this.drawPreview();
+    } else if (this.player) {
+      const p = this.player as any;
+      try {
+        if (!p.note) return;
+        if (!p.paused) p.pause();
+        const n: number = p.frameCount ?? 0;
+        if (!(n > 0)) return;
+        const to = Math.max(0, Math.min(n - 1, Math.round(v)));
+        p.setCurrentFrame(to);
+        if (p._hasEnded) p._hasEnded = false;
+      } catch {
+        /* ノート未ロード等 */
+      }
+      this.updatePlayButton();
+    }
+  }
+
+  /** V204 (A-110): 離したあと再生を続ける。ループなしで最後のコマなら止まったまま（先頭へ戻さない。そのあとの ▶ は V195 のとおり先頭から） */
+  private seekResume() {
+    const sel = this.selected;
+    if (!sel) return;
+    if (sel.kind === "project") {
+      const pp = this.previewProject;
+      if (!pp) return;
+      // ★V209 (A-121): 「曲の長さで書き出す」で BGM がある形では、この決まりを使わない（アニメは最後のコマのあとも続く）
+      if (!LibraryScreen.songModeWanted(pp) && !pp.loop && this.previewFrame >= pp.frames.length - 1) return;
+      void this.startPreview(); // 音は previewFrame / fps 秒から
+    } else if (this.player) {
+      const p = this.player as any;
+      try {
+        const n: number = p.frameCount ?? 0;
+        if (p.loop !== true && (Number(p.currentFrame ?? 0) || 0) >= n - 1) return;
+        this.player.play();
+      } catch {
+        /* ノート未ロード等 */
+      }
+      this.updatePlayButton();
+    }
+  }
+
   private updatePlayButton() {
     const playing =
       this.selected?.kind === "project"
@@ -1755,6 +2003,7 @@ export class LibraryScreen {
   }
 
   private drawPreview() {
+    this.syncSeekbar(); // V204 (A-110): 早い return より前
     if (!this.previewProject) return;
     // ★V163: 眠っているコマは起こしてから描き直す（起こすのは読み＝控えは残る）。
     // エディタの drawTrialFrame（V156 P-1）と同じ形: 起きるまでこの1コマは前の絵のまま
@@ -1762,9 +2011,22 @@ export class LibraryScreen {
     const cur = pp.frames[this.previewFrame];
     if (cur && frameHasAsleep(cur)) {
       const at = this.previewFrame;
-      void wakeFrame(pp, cur, "read").then(() => {
-        if (this.previewProject === pp && this.previewFrame === at) this.drawPreview();
-      });
+      // V204 (A-110): バーを動かしている間は、起こしている途中なら新しく起こさない（終わったときに今の位置を起こす＝最後に求められた位置だけ）
+      if (this.seekDrag && this.seekWaking) return;
+      this.seekWaking = !!this.seekDrag;
+      void wakeFrame(pp, cur, "read").then(
+        () => {
+          this.seekWaking = false;
+          if (this.previewProject === pp && this.previewFrame === at) this.drawPreview();
+          else {
+            this.sleepIfOutside(pp, at); // V204 (A-110): 起きるまでに窓の外へ飛んでいたら只で眠らせ直す
+            if (this.seekDrag && this.previewProject === pp) this.drawPreview(); // 待たせていた今の位置を起こす
+          }
+        },
+        () => {
+          this.seekWaking = false; // 起こせなかったときも下ろす（ドラッグ中の起こしが止まったままにならない＝第三者レビュー 2 周目の記録 5）
+        }
+      );
       this.prewakePreview();
       return;
     }
@@ -1788,38 +2050,97 @@ export class LibraryScreen {
     const pp = this.previewProject;
     if (!pp) return;
     const n = pp.frames.length;
-    for (let k = 1; k <= LibraryScreen.PREVIEW_AHEAD; k++) {
-      const f = pp.frames[(this.previewFrame + k) % n];
-      if (f && frameHasAsleep(f)) void wakeFrame(pp, f, "read");
+    for (let k = 1; !this.seekDrag && k <= LibraryScreen.PREVIEW_AHEAD; k++) {
+      const i = (this.previewFrame + k) % n;
+      const f = pp.frames[i];
+      if (f && frameHasAsleep(f)) void wakeFrame(pp, f, "read").then(() => this.sleepIfOutside(pp, i));
     }
     // 小さい作品（全部が窓に収まる）は片付けない＝起こす/眠らすの往復を作らない
     if (n <= LibraryScreen.PREVIEW_AHEAD * 2 + 2) return;
     const behind = pp.frames[(this.previewFrame - LibraryScreen.PREVIEW_AHEAD - 1 + n) % n];
     if (behind) void sleepFrame(pp, behind, undefined, true /* 只で片付くものだけ */);
+    // ★V204 (A-110・第三者レビュー記録 2): 1 コマずつ戻る（← など）ときも窓の先の外側を只で眠らせ直す（前は後ろだけ＝戻り続けると
+    //  起きているコマが 18 を超えて増えた）。飛んだとき（［先頭へ］・バー・▶ で先頭から）は窓の外を全部
+    const ahead = pp.frames[(this.previewFrame + LibraryScreen.PREVIEW_AHEAD + 1) % n];
+    if (ahead) void sleepFrame(pp, ahead, undefined, true);
+    const last = this.prewakeAt;
+    this.prewakeAt = { pp, at: this.previewFrame };
+    if (last && last.pp === pp && Math.min((this.previewFrame - last.at + n) % n, (last.at - this.previewFrame + n) % n) > 1) this.trimPreviewWindow();
   }
 
-  /** M5-1: 指定コマの配置SEを発火 */
-  private firePreviewSe(i: number) {
-    const a = this.previewProject?.audio;
-    if (!a || a.se.length === 0) return;
-    const ids = this.previewProject!.frames[i]?.se;
-    if (!ids) return;
-    for (const id of ids) {
-      const t = a.se.find((s) => s.id === id);
-      if (t) this.audioPreview.fireSe(t);
-    }
+  /** V204 (A-110・REQ §2-3): i 番目のコマが窓（previewFrame の後ろ PREVIEW_AHEAD＋1〜先 PREVIEW_AHEAD・端はつながる）の中か。
+   *  小さい作品（全部が窓に収まる）は全部が中 */
+  private inPreviewWindow(i: number): boolean {
+    const n = this.previewProject?.frames.length ?? 0;
+    if (n <= LibraryScreen.PREVIEW_AHEAD * 2 + 2) return true;
+    const d = (((i - this.previewFrame) % n) + n) % n; // 先へ 0〜n−1
+    return d <= LibraryScreen.PREVIEW_AHEAD || d >= n - (LibraryScreen.PREVIEW_AHEAD + 1);
+  }
+
+  /** V204 (A-110): 起こし終わったとき、そのコマがもう窓の外なら只で眠らせ直す（起こしは非同期＝その間に飛ぶことがある） */
+  private sleepIfOutside(pp: Project, i: number) {
+    if (this.previewProject !== pp || this.inPreviewWindow(i)) return;
+    const f = pp.frames[i];
+    if (f) void sleepFrame(pp, f, undefined, true);
+  }
+
+  /** V204 (A-110): 控えのあるレイヤーが起きているコマか（📌 全コマ共通のレイヤーは控えが無いので数えない） */
+  private static awakeWithCopy(f: Frame): boolean {
+    if (!f.sleep) return false;
+    for (const id of Object.keys(f.sleep)) if (f.layers[id]) return true;
+    return false;
+  }
+
+  /** V204 (A-110・B-4): バーで飛んだあと、窓の外で起きているコマを只で眠らせ直す */
+  private trimPreviewWindow() {
+    const pp = this.previewProject;
+    if (!pp || pp.frames.length <= LibraryScreen.PREVIEW_AHEAD * 2 + 2) return;
+    pp.frames.forEach((f, i) => {
+      if (LibraryScreen.awakeWithCopy(f) && !this.inPreviewWindow(i)) void sleepFrame(pp, f, undefined, true);
+    });
+  }
+
+  /** V204 (A-110・B-4): 数える入口（検査用）。プレビューの作品で、控えのあるレイヤーが起きているコマの数 */
+  previewAwakeCount(): number {
+    return this.previewProject?.frames.filter((f) => LibraryScreen.awakeWithCopy(f)).length ?? 0;
+  }
+
+  /** ★V209 (A-121): 「曲の長さで書き出す」で BGM がある形か（作品に保存されている値。ライブラリの書き出しで選んだ値は覚えない＝今と同じ） */
+  private static songModeWanted(pp: Project): boolean {
+    const b = pp.audio?.bgm;
+    return !!b && !b.muted && b.syncMode === "animToAudio";
+  }
+
+  /** V209: 何周目か（曲の長さの形の ⏸ の続き）と「曲の終わりで止まった」を捨てる */
+  private dropPreviewLap() {
+    this.previewResume = null;
+    this.previewEnded = null;
   }
 
   private async startPreview() {
     if (!this.previewProject || this.previewPlaying) return;
+    const gen = ++this.previewGen; // V204 (A-110): この start の世代
     this.previewPlaying = true;
     this.updatePlayButton(); // 押した合図はすぐ返す（音の用意を待つ前に）
     const pp = this.previewProject;
     const fps = FPS_TABLE[pp.speedIndex] || 8;
-    // M6-2/3: .animemo プレビューの音声同期（アニメのループ毎に頭出しリセット）
-    // M5-1: BGM=速度連動rate・SE=コマ発火
+    const n = pp.frames.length;
+    // M6-2/3: .animemo プレビューの音声。M5-1: BGM=速度連動rate・SE=コマ発火
     const bgm = pp.audio?.bgm ?? null;
     const rate = bgm ? bgmPlaybackRate(pp.speedIndex, bgm.baseSpeedIndex) : 1;
+    // ★V209: 始める位置は待つ前に決める。ライブラリは今と同じくそのコマの頭から（⏸ の SE の続きは残さない）。
+    //  「曲の長さで書き出す」の形だけ、⏸ した周のそのコマの頭から（コマ・速さ・コマ数が同じとき）
+    const song = LibraryScreen.songModeWanted(pp);
+    const r = this.previewResume;
+    const resumeOk = song && !!r && r.pp === pp && r.frame === this.previewFrame && r.fps === fps && r.n === n;
+    const t0 = resumeOk && r ? r.t : startTimeOf({ fps, frameCount: n }, this.previewFrame);
+    // 独立レビューの指摘#3: デコードは「配置済みかつ非ミュート」のSEだけ
+    let se: SeTrack[] = [];
+    if (pp.audio && pp.audio.se.length > 0) {
+      const used = new Set<string>();
+      for (const f of pp.frames) for (const id of f.se ?? []) used.add(id);
+      se = pp.audio.se.filter((s) => !s.muted && used.has(s.id));
+    }
     // ★V157 (D-4): **音の用意を待ってからコマを進め始める**（A-28・Culoe さんの報告）。
     //
     //  これまでは `void audioPreview.start(...)` と投げっぱなしにして、その直後に
@@ -1832,44 +2153,66 @@ export class LibraryScreen {
     //    2周目以降は 0.2ms（ズレ ほぼ 0）
     //
     //  待つと再生の開始が初回だけ 0.2 秒ほど遅れるが、**ズレたまま流れるより良い**
-    //  （同じ音源なら2回目からは待ちもゼロ）。
-    await this.audioPreview.start(bgm, this.previewFrame / fps, rate);
-    // 待っている間に止められた／別の作品に移った
-    if (!this.previewPlaying || this.previewProject !== pp) return;
-    // Codex指摘#3: デコードは「配置済みかつ非ミュート」のSEだけ
-    if (pp.audio && pp.audio.se.length > 0) {
-      const used = new Set<string>();
-      for (const f of pp.frames) for (const id of f.se ?? []) used.add(id);
-      void this.audioPreview.prepareSe(pp.audio.se.filter((s) => !s.muted && used.has(s.id)));
+    //  （同じ音源なら2回目からは待ちもゼロ）。★V209: SE だけの作品でも待つ（ensureAudioRunning と SE のデコード）
+    const prep = await this.audioPreview.preparePlay(bgm, se);
+    // 待っている間に止められた／別の作品に移った／V204: 止めてからまた始めた（新しい start が張る）
+    if (gen !== this.previewGen || !this.previewPlaying || this.previewProject !== pp) return;
+    this.dropPreviewLap();
+    let plan: BgmPlan | null = null;
+    if (bgm && prep.bgm) {
+      const { trimStartSec, trimEndSec, usableSec } = normalizeTrim(prep.bgm.duration, bgm.trimStartMs, bgm.trimEndMs);
+      if (usableSec > 0) plan = { buf: prep.bgm, trimStart: trimStartSec, trimEnd: trimEndSec, rate, volume: bgm.volume };
     }
-    this.firePreviewSe(this.previewFrame);
-    this.previewTimer = window.setInterval(() => {
-      if (!this.previewProject) return;
-      let next = this.previewFrame + 1;
-      if (next >= this.previewProject.frames.length) {
-        if (this.previewProject.loop) {
-          next = 0;
-          // A-1: アニメが先頭に戻るたび音も頭出しから鳴り直す（1コマ作品は毎tickラップのため除外）
-          if (this.previewProject.frames.length > 1) this.audioPreview.restart();
-        } else {
-          this.stopPreview();
-          return;
+    const host: PlayHost = {
+      // #tp-loop は再生を止めない（ループの切り替えは時計が次の周の終わりで効かせる）
+      shape: () => ({ fps, frameCount: n, loop: pp.loop }),
+      show: (i) => {
+        if (this.previewProject !== pp) return;
+        this.previewFrame = i;
+        this.drawPreview();
+      },
+      ended: () => {
+        const at = this.previewFrame;
+        this.stopPreview();
+        if (song && plan) this.previewEnded = { pp, frame: at };
+      },
+      reshape: () => {
+        this.stopPreview();
+        void this.startPreview();
+      },
+      seAt: (i) => {
+        const a = pp.audio;
+        const ids = pp.frames[i]?.se;
+        if (!a || !ids) return [];
+        const out: { buf: AudioBuffer; track: SeTrack }[] = [];
+        for (const id of ids) {
+          const tr = a.se.find((s) => s.id === id);
+          const b = tr && !tr.muted ? this.audioPreview.seBuffer(tr) : undefined;
+          if (tr && b) out.push({ buf: b, track: tr });
         }
-      }
-      this.previewFrame = next;
-      this.firePreviewSe(next);
-      this.drawPreview();
-    }, 1000 / fps);
+        return out;
+      },
+      bgm: () => plan,
+    };
+    const clock = new PlayClock(host, this.audioPreview);
+    this.previewClock = clock;
+    clock.start({ t0, songMode: song && !!plan, wantAudio: !!plan || se.length > 0, resume: false });
     this.updatePlayButton();
   }
 
-  private stopPreview() {
+  /** pause=true は ⏸（ライブラリの ⏸ は止めるのと同じ＝SE の続きは残さない。★V209: 「曲の長さで書き出す」の形だけ何周目かを覚える） */
+  private stopPreview(pause = false) {
+    this.previewGen++; // V204 (A-110): 音の用意を待っている start を古くする
     this.previewPlaying = false;
+    const clock = this.previewClock;
+    this.previewClock = null;
+    const pp = this.previewProject;
+    if (pause && clock && pp && clock.shape().songSec != null) {
+      const s = clock.shape();
+      this.previewResume = { pp, frame: this.previewFrame, t: clock.frameHead(), fps: s.fps, n: s.frameCount };
+    } else if (!pause || clock) this.dropPreviewLap(); // 待っている間の ⏸ は覚えていた続きをそのまま
+    clock?.stop();
     this.audioPreview.stop();
-    if (this.previewTimer != null) {
-      clearInterval(this.previewTimer);
-      this.previewTimer = null;
-    }
     this.updatePlayButton();
   }
 }

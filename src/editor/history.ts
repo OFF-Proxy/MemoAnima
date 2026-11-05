@@ -53,7 +53,7 @@ export interface HistoryEntry {
   /** **取り消し済み（undo した状態）のときだけ**履歴が抱える量。
    *  例: コマ追加・ページ挿入・連番挿入・ゆらゆら・SE追加。
    *  適用済みならその実体は**プロジェクト側**にあるので `projectBytes` が数える＝ここでは数えない
-   *  （両方で数えると二重になる。Codex レビュー指摘: 申告しないと **undo 後に減ったように見える**） */
+   *  （両方で数えると二重になる。独立レビューの指摘: 申告しないと **undo 後に減ったように見える**） */
   bytesIfUndone?: number;
   /** **適用済み（redo した状態）のときだけ**履歴が抱える量。
    *  例: コマ削除・SE削除。取り消すと実体はプロジェクトへ戻るので、そのときは数えない。 */
@@ -209,12 +209,39 @@ export class History {
     this.mutations++;
     this.onchange?.();
   }
+
+  /** ★V214 (M-2b-1a): いまの並びの控え（エントリの参照の写しと位置）。やめる口が押した時点に取る */
+  mark(): HistoryMark {
+    return { stack: this.stack.slice(), pos: this.pos };
+  }
+
+  /** ★V214: 控えのあとで積まれたか（いまの「実行済みの最後」が控えの並びに無い）。数えるだけ・状態は変えない */
+  pushedSince(m: HistoryMark): boolean {
+    return this.pos > 0 && !m.stack.includes(this.stack[this.pos - 1]);
+  }
+
+  /** ★V214: 控えの並びへ戻す（控えのあとに積んだものを取り除く。やり直しの側も控えの時点に戻る）。
+   *  同じ並びなら何もしない（false）。戻したら変更カウンタを進めて知らせる（true） */
+  restoreMark(m: HistoryMark): boolean {
+    if (this.stack.length === m.stack.length && this.pos === m.pos && this.stack.every((e, i) => e === m.stack[i])) return false;
+    this.stack = m.stack;
+    this.pos = m.pos;
+    this.mutations++;
+    this.onchange?.();
+    return true;
+  }
+}
+
+/** ★V214: 履歴の並びの控え（`History.mark()`）。中身はエントリの参照だけ（画素は写さない） */
+export interface HistoryMark {
+  readonly stack: HistoryEntry[];
+  readonly pos: number;
 }
 
 /**
  * レイヤーバッファ書き換えの履歴エントリを作る（before は呼び出し前に取得しておく）。
  * バッファ実体はレイヤー構造の undo/redo で再生成されることがあるため、
- * 参照を閉じ込めず `resolve` で適用時に解決する（stale 参照対策・Codexレビュー指摘）。
+ * 参照を閉じ込めず `resolve` で適用時に解決する（stale 参照対策・独立レビューの指摘）。
  */
 export function bufferChangeEntry(
   label: string,

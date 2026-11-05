@@ -21,6 +21,9 @@
         </div>
         <div class="spacer"></div>
         <div class="search"><span class="btn-ic" data-icon="zoom"></span><input id="lib-search" data-i18n-placeholder="lib.search.placeholder" /></div>
+        <!-- V198 (A-104 E-1): ギャラリーを既定のブラウザで開く。並びの**先頭**（右寄せの並びなので、既存のボタンは
+             1 px も動かない・⚙ は右端のまま）。見た目はほかのボタンと同じ（.btn）・設定に関係なく常に出す -->
+        <button class="btn" id="lib-gallery" type="button" data-i18n="lib.gallery.btn" data-i18n-title="lib.gallery.title" data-icon="gallery"></button>
         <button class="btn blue" id="lib-import" type="button" data-i18n="lib.import.btn"></button>
         <button class="btn" id="lib-open-file" type="button" data-i18n="lib.openFile.btn" data-i18n-title="lib.openFile.title" data-icon="folder-open"></button>
         <button class="btn primary" id="lib-new-note" type="button" data-i18n="lib.newNote.btn" data-icon="pen"></button>
@@ -35,6 +38,8 @@
             <span class="albbtns">
               <button class="minibtn" id="album-add" type="button" data-i18n-title="lib.album.add.title">＋</button>
               <button class="minibtn" id="album-rename" type="button" data-i18n-title="lib.album.rename.title" data-icon="pen"></button>
+              <!-- V200 (A-100): このアルバムの 3DS 作品（.kwz／.ppm）をまとめて .memoanima にする（印は作品の印・🗑 は今までどおり右端） -->
+              <button class="minibtn" id="album-kwzbatch" type="button" data-i18n-title="lib.album.kwzBatch.title" data-icon="project"></button>
               <button class="minibtn" id="album-delete" type="button" data-i18n-title="lib.album.delete.title" data-icon="trash"></button>
             </span>
           </h2>
@@ -51,6 +56,11 @@
           <div class="screen-view">
             <div id="player-host"></div>
             <canvas id="preview-host" width="320" height="240" hidden></canvas>
+          </div>
+          <!-- V204 (A-110): 再生バー（押した所・動かした所へ飛ぶ）と「今のコマ / コマ数」。作品を選んでいないときは段ごと隠す -->
+          <div class="seekrow" id="stage-seek" hidden>
+            <div class="seek-host" id="seek-host"></div>
+            <span class="seek-count" id="seek-count" data-i18n-title="lib.tp.seekCount.title"></span>
           </div>
           <div class="controls">
             <div class="transport">
@@ -108,7 +118,7 @@
         <button class="ic" id="ed-clearframe" type="button" data-i18n-title="ed.clearFrame.title" data-icon="clear"></button>
         <!-- V161 (A): 右下の保存ピル。保存は背景で走る（描き続けられる）ので、中央の
              「保存中です」はやめて、視界の隅で「保存していること」だけを知らせる。
-             title に「押した瞬間までの絵が保存される」ことを書く（Codex 観点③の言葉の防波堤） -->
+             title に「押した瞬間までの絵が保存される」ことを書く（レビューの観点③の言葉の防波堤） -->
         <div id="ed-savepill" hidden data-i18n-title="ed.save.bg.title"><i></i><span data-i18n="ed.save.bg.label"></span></div>
         <div class="sp"></div>
         <div class="h-spec" data-i18n="ed.spec.label"></div>
@@ -139,19 +149,22 @@
               <canvas id="ed-overlay" width="320" height="240"></canvas>
               <!-- M3.10 G-1: 格子は canvas 化（実測ピッチ×devicePixelRatio の物理pxに線を引く） -->
               <canvas class="pxgrid" id="ed-grid" hidden></canvas>
+              <!-- V208 (A-119): 範囲選択の線（選んだドットの境目の動く点線・囲んでいる途中の線）。格子の上・カーソルと
+                   変形の枠の下。画面解像度で描く（editor.ts paintSelectionUi） -->
+              <canvas id="ed-sel-ui" hidden></canvas>
               <!-- M12-C: カーソル層（ペン先の輪・ドット枠）。格子と同じく画面解像度で描く。
                    #ed-overlay は 320×240 のドット解像度なので 1ドット未満の細い線が出せない -->
               <canvas id="ed-cursor" hidden></canvas>
               <!-- M13-2b (T-6): 変形・四隅の枠とハンドル。格子・カーソル層と同じく画面解像度で描く
-                   （#ed-overlay に引くとズーム倍の太線になる）。ドット粒度のもの（アンツ・色マスク・
-                   変形プレビューの絵）は #ed-overlay に残す -->
+                   （#ed-overlay に引くとズーム倍の太線になる）。ドット粒度のもの（「色を付ける」の中の色・
+                   変形プレビューの絵）は #ed-overlay に残す。選択の線は V208 (A-119) で #ed-sel-ui へ移した -->
               <canvas id="ed-overlay-ui" hidden></canvas>
               <div class="drawguide"></div>
             </div>
           </div>
           <div class="cvbadge" id="ed-badge"></div>
           <div class="xform-badge" id="ed-xform-badge" data-i18n="ed.xform.badge.label" data-icon="transform" hidden></div>
-          <!-- V156（Codex レビュー §4）: 遠くのコマへ飛んだとき、絵が揃うまでの「一瞬」に出す小さな札。
+          <!-- V156（独立レビュー §4）: 遠くのコマへ飛んだとき、絵が揃うまでの「一瞬」に出す小さな札。
                白紙にはしない（前のコマを出したまま待つ）が、それだと「押せていない」「違うコマを見ている」に
                見える余地がある。**待ちが目に見える長さになったときだけ**出す（150ms 未満なら出ない）。
                変形の札と位置を共有しているが、変形中はコマ移動が塞がれるので同時には出ない -->

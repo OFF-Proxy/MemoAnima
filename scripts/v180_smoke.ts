@@ -21,7 +21,7 @@
 //        （サムネもコマ 0 を塗る）。Ctrl+Y でコマ 0 に歪みが戻る
 // [S-2]  ★操作ごとの表: 操作したコマを**眠らせてから** Ctrl+Z → 起こすと元の絵・Ctrl+Y → 操作後の絵。
 //        いま見ているコマは 1 画素も変わらない・眠りの網（古い控えのログ）が 1 回も鳴らない・
-//        保存した直後の Ctrl+Z / Ctrl+Y で未保存の印（dirty）が立つ（Codex 1 回目の穴）・画面を描き直す・
+//        保存した直後の Ctrl+Z / Ctrl+Y で未保存の印（dirty）が立つ（独立レビュー 1 回目の穴）・画面を描き直す・
 //        （手組みでない行は）塗り直すサムネが操作したコマだけ
 // [S-2b] ページ貼り付け（手組み・prepare なし）は眠ったコマでも戻る（取り消しがバッファごと差し替える＝対象外の根拠）
 // [S-3]  ★`bufferChangeEntry` / `multiBufferChangeEntry` を**呼ぶ所の数＝`prepare` を付ける所の数**（構文木で数える）。
@@ -47,6 +47,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
+import { editorFileHaving } from "./editorSource";
 
 let pass = 0;
 let fail = 0;
@@ -181,10 +182,11 @@ interface Edit {
   from: string;
   to: string;
 }
+const ED = "src/editor/editor.ts";
 /** 書き換えを当てる。**ちょうど 1 か所**に当たらなければ理由を返す */
 function applyEdits(dir: string, edits: Edit[]): string {
   for (const e of edits) {
-    const f = path.join(dir, e.file);
+    const f = path.join(dir, editTarget(dir, e));
     const text = fs.readFileSync(f, "utf8");
     const eol = text.includes("\r\n") ? "\r\n" : "\n";
     const from = e.from.replace(/\n/g, eol);
@@ -193,6 +195,12 @@ function applyEdits(dir: string, edits: Edit[]): string {
     fs.writeFileSync(f, text.replace(from, () => e.to.replace(/\n/g, eol)));
   }
   return "";
+}
+/** ★V213: editor.ts を的にした書き換えは、書き換える字のあるファイル（editor.ts かコア src/editor/core/editorCore.ts）へ当てる。
+ *  描く処理はコアへ字を変えずに移った。どちらにも無い・両方にあるときは editor.ts のまま（＝当たらない数で赤） */
+function editTarget(dir: string, e: Edit): string {
+  if (e.file !== ED) return e.file;
+  return editorFileHaving(dir, e.from) ?? editorFileHaving(dir, e.from.replace(/\n/g, "\r\n")) ?? e.file;
 }
 /** ★計器: sleep.ts の `wakeFrame` が呼ばれるたびに（コマ・起こし方）を記録する。**sleep.ts 本体は触らない**——
  *  写しの中だけに 1 行足す（[S-4] が「取り消し 1 回につき、その操作のコマへ 1 回だけ」を数えるため） */
@@ -431,7 +439,8 @@ const ROWS: Row[] = [
   {
     id: "歪み",
     label: "歪み",
-    site: "onPointerUp",
+    // ★V213: 歪みの履歴を積む所は PC の onPointerUp からコアの strokeFinish へ移った（字は同じ・呼ぶ所の数も同じ 1）
+    site: "strokeFinish",
     run: (ed) => {
       ed.tool = "warp";
       ed.warpMode = "push";
@@ -1093,7 +1102,6 @@ for (const c of CHECKS) {
 }
 
 // ================= [S-R] 反証（わざと壊した写し） =================
-const ED = "src/editor/editor.ts";
 interface Mut {
   id: string;
   what: string;
@@ -1223,7 +1231,7 @@ const MUTS: Mut[] = [
   },
   {
     id: "2z-13",
-    what: "★歪みの取り消し・やり直しで未保存の印（dirty）を立てない（Codex 1 回目の穴そのもの）",
+    what: "★歪みの取り消し・やり直しで未保存の印（dirty）を立てない（独立レビュー 1 回目の穴そのもの）",
     target: "S-2",
     rows: ["歪み"],
     edits: [
@@ -1328,7 +1336,8 @@ const MUTS: Mut[] = [
     what: "import の別名で呼ぶ（prepare なし）",
     target: "S-3",
     edits: [
-      { file: ED, from: "  bufferChangeEntry,\n  entryBytes,\n", to: "  bufferChangeEntry,\n  bufferChangeEntry as bce,\n  entryBytes,\n" },
+      // ★V213: queueHistory と一緒にコアへ移った。コアの import は 1 行（"../history"）なので、その字に合わせる（別名を足すことは同じ）
+      { file: ED, from: "import { History, bufferChangeEntry, entryBytes,", to: "import { History, bufferChangeEntry, bufferChangeEntry as bce, entryBytes," },
       {
         file: ED,
         from: '  private queueHistory(dir: "undo" | "redo"): void {\n',
@@ -1414,7 +1423,8 @@ const MUTS: Mut[] = [
       },
       {
         file: ED,
-        from: '        if (dir === "undo") await this.applyHistory(() => this.history.undo(), this.history.peekUndo());\n        else await this.applyHistory(() => this.history.redo(), this.history.peekRedo());',
+        // ★V216b: どのエントリかは片づけを待ったあとで引く形（peek を関数で渡す）になった。書き換える字をその形に合わせた（壊し方は同じ）
+        from: '        if (dir === "undo") await this.applyHistory(() => this.history.undo(), () => this.history.peekUndo());\n        else await this.applyHistory(() => this.history.redo(), () => this.history.peekRedo());',
         to: '        if (dir === "undo") await this.applyHistory(() => this.history.undo(), early);\n        else await this.applyHistory(() => this.history.redo(), early);',
       },
     ],

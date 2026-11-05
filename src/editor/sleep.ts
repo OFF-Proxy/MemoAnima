@@ -135,6 +135,7 @@ function bytesToIndexBuf(raw: Uint8Array, from: 8 | 16, to: 8 | 16): IndexBuf {
 /** V156: 「誰かが書いた」ことにする＝控えを捨てる。**条件5の主役**。
  *  ここを通ったレイヤーは、次に眠るとき必ず圧縮し直される。 */
 export function invalidateLayer(f: Frame, id: string): void {
+  bumpWriteGen(f, id); // V216b (A-128): 圧縮の途中の眠らせが「その間に書く道を通った」と分かるように
   if (f.sleep?.[id]) {
     delete f.sleep[id];
     if (Object.keys(f.sleep).length === 0) delete f.sleep;
@@ -143,9 +144,22 @@ export function invalidateLayer(f: Frame, id: string): void {
 
 /** V156: そのコマの控えを全部捨てる（コマ丸ごとに書いたとき）。 */
 export function invalidateFrame(f: Frame): void {
+  for (const id of Object.keys(f.layers)) bumpWriteGen(f, id); // V216b (A-128)
   if (!f.sleep) return;
   for (const id of Object.keys(f.sleep)) if (f.layers[id]) delete f.sleep[id];
   if (Object.keys(f.sleep).length === 0) delete f.sleep;
+}
+
+/** ★V216b (A-128): レイヤーごとの「書く道を通った」回数（`invalidateLayer`・`invalidateFrame`＝書きで起こす・書く前に控えを捨てる所）。
+ *  `sleepLayer` が圧縮を待つ間に増えたら、その圧縮は古い＝捨てる（保険）。作品のデータには持たない（WeakMap） */
+const writeGen = new WeakMap<Frame, Map<string, number>>();
+function bumpWriteGen(f: Frame, id: string): void {
+  let m = writeGen.get(f);
+  if (!m) writeGen.set(f, (m = new Map()));
+  m.set(id, (m.get(id) ?? 0) + 1);
+}
+function writeGenOf(f: Frame, id: string): number {
+  return writeGen.get(f)?.get(id) ?? 0;
 }
 
 /** V156: 1レイヤーを起こす。
@@ -227,7 +241,15 @@ export async function sleepLayer(
     onStaleSleep?.(`stale sleep copy discarded (layer=${id.length}ch)`);
     invalidateLayer(f, id);
   }
+  // ★V216b (A-128・要件 §2-4 の 2): 圧縮を待つ間に、そのレイヤーが差し替わった・書かれた・書く道を通った・ほかで眠らされたなら、
+  //  この圧縮は古い＝**捨てる**（生はそのまま残す＝絵を失わない側）。次の周がいまの姿で圧縮し直す
+  const sum0 = fingerprint(buf);
+  const gen0 = writeGenOf(f, id);
   const z = await gzipBytes(viewBytes(buf));
+  if (f.layers[id] !== buf || f.sleep?.[id] || writeGenOf(f, id) !== gen0 || fingerprint(buf) !== sum0) {
+    onStaleSleep?.(`sleep raced with a write; compressed copy dropped (layer=${id.length}ch)`);
+    return false;
+  }
   if (!f.sleep) f.sleep = {};
   f.sleep[id] = { z, bits, live: null };
   delete f.layers[id];

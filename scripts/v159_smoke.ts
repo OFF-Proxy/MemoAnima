@@ -2,7 +2,7 @@
 //   npx tsx scripts/v159_smoke.ts
 //
 // ★この回でいちばん怖いのは1つ。**ログに作品名やパスが混ざること**。
-//   このログは「作者が普段の作業で取って Cowork へ送る」前提で作っている。
+//   このログは「作者が普段の作業で取って確認に回す」前提で作っている。
 //   1行でも作品名やフォルダのパスが入れば、送ってもらうこと自体ができなくなる（W-10）。
 //   だから 1〜3 で「書ける形」そのものを縛る。
 //
@@ -15,6 +15,7 @@
 // 7. G-2: マイ柄の見本だけ元の大きさ・組み込みトーンの縮小は維持
 import fs from "node:fs";
 import path from "node:path";
+import { editorSourceFiles, readEditorSource } from "./editorSource";
 import {
   perfDone,
   perfNow,
@@ -77,7 +78,8 @@ const OPS = (() => {
 // ---------------------------------------------------------------- 2. 呼び出し側（全走査）
 {
   const FILES = [
-    "src/editor/editor.ts",
+    // ★V213 (M-2a): editor.ts とコア（src/editor/core/editorCore.ts）。描く処理はコアへ移った
+    ...editorSourceFiles(root).map(({ file }) => file),
     "src/main.ts",
     "src/library.ts",
     "src/ui/busy.ts",
@@ -193,7 +195,7 @@ const OPS = (() => {
   const v = await runWithBusy("open.preview", "…", async () => 42);
   check("6 戻り値をそのまま返す", v === 42);
 
-  // ⑥ ★重なった処理（Codex 指摘①）: A が終わっても B がまだ走っていれば**畳まない**。
+  // ⑥ ★重なった処理（独立レビューの指摘①）: A が終わっても B がまだ走っていれば**畳まない**。
   //    棚のメモ A → すぐ B、で「B の読み込み中だけ画面が無表示に戻る」を防ぐ
   shown = 0;
   hidden = 0;
@@ -212,7 +214,7 @@ const OPS = (() => {
 
 // ---------------------------------------------------------------- 8. 古い読み込みが画面を乗っ取らない
 {
-  // Codex 指摘①の後半。棚のクリックは `void this.select(it)` で投げっぱなしなので、
+  // 独立レビューの指摘①の後半。棚のクリックは `void this.select(it)` で投げっぱなしなので、
   // 重い A → 軽い B と押すと A が後から終わって B を上書きし得る。世代番号で降ろす。
   const src = fs.readFileSync(path.join(root, "src/library.ts"), "utf8");
   const sel = src.match(/async select\(it: LibraryView\) \{[\s\S]*?\n  \}\n/);
@@ -257,7 +259,7 @@ const OPS = (() => {
   check("7 組み込みトーンの縮小は維持（96×32）", !!normal && normal[0] === 96 && normal[1] === 32, String(normal));
   check("7 2列ぶちぬきも維持（144×32）", !!wide && wide[0] === 144 && wide[1] === 32, String(wide));
   // マイ柄のバッキングは正方形のまま（CSS だけで戻していることの確認）
-  const ts = fs.readFileSync(path.join(root, "src/editor/editor.ts"), "utf8");
+  const ts = readEditorSource(root); // ★V213: editor.ts とコア
   check(
     "7 マイ柄のバッキングは正方形のまま（TS 側は無変更）",
     /cv\.width = CUSTOM_CHIP_PX;\s*\n\s*cv\.height = CUSTOM_CHIP_PX;/.test(ts)

@@ -4,6 +4,8 @@
 // 3) .kwz 分離取込（実データ: トラック本数・コマ配置・PCM長・baseSpeedIndex）
 // 4) computeMixPlan（尺・SE時刻・速度rate・ミュート/トリム規則）
 // 5) frameClip の SE規則（同一メモ=保持／別メモ=未知SEは外れる）・cloneFrame/sanitizeAudio
+// 6) .ppm の効果音の置き場所（合成・ライブラリ不要。期待は書いた旗のバイトから）
+//  ※ 3) と 6) の効果音の置き場所の期待は、取り込み（getSoundEffectFlags の鍵 1〜4）と**別の口**から作る（V200 報告書 §7-1）
 //
 // 実行: npx tsx scripts/m5_smoke.ts <ライブラリパス（.kwz検証用・省略可）>
 
@@ -209,13 +211,13 @@ const mkSe = (id: string, over: Partial<SeTrack> = {}): SeTrack => ({
     ...over,
   });
   const dec = new Set(["S1", "S2"]);
-  // audioToAnim: 尺=アニメ・BGMループ・SEはコマ時刻（muted除外）
+  // audioToAnim: 尺=アニメ・BGMは繰り返さない（V209 A-121）・SEはコマ時刻（muted除外）
   {
     const plan = computeMixPlan(spec(), 10, dec);
     check(
-      "plan audioToAnim: 尺=アニメ・BGMループ・rate=1",
+      "plan audioToAnim: 尺=アニメ・BGMは繰り返さない（V209 A-121・loop は偽）・rate=1",
       Math.abs(plan.outDurSec - 4 / 8) < 1e-9 &&
-        plan.bgm?.loop === true &&
+        plan.bgm?.loop === false &&
         plan.bgm.rate === 1
     );
     check(
@@ -322,17 +324,17 @@ const mkSe = (id: string, over: Partial<SeTrack> = {}): SeTrack => ({
       !!plan.bgm && Math.abs(plan.bgm.offsetSec - 3.5) < 1e-9
     );
   }
-  // 短い BGM ＋ 範囲先頭が2周目: 剰余で巻き戻る
+  // 短い BGM ＋ 範囲先頭が曲の終わりより後ろ: V209 (A-121) から剰余しない＝トリムの終わりに留める（無音）
   {
     const plan = computeMixPlan(
       spec({ bgm: mkBgm({ trimStartMs: 0, trimEndMs: 3000 }), rangeStartSec: 7 }),
       10,
       dec
     );
-    // trimStart=0 / usable=3 / rate=1 → 0 + (7 % 3) = 1（3周目の頭から1秒）
+    // trimStart=0 / trimEnd=3 / rate=1 → min(3, 0 + 7) = 3（鳴らす長さ 0 の無音・計画の bgm は null にしない）
     check(
-      "plan 2周目以降: 剰余で巻き戻る（usable=3s・range=7s → 1s）",
-      !!plan.bgm && Math.abs(plan.bgm.offsetSec - 1) < 1e-9
+      "plan 範囲先頭が曲より後ろ: 剰余しない・offsetSec=trimEndSec（usable=3s・range=7s → 3s）・bgm は null でない",
+      !!plan.bgm && Math.abs(plan.bgm.offsetSec - 3) < 1e-9 && plan.bgm.loop === false
     );
   }
   // 速度連動 rate が掛かること（rate=2.5 → バッファ時間は 2.5 倍進む）
@@ -350,7 +352,7 @@ const mkSe = (id: string, over: Partial<SeTrack> = {}): SeTrack => ({
     const rate = FPS_TABLE[8] / FPS_TABLE[6]; // 2.5
     check(
       "plan rangeStartSec に rate が掛かる（2s × 2.5 = 5s）",
-      !!plan.bgm && Math.abs(plan.bgm.offsetSec - ((2 * rate) % 10)) < 1e-9 &&
+      !!plan.bgm && Math.abs(plan.bgm.offsetSec - 2 * rate) < 1e-9 &&
         Math.abs(plan.bgm.offsetSec - 5) < 1e-9
     );
   }
@@ -375,10 +377,11 @@ const mkSe = (id: string, over: Partial<SeTrack> = {}): SeTrack => ({
     const a = computeMixPlan(spec({ rangeStartSec: -5 }), 10, dec);
     const b = computeMixPlan(spec({ rangeStartSec: 1e6 }), 10, dec);
     check(
-      "plan rangeStartSec の異常値（負/巨大）でも 0..usable に収まる",
+      "plan rangeStartSec の異常値（負/巨大）でもトリムの中（V209: 巨大な値はトリムの終わりに留める＝上限は <=）",
       !!a.bgm && a.bgm.offsetSec === a.bgm.trimStartSec &&
         !!b.bgm && b.bgm.offsetSec >= b.bgm.trimStartSec &&
-        b.bgm.offsetSec < b.bgm.trimStartSec + b.bgm.usableSec
+        b.bgm.offsetSec <= b.bgm.trimStartSec + b.bgm.usableSec &&
+        Math.abs(b.bgm.offsetSec - b.bgm.trimEndSec) < 1e-9
     );
   }
 }
@@ -428,7 +431,6 @@ if (libRoot) {
   })(libRoot);
   let seSample = 0;
   let bgmSample = 0;
-  let checkedPlacement = false;
   // V176b: 実データのライブラリには**開けない .kwz** が混ざり得る（0 バイト・途中で切れた・読めない）。
   //  以前はここで例外がそのまま上がり、**この先の検査ごとプロセスが死んでいた**。
   //  ⚠ **黙って continue しない**——開けなかったものは下で **NG として数えて理由を出す**。
@@ -436,8 +438,15 @@ if (libRoot) {
   //  `.kwz` の名前は 3DS が付ける英数字のハッシュ＝作品名ではないので、**名前だけは出してよい**。
   const unreadable: string[] = [];
   let scanned = 0;
+  // 効果音の置き場所: 期待は**取り込みと別の口**から作る（下の「kwz SE配置」）。
+  //  ⚠ 空振りにしない: SE1〜SE4 のどれも「置くべきコマ」に 1 回は当たるまで見る（当たらなければ赤）
+  const placedBySlot = [0, 0, 0, 0, 0]; // [1]〜[4] = SE1〜SE4 の置くべきコマの数
+  let placementWorks = 0;
+  let placementBad = 0;
+  let oracleDisagree = 0;
+  const slotsCovered = () => [1, 2, 3, 4].every((n) => placedBySlot[n] > 0);
   for (const f of files) {
-    if (seSample >= 3 && bgmSample >= 3) break;
+    if (seSample >= 3 && bgmSample >= 3 && slotsCovered()) break;
     scanned++;
     // ★try で囲むのは「**開く**」ところだけ。この下の照合まで囲むと、こちら側が壊れたときに
     //  「開けなかった」として数えてしまい、本物の不具合が 1 行の注記に化ける
@@ -492,26 +501,49 @@ if (libRoot) {
         a?.se.length === seSlots.length &&
           seSlots.every((n, i) => a!.se[i].name === `SE${n}`)
       );
-      if (!checkedPlacement) {
-        checkedPlacement = true;
-        const flags: boolean[][] = note.getSoundEffectFlags();
-        let match = true;
-        for (let fi = 0; fi < project.frames.length; fi++) {
-          const expected = seSlots
-            .filter((n) => flags[fi]?.[n - 1])
-            .map((n) => a!.se[seSlots.indexOf(n)].id);
-          const actual = project.frames[fi].se ?? [];
-          if (expected.join() !== actual.join()) {
-            match = false;
-            console.log(`  placement mismatch frame ${fi}: ${expected} vs ${actual}`);
-            break;
-          }
+      // ★期待は flipnote.js の isSoundEffectUsedOnFrame(トラック 1〜4, コマ) から作り、decodeSoundFlags()（0〜3 の配列）と
+      //  全コマで食い違わないことも見る（正そのものの確かめ）。取り込み（kwzImport.ts）が読むのは getSoundEffectFlags()
+      //  （コマごとに **1〜4 を鍵にしたオブジェクト**）なので、ここはそれと別の口。
+      //  前は期待を getSoundEffectFlags() の `[n - 1]` で作っていた＝取り込みと同じ思い込みで、SE1 がどこにも置かれず
+      //  SE2〜SE4 が 1 つ前の効果音のコマに置かれていても緑だった（V200 報告書 §7-1）。見るのも最初の 1 作品だけだった
+      placementWorks++;
+      const dec: boolean[][] = note.decodeSoundFlags();
+      let firstBad = "";
+      for (let fi = 0; fi < project.frames.length; fi++) {
+        const used = (n: number) => note.isSoundEffectUsedOnFrame(n, fi) === true;
+        for (const n of [1, 2, 3, 4]) if (used(n) !== (dec[fi]?.[n - 1] === true)) oracleDisagree++;
+        const expected = seSlots.filter(used);
+        for (const n of expected) placedBySlot[n]++;
+        const want = expected.map((n) => a!.se[seSlots.indexOf(n)].id);
+        const actual = project.frames[fi].se ?? [];
+        if (!firstBad && want.join() !== actual.join()) {
+          const nameOf = (id: string) => a!.se.find((s) => s.id === id)?.name ?? id;
+          firstBad = `コマ ${fi}: 期待 [${expected.map((n) => `SE${n}`)}] 実際 [${actual.map(nameOf)}]`;
         }
-        check("kwz SE配置: 全コマで getSoundEffectFlags と一致", match);
+      }
+      if (firstBad) {
+        placementBad++;
+        console.log(`  placement mismatch (${f.split(/[\\/]/).pop()}) ${firstBad}`);
       }
     }
   }
   console.log(`kwz sampled: bgm=${bgmSample} se=${seSample} (${files.length} files scanned)`);
+  if (seSample > 0) {
+    console.log(
+      `kwz SE配置: ${placementWorks} 作品を全コマ照合・置くべきコマ SE1=${placedBySlot[1]} SE2=${placedBySlot[2]} SE3=${placedBySlot[3]} SE4=${placedBySlot[4]}`
+    );
+    check(
+      "kwz SE配置: 見た作品の全コマで flipnote.js の isSoundEffectUsedOnFrame と一致（取り込みと別の口）",
+      placementWorks === seSample && placementBad === 0,
+      `${placementBad}/${placementWorks} 作品で食い違い`
+    );
+    check("kwz SE配置の正: isSoundEffectUsedOnFrame と decodeSoundFlags が全コマで一致", oracleDisagree === 0, `${oracleDisagree} か所`);
+    check(
+      "kwz SE配置: SE1〜SE4 のどれも置くべきコマに 1 回以上当たった（空振りでない）",
+      slotsCovered(),
+      `SE1..SE4=${placedBySlot.slice(1).join(",")}`
+    );
+  }
   // ★0 件でも必ず出す（出さないと「見ていない」のか「無かった」のか読む側に分からない）
   console.log(`開けなかった .kwz: ${unreadable.length} 件 / 見た ${scanned} 件中${unreadable.length ? "（NG）" : ""}`);
   for (const u of unreadable) console.log(`  - ${u}`);
@@ -519,6 +551,83 @@ if (libRoot) {
   if (seSample === 0) console.log("  ⚠ SEありの .kwz が見つからなかったため配置検証はスキップ");
 } else {
   console.log("（.kwz 分離取込の実データ検証はライブラリパス引数を付けて実行）");
+}
+
+// ---- (6) .ppm の効果音の置き場所（合成・ライブラリ不要） ----
+// 作者のライブラリに .ppm は無いので合成する。期待は**書いた旗のバイト**から作る（flipnote.js の口にも頼らない）。
+// .ppm の効果音は SE1〜SE3 だけ（getSoundEffectFlags() の鍵 4 は常に false）
+/** 合成の DSi .ppm（効果音の検査用・絵は空）。書き方は v200_smoke の makePpm と同じ（flipnote.js の PpmParser の
+ *  読み方どおり。署名は 0 で埋める＝読み手は確かめない）。flag(f) はコマ f の旗のバイト（bit0=SE1・bit1=SE2・bit2=SE3） */
+function makeSePpm(frames: number, se: [number, number, number], flag: (f: number) => number): ArrayBuffer {
+  const frameLen = 1 + 2 * (192 / 4); // 頭の 1 バイト＋2 層の行の種類（2 ビット × 192 行・全部 0＝空の行）
+  const offTable = frames * 4;
+  const frameDataLength = 8 + offTable + frames * frameLen;
+  const flagsAt = 0x6a0 + frameDataLength;
+  let soundAt = flagsAt + frames;
+  if (soundAt % 4) soundAt += 4 - (soundAt % 4);
+  const soundLen = se[0] + se[1] + se[2];
+  const b = new Uint8Array(soundAt + 32 + soundLen + 0x80 + 0x10);
+  const dv = new DataView(b.buffer);
+  b.set([0x50, 0x41, 0x52, 0x41], 0); // "PARA"
+  dv.setUint32(4, frameDataLength, true);
+  dv.setUint32(8, soundLen, true);
+  dv.setUint16(12, frames - 1, true);
+  dv.setUint16(14, 0x24, true);
+  dv.setUint16(0x6a0, offTable, true);
+  for (let f = 0; f < frames; f++) {
+    dv.setUint32(0x6a8 + f * 4, f * frameLen, true);
+    b[0x6a8 + offTable + f * frameLen] = 0x80 | (1 << 1) | (1 << 3); // キーフレーム・紙 0・ペンは 2 層とも 1
+  }
+  for (let f = 0; f < frames; f++) b[flagsAt + f] = flag(f);
+  dv.setUint32(soundAt, 0, true); // BGM なし
+  dv.setUint32(soundAt + 4, se[0], true);
+  dv.setUint32(soundAt + 8, se[1], true);
+  dv.setUint32(soundAt + 12, se[2], true);
+  b[soundAt + 16] = 8 - 5; // 速さ 5
+  b[soundAt + 17] = 8 - 5;
+  for (let k = soundAt + 32; k < soundAt + 32 + soundLen; k++) b[k] = (k * 37) & 0xff; // 音の中身は何でもよい
+  return b.buffer;
+}
+{
+  const { importFlipnote } = await import("../src/editor/kwzImport");
+  const { parse } = await import("flipnote.js");
+  // SE1＝コマ 0,3,6,9・SE2＝1,5,9・SE3＝2,7（コマ 9 は SE1 と SE2 の 2 つ）
+  const FLAG = (f: number) => (f % 3 === 0 ? 1 : 0) | (f % 4 === 1 ? 2 : 0) | (f % 5 === 2 ? 4 : 0);
+  const bit = (f: number, n: number) => ((FLAG(f) >> (n - 1)) & 1) === 1;
+  const cases: { label: string; se: [number, number, number] }[] = [
+    { label: "SE1〜SE3 あり", se: [400, 300, 200] },
+    { label: "SE2 の音が無い（旗だけ立つ）", se: [400, 0, 200] },
+  ];
+  for (const c of cases) {
+    const ab = makeSePpm(12, c.se, FLAG);
+    const have = c.se.map((n) => n > 0);
+    // 材料の確かめ: 書いた旗のとおりに flipnote.js が読む（.ppm に SE4 は無い）
+    const note: any = await parse(ab.slice(0));
+    let readOk =
+      note.format === "PPM" &&
+      note.frameCount === 12 &&
+      [1, 2, 3].every((n) => note.hasAudioTrack(n) === have[n - 1]) &&
+      !note.hasAudioTrack(4);
+    for (let f = 0; f < 12; f++)
+      for (const n of [1, 2, 3, 4]) if (note.isSoundEffectUsedOnFrame(n, f) !== (n <= 3 && bit(f, n))) readOk = false;
+    check(`ppm 材料: 合成 .ppm（${c.label}）の旗を flipnote.js が書いたとおりに読む（SE4 は無い）`, readOk);
+    const { project } = await importFlipnote(ab.slice(0), "se.ppm");
+    const tracks = project.audio?.se ?? [];
+    const nameOf = (id: string) => tracks.find((t) => t.id === id)?.name ?? id;
+    let bad = "";
+    for (let f = 0; f < 12; f++) {
+      const expected = [1, 2, 3].filter((n) => have[n - 1] && bit(f, n));
+      const want = expected.map((n) => tracks.find((t) => t.name === `SE${n}`)?.id ?? `SE${n}?`);
+      const actual = project.frames[f].se ?? [];
+      if (!bad && want.join() !== actual.join())
+        bad = `コマ ${f}: 期待 [${expected.map((n) => `SE${n}`)}] 実際 [${actual.map(nameOf)}]`;
+    }
+    check(
+      `ppm SE配置（${c.label}）: 書いた旗のとおり（SE1＝0,3,6,9・SE2＝1,5,9・SE3＝2,7）`,
+      tracks.length === have.filter(Boolean).length && bad === "",
+      bad
+    );
+  }
 }
 
 console.log(`m5 smoke: pass=${pass} fail=${fail}`);

@@ -185,28 +185,37 @@ export function footprintEdges(size: number): FootprintEdge[] {
   return edges;
 }
 
+/** ★V209 (A-122): 枠の色。内側が黒（今の `antColor` の黒）・外側が白。位置で色を変えない */
+export const FRAME_INK = "rgb(44, 38, 33)";
+export const FRAME_PAPER = "#ffffff";
+
+/** 物理 px の矩形 */
+export interface PxRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** 枠を描く手順の 1 つ（描いた順に重ねる。clear は中を空ける） */
+export type FrameOp = { kind: "fill"; color: string; rects: PxRect[] } | { kind: "clear"; rects: PxRect[] };
+
 /**
- * ★V178 (A-72): 全レイヤー消しゴムの「二重線」の**外側の線**（物理 px で 1px の横帯の並び）。
+ * ★V209 (A-122・docs/REQ_cursor_frame.md §2 (1)): ペン・消しゴム・ブラシの枠を描く手順（純関数）。
  *
- * 輪（`footprintEdges`＝消える範囲の外周）は**そのまま**残し、その外側に g 物理 px 離してもう 1 本引く
- * （消える範囲は変わらないので、太さの輪は動かさない）。形は「消えるドットの集合を g だけ太らせた領域
- * （チェビシェフ）の、4 近傍で外に接する 1px」。
+ * 塗られるドットの集まり（`penFootprint`）を**ドットの行ごとの矩形**（物理 px）にして、白を 2 本ぶん・黒を 1 本ぶん外へ広げて塗り、
+ * 最後に中を空ける（試しのページ `docs/handoff/TRIAL_cursor_frame.html` の `paintCursor` と同じ描き方）。
+ * 行の矩形を同じだけ広げた和は、塗られるドットの集まりを正方形で太らせた形と同じ＝黒は塗られるドットのすぐ外側に、白はその外側に、
+ * それぞれ lw 物理 px で隙間なく囲む。**塗られるドットの上には何も残らない**（最後に中を空ける）。
  *
- * 辺ごとに平行移動するだけだと、低い倍率（1 ドット＝2〜3px）で段の角がつぶれて線が乱れるので、
- * **物理 px の行ごとに区間で**求める。`penFootprint` の形はどのドット行も中心の列（dx=0）を含む
- * ＝太らせた領域も各行 1 本の区間になる（`scripts/v178_smoke.ts` [S-10] が物差しと総当たりで突き合わせる）。
+ * `outerGap` を渡すと（全レイヤー消しゴムの二重線）、新しい枠のさらに外側に outerGap 物理 px 空けてもう 1 組（同じ黒と白）。
+ * 中を空ける描き方なので、**外側の組を先に**描く（後に描くと内側の枠まで空けてしまう）。
  *
- * @param L ドット相対 x → 物理 px（`paintCursorLayer` と**同じ式**を渡す。輪と 1px もずれないように）
+ * @param L ドット相対 x → 物理 px（`paintCursorLayer` と同じ式 `round((x + dx) × px)`）
  * @param T ドット相対 y → 物理 px
- * @param g 輪からの間隔（物理 px）
+ * @param lw 線の太さ（物理 px・`max(1, round(dpr))`）
  */
-export function outerRingRuns(
-  size: number,
-  L: (dx: number) => number,
-  T: (dy: number) => number,
-  g: number
-): { x: number; y: number; w: number }[] {
-  // ドット行ごとの横の範囲 [a, b]
+export function cursorFrameOps(size: number, L: (dx: number) => number, T: (dy: number) => number, lw: number, outerGap: number | null = null): FrameOp[] {
   const rows = new Map<number, { a: number; b: number }>();
   for (const c of penFootprint(size)) {
     const r = rows.get(c.dy);
@@ -216,57 +225,31 @@ export function outerRingRuns(
       r.b = Math.max(r.b, c.dx);
     }
   }
-  // 太らせた領域の、物理 px の行 y での区間 [lo, hi)（その行に無ければ null）
-  const span = (y: number): [number, number] | null => {
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const [dy, r] of rows) {
-      if (y < T(dy) - g || y >= T(dy + 1) + g) continue;
-      lo = Math.min(lo, L(r.a) - g);
-      hi = Math.max(hi, L(r.b + 1) + g);
-    }
-    return lo < hi ? [lo, hi] : null;
-  };
-  let top = Infinity;
-  let bottom = -Infinity;
-  for (const dy of rows.keys()) {
-    top = Math.min(top, T(dy) - g);
-    bottom = Math.max(bottom, T(dy + 1) + g);
+  const inner: PxRect[] = [...rows.entries()]
+    .sort((p, q) => p[0] - q[0])
+    .map(([dy, r]) => ({ x: L(r.a), y: T(dy), w: L(r.b + 1) - L(r.a), h: T(dy + 1) - T(dy) }));
+  const grow = (k: number): PxRect[] => inner.map((r) => ({ x: r.x - k, y: r.y - k, w: r.w + 2 * k, h: r.h + 2 * k }));
+  const ops: FrameOp[] = [];
+  if (outerGap != null) {
+    const o = 2 * lw + outerGap; // 外側の組の内側の縁（新しい枠の白の外からの間）
+    ops.push({ kind: "fill", color: FRAME_PAPER, rects: grow(o + 2 * lw) });
+    ops.push({ kind: "fill", color: FRAME_INK, rects: grow(o + lw) });
+    ops.push({ kind: "clear", rects: grow(o) });
   }
-  const out: { x: number; y: number; w: number }[] = [];
-  for (let y = top; y < bottom; y++) {
-    const cur = span(y);
-    if (!cur) continue;
-    const [lo, hi] = cur;
-    // この行で外に接する画素 = 左右の端 ＋ 上の行・下の行の区間からはみ出した所
-    const marks: [number, number][] = [
-      [lo, lo + 1],
-      [hi - 1, hi],
-    ];
-    for (const nb of [span(y - 1), span(y + 1)]) {
-      if (!nb) {
-        marks.push([lo, hi]);
-        continue;
-      }
-      if (nb[0] > lo) marks.push([lo, Math.min(hi, nb[0])]);
-      if (nb[1] < hi) marks.push([Math.max(lo, nb[1]), hi]);
-    }
-    // 重なり・隣り合いをまとめて帯にする
-    marks.sort((a, b) => a[0] - b[0]);
-    let s = marks[0][0];
-    let e = marks[0][1];
-    for (let i = 1; i < marks.length; i++) {
-      const [ms, me] = marks[i];
-      if (ms <= e) e = Math.max(e, me);
-      else {
-        out.push({ x: s, y, w: e - s });
-        s = ms;
-        e = me;
-      }
-    }
-    out.push({ x: s, y, w: e - s });
-  }
-  return out;
+  ops.push({ kind: "fill", color: FRAME_PAPER, rects: grow(2 * lw) });
+  ops.push({ kind: "fill", color: FRAME_INK, rects: grow(lw) });
+  ops.push({ kind: "clear", rects: inner });
+  return ops;
+}
+
+/** ★V209 (A-122): 枠の線の太さ（物理 px） */
+export function frameLineWidth(dpr: number): number {
+  return Math.max(1, Math.round(dpr || 1));
+}
+
+/** ★V209 (A-122): 実際に塗る太さ（ブラシは 3 より細く塗らない＝`penOptions` と同じ）。枠はこの太さで描く */
+export function paintedSize(tool: string, size: number): number {
+  return tool === "brush" ? Math.max(size, 3) : size;
 }
 
 /**

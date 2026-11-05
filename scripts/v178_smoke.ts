@@ -35,7 +35,7 @@
 // [S-12] ★この回で足した: 眠りの最後の網（眠っている対象があるストロークは描かない・半分だけ消さない）
 // [S-13] ★この回で足した: いまのレイヤーが 🔒 でも、ほかの見えているレイヤーは消える（オフなら従来どおり止まる）
 // [S-14] ★この回で足した: なぞっている途中で道具が変わっても、束をペンの色で塗らない・消した分は確定する
-// [S-15] ★Codex 指摘: 全レイヤーの束は、作品に別の変更が入る前（キー・コマンド・重い処理・↶↷・UI を押した時点）に
+// [S-15] ★独立レビューの指摘: 全レイヤーの束は、作品に別の変更が入る前（キー・コマンド・重い処理・↶↷・UI を押した時点）に
 //        確定して終え、pointerup と同じ状態に戻る。描きながらコマを消しても Ctrl+Z で元の絵に戻る。
 //        入口を通らない経路でも、ほかの履歴が積まれる直前に束を確定する（最後の網）。残った束は次に触れた時点で確定して
 //        次のストロークを乗っ取らない（別の作品に移っていたら積まない）
@@ -46,6 +46,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { editorFileHaving } from "./editorSource";
 
 let pass = 0;
 let fail = 0;
@@ -75,24 +76,21 @@ const G = globalThis as unknown as Record<string, unknown>;
 G.self = G; // exporter.ts が読む gif.js（ブラウザ前提・self 参照）
 G.window = G; // editor.ts の window.setTimeout 等（Node の同名の関数がそのまま使える）
 G.devicePixelRatio = 1;
-interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-const cursorRects: Rect[] = [];
+/** ★V209 (A-122・R-6): カーソル層は**描いた順に物理ピクセルの絵へ起こす**（fillRect の記録だけだと、中を空ける描き方＝
+ *  clearRect の範囲で記録が消えるのを見分けられない）。キーは物理 px の座標・値は色 */
+const cursorPix = new Map<number, string>();
+const PK = (x: number, y: number) => (y + 4096) * 16384 + (x + 4096);
 const cursorCtx = {
   fillStyle: "",
   imageSmoothingEnabled: false,
-  clearRect() {
-    cursorRects.length = 0;
+  clearRect(x: number, y: number, w: number, h: number) {
+    for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) cursorPix.delete(PK(xx, yy));
   },
   fillRect(x: number, y: number, w: number, h: number) {
-    cursorRects.push({ x, y, w, h });
+    for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) cursorPix.set(PK(xx, yy), this.fillStyle);
   },
 };
-/** `#ed-cursor`（2 階のカーソル層）。描かれた矩形を `cursorRects` に記録する */
+/** `#ed-cursor`（2 階のカーソル層）。描かれた絵を `cursorPix` に起こす */
 const CURSOR_CV = { width: 0, height: 0, hidden: true, getContext: () => cursorCtx };
 /** `#ed-canvas`。矩形は 320×240 ちょうど＝クライアント座標がそのままドット座標（x+0.5 → 画素 x）。
  *  offsetWidth はカーソル層の大きさ（1 ドット＝3 物理 px）を決めるだけ。
@@ -104,7 +102,7 @@ const CANVAS = {
   getBoundingClientRect: () => ({ left: 0, top: 0, width: 320, height: 240 }),
 };
 /** `#ed-cvwrap`（ポインタを掴む外枠）。**捕捉を本当に取らせる**（掴んだ id を覚える）——終えたストロークが
- *  捕捉を放したかを状態で見るため（Codex 3 回目の穴: releaseCapture を外しても緑だった） */
+ *  捕捉を放したかを状態で見るため（独立レビュー 3 回目の穴: releaseCapture を外しても緑だった） */
 const CVWRAP = {
   style: {} as Record<string, string>,
   captured: null as number | null,
@@ -179,12 +177,19 @@ interface Edit {
   to: string;
 }
 let mutSeq = 0;
+const ED = "src/editor/editor.ts";
+/** ★V213: editor.ts を的にした書き換えは、書き換える字のあるファイル（editor.ts かコア src/editor/core/editorCore.ts）へ当てる。
+ *  描く処理はコアへ字を変えずに移った。どちらにも無い・両方にあるときは editor.ts のまま（＝当たらない数で赤） */
+function editTarget(dir: string, e: Edit): string {
+  if (e.file !== ED) return e.file;
+  return editorFileHaving(dir, e.from) ?? editorFileHaving(dir, e.from.replace(/\n/g, "\r\n")) ?? e.file;
+}
 /** src/ を写して `edits` を当てた木を読み込む。書き換えは**ちょうど 1 か所**に当たること */
 async function mutant(edits: Edit[]): Promise<{ tree: Tree | null; why: string }> {
   const dir = path.join(WORK, `m${++mutSeq}`);
   copySrc(dir);
   for (const e of edits) {
-    const f = path.join(dir, e.file);
+    const f = path.join(dir, editTarget(dir, e));
     const text = fs.readFileSync(f, "utf8");
     const eol = text.includes("\r\n") ? "\r\n" : "\n";
     const from = e.from.replace(/\n/g, eol);
@@ -797,7 +802,7 @@ async function checkS7(T: Tree): Promise<V> {
   stroke(ed, PATH2);
   if (pins() !== 2) return ng(`★同じ作品の 2 回目でも 📌 の知らせが出た（通算 ${pins()} 回）`);
   // ★知らせを出した作品の記録は**弱い参照**（WeakSet）。ふつうの Set だと、閉じた作品（数百 MB になり得る）を
-  //  Editor が抱え続ける。WeakSet は中身を数えられないので、実体の型で見る（Codex 2 回目の穴）
+  //  Editor が抱え続ける。WeakSet は中身を数えられないので、実体の型で見る（独立レビュー 2 回目の穴）
   if (!(ed.eraseAllPinNoticed instanceof WeakSet)) return ng("★📌 の知らせの記録が WeakSet でない（閉じた作品を抱え込む）");
   return ok();
 }
@@ -845,53 +850,64 @@ async function checkS9(T: Tree): Promise<V> {
 }
 
 // ================= [S-10] カーソルの二重線 =================
+// ★V209 (A-122・R-4・R-6): 枠は塗られるドットの**外側**の黒白 2 本線（cursor.ts の cursorFrameOps）になった。二重線は
+//  新しい枠のさらに外側に間を空けてもう 1 組（同じ黒と白）。前の形（ドットの内側の縁の輪＋太らせた外周の 1 本＝outerRingRuns）の
+//  物差しを、新しい形の物差しへ書き換えた（確かめる中身は同じ: 全レイヤーのときだけ二重・太さの枠はそのまま・外側の組は枠から一定の間で太らせた形）
 type PxSet = Set<number>;
-const K = (x: number, y: number) => (y + 4096) * 16384 + (x + 4096);
-function rectsToSet(rs: Rect[]): PxSet {
-  const s: PxSet = new Set();
-  for (const r of rs) for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) s.add(K(x, y));
-  return s;
+const K = PK;
+/** 検査側が**自分で**求める物差し: 物理 px の点から、消えるドットの集合までのチェビシェフ距離（中は 0） */
+function chebDist(cells: { dx: number; dy: number }[], L: (d: number) => number, Tt: (d: number) => number, x: number, y: number): number {
+  let best = Infinity;
+  for (const c of cells) {
+    const gx = Math.max(0, L(c.dx) - x, x - (L(c.dx + 1) - 1));
+    const gy = Math.max(0, Tt(c.dy) - y, y - (Tt(c.dy + 1) - 1));
+    best = Math.min(best, Math.max(gx, gy));
+  }
+  return best;
 }
-/** 検査側が**自分で**求める物差し: 消えるドットの集合を g だけ太らせた領域の、4 近傍で外に接する画素 */
-function dilationBoundary(
-  cells: { dx: number; dy: number }[],
-  L: (d: number) => number,
-  Tt: (d: number) => number,
-  g: number
-): PxSet {
-  const rects = cells.map((c) => ({ x0: L(c.dx) - g, x1: L(c.dx + 1) + g, y0: Tt(c.dy) - g, y1: Tt(c.dy + 1) + g }));
-  const inD = (x: number, y: number) => rects.some((r) => x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1);
-  const xs0 = Math.min(...rects.map((r) => r.x0)) - 1;
-  const xs1 = Math.max(...rects.map((r) => r.x1)) + 1;
-  const ys0 = Math.min(...rects.map((r) => r.y0)) - 1;
-  const ys1 = Math.max(...rects.map((r) => r.y1)) + 1;
-  const out: PxSet = new Set();
-  for (let y = ys0; y < ys1; y++)
-    for (let x = xs0; x < xs1; x++) {
-      if (!inD(x, y)) continue;
-      if (!inD(x - 1, y) || !inD(x + 1, y) || !inD(x, y - 1) || !inD(x, y + 1)) out.add(K(x, y));
-    }
-  return out;
+const INK = "rgb(44, 38, 33)";
+const PAPER = "#ffffff";
+/** 物差し: 距離の帯ごとの色（lw＝線の太さ・g＝内側の組と外側の組の間）。null なら二重線なし */
+function wantColor(d: number, lw: number, g: number | null): string | undefined {
+  if (d === 0) return undefined;
+  if (d <= lw) return INK;
+  if (d <= 2 * lw) return PAPER;
+  if (g == null) return undefined;
+  const o = 2 * lw + g;
+  if (d <= o) return undefined;
+  if (d <= o + lw) return INK;
+  if (d <= o + 2 * lw) return PAPER;
+  return undefined;
 }
 const setEq = (a: PxSet, b: PxSet) => a.size === b.size && [...a].every((k) => b.has(k));
 async function checkS10(T: Tree): Promise<V> {
-  if (typeof T.C.outerRingRuns !== "function") return ng("★cursor.ts に outerRingRuns が無い");
-  // (a) 純関数: どの太さ・どの倍率でも「太らせた領域の外周」と 1 画素も違わない
+  if (typeof T.C.cursorFrameOps !== "function") return ng("★cursor.ts に cursorFrameOps が無い");
+  // (a) 純関数: どの太さ・どの倍率・どの間でも、外側の組は「消えるドットを太らせた帯」と 1 画素も違わない
   for (const size of [1, 2, 3, 5, 8, 12])
     for (const px of [1, 2, 3, 4.5, 8, 16])
       for (const g of [2, 3, 6]) {
         const L = (d: number) => Math.round((160 + d) * px);
         const Tt = (d: number) => Math.round((120 + d) * px);
-        const got = rectsToSet(
-          (T.C.outerRingRuns(size, L, Tt, g) as { x: number; y: number; w: number }[]).map((r) => ({ ...r, h: 1 }))
-        );
-        const want = dilationBoundary(T.C.penFootprint(size), L, Tt, g);
-        if (!setEq(got, want)) return ng(`★太さ ${size}・1 ドット ${px}px・間 ${g}: 外側の線が太らせた外周とずれる`);
+        const M = new Map<number, string>();
+        for (const op of T.C.cursorFrameOps(size, L, Tt, 1, g) as { kind: string; color?: string; rects: { x: number; y: number; w: number; h: number }[] }[])
+          for (const r of op.rects)
+            for (let y = r.y; y < r.y + r.h; y++)
+              for (let x = r.x; x < r.x + r.w; x++) {
+                if (op.kind === "clear") M.delete(K(x, y));
+                else M.set(K(x, y), op.color!);
+              }
+        const cells = T.C.penFootprint(size) as { dx: number; dy: number }[];
+        const x0 = L(-8) - 20, x1 = L(8) + 20, y0 = Tt(-8) - 20, y1 = Tt(8) + 20;
+        for (let y = y0; y < y1; y++)
+          for (let x = x0; x < x1; x++) {
+            const want = wantColor(chebDist(cells, L, Tt, x, y), 1, g);
+            if (M.get(K(x, y)) !== want) return ng(`★太さ ${size}・1 ドット ${px}px・間 ${g}: (${x},${y}) が ${M.get(K(x, y))}（期待 ${want}）`);
+          }
       }
-  // (b) 本物の paintCursorLayer: 全レイヤーのときだけ二重・太さの輪はそのまま
+  // (b) 本物の paintCursorLayer: 全レイヤーのときだけ二重・太さの枠はそのまま
   const p = build(T, 1, [{ id: "A", fill: 1 }]);
   const { ed } = makeEd(T, p, { active: "A" });
-  ed.cursorLive = true; // 2 階（輪）は cursorLive のときだけ描く（makeEd はホバー追従を止めている）
+  ed.cursorLive = true; // 2 階（枠）は cursorLive のときだけ描く（makeEd はホバー追従を止めている）
   ed.cursorDot = { x: 160, y: 120 };
   const px = CANVAS.offsetWidth / W; // devicePixelRatio 1
   for (const size of [1, 3, 8]) {
@@ -899,32 +915,30 @@ async function checkS10(T: Tree): Promise<V> {
     setAll(ed, false);
     ed.cursorPainted = "";
     ed.paintCursorLayer();
-    const off = rectsToSet(cursorRects);
-    if (off.size === 0) return ng("前提: 輪が描かれていない（検査が黙る）");
+    const offMap = new Map(cursorPix);
+    const off: PxSet = new Set(offMap.keys());
+    if (off.size === 0) return ng("前提: 枠が描かれていない（検査が黙る）");
     setAll(ed, true); // 切り替えたら、ポインタを動かさなくても描き直す
-    const on = rectsToSet(cursorRects);
-    for (const k of off) if (!on.has(k)) return ng(`★太さ ${size}: 全レイヤーにすると太さの輪が変わった`);
+    const on: PxSet = new Set(cursorPix.keys());
+    for (const k of off) if (!on.has(k) || cursorPix.get(k) !== offMap.get(k)) return ng(`★太さ ${size}: 全レイヤーにすると太さの枠が変わった`);
     const extra: PxSet = new Set([...on].filter((k) => !off.has(k)));
     if (extra.size === 0) return ng(`★太さ ${size}: 全レイヤーなのに二重線が出ない（切り替えても描き直していない）`);
     const L = (d: number) => Math.round((160 + d) * px);
     const Tt = (d: number) => Math.round((120 + d) * px);
     const cells = T.C.penFootprint(size) as { dx: number; dy: number }[];
-    // 外側の線と輪の中身の間隔 g（チェビシェフ距離）。外周の画素はどれも同じ距離にあるはず
-    const dist = (k: number) => {
-      const x = (k % 16384) - 4096;
-      const y = Math.floor(k / 16384) - 4096;
-      let best = Infinity;
-      for (const c of cells) {
-        const gx = Math.max(0, L(c.dx) - x, x - (L(c.dx + 1) - 1));
-        const gy = Math.max(0, Tt(c.dy) - y, y - (Tt(c.dy + 1) - 1));
-        best = Math.min(best, Math.max(gx, gy));
-      }
-      return best;
-    };
-    const ds = [...extra].map(dist);
-    const g = Math.max(...ds);
-    if (Math.min(...ds) !== g || g < 2) return ng(`★太さ ${size}: 外側の線が輪から一定の間隔で離れていない（${Math.min(...ds)}〜${g}）`);
-    if (!setEq(extra, dilationBoundary(cells, L, Tt, g))) return ng(`★太さ ${size}: 外側の線が太らせた外周の形でない`);
+    const at = (k: number) => [(k % 16384) - 4096, Math.floor(k / 16384) - 4096];
+    const ds = [...extra].map((k) => chebDist(cells, L, Tt, ...(at(k) as [number, number])));
+    // 外側の組は新しい枠（距離 1〜2）のさらに外・間を空けて（距離 3 以上の空き）
+    const g = Math.min(...ds) - 3; // 外側の黒の距離 = 2 + g + 1
+    if (g < 2) return ng(`★太さ ${size}: 外側の組が新しい枠に重なる・間が空いていない（最小の距離 ${Math.min(...ds)}）`);
+    for (const k of on) {
+      const want = wantColor(chebDist(cells, L, Tt, ...(at(k) as [number, number])), 1, g);
+      if (cursorPix.get(k) !== want) return ng(`★太さ ${size}: 二重線の形が太らせた帯でない（${cursorPix.get(k)}／期待 ${want}）`);
+    }
+    const wantSet: PxSet = new Set();
+    for (let y = Tt(-8) - 30; y < Tt(8) + 30; y++)
+      for (let x = L(-8) - 30; x < L(8) + 30; x++) if (wantColor(chebDist(cells, L, Tt, x, y), 1, g)) wantSet.add(K(x, y));
+    if (!setEq(on, wantSet)) return ng(`★太さ ${size}: 二重線の枠が抜けている（描いた ${on.size}・物差し ${wantSet.size}）`);
   }
   // ペンでは、全レイヤーをオンにしていても二重にしない（消しゴムの設定）
   ed.tool = "pen";
@@ -932,11 +946,11 @@ async function checkS10(T: Tree): Promise<V> {
   setAll(ed, false);
   ed.cursorPainted = "";
   ed.paintCursorLayer();
-  const penOff = rectsToSet(cursorRects);
+  const penOff: PxSet = new Set(cursorPix.keys());
   setAll(ed, true);
   ed.cursorPainted = "";
   ed.paintCursorLayer();
-  if (!setEq(penOff, rectsToSet(cursorRects))) return ng("★ペンのカーソルまで二重になった");
+  if (!setEq(penOff, new Set(cursorPix.keys()))) return ng("★ペンのカーソルまで二重になった");
   return ok();
 }
 
@@ -1000,12 +1014,12 @@ async function checkS12(T: Tree): Promise<V> {
   return ok();
 }
 
-// ================= [S-15] 束は、作品に別の変更が入る前に確定して終える（Codex 指摘 3 回） =================
+// ================= [S-15] 束は、作品に別の変更が入る前に確定して終える（独立レビューの指摘 3 回） =================
 // 描いている最中でもショートカットは効く（onKeyDown に pointerDown の関所は無い）。束より先にコマの削除などが走ると、
-// その履歴が「消したあと」の絵を抱え、**Ctrl+Z しても元の絵に戻らない**（Codex 2 回目・高）。
-// ↶↷ ボタンは runCommand を通らず、もう 1 本のポインタ（ペンを置いたままマウス）で押せる（Codex 3 回目・高）。
-// また重い処理の最中にフォーカスを失うと pointerup の関所で確定されず、**残った束が次のストロークを乗っ取る**（Codex 1 回目・中）。
-// 終えたあとは **pointerup と同じ状態**（捕捉・終端の控え・解決済みトーンを残さない＝Codex 3 回目の穴）
+// その履歴が「消したあと」の絵を抱え、**Ctrl+Z しても元の絵に戻らない**（独立レビュー 2 回目・高）。
+// ↶↷ ボタンは runCommand を通らず、もう 1 本のポインタ（ペンを置いたままマウス）で押せる（独立レビュー 3 回目・高）。
+// また重い処理の最中にフォーカスを失うと pointerup の関所で確定されず、**残った束が次のストロークを乗っ取る**（独立レビュー 1 回目・中）。
+// 終えたあとは **pointerup と同じ状態**（捕捉・終端の控え・解決済みトーンを残さない＝独立レビュー 3 回目の穴）
 /** 全レイヤーで描き始めて、押したまま途中まで動かす */
 function beginAllLayerStroke(ed: Mod) {
   setAll(ed, true);
@@ -1131,7 +1145,7 @@ async function checkS15(T: Tree): Promise<V> {
     if (ed.pointerDown || ed.eraseAllStroke) return ng("★Ctrl+Z のあとも描きかけが残っている");
   }
   // (g) ★↶ ボタン（runCommand を通らない・フォーカスのあるボタンをキーで押しても来る）: handleUndo を直に呼ぶ。
-  //     いまの束が先に確定され、**それが**取り消される（Codex 3 回目・高）
+  //     いまの束が先に確定され、**それが**取り消される（独立レビュー 3 回目・高）
   {
     const p = build(T, 1, ABC);
     const { ed } = makeEd(T, p, { active: "B" });
@@ -1207,7 +1221,7 @@ async function checkS15(T: Tree): Promise<V> {
       ed.keydownHandler(k);
       if (!ed.eraseAllStroke || !ed.pointerDown) return ng(`★${label} で描きかけが終わった（描きながら押さえて使うキー・くり返しでは終えない）`);
     }
-    // 文字入力欄への入力・IME の変換中はエディタの操作ではない（onKeyDown の関所で抜ける）＝終えない（Codex 4 回目）
+    // 文字入力欄への入力・IME の変換中はエディタの操作ではない（onKeyDown の関所で抜ける）＝終えない（独立レビュー 4 回目）
     const notEditor: [string, Mod][] = [
       ["文字入力欄への入力", key("a", "KeyA", { target: { tagName: "INPUT" } })],
       ["IME の変換中", key("Process", "KeyA", { isComposing: true, keyCode: 229 })],
@@ -1220,7 +1234,7 @@ async function checkS15(T: Tree): Promise<V> {
     const st = endedLikePointerUp(ed, "ふつうのキー（割り当ての無い Q）のあと");
     if (!st.ok) return st;
     if (ed.history.undoDepth !== 1) return ng(`★ふつうのキーで束を確定していない（履歴 ${ed.history.undoDepth}）`);
-    // ★Enter（フォーカスのあるボタンを押す＝ブラウザ既定の click がこのあとに来る）・Esc でも終える（Codex 4 回目の穴）
+    // ★Enter（フォーカスのあるボタンを押す＝ブラウザ既定の click がこのあとに来る）・Esc でも終える（独立レビュー 4 回目の穴）
     const focusedButton = { tagName: "BUTTON", closest: () => ({}) };
     for (const [label, k] of [
       ["Enter（フォーカスのあるボタン）", key("Enter", "Enter", { target: focusedButton })],
@@ -1475,7 +1489,6 @@ for (const c of CHECKS) {
 }
 
 // ================= [S-R] 反証（わざと壊した写し） =================
-const ED = "src/editor/editor.ts";
 const LTF = "src/editor/layerTree.ts";
 interface Mut {
   id: string;
@@ -1625,14 +1638,16 @@ const MUTS: Mut[] = [
     id: "7z''",
     what: "📌 の知らせを作品ごとではなく Editor で 1 回にする（別の作品で出し直さない）",
     target: "S-7",
+    // ★V213: この字はコアへ移った。コアの中では static の読み方が `Editor` → `EditorCore`（機械的な書き換え）なので、
+    //  「作品ではなくクラス 1 つを鍵にする」の鍵もコアのクラスに合わせる（コアに `Editor` の名前は無い＝そのままだと例外で落ちる）
     edits: [
-      { file: ED, from: "!this.eraseAllPinNoticed.has(this.project)", to: "!this.eraseAllPinNoticed.has(Editor as unknown as Project)" },
-      { file: ED, from: "this.eraseAllPinNoticed.add(this.project);", to: "this.eraseAllPinNoticed.add(Editor as unknown as Project);" },
+      { file: ED, from: "!this.eraseAllPinNoticed.has(this.project)", to: "!this.eraseAllPinNoticed.has(EditorCore as unknown as Project)" },
+      { file: ED, from: "this.eraseAllPinNoticed.add(this.project);", to: "this.eraseAllPinNoticed.add(EditorCore as unknown as Project);" },
     ],
   },
   {
     id: "12z'",
-    what: "オンにした時点の先回り（眠っている窓を起こす）を外す（Codex 指摘の穴）",
+    what: "オンにした時点の先回り（眠っている窓を起こす）を外す（独立レビューの指摘の穴）",
     target: "S-12",
     edits: [{ file: ED, from: "if (on && this.sleepOn && !this.frameReady()) this.renderCanvas();", to: "" }],
   },
@@ -1650,7 +1665,7 @@ const MUTS: Mut[] = [
   },
   {
     id: "15z'",
-    what: "★コマンドの入口で束を確定しない（Codex 2 回目・高: 描きながらコマを消すと Ctrl+Z で戻らない）",
+    what: "★コマンドの入口で束を確定しない（独立レビュー 2 回目・高: 描きながらコマを消すと Ctrl+Z で戻らない）",
     target: "S-15",
     edits: [
       {
@@ -1674,7 +1689,7 @@ const MUTS: Mut[] = [
   },
   {
     id: "15z4",
-    what: "★↶↷ の入口で束を確定しない（ボタンは runCommand を通らない・Codex 3 回目・高）",
+    what: "★↶↷ の入口で束を確定しない（ボタンは runCommand を通らない・独立レビュー 3 回目・高）",
     target: "S-15",
     edits: [
       {
@@ -1694,25 +1709,29 @@ const MUTS: Mut[] = [
   },
   {
     id: "15z6",
-    what: "束を終えるときにポインタの捕捉を放さない（Codex 3 回目の穴）",
+    what: "束を終えるときにポインタの捕捉を放さない（独立レビュー 3 回目の穴）",
     target: "S-15",
+    // ★V213: 束の確定の後始末は「分けた所」。`lastPointerEvent = null` と `releaseCapture()` は PC の
+    //  `pointerReleased()`（コアの finishEraseAllNow だけが呼ぶフック）へ移った。外す行は同じ（字はその新しい置き場所に合わせた）
     edits: [
       {
         file: ED,
-        from: "      this.strokeTone = null;\n      this.releaseCapture();\n    }",
-        to: "      this.strokeTone = null;\n    }",
+        from: "pointerReleased(): void {\n    this.lastPointerEvent = null;\n    this.releaseCapture();\n  }",
+        to: "pointerReleased(): void {\n    this.lastPointerEvent = null;\n  }",
       },
     ],
   },
   {
     id: "15z7",
-    what: "束を終えるときに途切れたときの終端の控えを消さない（Codex 3 回目の穴）",
+    what: "束を終えるときに途切れたときの終端の控えを消さない（独立レビュー 3 回目の穴）",
     target: "S-15",
+    // ★V213: 束の確定の後始末は「分けた所」。`lastPointerEvent = null` と `releaseCapture()` は PC の
+    //  `pointerReleased()`（コアの finishEraseAllNow だけが呼ぶフック）へ移った。外す行は同じ（字はその新しい置き場所に合わせた）
     edits: [
       {
         file: ED,
-        from: "      this.pointerDown = false;\n      this.lastPointerEvent = null;\n      this.strokeTone = null;",
-        to: "      this.pointerDown = false;\n      this.strokeTone = null;",
+        from: "pointerReleased(): void {\n    this.lastPointerEvent = null;\n    this.releaseCapture();\n  }",
+        to: "pointerReleased(): void {\n    this.releaseCapture();\n  }",
       },
     ],
   },
@@ -1720,17 +1739,19 @@ const MUTS: Mut[] = [
     id: "15z8",
     what: "束を終えるときに解決済みトーンを捨てない（pointerup と同じ後始末になっていない）",
     target: "S-15",
+    // ★V213: 束の確定の後始末は「分けた所」。`lastPointerEvent = null` と `releaseCapture()` は PC の
+    //  `pointerReleased()`（コアの finishEraseAllNow だけが呼ぶフック）へ移った。外す行は同じ（字はその新しい置き場所に合わせた）
     edits: [
       {
         file: ED,
-        from: "      this.lastPointerEvent = null;\n      this.strokeTone = null;\n      this.releaseCapture();",
-        to: "      this.lastPointerEvent = null;\n      this.releaseCapture();",
+        from: "      this.strokeTone = null;\n      this.pointerReleased();",
+        to: "      this.pointerReleased();",
       },
     ],
   },
   {
     id: "7z'''",
-    what: "📌 の知らせの記録を WeakSet ではなく Set にする（閉じた作品を抱え込む・Codex 2 回目の穴）",
+    what: "📌 の知らせの記録を WeakSet ではなく Set にする（閉じた作品を抱え込む・独立レビュー 2 回目の穴）",
     target: "S-7",
     edits: [{ file: ED, from: "private eraseAllPinNoticed = new WeakSet<Project>();", to: "private eraseAllPinNoticed = new Set<Project>();" }],
   },
@@ -1744,10 +1765,12 @@ const MUTS: Mut[] = [
     id: "15z9",
     what: "★キーの入口で束を確定しない（ショートカットの表を通らない Backspace の選択消去が束より先に走る）",
     target: "S-15",
+    // ★V214 (M-2b-1a): キーの入口の確定は `if (!e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.settleEraseAll();` に
+    //  なった（束があるかの判定はコアの settleEraseAll の中へ・どのキーで確定するかは PC のここ）。壊し方は同じで、今の字に当てる
     edits: [
       {
         file: ED,
-        from: "    if (this.eraseAllStroke && !e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.finishEraseAllNow();\n",
+        from: "    if (!e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.settleEraseAll();\n",
         to: "",
       },
     ],
@@ -1756,11 +1779,13 @@ const MUTS: Mut[] = [
     id: "15z10",
     what: "押しっぱなしのくり返しでも束を終える（キーを押さえたまま描けなくなる）",
     target: "S-15",
+    // ★V214 (M-2b-1a): キーの入口の確定は `if (!e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.settleEraseAll();` に
+    //  なった（束があるかの判定はコアの settleEraseAll の中へ・どのキーで確定するかは PC のここ）。壊し方は同じで、今の字に当てる
     edits: [
       {
         file: ED,
-        from: "if (this.eraseAllStroke && !e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key))",
-        to: "if (this.eraseAllStroke && !Editor.HELD_WHILE_DRAWING.has(e.key))",
+        from: "if (!e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.settleEraseAll();",
+        to: "if (!Editor.HELD_WHILE_DRAWING.has(e.key)) this.settleEraseAll();",
       },
     ],
   },
@@ -1768,34 +1793,38 @@ const MUTS: Mut[] = [
     id: "15z11",
     what: "修飾キー・Space でも束を終える（Shift の拘束・Space の手のひらを押さえたまま描けなくなる）",
     target: "S-15",
+    // ★V214 (M-2b-1a): キーの入口の確定は `if (!e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.settleEraseAll();` に
+    //  なった（束があるかの判定はコアの settleEraseAll の中へ・どのキーで確定するかは PC のここ）。壊し方は同じで、今の字に当てる
     edits: [
       {
         file: ED,
-        from: "if (this.eraseAllStroke && !e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key))",
-        to: "if (this.eraseAllStroke && !e.repeat)",
+        from: "if (!e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.settleEraseAll();",
+        to: "if (!e.repeat) this.settleEraseAll();",
       },
     ],
   },
   {
     id: "15z14",
-    what: "キーの入口を、ダイアログ・文字入力欄・IME の関所より前に置く（文字を打っただけでストロークが終わる・Codex 4 回目）",
+    what: "キーの入口を、ダイアログ・文字入力欄・IME の関所より前に置く（文字を打っただけでストロークが終わる・独立レビュー 4 回目）",
     target: "S-15",
+    // ★V214 (M-2b-1a): キーの入口の確定は `if (!e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.settleEraseAll();` に
+    //  なった（束があるかの判定はコアの settleEraseAll の中へ・どのキーで確定するかは PC のここ）。壊し方は同じで、今の字に当てる
     edits: [
       {
         file: ED,
-        from: "    if (this.eraseAllStroke && !e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.finishEraseAllNow();\n",
+        from: "    if (!e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.settleEraseAll();\n",
         to: "",
       },
       {
         file: ED,
         from: "  private keydownHandler = (e: KeyboardEvent) => {\n",
-        to: "  private keydownHandler = (e: KeyboardEvent) => {\n    if (this.eraseAllStroke && !e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.finishEraseAllNow();\n",
+        to: "  private keydownHandler = (e: KeyboardEvent) => {\n    if (!e.repeat && !Editor.HELD_WHILE_DRAWING.has(e.key)) this.settleEraseAll();\n",
       },
     ],
   },
   {
     id: "15z15",
-    what: "Enter も押さえて使うキーに入れる（フォーカスのあるボタンの click が束より先に走る・Codex 4 回目の穴）",
+    what: "Enter も押さえて使うキーに入れる（フォーカスのあるボタンの click が束より先に走る・独立レビュー 4 回目の穴）",
     target: "S-15",
     edits: [
       {

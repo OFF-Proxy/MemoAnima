@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v1.9.5
+ MemoAnima v2.0.0
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -10,11 +10,57 @@ Japanese: see README.txt in this folder.
 Import the flipbook animations you made on a Nintendo 3DS (.kwz / .ppm) onto
 your PC, edit them, and export to MP4 / GIF / APNG / a PNG sequence.
 Windows and Mac. (This README covers the Windows version.)
-- An unofficial, non-commercial fan tool made by one person.
+- An unofficial, not-for-profit fan tool made by one person.
 - It is a tool for editing animation data you created yourself, on your own PC.
 - Your source data (the SD card and so on) is only ever READ. Nothing is
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
+
+== CHANGED IN v2.0.0 ==
+[Gallery]
+- A "Gallery" button now sits in the bar at the top of the library. It opens the MemoAnima gallery in your web browser.
+- When an export finishes, a note says "You can post the saved animation file (.memoanima) to the gallery as is." with "Open posting page" and "Show in folder" buttons. Turn the note off in Settings with "Show the gallery tip" (the library button stays).
+[Layers]
+- Copying and pasting layers is easier. A folder is copied together with every layer inside it, and you can paste into the current frame, a range of frames or all frames. When nothing is selected, Ctrl+C copies the layer, and Ctrl+V pastes whatever you copied last (a selection or a layer).
+- New "Overlay" paste: only the drawn parts of the copied picture are laid on top of the current layer. The existing "Paste" (replace everything) is still there.
+- When reordering layers, whether a layer goes into a folder or next to it is now decided by the upper or lower half of the row, and a marker shows where it will land. Moving a folder inside another folder no longer drops it into the folder next to it.
+- Fixed moving or transforming right after adding a layer with + acting on the previously selected layer. Undoing the + now returns to the layer you were drawing on before.
+- Fixed a paste that replaces one frame also replacing layers shared by all frames.
+- Fixed pasting a folder to "New layer" losing the per-frame display colors and draw order.
+[Playback and sound]
+- Library playback now has a seek bar and a "current frame / total frames" counter. Click or drag to jump. If you drag during playback, it continues from where you let go.
+- Fixed the picture slowly running ahead of the sound during in-app playback.
+- Music now plays the same way in the app and in exports. A song shorter than the animation plays once in exports too, and with "Match the music" the app also plays the song to the end and repeats the animation.
+- Fixed exported MP4 files sounding slightly early in the standard Windows player. MP4 files exported with v1.9.5 or earlier line up when you export them again.
+- Fixed picture and sound drifting apart from the second loop when exporting with "Match the music" and two or more loops. Exporting from a frame in the middle now keeps the rest of a sound effect that started on an earlier frame.
+[Wobble frames]
+- Choose the wobble strength on a 1-10 slider (the old weak / medium / strong are 3 / 5 / 7), while a preview shows the frames it will make. 1px lines no longer break up.
+- Wobble the layers or folders you selected in the layer list all at once (Ctrl / Shift to select several). Layers shared by all frames cannot wobble; if only those are selected, you are told and nothing is made.
+- Duplicated frames, frames added with "Add several frames" and wobble frames now keep the original frame's per-frame layer display colors.
+[Colors]
+- The color bar and favorite colors now sit at the bottom of the right column, always in view. You can pick a color without scrolling, whatever tool you use.
+- New "Clean up" button in the palette removes every color the project does not use, all at once. The picture does not change by a single pixel, and Ctrl+Z brings the colors back.
+[Selection and cursor]
+- The selection outline is now a dotted line thinner than a pixel, and the lasso follows your pen smoothly.
+- Tinting the inside of a selection is now off by default (turn it on with "Tint").
+- The pen, eraser and brush cursors are now just a frame around the pixels that will be painted.
+[Import and conversion]
+- Turn all the 3DS animations (.kwz / .ppm) in an album into .memoanima files at once. The originals stay, and animations that already have a .memoanima with the same name are skipped.
+- Opening or dragging in a .kwz / .ppm file now puts it straight into the current album. No "Collab" album is created.
+- Fixed sound effects being placed one slot off when importing 3DS animations.
+[Saving]
+- If the album already has a project with the same name, you are asked before it is replaced ("Replace", "Save with a new name" or "Cancel").
+- Fixed the name at the top left of the editor and the default export name staying the old name after you renamed the file.
+- The "Save in a format that older versions (v1.5 and earlier) can open" option is gone. Projects are always saved in the new format. Old-format projects still open as before and become the new format when saved.
+[Updates]
+- The Mac app can now update itself. When the update is done, the app reopens; if you have unsaved changes, you are asked first.
+- Only when updating a Mac from v1.9.5 or earlier to v2.0.0, the progress stays at 100% and looks stuck. Quit with ⌘Q and open the app again: it is v2.0.0.
+- An update is installed only when the version in its signature matches the version being offered. Update checks follow your OS proxy settings.
+- Update notes are now shown one item per line (you will see this from the next update on).
+[Other fixes]
+- Fixed the orange frame and handles staying behind when moving with the arrow keys in the middle of a transform.
+- Fixed pictures going back to an older state when pasting to all frames, overlaying or merging right after opening a large project.
+- The project file format is unchanged and remains compatible with v1.6.0 and later.
 
 == CHANGED IN v1.9.5 ==
 - 1px pen and eraser strokes no longer look rough and now connect cleanly. Strokes 2px or wider, the brush and the line tool are unchanged.
@@ -113,6 +159,7 @@ Windows and Mac. (This README covers the Windows version.)
   on an older version, tick "Save in a format that older versions (v1.5 and
   earlier) can open" in the save-target dialog. That save target keeps using the
   same format from then on.
+  (This option was removed in v2.0.0. Projects are now always saved in the new format.)
 
 == CHANGED IN v1.5.10 ==
 - [You can keep drawing while saving] Until now, saving a large piece showed a
@@ -422,7 +469,7 @@ opens as it is, and your settings and shortcuts carry over.
 3. Follow the first-run guide: choose a library folder -> import -> edit -> export
 Note: layers are shared across every frame (the standard way animation tools
 work). Adding a frame gives you a blank frame with the same layer structure.
-Note: there is also an installer (named like MemoAnima_1.9.0_x64-setup.exe,
+Note: there is also an installer (named like MemoAnima_2.0.0_x64-setup.exe,
 with the version number in it). Just
 double-click it; no administrator rights are needed. IMPORTANT: this portable
 (zip) version cannot update in place - accepting an update installs the
@@ -521,7 +568,7 @@ Contact: aru.oribo@gmail.com
 Art and other work: BOOTH https://shitamatsuge-com.booth.pm/
 
 == WHAT THIS SOFTWARE IS, AND RIGHTS ==
-This software is an unofficial, non-commercial fan tool made by an individual.
+This software is an unofficial, not-for-profit fan tool made by an individual.
 It has no connection to Nintendo Co., Ltd., its affiliates, or any other rights
 holder, and it is not licensed, sponsored, endorsed or otherwise approved by
 them.
@@ -535,13 +582,13 @@ animation data the console saves as ordinary files, as they are.
 This software contains no programs, images, sounds, fonts, data or encryption
 keys owned by Nintendo Co., Ltd.
 
-"Nintendo 3DS", "Flipnote Studio" and other such names are trademarks or
-registered trademarks of Nintendo Co., Ltd. This software mentions them only to
-explain which file formats and which environments it supports.
+"Nintendo 3DS", "うごくメモ帳", "Flipnote Studio" and other such names are trademarks
+or registered trademarks of Nintendo Co., Ltd. This software mentions them only
+to explain which file formats and which environments it supports.
 
 This software assumes you will use it, at your own responsibility, with
-animation data you legitimately own. Please do not use it in ways that infringe
-anyone else's rights.
+animation data you legitimately own. Please do not use it for the purpose of
+infringing anyone else's rights.
 
 == TO RIGHTS HOLDERS ==
 If you have any concern about the contents of this software, please contact us

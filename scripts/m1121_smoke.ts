@@ -94,7 +94,7 @@ const readGama = (b: Uint8Array): number | null => {
   check("① acTL の後ろに sRGB がある PNG でも sRGB は二重にならず gAMA だけ足す", af.filter((n) => n === "sRGB").length === 1 && af.filter((n) => n === "gAMA").length === 1 && af.indexOf("gAMA") === af.indexOf("sRGB") + 1, af.join(","));
 }
 
-// ---------- ① MP4 引数（色以外は M5-1/M6-1 と同一） ----------
+// ---------- ① MP4 引数（色と -bf 0 以外は M5-1/M6-1 と同一） ----------
 {
   const OLD_NOAUDIO = ["-framerate", "8", "-i", "f%04d.png", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-movflags", "+faststart", "out.mp4"];
   const OLD_A2A = ["-framerate", "8", "-i", "f%04d.png", "-i", "mix.wav", "-t", "0.375", "-c:v", "libx264", "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "out.mp4"];
@@ -104,6 +104,8 @@ const readGama = (b: Uint8Array): number | null => {
     for (let i = 0; i < a.length; i++) {
       if (a[i] === "-vf" && a[i + 1] === MP4_COLOR_VF) { i++; continue; }
       if (MP4_COLOR_TAGS.includes(a[i]) && i % 1 === 0 && ["-colorspace", "-color_primaries", "-color_trc", "-color_range"].includes(a[i])) { i++; continue; }
+      // V210 (A-123): "libx264" の直後の "-bf", "0"（B フレームを使わない）も抜く。ほかの所の -bf は残す（並びの比べで赤になる）
+      if (a[i] === "-bf" && a[i + 1] === "0" && a[i - 1] === "libx264") { i++; continue; }
       out.push(a[i]);
     }
     return out;
@@ -117,6 +119,8 @@ const readGama = (b: Uint8Array): number | null => {
   check("① 音声(animToAudio): 色引数を抜くと M5-1 の引数列と完全一致（-stream_loop 先頭）", eq(stripColor(loop), OLD_LOOP), JSON.stringify(stripColor(loop)));
   const hasColor = (a: string[]) => a.includes("-vf") && a[a.indexOf("-vf") + 1] === "scale=out_color_matrix=bt709:out_range=tv" && a.includes("-colorspace") && a[a.indexOf("-colorspace") + 1] === "bt709" && a[a.indexOf("-color_primaries") + 1] === "bt709" && a[a.indexOf("-color_trc") + 1] === "bt709" && a[a.indexOf("-color_range") + 1] === "tv" && a.indexOf("-vf") < a.indexOf("-pix_fmt");
   check("① 3経路とも BT.709 変換（-vf scale…bt709:tv が -pix_fmt より前）＋4タグが入る", hasColor(na) && hasColor(a2a) && hasColor(loop));
+  const bf0 = (a: string[]) => a[a.indexOf("libx264") + 1] === "-bf" && a[a.indexOf("libx264") + 2] === "0" && a.filter((x) => x === "-bf").length === 1;
+  check("① V210 (A-123): 3経路とも \"libx264\" の直後が \"-bf\", \"0\"（\"-bf\" はちょうど 1 回）", bf0(na) && bf0(a2a) && bf0(loop), JSON.stringify([na, a2a, loop].map((a) => a.slice(a.indexOf("libx264"), a.indexOf("libx264") + 3))));
   check("① 分数 fps はそのまま文字列化", mp4ExecArgs(0.2, null)[1] === "0.2" && mp4ExecArgs(24, null)[1] === "24");
 }
 

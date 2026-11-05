@@ -12,6 +12,7 @@
 //   既存を全部直せと言わない代わりに、増えたら必ず止まる。
 import fs from "node:fs";
 import path from "node:path";
+import { readEditorSource } from "./editorSource";
 
 let pass = 0;
 let fail = 0;
@@ -88,7 +89,9 @@ function stripRootBlocks(text: string): string {
 //  ここも直書きが増えたら落とす。**作品データの色**（紙色・パレット・描画色）と
 //  **絵の上に重ねるプレビュー**（投げ縄・図形・選択枠・格子・カーソル・市松）は対象外。
 {
-  const ts = fs.readFileSync(path.join(root, "src/editor/editor.ts"), "utf8");
+  // ★V213 (M-2a): editor.ts の描く処理はコア（src/editor/core/editorCore.ts）へ移った＝editor.ts とコアの字を並べて数える
+  //  （L の番号は並べた字の行。数え方・基準の数は前と同じ）
+  const ts = readEditorSource(root);
   const lines = ts.split("\n");
   const hits: string[] = [];
   for (let i = 0; i < lines.length; i++) {

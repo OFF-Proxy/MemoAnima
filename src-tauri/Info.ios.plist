@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- V211 (M-1b): Tauri の CLI が、生成した Info.plist にトップの鍵ごと混ぜる（iOS だけ）。 -->
+<plist version="1.0">
+<dict>
+  <!-- ライブラリ（Documents）を「ファイル」App の「この iPhone 内／この iPad 内」に、アプリの名前のフォルダとして見せる -->
+  <key>UIFileSharingEnabled</key>
+  <true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key>
+  <true/>
+  <!-- 暗号の申告（独自の暗号なし）: TestFlight のたびに聞かれないように -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
+</dict>
+</plist>

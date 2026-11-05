@@ -798,7 +798,7 @@ mod tests {
         assert_eq!(clean_details("パラパラアニメを描いています").as_deref(), Some("パラパラアニメを描いています"));
         assert_eq!(clean_details("  Drawing a flipbook animation \n").as_deref(), Some("Drawing a flipbook animation"));
         assert_eq!(clean_details("a\u{7}b\u{0}c").as_deref(), Some("abc"));
-        assert_eq!(clean_details(r"C:\Users\taro\MemoLib"), None);
+        assert_eq!(clean_details(r"D:\Users\taro\MemoLib"), None);
         assert_eq!(clean_details("/Users/taro/Library"), None);
         assert_eq!(clean_details("x"), None);
         assert_eq!(clean_details(""), None);

@@ -1,4 +1,4 @@
-// V171: src/icons/*.svg（86 個・Cowork の成果物・触らない）を **ビルド前に** TS の文字列へ束ねる。
+// V171: src/icons/*.svg（86 個・設計側の成果物・触らない）を **ビルド前に** TS の文字列へ束ねる。
 //   npx tsx scripts/gen_icons.ts   → src/icons/_bundle.ts（生成物・手で直さない）
 //
 // なぜ Vite の `?raw` import ではなく生成物か:

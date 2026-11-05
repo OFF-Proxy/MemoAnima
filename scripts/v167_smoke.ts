@@ -19,6 +19,7 @@
 // 8. i18n（7言語・差し込みの名前）
 import fs from "node:fs";
 import path from "node:path";
+import { readEditorSource } from "./editorSource";
 import {
   COMMANDS,
   BUILTIN_PRESETS,
@@ -232,10 +233,19 @@ function toolCoexistOk(fc: typeof findConflict): boolean {
   check("6 ★時間の間引きはポインタ経路にも効く（言いっぱなしにしない）", !shouldNoticePick("pointer", "#111111", "#222222", 1000, 1000 + PICK_NOTICE_GAP_MS - 1));
   check("6 間が空けば知らせる（境界ちょうど）", shouldNoticePick("tool", "#111111", "#222222", 1000, 1000 + PICK_NOTICE_GAP_MS));
   check("6 未設定（\"\"）から拾ったら知らせる", shouldNoticePick("tool", "", "#222222", -Infinity, 0));
-  // ★Codex 指摘（中）で 1200ms から上げた。トーストは 3200ms 残って**積み上がる**ので、
+  // ★独立レビューの指摘（中）で 1200ms から上げた。トーストは 3200ms 残って**積み上がる**ので、
   //  間引きが寿命より短いと画面に2〜3個居座る。**同時に1つより多く出ない**ことを値で保証する
   check("6 ★間引きはトーストの寿命以上（積み上がらない）", PICK_NOTICE_GAP_MS >= TOAST_LIFETIME_MS, `gap=${PICK_NOTICE_GAP_MS} life=${TOAST_LIFETIME_MS}`);
-  check("6 トーストの寿命の写しが main.ts と合っている", TOAST_LIFETIME_MS === 3200 && /\}, 3200\);/.test(read("src/main.ts")));
+  // V198 (A-104 E-2): main.ts の toast() は寿命を定数 `TOAST_MS` に出した（ボタンを置く形だけ `TOAST_ACT_MS`）。
+  // 以前の字面 `}, 3200);` はもう無いので、定数の宣言と、ふつうのトーストがそれを使うことを見る
+  //（実際に 3.2 秒で消えることは v198_smoke [U-6] が画面で確かめる）
+  {
+    const main = read("src/main.ts");
+    check(
+      "6 トーストの寿命の写しが main.ts と合っている",
+      TOAST_LIFETIME_MS === 3200 && /\nconst TOAST_MS = 3200;/.test(main) && /setTimeout\(hide, extra \? TOAST_ACT_MS : TOAST_MS\)/.test(main)
+    );
+  }
   // ★連続で拾う人の身になった検査（基準6「連続で拾っても邪魔にならない」）。
   //  数を決め打ちせず、**守りたい性質**を確かめる: 知らせは必ず `PICK_NOTICE_GAP_MS` 以上あく。
   //  0.2秒おきに10回（＝1.8秒ぶん）拾うと、10回ではなく2回に減る
@@ -277,7 +287,7 @@ function toolCoexistOk(fc: typeof findConflict): boolean {
 // ================= 7. 配線の走査 =================
 {
   const mainTs = read("src/main.ts");
-  const edRaw = read("src/editor/editor.ts");
+  const edRaw = readEditorSource(root); // V213: editor.ts とコアを合わせて読む（数え方は同じ）
   const ed = edRaw.replace(/^[ \t]*\/\/.*$/gm, ""); // 自分のコメントに当たらないように（V165 の反省）
   const css = read("src/styles.css");
 
@@ -297,7 +307,7 @@ function toolCoexistOk(fc: typeof findConflict): boolean {
   check("7 ★スポイトの知らせは1か所（pickColorAt）に集約", /private noticePick\(/.test(ed) && /this\.noticePick\(prevHex, via, keys\);/.test(ed));
   check("7 ★間引きの規則は純関数（prefs.ts）に置く", /shouldNoticePick\(via, prevHex, next, this\.lastPickNoticeAt, performance\.now\(\)\)/.test(ed));
   check("7 ★Alt＋クリック経路は押した組み合わせを名指しする", /"pointer", keyLabel\(bindingFromPointer\(e\)\)/.test(ed));
-  check("7 スポイト道具の経路も知らせる（既定の via=\"tool\"）", /private pickColorAt\(pt: \{ x: number; y: number \}, via: "tool" \| "pointer" \| "key" = "tool"/.test(ed));
+  check("7 スポイト道具の経路も知らせる（既定の via=\"tool\"）", /(?:private|protected) pickColorAt\(pt: \{ x: number; y: number \}, via: "tool" \| "pointer" \| "key" = "tool"/.test(ed));
   check("7 ★ツールを切り替えない性質は変えていない（M16 K-4）", /if \(id === "edit\.pickColor"\) \{[\s\S]{0,320}?return;/.test(ed) && !/if \(id === "edit\.pickColor"\) \{[\s\S]{0,320}?setTool/.test(ed));
 
   // K-4: ログ
@@ -334,15 +344,15 @@ function toolCoexistOk(fc: typeof findConflict): boolean {
   }
 }
 
-// ================= 8b. Codex 指摘への対応（塞いだまま保つ） =================
+// ================= 8b. 独立レビューの指摘への対応（塞いだまま保つ） =================
 {
-  const ed = read("src/editor/editor.ts").replace(/^[ \t]*\/\/.*$/gm, "");
+  const ed = readEditorSource(root).replace(/^[ \t]*\/\/.*$/gm, "");
   const mainTs = read("src/main.ts");
   // 中②: 透明を拾ったとき「（）」にならない
-  check("8b ★透明を拾っても空欄にならない（Codex 中②）", /next === "" \? t\("ed\.color\.transparent\.title"\)/.test(ed));
+  check("8b ★透明を拾っても空欄にならない（独立レビュー 中②）", /next === "" \? t\("ed\.color\.transparent\.title"\)/.test(ed));
   check("8b その言い方は既存のものを借りている", /"ed\.color\.transparent\.title"/.test(read("src/i18n/ja.ts")));
   // 低④: 取り合う相手が複数でも全部消す
-  check("8b ★取り合いの相手を全部挙げる（Codex 低④）", /clashAll = modifierClashPartners\(currentPreset\(\), b, cmd\);/.test(mainTs));
+  check("8b ★取り合いの相手を全部挙げる（独立レビュー 低④）", /clashAll = modifierClashPartners\(currentPreset\(\), b, cmd\);/.test(mainTs));
   check("8b ★取り合いは全部消す（1つだけ消して残さない）", /if \(clashAll\.length\) for \(const id of clashAll\) delete cur\.bindings\[id\];/.test(mainTs));
   check("8b 取り合い以外は従来どおり1つだけ消す", /else if \(conflict\) delete cur\.bindings\[conflict\];/.test(mainTs));
   // 相手が3つある設定でも全部返る

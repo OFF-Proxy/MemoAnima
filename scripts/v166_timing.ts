@@ -125,7 +125,7 @@ const out = await evalJs(`(async () => {
     r.async_delaysMs.push(shown.length ? Math.round(shown[0].at - t0) : null);
   }
 
-  // ③ ★同期で塞ぐ操作では箱を出せない（正直な限界・Codex 指摘）。
+  // ③ ★同期で塞ぐ操作では箱を出せない（正直な限界・独立レビューの指摘）。
   //    ただし「押せなくなった見た目」は塞ぐ前に描かれている
   shown.length = 0;
   let lockedBeforeBlocking = null;

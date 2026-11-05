@@ -387,7 +387,7 @@ export function effectiveLayerStates(
   const folders = p.folders ?? [];
   const byId = new Map(folders.map((f) => [f.id, f]));
   // 先に親参照を健全化した写しを作る（存在しない親・循環に関与するフォルダは
-  // **ルート扱い**にする。循環の一部だけ適用される中途半端を避ける — Codexレビュー指摘）
+  // **ルート扱い**にする。循環の一部だけ適用される中途半端を避ける — 独立レビューの指摘）
   const safeParent = new Map<string, string | undefined>();
   for (const f of folders) {
     let parent = f.parent && byId.has(f.parent) ? f.parent : undefined;
@@ -626,7 +626,7 @@ export function newProject(title: string): Project {
 
 /** フレームのレイヤーバッファ幅をプロジェクトの indexBits に合わせる（widening のみ・値保存）。
  *  Undo/Redo でプロジェクト外に出ていたフレームを戻すとき、外にいる間に16bit昇格が
- *  起きていると 8bit バッファが混入するため、復帰直前に必ずこれを通す（Codexレビュー指摘）。 */
+ *  起きていると 8bit バッファが混入するため、復帰直前に必ずこれを通す（独立レビューの指摘）。 */
 export function conformFrameWidth(p: Project, f: Frame): void {
   if (p.indexBits !== 16) return;
   for (const id of Object.keys(f.layers)) {
@@ -645,16 +645,20 @@ export function conformFrameWidth(p: Project, f: Frame): void {
   // 眠っているぶんは触らない（控えは自分の幅を覚えていて、起こすときに広がる）
 }
 
-/** フレームの複製（バッファもコピー・幅維持。M5-1: SE配置も複製） */
+/** フレームの複製（バッファもコピー・幅維持。M5-1: SE配置も複製）。
+ *  V205 (A-113): このコマだけのレイヤーの表示色（`layerColors`）も写す（新しいオブジェクト＝元を変えても写しは変わらない）。
+ *  色が 1 つも無ければキーを作らない（色の無いコマの写しは前と同じ形） */
 export function cloneFrame(f: Frame): Frame {
   const layers: Record<string, IndexBuf> = {};
   for (const [k, v] of Object.entries(f.layers)) layers[k] = copyIndexBuf(v);
-  return {
+  const out: Frame = {
     paper: f.paper,
     layers,
     order: f.order ? [...f.order] : undefined,
     se: f.se && f.se.length > 0 ? [...f.se] : undefined,
   };
+  if (f.layerColors && Object.keys(f.layerColors).length > 0) out.layerColors = { ...f.layerColors };
+  return out;
 }
 
 /** V154 (W-2): いま**メモリに載っている**作品の量（バイト）。

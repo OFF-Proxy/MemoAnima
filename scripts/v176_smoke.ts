@@ -33,6 +33,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { readEditorSource } from "./editorSource";
 
 let pass = 0;
 let fail = 0;
@@ -56,7 +57,9 @@ type V = { ok: boolean; why: string };
 const ok = (): V => ({ ok: true, why: "" });
 const ng = (why: string): V => ({ ok: false, why });
 
-const editorRaw = readIf("src/editor/editor.ts");
+// ★V213 (M-2a): 描く処理（ペン系の pointerdown / pointermove の中身・lastPt / smoothPt）はコア（src/editor/core/editorCore.ts）へ移った。
+//  editor.ts とコアの字を順に並べたものを読む（見る所を広げるだけ・数え方は変えない。コアが無い木では editor.ts だけ）
+const editorRaw = readEditorSource(root);
 const fontsRaw = readIf("src/editor/fonts.ts");
 const cssRaw = readIf("src/styles.css");
 const manifestRaw = readIf("tools/fonts/MANIFEST.txt");
@@ -156,18 +159,19 @@ const PEN_CASE = /case "pen":\s*\n\s*case "brush":\s*\n\s*case "eraser":\s*/;
 function penCoordBlocks(src: string): string[] {
   return blocksAfter(src, PEN_CASE).filter((b) => /R\.(stamp|strokeSegment)\(/.test(b));
 }
-// ★「`clientToStrokePt` という字面がある」だけでは足りない（Codex 指摘）。
+// ★「`clientToStrokePt` という字面がある」だけでは足りない（独立レビューの指摘）。
 //  `ptF` を受け取っておきながら、描くのは整数の `pt` のまま——という書き方で素通りできた。
 //  そこで **許す形を 1 つだけ決めて、その形であることを要求する**（V174 で効いたやり方）。
 const DOWN_MUST = [
-  /const ptF = this\.clientToStrokePt\(e\.clientX, e\.clientY\);/,
+  // ★V213: 前の `this.clientToStrokePt(e.clientX, e.clientY)` は、コアの `this.sampleStrokePt(s)`（半画素ずらしはここ）
+  /const ptF = this\.sampleStrokePt\(s\);/,
   /this\.smoothPt = \{ x: ptF\.x, y: ptF\.y \};/,
   /this\.lastPt = \{ x: ptF\.x, y: ptF\.y \};/,
   // ★最初の打点は**整数の pt**（＝floor）。小数を丸め直すとカーソルと 1 ドットずれる
   /R\.stamp\(buf2, pt\.x, pt\.y, o\);/,
 ];
 const MOVE_MUST = [
-  /const ptF = this\.clientToStrokePt\(ev\.clientX, ev\.clientY\);/,
+  /const ptF = this\.sampleStrokePt\(s\);/, // ★V213: 前の `this.clientToStrokePt(ev.clientX, ev.clientY)`
   /let tx = ptF\.x;/,
   /let ty = ptF\.y;/,
   /this\.smoothPt\.x \+= \(ptF\.x - this\.smoothPt\.x\) \* 0\.35;/,
@@ -185,11 +189,22 @@ const checkS3 = (src: string): V => {
   for (const re of MOVE_MUST) if (!re.test(move)) return ng(`★pointermove の形が違う: ${re.source.slice(0, 40)}`);
   // ★小数を受け取りながら整数の pt で描く「受け取っただけ」を塞ぐ
   if (/\bpt\.[xy]\b/.test(move)) return ng("★pointermove の描線経路に整数の pt が残っている");
-  // clientToStrokePt が clientToPixelF の上に建っていること（写像を2つに書き分けない）
-  const sp = methodBody(src, "clientToStrokePt");
-  if (sp === "") return ng("★clientToStrokePt が無い");
-  if (!/clientToPixelF\(/.test(sp)) return ng("★clientToStrokePt が clientToPixelF を使っていない");
-  if (!/- 0\.5/.test(sp)) return ng("★clientToStrokePt が半画素ずらしていない（カーソルと 1 ドットずれる）");
+  // 線に渡す座標が clientToPixelF の上に建っていること（写像を2つに書き分けない）
+  // ★V213 (M-2a): 前の `clientToStrokePt(cx, cy)`（＝`clientToPixelF` − 0.5）は 2 段に割れた。
+  //  PC の `sampleOf(e)` が `clientToPixelF` の結果を**そのまま**サンプルの x・y にし、コアの `sampleStrokePt(s)` がそれを半画素ずらす。
+  //  ペン系の 2 経路（DOWN_MUST / MOVE_MUST）が `sampleStrokePt(s)` を使うことは上で縛った。ここでは 3 つを縛る:
+  //  ① sampleStrokePt がサンプルの x・y から半画素引く ② sampleOf が clientToPixelF の結果をそのまま x・y にする
+  //  ③ PC の pointerdown / pointermove が描き始め・動いた点へ渡すサンプルは sampleOf で作ったもの
+  const sp = methodBody(src, "sampleStrokePt");
+  if (sp === "") return ng("★sampleStrokePt が無い");
+  if (!/\bs\.x\b/.test(sp) || !/\bs\.y\b/.test(sp)) return ng("★sampleStrokePt がサンプルの x・y を使っていない");
+  if (!/- 0\.5/.test(sp)) return ng("★sampleStrokePt が半画素ずらしていない（カーソルと 1 ドットずれる）");
+  const so = methodBody(src, "sampleOf");
+  if (so === "") return ng("★sampleOf が無い");
+  if (!/const p = this\.clientToPixelF\(e\.clientX, e\.clientY\);/.test(so)) return ng("★sampleOf が clientToPixelF を使っていない");
+  if (!/\bx: p\.x, y: p\.y\b/.test(so)) return ng("★sampleOf が clientToPixelF の結果をそのまま x・y にしていない");
+  if (!/this\.strokeStart\(this\.sampleOf\(e\)\)/.test(src)) return ng("★pointerdown が sampleOf のサンプルで描き始めていない");
+  if (!/this\.strokeMoveOne\(this\.sampleOf\(ev\)\)/.test(src)) return ng("★pointermove が sampleOf のサンプルを渡していない");
   return ok();
 };
 {
@@ -206,7 +221,7 @@ const checkS3 = (src: string): V => {
 // ★逆戻り検知。**丸めるのは打点の瞬間だけ**（strokeSegment の中で既に Math.round している）
 /** `lastPt` / `smoothPt` に書いてよい形の**全部**。ここに無い書き方は赤。
  *  ★「右辺に Math.round が無いこと」だけを見ると、丸めた一時変数を代入する／
- *   `this.lastPt.x = Math.round(...)` とプロパティを直に書く、で素通りできた（Codex 指摘）。 */
+ *   `this.lastPt.x = Math.round(...)` とプロパティを直に書く、で素通りできた（独立レビューの指摘）。 */
 const PT_WRITE_OK = [
   "this.smoothPt = { x: ptF.x, y: ptF.y };",
   "this.lastPt = { x: ptF.x, y: ptF.y };",
@@ -221,12 +236,22 @@ const checkS4 = (src: string): V => {
   if (src === "") return ng("editor.ts を読めない");
   let seen = 0;
   // プロパティへの直書き（`this.lastPt.x = …`）も含めて拾う
-  for (const m of src.matchAll(/this\.(lastPt|smoothPt)(?:\.[xy])?\s*(?:\+=|=)[^;\n]*;/g)) {
+  const WRITE_RE = /this\.(lastPt|smoothPt)(?:\.[xy])?\s*(?:\+=|=)[^;\n]*;/g;
+  for (const m of src.matchAll(WRITE_RE)) {
     seen++;
     const stmt = m[0].trim();
     if (!PT_WRITE_OK.includes(stmt))
       return ng(`★lastPt / smoothPt に許していない書き方がある: ${stmt.slice(0, 60)}`);
   }
+  // ★V213 (決-6): コアに**新しく**足した「やめる口」（strokeCancel・モバイルの 2 本目の指）は描きかけを捨てるので
+  //  `this.lastPt = null;` `this.smoothPt = null;` を 1 回ずつ書く（V213 の前には無いメソッド＝移したコードではない）。
+  //  書き方は上で全部（やめる口の中も）許した形かを見たうえで、やめる口の中は**ちょうどこの 2 文**であることを縛り、
+  //  数（7）はやめる口の外で数える（前の木と同じ 7）。やめる口が無い木（V213 より前）では 0 件
+  const cancel = methodBody(src, "strokeCancel");
+  const cancelWrites = [...cancel.matchAll(WRITE_RE)].map((m) => m[0].trim());
+  if (cancel !== "" && cancelWrites.join(" ") !== "this.lastPt = null; this.smoothPt = null;")
+    return ng(`★やめる口（strokeCancel）の lastPt / smoothPt への書き込みが違う: ${cancelWrites.join(" ").slice(0, 80)}`);
+  seen -= cancelWrites.length;
   // ⚠ 空振りは赤（書き方が変わって検査が素通りする形を塞ぐ）
   if (seen !== PT_WRITE_OK.length)
     return ng(`lastPt / smoothPt への書き込みが ${seen} 件（${PT_WRITE_OK.length} 件のはず）`);
@@ -299,7 +324,7 @@ const checkS5 = (fsrc: string, csrc: string): V => {
     if (!reg) return ng(`★${f.key}: @font-face（weight 400）が無い`);
     const want = f.hasBold ? 2 : 1;
     if (mine.length !== want) return ng(`★${f.key}: @font-face が ${mine.length} 件（${want} 件のはず）`);
-    // ★書体と woff2 の**結びつき**まで見る（Codex 指摘）。
+    // ★書体と woff2 の**結びつき**まで見る（独立レビューの指摘）。
     //  family とウェイト数だけを照合していたので、`MA Kaku` と `MA Reggae` の url を
     //  入れ替えても全部緑だった。この製品の決まりは「ファイル名＝FontKey」
     if (reg.file !== `${f.key}.woff2`) return ng(`★${f.key}: weight 400 が ${reg.file} を指している`);
@@ -399,7 +424,7 @@ function manifestSubsetSha(msrc: string): Record<string, string> {
 }
 const checkS9 = (msrc: string): V => {
   if (msrc === "") return ng("MANIFEST.txt を読めない");
-  // ★パスの字面だけでは足りない（Codex 指摘）。SHA-256 の行を消してもパスが残れば緑だった。
+  // ★パスの字面だけでは足りない（独立レビューの指摘）。SHA-256 の行を消してもパスが残れば緑だった。
   //  **記録の集合と、実際に置いてある woff2 の集合が完全に一致する**ことを要求する
   const rec = manifestSubsetSha(msrc);
   const dir = path.join(root, "assets", "fonts");
@@ -501,7 +526,7 @@ const LANGS = ["ja", "en", "es", "ko", "pt-BR", "zh-Hans", "zh-Hant"];
 // ================= [S-14] 書体の種別を 2 か所に書き分けていない =================
 //
 // ★V176 で一度、**アプリは dot で描くのに見本シートだけ outline と言う**状態を作りかけた
-// （Codex が「検査を黙らせている」と止めた）。いまは dot16 が**アプリ自身 outline** なので、
+// （独立レビューが「検査を黙らせている」と止めた）。いまは dot16 が**アプリ自身 outline** なので、
 // 道具がそれに従うのは正しい——ただし**表を 2 か所に持つと、また同じズレが起きる**。
 // そこで道具側は `src/editor/fonts.ts` の `kind` を**読む**形にし、書き写しを禁じる。
 const TOOLS_READ_KIND = ["tools/fonts/make_sample_sheet.ts", "tools/fonts/verify_text_mask.ts"];
@@ -557,17 +582,20 @@ const checkS14 = (raw: Record<string, string>): V => {
   check("[S-13] 反証 1z: raster.ts のハッシュが違う写しは [S-1] が赤", !checkS1("0".repeat(64)).ok);
 
   // 3z: 描線の経路を整数版に戻す
-  const mut3 = editorRaw.replace(/clientToStrokePt\(ev\.clientX, ev\.clientY\)/, "clientToPixel(ev.clientX, ev.clientY)");
+  // ★V213: 前の `clientToStrokePt(ev.clientX, ev.clientY)` → `clientToPixel(ev.clientX, ev.clientY)` は、
+  //  コアの pointermove の経路（strokeMoveOne）の `sampleStrokePt(s)` → `samplePixel(s)`（同じ「整数版に戻す」）
+  const mut3 = editorRaw.replace(/sampleStrokePt\(s\)(;\n\s*let tx = ptF\.x;)/, "samplePixel(s)$1");
   check("[S-13] 反証 3z: 描線の経路を clientToPixel に戻した写しは [S-3] が赤", editorRaw !== "" && mut3 !== editorRaw && !checkS3(mut3).ok);
-  // ★Codex 指摘の抜け道: 小数を**受け取るだけ受け取って**、描くのは整数の pt のまま
+  // ★独立レビューの指摘の抜け道: 小数を**受け取るだけ受け取って**、描くのは整数の pt のまま
   const mut3b = editorRaw.replace(/let tx = ptF\.x;\n(\s*)let ty = ptF\.y;/, "let tx = pt.x;\n$1let ty = pt.y;");
-  check("[S-13] 反証 3z'（Codex）小数を受け取るだけで描かない写しは [S-3] が赤", editorRaw !== "" && mut3b !== editorRaw && !checkS3(mut3b).ok);
+  check("[S-13] 反証 3z'（独立レビュー）小数を受け取るだけで描かない写しは [S-3] が赤", editorRaw !== "" && mut3b !== editorRaw && !checkS3(mut3b).ok);
   // ★半画素ずらしを外すと、カーソルと 1 ドットずれる（この回で踏んだ穴）
-  const mut3c = editorRaw.replace(/return \{ x: p\.x - 0\.5, y: p\.y - 0\.5 \};/, "return { x: p.x, y: p.y };");
-  check("[S-13] 反証 3z''（Codex）半画素ずらしを外した写しは [S-3] が赤", editorRaw !== "" && mut3c !== editorRaw && !checkS3(mut3c).ok);
+  //  ★V213: 半画素ずらしはコアの sampleStrokePt（前の `p.x - 0.5` は `s.x - 0.5`）
+  const mut3c = editorRaw.replace(/return \{ x: s\.x - 0\.5, y: s\.y - 0\.5 \};/, "return { x: s.x, y: s.y };");
+  check("[S-13] 反証 3z''（独立レビュー）半画素ずらしを外した写しは [S-3] が赤", editorRaw !== "" && mut3c !== editorRaw && !checkS3(mut3c).ok);
   // ★最初の打点を小数の丸め直しに戻す（カーソルと 1 ドットずれる形）
   const mut3d = editorRaw.replace(/R\.stamp\(buf2, pt\.x, pt\.y, o\);/, "R.stamp(buf2, Math.round(ptF.x), Math.round(ptF.y), o);");
-  check("[S-13] 反証 3z'''（Codex）打点を丸め直しに戻した写しは [S-3] が赤", editorRaw !== "" && mut3d !== editorRaw && !checkS3(mut3d).ok);
+  check("[S-13] 反証 3z'''（独立レビュー）打点を丸め直しに戻した写しは [S-3] が赤", editorRaw !== "" && mut3d !== editorRaw && !checkS3(mut3d).ok);
 
   // 4z: lastPt を丸めて保存する（逆戻り）
   const mut4 = editorRaw.replace(/this\.lastPt = \{ x: tx, y: ty \};/, "this.lastPt = { x: Math.round(tx), y: Math.round(ty) };");
@@ -575,11 +603,11 @@ const checkS14 = (raw: Record<string, string>): V => {
   // 4z': 手ブレ補正の後で丸める（以前の形）
   const mut4b = editorRaw.replace(/tx = this\.smoothPt\.x;/, "tx = Math.round(this.smoothPt.x);");
   check("[S-13] 反証 4z': 手ブレ補正の後で丸めた写しは [S-4] が赤", editorRaw !== "" && mut4b !== editorRaw && !checkS4(mut4b).ok);
-  // ★Codex 指摘の抜け道: 丸めた一時変数を代入する／プロパティを直に丸める
+  // ★独立レビューの指摘の抜け道: 丸めた一時変数を代入する／プロパティを直に丸める
   const mut4c = editorRaw.replace(/this\.lastPt = \{ x: tx, y: ty \};/, "const rx = Math.round(tx), ry = Math.round(ty);\n          this.lastPt = { x: rx, y: ry };");
-  check("[S-13] 反証 4z''（Codex）丸めた一時変数を入れた写しは [S-4] が赤", editorRaw !== "" && mut4c !== editorRaw && !checkS4(mut4c).ok);
+  check("[S-13] 反証 4z''（独立レビュー）丸めた一時変数を入れた写しは [S-4] が赤", editorRaw !== "" && mut4c !== editorRaw && !checkS4(mut4c).ok);
   const mut4d = editorRaw.replace(/this\.lastPt = \{ x: tx, y: ty \};/, "this.lastPt.x = Math.round(tx);");
-  check("[S-13] 反証 4z'''（Codex）プロパティを直に丸めた写しは [S-4] が赤", editorRaw !== "" && mut4d !== editorRaw && !checkS4(mut4d).ok);
+  check("[S-13] 反証 4z'''（独立レビュー）プロパティを直に丸めた写しは [S-4] が赤", editorRaw !== "" && mut4d !== editorRaw && !checkS4(mut4d).ok);
 
   // 5z: @font-face を 1 本だけ消す
   const mut5 = cssRaw.replace(/@font-face \{ font-family: "MA Kaku";[^\n]*\n/, "");
@@ -610,22 +638,22 @@ const checkS14 = (raw: Record<string, string>): V => {
   // 9z / 10z: 記録を消す
   const mut9 = manifestRaw.replace("assets/fonts/kaku.woff2", "assets/fonts/xxx.woff2");
   check("[S-13] 反証 9z: MANIFEST から 1 本消した写しは [S-9] が赤", manifestRaw !== "" && mut9 !== manifestRaw && !checkS9(mut9).ok);
-  // ★Codex 指摘: パスは残したまま SHA-256 の行だけ消す
+  // ★独立レビューの指摘: パスは残したまま SHA-256 の行だけ消す
   const mut9b = manifestRaw.replace(
     /(サブセット: assets\/fonts\/kaku\.woff2[\s\S]{0,60}?)sha256  : [0-9a-f]{64}/,
     "$1"
   );
-  check("[S-13] 反証 9z'（Codex）SHA-256 の行だけ消した写しは [S-9] が赤", manifestRaw !== "" && mut9b !== manifestRaw && !checkS9(mut9b).ok);
+  check("[S-13] 反証 9z'（独立レビュー）SHA-256 の行だけ消した写しは [S-9] が赤", manifestRaw !== "" && mut9b !== manifestRaw && !checkS9(mut9b).ok);
   // 11z: 既存の woff2 が 1 バイトでも変わる
   const actual: Record<string, string> = {};
   for (const f of Object.keys(KEEP_SHA)) actual[f] = sha256(`assets/fonts/${f}`);
-  check("[S-13] 反証 11z（Codex）既存の woff2 が変わった写しは [S-11] が赤",
+  check("[S-13] 反証 11z（独立レビュー）既存の woff2 が変わった写しは [S-11] が赤",
     !checkS11({ ...actual, "maru.woff2": "0".repeat(64) }).ok);
   // 5z'': 書体と woff2 の結びつきを入れ替える
   const mut5c = cssRaw
     .replace('"MA Kaku";     src: url("../assets/fonts/kaku.woff2")', '"MA Kaku";     src: url("../assets/fonts/reggae.woff2")')
     .replace('"MA Reggae";   src: url("../assets/fonts/reggae.woff2")', '"MA Reggae";   src: url("../assets/fonts/kaku.woff2")');
-  check("[S-13] 反証 5z''（Codex）書体と woff2 を入れ替えた写しは [S-5] が赤", cssRaw !== "" && mut5c !== cssRaw && !checkS5(fontsRaw, mut5c).ok);
+  check("[S-13] 反証 5z''（独立レビュー）書体と woff2 を入れ替えた写しは [S-5] が赤", cssRaw !== "" && mut5c !== cssRaw && !checkS5(fontsRaw, mut5c).ok);
   const mut10 = licRaw.replace("OFL-1.1_ZenKakuGothicNew.txt", "OFL-1.1_Xxx.txt");
   check("[S-13] 反証 10z: make_licenses.ts が条文を読まなくなった写しは [S-10] が赤", licRaw !== "" && mut10 !== licRaw && !checkS10(mut10).ok);
 

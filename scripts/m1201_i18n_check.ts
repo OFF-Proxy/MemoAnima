@@ -14,6 +14,7 @@ import ts from "typescript";
 // L-2: 言語コードは `LANGS` が正。**型だけ**取る（値を import すると辞書を読み込むので、
 // esbuild が消せる `import type` にしてある）。綴りを間違えた言語はここで気づける
 import type { Lang } from "../src/i18n";
+import { editorSourceFiles } from "./editorSource";
 
 const REPO = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const read = (p: string) => readFileSync(`${REPO}/${p}`, "utf8");
@@ -32,7 +33,9 @@ function check(name: string, ok: boolean, detail = "") {
 // ---------------- 対象ファイル ----------------
 const mainSrc = read("src/main.ts");
 const htmlSrc = read("index.html");
-const editorSrc = read("src/editor/editor.ts"); // M12-1b から検査対象
+// ★V213 (M-2a): editor.ts の描く処理はコア（src/editor/core/editorCore.ts）へ移った。editor.ts とコアを**ファイルごと**に
+//  同じ扱いで舐める（editorSource.ts の一覧。コアが無い前の木では editor.ts だけ＝前と同じ数）
+const EDITOR_FILES: readonly (readonly [string, string])[] = editorSourceFiles(REPO).map(({ file, text }) => [file, text] as const); // M12-1b から検査対象
 const jaSrc = read("src/i18n/ja.ts");
 
 /** キー化を終えたファイル。**ここに足すと検査4・5・6・7 の対象になる**。
@@ -67,6 +70,8 @@ const KEYED_FILES: readonly (readonly [string, string])[] = [
   ["src/editor/customTone.ts", read("src/editor/customTone.ts")],
   // V191 (A-89): 1px の線（純関数・画面文言なし）。cursor.ts / customTone.ts と同じ理由で載せる
   ["src/editor/line1px.ts", read("src/editor/line1px.ts")],
+  // V208 (A-119): 範囲選択の境目の線（純関数・画面文言なし）。cursor.ts / line1px.ts と同じ理由で載せる
+  ["src/editor/selOutline.ts", read("src/editor/selOutline.ts")],
   // V192 (A-93): 縮め方・広げ方（downscale.ts は純関数・scaledView.ts は表示の共通の出口。どちらも画面文言なし）。同じ理由で載せる
   ["src/editor/downscale.ts", read("src/editor/downscale.ts")],
   ["src/editor/scaledView.ts", read("src/editor/scaledView.ts")],
@@ -76,12 +81,28 @@ const KEYED_FILES: readonly (readonly [string, string])[] = [
   ["src/editor/playStart.ts", read("src/editor/playStart.ts")],
   ["src/editor/stagePan.ts", read("src/editor/stagePan.ts")],
   ["src/editor/colorUsage.ts", read("src/editor/colorUsage.ts")],
+  // V209 (A-121): 再生の時計（経過時間 → コマの純関数と小さな駆動部・画面文言なし）。playStart.ts と同じ理由で載せる
+  ["src/editor/playClock.ts", read("src/editor/playClock.ts")],
+  // V198 (A-104): ギャラリーへの入口の決まり（URL の定数・設定の読み書き。純関数・画面文言なし）。同じ理由で載せる
+  ["src/galleryEntry.ts", read("src/galleryEntry.ts")],
+  // V199 (A-105・A-106): レイヤーのコピー・貼り付けの決まり／作品の名前の決まり（どちらも純関数・画面文言なし）。同じ理由で載せる
+  ["src/editor/layerClip.ts", read("src/editor/layerClip.ts")],
+  ["src/editor/workTitle.ts", read("src/editor/workTitle.ts")],
+  // V200 (A-100): アルバムの 3DS 作品をまとめて .memoanima にする決まりと段取り（純関数・画面文言なし）。同じ理由で載せる
+  ["src/kwzBatch.ts", read("src/kwzBatch.ts")],
+  // V201 (M-1a): 保存とオートセーブの共通の部品（画面文言なし・ログの決まった英字だけ）。同じ理由で載せる
+  ["src/editor/saveCore.ts", read("src/editor/saveCore.ts")],
+  // V202 (M-1a): モバイルだけの保存の仕組みの部品と薄い口（画面文言なし・断りは決まった英字の値だけ）。同じ理由で載せる（検査 5・9 が見る）
+  ["src/mobile/names.ts", read("src/mobile/names.ts")],
+  ["src/mobile/port.ts", read("src/mobile/port.ts")],
+  ["src/mobile/session.ts", read("src/mobile/session.ts")],
+  ["src/mobile/tauriPort.ts", read("src/mobile/tauriPort.ts")],
 ];
 
 /** 検査4・6・7 が舐めるソース一式（main / editor ＋ キー化済みファイル） */
 const SCANNED: readonly (readonly [string, string])[] = [
   ["src/main.ts", mainSrc],
-  ["src/editor/editor.ts", editorSrc],
+  ...EDITOR_FILES,
   ...KEYED_FILES,
 ];
 
@@ -187,6 +208,20 @@ const LIMIT_OVERRIDE: Record<string, number> = {
   // V193 (A-95): ⚙ の項目名は**作者決定の文言そのまま**（指示書 §0「Discord にプレイ状況を表示する」・REQ_discord_rpc 決-2）。
   // ja の実測ちょうど＝これ以上増やさない（`ed.spec.label` と同じ流儀）
   "set.discord.label": 19,
+  // V198 (A-104 S-1): ⚙ の説明は**要件の文そのまま**（REQ_gallery_entry_v1.md §6 S-1・作者承認 2026-10-07・指示書 §4）。
+  // 2 文（何を出すか／E-1 のボタンは関係ない）で、どちらを落としても「オフにしたらギャラリーへ行けなくなる」と読める。
+  // ja の実測ちょうど＝これ以上増やさない（`set.discord.label` と同じ流儀）。ほかの言語はこの値×係数に収めた
+  "set.galleryGuide.hint": 48,
+  // V199 (A-105・REQ_layer_copy_v1.md §2-3): 貼り付けボタンの「貼り付け → コマ 3〜8」は**要件の例の形そのまま**。
+  // 字数はプレースホルダ名込み（{from}{to}）で 21 字・画面では「貼り付け → コマ 3〜8」の 13 字前後
+  //（今の「貼り付け → {layerShort}」＝ ja 21 字・既知の超過と同じ長さ）。ja の実測ちょうど＝これ以上は増やさない。
+  // ほかの言語はこの値×係数に収めた（ko 22／23・zh 20／21）
+  "ed.layerclip.pasteToFrames.btn": 21,
+  // V203 (A-109・REQ_layer_overlay_paste.md §2-2): 重ね貼りのボタンは隣の「貼り付け」と同じ形（要件の文そのまま）。
+  // 「重ね貼り → {layerShort}」19 字・「重ね貼り → コマ {from}〜{to}」21 字（プレースホルダ名込み・ja の実測ちょうど＝これ以上は増やさない）。
+  // ほかの言語はこの値×係数に収めた（ko 20／23・zh 19／20）
+  "ed.layerclip.pasteOverTo.btn": 19,
+  "ed.layerclip.pasteOverToFrames.btn": 21,
 };
 
 /**
@@ -846,11 +881,15 @@ function jaLiterals(
   // M12-1b: editor.ts。履歴ラベル（画面に出ない内部識別子）と名前になる語は除く。
   // M12-1b-2: キー化が終わったので **fail 判定**（0 件でなければ落ちる）。
   // 以後 editor.ts に日本語を直書きすると、このゲートが止める
-  const edHits = jaLiterals("src/editor/editor.ts", editorSrc)
-    .filter((h) => !h.internal)
-    .filter((h) => !ALLOW_LITERALS.includes(h.text))
-    .filter((h) => !exemptLines(editorSrc).has(h.line));
-  for (const h of edHits) console.log(`  ハードコード src/editor/editor.ts:${h.line}  ${JSON.stringify(h.text.slice(0, 80))}`);
+  // ★V213: editor.ts とコアの両方（ファイルごとに拾って合わせて数える＝検査の数は 1 つのまま）
+  const edHits = EDITOR_FILES.flatMap(([name, editorSrc]) =>
+    jaLiterals(name, editorSrc)
+      .filter((h) => !h.internal)
+      .filter((h) => !ALLOW_LITERALS.includes(h.text))
+      .filter((h) => !exemptLines(editorSrc).has(h.line))
+      .map((h) => ({ ...h, name }))
+  );
+  for (const h of edHits) console.log(`  ハードコード ${h.name}:${h.line}  ${JSON.stringify(h.text.slice(0, 80))}`);
   check(
     "検査5: src/editor/editor.ts に日本語のハードコードが無い（履歴ラベル・名前定数を除く）",
     edHits.length === 0,

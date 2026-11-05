@@ -1,7 +1,7 @@
 // V171: 線画アイコンの器（REQ_icon_set.md §3-1）。
 //   絵文字は OS のフォントで描かれるので Windows と Mac で絵が変わる（2026-09-05・Mac 実機で発覚）。
 //   SVG を **インライン**で挿す（<img> にしない＝ `currentColor` で周りの文字色を継承する。夜の紙でも同じファイル）。
-//   素材は src/icons/*.svg（Cowork の成果物・触らない）→ scripts/gen_icons.ts が `_bundle.ts` に束ねる（実行時に fetch しない）。
+//   素材は src/icons/*.svg（設計側の成果物・触らない）→ scripts/gen_icons.ts が `_bundle.ts` に束ねる（実行時に fetch しない）。
 //   `IconId` は icons.json の id から**型で**作られる（typo はコンパイルで落ちる）。
 import { ICON_IDS, ICON_INNER, ICON_STROKE, type IconId } from "./_bundle";
 import { t } from "../i18n";

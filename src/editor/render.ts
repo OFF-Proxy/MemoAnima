@@ -186,7 +186,7 @@ function blendOnion(
 
 /** コマ固有の描画順（KWZの3D奥行き由来）があればそれを優先した layerDefs 列を返す。
  *  破損・将来ファイルで order に載っていないレイヤーは末尾（最上位）に補完し、
- *  重複・未知IDは無視する（レイヤーが黙って消えないように・Codexレビュー指摘）。
+ *  重複・未知IDは無視する（レイヤーが黙って消えないように・独立レビューの指摘）。
  *  M10-19: compositeFrame と flattenIndexFrame で同一の順序解決を共有するため関数化（挙動不変）。 */
 function orderedLayerDefs(p: Project, frame: Frame): Project["layerDefs"] {
   let defs = p.layerDefs;

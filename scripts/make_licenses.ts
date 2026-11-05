@@ -1,5 +1,5 @@
 // M7-3 P-2 / M9-1b: LICENSES.txt 自動生成
-// - npm 実行時依存（package.json dependencies）: node_modules から名前/バージョン/ライセンス種別＋LICENSE全文
+// - npm 実行時依存（package-lock.json の dev でない全パッケージ）: node_modules から名前/バージョン/ライセンス種別＋LICENSE全文
 // - Rust クレート: cargo metadata からライセンス準拠表記の一覧（GPL v2 / Apache-2.0 / MIT 全文は末尾に1回掲載）
 // - ffmpeg.wasm コア（FFmpeg + x264 = GPL v2+）: GPL v2 §3(b) の**書面によるオファー**を掲載
 // ライセンス全文は scripts/licenses/*.txt に同梱（**ビルド時にネットワークへ取りに行かない**）
@@ -12,8 +12,23 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outPath = path.resolve(process.argv[2] ?? path.join(root, "dist-release", "LICENSES.txt"));
 
-const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-const deps: string[] = Object.keys(pkg.dependencies ?? {}).sort();
+// V218: 実行時に配布物へ入る依存は、直接の依存だけでなく、その先の依存も全部載せる。
+// package-lock.json の packages のうち node_modules/ の下で dev でも devOptional でもないものを、名前と版の組で 1 回ずつ。
+// 読むのはその lock のキーのフォルダ（入れ子の node_modules に別の版があっても、その版の LICENSE を読む）。
+const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
+const deps: { name: string; version: string; dir: string }[] = (() => {
+  const seen = new Set<string>();
+  const out: { name: string; version: string; dir: string }[] = [];
+  for (const [key, ent] of Object.entries<any>(lock.packages ?? {})) {
+    if (!key.startsWith("node_modules/") || ent.dev || ent.devOptional) continue;
+    const name = key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length);
+    const id = `${name}@${ent.version}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({ name, version: ent.version, dir: path.join(root, ...key.split("/")) });
+  }
+  return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.version < b.version ? -1 : a.version > b.version ? 1 : 0));
+})();
 
 /** リポジトリ同梱のライセンス全文を読む（ネットワーク不使用・ビルド再現性のため） */
 function readBundledLicense(name: string): string {
@@ -62,6 +77,20 @@ const ffmpegCoreVer: string | null = (() => {
 if (!ffmpegCoreVer) {
   console.error(
     "FATAL: @ffmpeg/core のバージョンを特定できません。GPL 書面オファーにはバージョンの明記が必須です。"
+  );
+  process.exit(1);
+}
+
+// V218: 同梱の @ffmpeg/core の対応ソースの束の置き場（v2.0.0 の Release に添付する）。
+// 束は版ごとに作るので、@ffmpeg/core の版が変わったら、束を作り直して新しい Release に付け、ここを直すまで LICENSES.txt を作らない。
+const FFMPEG_SOURCE_BUNDLE = {
+  coreVersion: "0.12.10",
+  url: "https://github.com/OFF-Proxy/MemoAnima/releases/download/v2.0.0/ffmpeg-core-0.12.10-source.tar.gz",
+} as const;
+if (ffmpegCoreVer !== FFMPEG_SOURCE_BUNDLE.coreVersion) {
+  console.error(
+    `FATAL: @ffmpeg/core の版 ${ffmpegCoreVer} が、対応ソースの束の版 ${FFMPEG_SOURCE_BUNDLE.coreVersion} と違います。` +
+      "束を作り直して Release に付け、FFMPEG_SOURCE_BUNDLE を直すまで LICENSES.txt を作りません。"
   );
   process.exit(1);
 }
@@ -146,8 +175,10 @@ ffmpeg.wasm コアは改変せず、そのまま同梱しています。
 誰でも**無償で**入手できます。
 
   メモアニマ本体: https://github.com/OFF-Proxy/MemoAnima
-  @ffmpeg/core:   https://github.com/ffmpegwasm/ffmpeg.wasm
-                  （同梱バージョン ${ffmpegCoreVer} に対応するもの）
+  @ffmpeg/core:   ${FFMPEG_SOURCE_BUNDLE.url}
+                  （同梱バージョン ${ffmpegCoreVer} に対応するソース一式とビルド手順。
+                    上流のビルドに使われた ffmpeg.wasm と、FFmpeg・x264 などの部品を、
+                    上流が使った版のまま 1 つにまとめたもの）
 
 ---------------------------------------------------------------------
 ■ ソースコード提供の申し出
@@ -158,8 +189,8 @@ ffmpeg.wasm コアは改変せず、そのまま同梱しています。
 本配布物の頒布者は、本配布物を受け取ったいかなる第三者に対しても、
 本配布物の頒布日から3年間、**本配布物に含まれる GPL 対象物すべて
 （メモアニマ本体の実行ファイル、および同梱の @ffmpeg/core バイナリ）**
-に対応する完全な機械可読形式のソースコード一式を提供することを、
-ここに申し出ます。
+に対応する完全な機械可読形式のソースコード一式を、ソフトウェアの
+交換に通常用いられる媒体で提供することを、ここに申し出ます。
 
 本体には GNU GPL v3 第6条(b) が、@ffmpeg/core（GPL v2 以降）には
 GNU GPL v2 第3条(b) が、それぞれ適用されます。
@@ -171,7 +202,7 @@ GNU GPL v2 第3条(b) が、それぞれ適用されます。
   メール: aru.oribo@gmail.com
   X（DM）: @Arcana_Proxy
 
-なお、同一のソースコードは上記の各リポジトリからも入手できますが、
+なお、同一のソースコードは上記の各入手先からも入手できますが、
 本申し出はそれらの提供状況にかかわらず有効です。
 
 We hereby offer, to any third party who receives this distribution, a
@@ -183,10 +214,15 @@ under Section 6(b) of the GNU General Public License version 3 (for
 MemoAnima itself) and under Section 3(b) of the GNU General Public
 License version 2 (for @ffmpeg/core, which is GPL v2 or later). It is
 valid for three (3) years from the date of distribution, for a charge
-no more than the cost of physically performing source conveying.
+no more than the cost of physically performing source conveying; if
+the source is delivered online, there is no charge.
 The same source is also available at no charge from
-https://github.com/OFF-Proxy/MemoAnima and
-https://github.com/ffmpegwasm/ffmpeg.wasm .
+https://github.com/OFF-Proxy/MemoAnima (MemoAnima itself) and
+${FFMPEG_SOURCE_BUNDLE.url}
+(@ffmpeg/core ${ffmpegCoreVer}: the upstream build scripts and the source of
+every component they build, at the versions upstream used), but this
+offer remains valid regardless of whether those copies remain
+available.
 Requests: aru.oribo@gmail.com (email) or X DM @Arcana_Proxy
 
 GPL v2 の全文は本ファイル末尾に掲載しています。`);
@@ -195,8 +231,7 @@ GPL v2 の全文は本ファイル末尾に掲載しています。`);
 sections.push(`=====================================================================
 JavaScript ライブラリ（実行時依存）
 =====================================================================`);
-for (const name of deps) {
-  const dir = path.join(root, "node_modules", name);
+for (const { name, version, dir } of deps) {
   let meta: any = {};
   try {
     meta = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
@@ -204,7 +239,7 @@ for (const name of deps) {
     /* noop */
   }
   const lic = meta.license ?? "（package.json に記載なし）";
-  const ver = meta.version ?? "?";
+  const ver = meta.version ?? version;
   const text = readLicenseText(dir);
   sections.push(
     `---------------------------------------------------------------------
@@ -222,11 +257,25 @@ Rust クレート（バックエンド・cargo metadata より自動抽出）
 MIT / Apache-2.0 / GPL v2 の本文は末尾に1回だけ掲載します。`);
 /** M9-1b P-3-2: Apache-2.0 単独（デュアルでない）のクレート。全文同梱の要否判定に使う */
 let apacheOnly: string[] = [];
+// V218: 一覧が取れないときは、失敗の文を書いて続けずに止める（続けると Apache-2.0 単独のクレートの行が事実と違う文になる）。
+// PATH の cargo を先に試し、無ければ %USERPROFILE%\.cargo\bin\cargo.exe。
+const cargoMetadata = (): string => {
+  const args = "metadata --format-version 1 --manifest-path src-tauri/Cargo.toml";
+  const cands = ["cargo", ...(process.env.USERPROFILE ? [`"${path.join(process.env.USERPROFILE, ".cargo", "bin", "cargo.exe")}"`] : [])];
+  const errs: string[] = [];
+  for (const c of cands) {
+    try {
+      return execSync(`${c} ${args}`, { cwd: root, maxBuffer: 256 * 1024 * 1024, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      // 実パスを含むので、失敗の文そのものは出さない（どちらの道か・終了コードだけ）
+      errs.push(`${c === "cargo" ? "PATH の cargo" : ".cargo/bin/cargo.exe"}: 終了コード ${(e as { status?: number }).status ?? "なし"}`);
+    }
+  }
+  console.error(`FATAL: cargo metadata を実行できません（${errs.join(" / ")}）。Rust クレートの一覧が無いまま LICENSES.txt を作りません。`);
+  process.exit(1);
+};
 try {
-  const metaJson = execSync(
-    `"${process.env.USERPROFILE}\\.cargo\\bin\\cargo.exe" metadata --format-version 1 --manifest-path src-tauri/Cargo.toml`,
-    { cwd: root, maxBuffer: 256 * 1024 * 1024, encoding: "utf8" }
-  );
+  const metaJson = cargoMetadata();
   const meta = JSON.parse(metaJson);
   // M9-1b P-4: 自クレート名は Cargo.toml の [package] name から読む
   // （ハードコードだと、クレート名を変えたときに黙って自分自身が一覧に載る）
@@ -257,7 +306,8 @@ try {
     .sort();
   sections.push([...new Set(lines)].join("\n"));
 } catch (e) {
-  sections.push(`（cargo metadata の実行に失敗: ${e}）`);
+  console.error(`FATAL: cargo metadata の結果を読めません: ${e}`);
+  process.exit(1);
 }
 
 // ---- 標準ライセンス本文（MIT / Apache-2.0 / GPLv2 参照） ----

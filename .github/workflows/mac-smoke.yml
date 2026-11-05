@@ -52,7 +52,7 @@ jobs:
       #   - createUpdaterArtifacts は tauri.conf.json に置かず、一時 config の --config で足す
       #     （置くと鍵の無い環境の npm run tauri:build が最後に必ず落ちる — U-1 の実測）
       #   - RUSTFLAGS の --remap-path-prefix でホームの絶対パスを成果物から除く（本番と同じ監査規則）
-      #   - 秘密鍵の**中身**を TAURI_SIGNING_PRIVATE_KEY へ（CLI 2.11.4 の案内どおり。ステップ内の
+      #   - 秘密鍵の**中身**を TAURI_SIGNING_PRIVATE_KEY へ（CLI 2.12.4 の案内どおり＝build は中身でも場所でもよい。ステップ内の
       #     export だけ＝ログにも後続ステップにも出ない。echo/cat での表示はしない）
       - name: Build (universal .app / .dmg / updater .app.tar.gz)
         run: |

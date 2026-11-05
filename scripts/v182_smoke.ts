@@ -32,7 +32,7 @@
 //         (c) この回の前と違う画素は、どれも前の式が浮動小数の誤差で**隣の画素を余計に拾っていた**所だけ（混ぜるべき所は減らしていない）
 //   [S-4] 取り込める上限（main.ts の長辺 MAXSIDE・倍率 8 まで）と、上限の無い CLI/MCP の極端な細長で、範囲が溢れない・
 //         元画像の外へ出ない（BigInt の範囲の平均と一致）。★(k+1)·s が 2^53 を超える大きさ（24,333,387×7 ほか・画素は作らずに
-//         読むたびに色を返す）でも一致＝倍率 1 の枝の BigInt の道（Codex 3 回目の低）。d·s の最大と 2^53 の比を記録する
+//         読むたびに色を返す）でも一致＝倍率 1 の枝の BigInt の道（独立レビュー 3 回目の低）。d·s の最大と 2^53 の比を記録する
 //   [S-5] 色を減らしたあとの差（写真に近い画像・既定の設定）を**数えて記録**（判定ではない）
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -369,7 +369,7 @@ const S1: Check = (IC, _ctx, push) => {
 
 // ---------------- [S-2] 変わるのは倍率 1 の範囲の式だけ ----------------
 const NAMED: [number, number][] = [
-  // Cowork の実測（要件 §2-2）の大きさ
+  // 要件書の実測（§2-2）の大きさ
   [320, 240],
   [160, 120],
   [80, 60],
@@ -540,7 +540,7 @@ const S2: Check = (IC, ctx, push) => {
     cases.push({ m: { mode: "color", brightness: 0, contrast: 30 }, fit: "cover", set: imgs });
     cases.push({ m: { mode: "tone", brightness: -25, contrast: 0 }, fit: "cover", set: imgs });
     cases.push({ m: { mode: "color", colors: 255 }, fit: "cover", set: imgs });
-    // 9 枚の連番（9 枚目だけ色が違う＝パレットは全ページから）・白でない紙色の余白・線画の反転（Codex 3 回目の穴②③④）
+    // 9 枚の連番（9 枚目だけ色が違う＝パレットは全ページから）・白でない紙色の余白・線画の反転（独立レビュー 3 回目の穴②③④）
     cases.push({ m: modes[0], fit: "cover", set: [...Array(8).fill(pick(320, 240)), pick(640, 480)] });
     cases.push({ m: { mode: "color", paper: "#ff2040" }, fit: "contain", set: [pick(1920, 1080), pick(333, 211)] });
     cases.push({ m: { mode: "lineart", edge: 60, invert: true }, fit: "cover", set: imgs });
@@ -799,7 +799,7 @@ const S4: Check = (IC, _ctx, push) => {
     const img = s4Img(w, h, w * 3 + h);
     for (const fit of FITS) for (const z of [undefined, 1.25, 8]) for (const c of [undefined, { x: 0.13, y: 0.87 }, { x: 1, y: 0 }]) run(img, fit, z, c);
   }
-  // ★2^53 を超える所（CLI・MCP だけで届く）: Codex 3 回目の例 24,333,387×7（倍率 1・中央で (40,120) が前の式は正しく、BigInt の道が無いと 1 画素ずれる）
+  // ★2^53 を超える所（CLI・MCP だけで届く）: 独立レビュー 3 回目の例 24,333,387×7（倍率 1・中央で (40,120) が前の式は正しく、BigInt の道が無いと 1 画素ずれる）
   //   と、縦長・位置違い。倍率 1 だけ（倍率 >1 の枝は V179 のまま＝CLI・MCP は倍率を渡さない）
   for (const [w, h] of [
     [24_333_387, 7],
@@ -1087,7 +1087,7 @@ const INT_LINES = "      lo = Math.floor((k * s) / d);\n      hi = Math.min(s - 
 /** 倍率 1 の枝の速い道（字下げ 8・2^53 まで）と、その後ろ（BigInt の道の頭）＝反証の書き換えを 1 か所に決める */
 const FAST_LINES = "        lo = Math.floor((k * s) / d);\n        hi = Math.min(s - 1, Math.max(lo, Math.ceil(((k + 1) * s) / d) - 1));\n";
 const FAST_TAIL = "      } else {\n        const S = BigInt(s);";
-/** [A] の本文（Codex 3 回目の指摘で、(k + 1)·s が 2^53 を超える所だけ BigInt にした） */
+/** [A] の本文（独立レビュー 3 回目の指摘で、(k + 1)·s が 2^53 を超える所だけ BigInt にした） */
 const NEW_BRANCH =
   "      if ((k + 1) * s <= Number.MAX_SAFE_INTEGER) {\n" +
   FAST_LINES +
@@ -1216,25 +1216,25 @@ const COUNTERS: Counter[] = [
   },
   {
     id: "2t",
-    what: "倍率 1 とみなす幅を 1.000001 まで広げる（Codex 2 回目の 03）",
+    what: "倍率 1 とみなす幅を 1.000001 まで広げる（独立レビュー 2 回目の 03）",
     edits: [{ from: "const zoomed = clampCropZoom(zoom) > 1;", to: "const zoomed = clampCropZoom(zoom) > 1.000001;" }],
     expect: [1],
   },
   {
     id: "2v",
-    what: "取り込んだレイヤーを見えなくする（Codex 2 回目の 09）",
+    what: "取り込んだレイヤーを見えなくする（独立レビュー 2 回目の 09）",
     edits: [{ from: 'p.layerDefs = [{ id: "L1", name: imageLayerName(), visible: true, opacity: 1 }];', to: 'p.layerDefs = [{ id: "L1", name: imageLayerName(), visible: false, opacity: 1 }];' }],
     expect: [1],
   },
   {
     id: "2f",
-    what: "既定の速さを 4 から 8 に（DEFAULT_CONVERT・Codex 2 回目の 11）",
+    what: "既定の速さを 4 から 8 に（DEFAULT_CONVERT・独立レビュー 2 回目の 11）",
     edits: [{ from: '  fps: 4,\n  title: "",', to: '  fps: 8,\n  title: "",' }],
     expect: [1],
   },
   {
     id: "4b",
-    what: "BigInt の道を外す（2^53 を超えても浮動小数の掛け算のまま・Codex 3 回目の低）",
+    what: "BigInt の道を外す（2^53 を超えても浮動小数の掛け算のまま・独立レビュー 3 回目の低）",
     edits: [{ from: "      if ((k + 1) * s <= Number.MAX_SAFE_INTEGER) {", to: "      if (true) {" }],
     expect: [3],
   },
@@ -1246,19 +1246,19 @@ const COUNTERS: Counter[] = [
   },
   {
     id: "2p8",
-    what: "連番のパレットを先頭 8 枚だけから作る（Codex 3 回目の 19）",
+    what: "連番のパレットを先頭 8 枚だけから作る（独立レビュー 3 回目の 19）",
     edits: [{ from: "return medianCut(canvases, Math.max(2, Math.min(255, o.colors)));", to: "return medianCut(canvases.slice(0, 8), Math.max(2, Math.min(255, o.colors)));" }],
     expect: [1],
   },
   {
     id: "2w",
-    what: "合成の紙色を白に固定（frameToRgba・Codex 3 回目の 20）",
+    what: "合成の紙色を白に固定（frameToRgba・独立レビュー 3 回目の 20）",
     edits: [{ from: 'const paper = hexToRgb(p.colorTable[p.frames[fi].paper] || "#ffffff");', to: 'const paper = hexToRgb("#ffffff");' }],
     expect: [1],
   },
   {
     id: "2i",
-    what: "線画の反転を無視する（convertToProject・Codex 3 回目の 21）",
+    what: "線画の反転を無視する（convertToProject・独立レビュー 3 回目の 21）",
     edits: [{ from: ": lineartBinarize(gray, o.edge, o.invert);", to: ": lineartBinarize(gray, o.edge, false);" }],
     expect: [1],
   },

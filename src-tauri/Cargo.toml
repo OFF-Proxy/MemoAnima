@@ -1,6 +1,6 @@
 [package]
 name = "animemo"
-version = "1.9.5"
+version = "2.0.0"
 description = "メモアニマ (MemoAnima) — 3DSのお絵かきアニメ作品をPCで編集・書き出しできる非公式・非営利のファンツール"
 authors = ["arcana"]
 edition = "2021"
@@ -15,12 +15,12 @@ name = "animemo_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
-tauri-plugin-dialog = "2"
+tauri = { version = "2.12", features = [] }
+tauri-plugin-opener = "2.7"
+tauri-plugin-dialog = "2.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -34,4 +34,50 @@ hex = "0.4"
 # プラグイン自体が要らない・G-1 でモバイルを足すときにここを直さずに済む形にしておく）。
 # 署名（minisign）は無効化できない仕様。公開鍵は tauri.conf.json、秘密鍵はビルド環境の環境変数。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri-plugin-updater = "2"
+# V207 (T): 2.14 より前へ戻さない。署名の版の確かめ（tauri.conf.json の requireSignedVersion）は 2.12 から
+#  （lib.rs の v207_tests が設定として読まれることを確かめる）。新しくない版なら check() が先に null を返す形は 2.14 から
+tauri-plugin-updater = "2.14"
+
+# V202 (M-1a): モバイルだけの保存の仕組み（pclib::mobile）が使う依存。**PC の製品のビルドでは組み立てない**
+# （pclib::mobile は cfg(any(mobile, test, feature = "mobile-harness")) の中だけ。PC では cargo test〔dev-dependencies〕と
+#  検査用の実行ファイル〔feature mobile-harness〕だけが組み立てる）。どれも今の木に**同じ機能で**入っているもの＝
+# Cargo.lock の [[package]] は増えない・PC の対象の `cargo tree -e features` の一覧も変わらない（scripts/v202_smoke.ts [D-1] が見る）
+#  - flate2: 作品のヘッダ（PV6 の先頭の gzip）だけを開いて作品の ID を読む（探す命令）
+#  - icu_normalizer: 名前を NFC にそろえて比べる（同じ名前の決まり）。機能は今の木と同じ compiled_data だけ
+#  - libc: Apple・Android で、置き換えない置き方（renamex_np・renameat2）と空き容量（statvfs）。Windows は kernel32 の関数を
+#    自分で宣言する（依存を足さない）
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+flate2 = "1"
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
+libc = "0.2"
+
+[dependencies.flate2]
+version = "1"
+optional = true
+
+[dependencies.icu_normalizer]
+version = "2"
+default-features = false
+features = ["compiled_data"]
+optional = true
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+[dev-dependencies]
+flate2 = "1"
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[features]
+# V202 (M-1a): 検査用の実行ファイル（examples/v202_mobile_harness.rs）だけが立てる。製品のビルドでは立てない
+mobile-harness = ["dep:flate2", "dep:icu_normalizer", "dep:libc"]
+# V211 (M-1b): 確かめ画面（開発用）の命令・試験用のライブラリ・故障を起こす口。モバイルのビルドで印を立てたときだけ
+#  （scripts/mobile_build.ts の --devcheck。画面の側は vite.mobile.config.ts の __MOBILE_DEVCHECK__）。依存は足さない
+mobile-devcheck = []
+
+[[example]]
+name = "v202_mobile_harness"
+required-features = ["mobile-harness"]

@@ -21,6 +21,9 @@
 // 8. i18n（新しい文言が7言語ぜんぶにある）
 import fs from "node:fs";
 import path from "node:path";
+import { readEditorSource, editorSourceFiles } from "./editorSource";
+import { undoV216b } from "./v216b_named.ts";
+import { undoV217 } from "./v217_named.ts"; // ★V217: コメントの語を替えた行が V216b の差分の前後に当たる＝先に V217 を外す
 import {
   HEAVY_ALLOC_MAX_BYTES,
   frameBytes,
@@ -41,7 +44,8 @@ function check(name: string, ok: boolean, detail = "") {
 const root = path.resolve(import.meta.dirname, "..");
 const read = (p: string) => fs.readFileSync(path.join(root, p), "utf8");
 
-const edRaw = read("src/editor/editor.ts");
+// V213: editor.ts とコア（src/editor/core/editorCore.ts）を合わせて読む（数え方は同じ）
+const edRaw = readEditorSource(root);
 const perf = read("src/perf.ts");
 const busy = read("src/ui/busy.ts");
 const css = read("src/styles.css");
@@ -49,6 +53,13 @@ const css = read("src/styles.css");
 // ★V165 の反省: 検査の正規表現が**自分のコメント**（旧コードを引用した説明）に当たると、
 //  実装を消しても緑のままになる。行コメントを落としてから見る（下の `stripped` 反証つき）。
 const ed = edRaw.replace(/^[ \t]*\/\/.*$/gm, "");
+// ★V216b (A-126・A-128): 背景保存の本体は「置き換えてよい」を受け取る形（runBackgroundSave(kind, replaceConfirmed)）になり、
+//  眠らせの入口は止める印（sweepHold）も見るようになった（その回の検査 v216b_smoke [W]・[S] が見張る）。
+//  検査3 の 2 つの字の見張りは、V216b の名指しの差分を外した字で見る（ほかの見張りは今の字のまま）
+const edNo16 = editorSourceFiles(root)
+  .map(({ file, text }) => undoV216b(file, undoV217(file, text) ?? "") ?? "")
+  .join("\n")
+  .replace(/^[ \t]*\/\/.*$/gm, "");
 check(
   "0 反証: コメントを落とすと中身が変わる（＝この前処理が効いている）",
   ed.length < edRaw.length && ed !== edRaw
@@ -108,6 +119,28 @@ function bodyOf(src: string, fn: string): string | null {
   return end < 0 ? src.slice(start) : src.slice(start, end);
 }
 
+/** V213: PC が上書きするフック（`protected override 名前(…)`）の本体。コアの同名の既定（何もしない）ではなく画面側を見る */
+function pcHookBody(src: string, fn: string): string {
+  const m = new RegExp(`\\n  protected override ${fn}\\s*(?:<[^>]{0,60}>)?\\s*(?:\\([^)]*\\)|\\([\\s\\S]{0,400}?\\))\\s*(?::[^{]{0,120})?\\{`).exec(src);
+  if (!m) return "";
+  const start = m.index + m[0].length;
+  const end = src.indexOf("\n  }", start);
+  return end < 0 ? src.slice(start) : src.slice(start, end);
+}
+
+/** V213: runHeavy の「1拍譲る」「箱」は PC のフック（heavyYield / heavyBox）へ分けた。
+ *  前の字（runHeavy の中に `await yieldToPaint();` / `runWithBusy(op, msg,`）か、今の字（フックを呼び、PC のフックの本体が同じ関数を呼ぶ）の位置を返す */
+function heavyYieldAt(rh: string, src: string): number {
+  const i = rh.indexOf("await yieldToPaint();");
+  if (i >= 0) return i;
+  return /yieldToPaint\(\)/.test(pcHookBody(src, "heavyYield")) ? rh.indexOf("await this.heavyYield();") : -1;
+}
+function heavyBoxAt(rh: string, src: string): number {
+  const i = rh.indexOf("runWithBusy(op, msg,");
+  if (i >= 0) return i;
+  return /runWithBusy\(op, msg,/.test(pcHookBody(src, "heavyBox")) ? rh.indexOf("this.heavyBox(op, msg,") : -1;
+}
+
 /** 層2 の1件を判定する（2z がこれを「壊した写し」に対して呼び直す） */
 function layer2Ok(src: string, fn: string): boolean {
   const body = bodyOf(src, fn);
@@ -146,10 +179,15 @@ for (const { fn, why } of LAYER2)
   const saveBody = bodyOf(ed, "runBackgroundSave") ?? bodyOf(ed, "save") ?? "";
   check("3 ★保存の本体が runHeavy を通らない", !/runHeavy\(/.test(saveBody));
   // V161-A の魂そのもの: 保存は背景で走り、**編集ロックをかけない**
+  // V201 (M-1a): 背景保存の本体は保存の種類を受け取る形になり（runBackgroundSave(kind)）、手順は共通の部品（saveCore.ts の saveWork）へ移った。
+  //  部品も入口を閉じない（runHeavy・beginBusy を持たない＝画面の漏斗を知らない）
+  const coreSrc = fs.readFileSync(path.join(root, "src/editor/saveCore.ts"), "utf8");
   check(
     "3 ★保存中も描ける仕組み（背景保存）が残っている",
-    /private async runBackgroundSave\(\): Promise<boolean>/.test(ed) &&
-      /this\.saveInFlight = job;/.test(ed)
+    /private async runBackgroundSave\(kind: SaveKind\): Promise<boolean>/.test(edNo16) &&
+      /this\.saveInFlight = job;/.test(ed) &&
+      /const r = await saveWork\(\{/.test(saveBody) &&
+      !/runHeavy\(|beginBusy\(/.test(coreSrc)
   );
   check(
     "3 ★保存が W-9 の編集ロックを掛けないことがコードに書いてある",
@@ -160,7 +198,7 @@ for (const { fn, why } of LAYER2)
   check("3 ★眠らせ（sweep）は漏斗を通さない（描きながら進む設計）", sweep !== "" && !/runHeavy\(/.test(sweep));
   // V168: `sweepSleep` は1周の Promise を返す包み（`sweepJob`）になったので、`return Promise.resolve();` も許す。
   // 見張りたいのは「多重起動を `sweeping` が止めている」ことで、戻り値の形ではない
-  check("3 眠らせの多重起動は sweeping が止めている", /if \(this\.sweeping \|\| !this\.sleepOn\) return(?: Promise\.resolve\(\))?;/.test(ed));
+  check("3 眠らせの多重起動は sweeping が止めている", /if \(this\.sweeping \|\| !this\.sleepOn\) return(?: Promise\.resolve\(\))?;/.test(edNo16));
   check("3 「コマでずらす」は PerfOp にも漏斗にも入っていない", !/frame\.dither/.test(perf) && !/frame\.dither/.test(ed));
   // ③スポイト: Alt＋クリックは従来どおり（壊すなリスト）
   check("3 ★Alt＋クリックのスポイト割り当てが残っている", /"edit\.pickColor": \{ code: "", button: 0, alt: true \}/.test(read("src/keymap.ts")));
@@ -195,7 +233,8 @@ for (const { fn, why } of LAYER2)
     { fn: "deleteLayerInner", why: "レイヤー削除（全コマ×1枚）" },
     { fn: "mergeLayerDownInner", why: "レイヤー統合（全コマ×2枚）" },
     { fn: "toggleLayerSharedInner", why: "全コマ共通の切り替え（全コマ×1枚）" },
-    { fn: "pasteLayerAllFramesInner", why: "全コマへレイヤー貼り付け" },
+    // V199 (A-105): 全コマへ・範囲へ・このコマの貼り付けは 1 本の pasteLayerClipInto にまとめた（見積もりは全コマ・範囲のとき）
+    { fn: "pasteLayerClipInto", why: "全コマ・範囲へレイヤー貼り付け" },
     { fn: "deleteFolderWithContents", why: "フォルダごと削除（全コマ×枚数）" },
   ];
   for (const { fn, why } of BUF_GUARDED) {
@@ -251,7 +290,7 @@ for (const { fn, why } of LAYER2)
   check("6 runHeavy が見つかる", rh !== "");
   check("6 ★どの抜け方でも入口を開ける（finally で endBusy）", /finally \{[\s\S]{0,400}?this\.endBusy\(\);/.test(rh));
   check("6 ★実行中は受け付けない（連打が原理的に起きない）", /if \(this\.busyKind\) return undefined;/.test(rh));
-  check("6 表示は共通の実装に委ねる（仕組みを2つに増やさない）", /runWithBusy\(op, msg,/.test(rh));
+  check("6 表示は共通の実装に委ねる（仕組みを2つに増やさない）", heavyBoxAt(rh, ed) >= 0);
   check("6 ★50ms を超えたら出す（PERF_MIN_MS と同じ値）", /HEAVY_BUSY_DELAY_MS = PERF_MIN_MS/.test(ed));
   check("6 busy.ts が遅延を引数で受ける（表示の実装は1つ）", /delayMs: number = BUSY_DELAY_MS/.test(busy) && /\}, delayMs\)/.test(busy));
   // D: メーターを重い操作の中で数え直さない
@@ -307,7 +346,7 @@ for (const { fn, why } of LAYER2)
   }
 }
 
-// ================= 9. Codex レビューで見つかった穴（塞いだまま保つ） =================
+// ================= 9. 独立レビューで見つかった穴（塞いだまま保つ） =================
 //
 // ★どれも「見積もりを足したのに、確保のほうが先に起きていた」という同じ形の見落とし。
 //  一度塞いでも、あとから `await` を1つ動かすだけで簡単に戻るので、順序を機械で固定する。
@@ -354,26 +393,26 @@ for (const { fn, why } of LAYER2)
     scan.slice(0, 0)
   );
   // 全コマ操作は起こす対象の id を必ず渡す（渡し忘れると wake 分が 0 に見える）
-  for (const fn of ["deleteLayerInner", "mergeLayerDownInner", "toggleLayerSharedInner", "pasteLayerAllFramesInner", "deleteFolderWithContents"]) {
+  for (const fn of ["deleteLayerInner", "mergeLayerDownInner", "toggleLayerSharedInner", "pasteLayerClipInto", "deleteFolderWithContents"]) {
     const body = bodyOf(ed, fn) ?? "";
     check(`9 ${fn}: 起こす対象の id を見積もりへ渡している`, /allowBufferAlloc\([^)]*,\s*"[a-zA-Z.]+",\s*[^)]+\)/.test(body));
   }
 
   // 中: 同期処理でも「押せなくなった見た目」は描かれる（1拍譲る）
   const rh2 = bodyOf(ed, "runHeavy") ?? "";
-  const iYield = rh2.indexOf("await yieldToPaint();");
-  const iRun = rh2.indexOf("runWithBusy(op, msg,");
+  const iYield = heavyYieldAt(rh2, ed);
+  const iRun = heavyBoxAt(rh2, ed);
   check("9 ★中身を始める前に1拍譲る（同期処理でも見た目が描かれる）", iYield >= 0 && iYield < iRun);
   // ★隠れた窓で setTimeout が1秒にクランプされる罠（実測で踏んだ）。MessageChannel で避ける
   check("9 ★その1拍は setTimeout ではない（隠れた窓で1秒に伸びる）", /export function yieldToPaint/.test(busy) && /new MessageChannel\(\)/.test(busy));
-  check("9 ★runHeavy が setTimeout で譲っていない", !/await new Promise\(\(r\) => setTimeout\(r, 0\)\);/.test(rh2));
+  check("9 ★runHeavy が setTimeout で譲っていない", !/await new Promise\(\(r\) => setTimeout\(r, 0\)\);/.test(rh2 + pcHookBody(ed, "heavyYield")));
 
   // 中: 連番画像の例外がダイアログの try/catch に届く
   check("9 ★onPlaceFrames を await する", /await editorCtx\.onPlaceFrames\(proj, transparentPaper\)/.test(read("src/main.ts")));
 
   // 低: 保存を型で締め出す／ログの操作名が中立
-  check("9 ★busyKind の型から \"save\" を消した（方針を型で守る）", /private busyKind: "" \| "audio" \| "export" \| "heavy" = "";/.test(ed));
-  check("9 ★beginBusy も \"save\" を受け取れない", /private beginBusy\(kind: "audio" \| "export" \| "heavy"\)/.test(ed));
+  check("9 ★busyKind の型から \"save\" を消した（方針を型で守る）", /(?:private|protected) busyKind: "" \| "audio" \| "export" \| "heavy" = "";/.test(ed));
+  check("9 ★beginBusy も \"save\" を受け取れない", /(?:private|protected) beginBusy\(kind: "audio" \| "export" \| "heavy"\)/.test(ed));
   check("9 ログの操作名が固定の \"paste\" ではない", /\$\{where\} refused/.test(edRaw) && !/\[V166\] paste refused/.test(edRaw));
 }
 

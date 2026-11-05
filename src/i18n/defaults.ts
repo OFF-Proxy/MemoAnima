@@ -31,11 +31,6 @@ export function newAlbumName(): string {
   return t("defaults.newAlbum.label");
 }
 
-/** 単発 .kwz/.ppm を受け取るときの既定アルバム名（合作の受け取り） */
-export function collabAlbumName(): string {
-  return t("defaults.collabAlbum.label");
-}
-
 /** 題名のない作品の表示名・保存名 */
 export function untitledTitle(): string {
   return t("defaults.untitled.label");

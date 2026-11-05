@@ -96,7 +96,7 @@ export function checkFrameAlloc(
   return { ok: needBytes <= budget, needBytes, maxFrames, perFrame };
 }
 
-/** V166 (Codex 指摘・優先度高④): **昇格を織り込んだ見積もり幅**を返す。
+/** V166 (独立レビューの指摘・優先度高④): **昇格を織り込んだ見積もり幅**を返す。
  *
  *  ★見落としていた穴: 見積もりは「いまの `indexBits`」で計算していたが、
  *   貼り付け・連番画像は途中で `ensureColor` が走り、**257色目で 16bit へ自動昇格**する（N-2）。
@@ -122,7 +122,7 @@ export function estimateBits(
   return curColors + incomingColors <= 256 ? 8 : 16;
 }
 
-/** V166 (Codex 指摘・優先度高④): 昇格が起こり得るとき、`promoteTo16` が
+/** V166 (独立レビューの指摘・優先度高④): 昇格が起こり得るとき、`promoteTo16` が
  *  **既存の起きているバッファを作り直す**ぶんの追加バイト数。
  *  16bit 化なので「起きている面数 × 76,800 × 2」を新しく確保する。 */
 export function promotionExtraBytes(awakeFaces: number, willPromote: boolean): number {
@@ -141,7 +141,7 @@ export function promotionExtraBytes(awakeFaces: number, willPromote: boolean): n
 
 /** V167 (K-3): 知らせを出してから、次を出すまでの最短時間（ms）。
  *
- *  **3500ms。** ★Codex 指摘（中）で 1200ms から上げた——
+ *  **3500ms。** ★独立レビューの指摘（中）で 1200ms から上げた——
  *  トーストは **3200ms 画面に残り、足すたびに積み上がる**（`main.ts` の `toast`）。
  *  間引きが 1.2 秒だと、Alt＋クリックで拾い続ける人の画面に**常時2〜3個**居座る。
  *  「1つ出したら消えるまで次を出さない」＝**同時に1つより多く出ない**ことを、
@@ -266,7 +266,7 @@ export function snapshotBytes(p: {
     }
     if (f.sleep)
       for (const e of Object.values(f.sleep)) {
-        // ★Codex 指摘（低）: 「起きていて控えもある」レイヤーの控えも**骨組みとして数える**
+        // ★独立レビューの指摘（低）: 「起きていて控えもある」レイヤーの控えも**骨組みとして数える**
         //  （バッファ本体は count() が数えている。過小に見積もらないを厳密にするなら控えの器も足す）
         faces++;
         sleep += count(e.z);
@@ -316,7 +316,7 @@ export const ADD_FRAMES_MAX = 100;
  *  @returns n=実際に足す枚数（0=1枚も足せない）／
  *    **clamped=「作品の上限（65,535コマ）に当たって減らしたか」**
  *
- *  ★`clamped` は 65,535 に当たった場合**だけ** true（Codex V164 指摘②で契約を明記）。
+ *  ★`clamped` は 65,535 に当たった場合**だけ** true（独立レビュー V164 指摘②で契約を明記）。
  *   1回の上限（`ADD_FRAMES_MAX`）への丸めはここでも起きるが、そちらは**小窓が先に見せる**
  *  （「1〜100枚」の但し書き・`max` 属性・確定時に入力欄の値そのものを丸める）ので、
  *   足したあとに知らせる必要がない。

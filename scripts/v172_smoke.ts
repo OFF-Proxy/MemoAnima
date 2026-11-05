@@ -25,6 +25,7 @@
 // 12. 配線: main.ts が setAudioLogSink を呼ぶ・PerfOp に audio.read / audio.load がある
 import fs from "node:fs";
 import path from "node:path";
+import { readEditorSource } from "./editorSource";
 
 let pass = 0;
 let fail = 0;
@@ -47,7 +48,8 @@ const mainRaw = read("src/main.ts");
 const main = strip(mainRaw);
 const audioRaw = read("src/editor/audio.ts");
 const audio = strip(audioRaw);
-const edRaw = read("src/editor/editor.ts");
+// ★V213 (M-2a): editor.ts の描く処理はコア（src/editor/core/editorCore.ts）へ移った＝editor.ts とコアの字を並べて見る
+const edRaw = readEditorSource(root);
 
 /** top-level 関数の本体（`function name(` / `async function name(` から、次の行頭 `}` まで） */
 function fnBody(src: string, name: string): string {
@@ -184,7 +186,7 @@ const check5 = (src: string): { ok: boolean; why: string } => {
     }
   }
   const branch = b.slice(open, j + 1);
-  // Codex 指摘（中）: 語だけの分岐は Windows 向け feed の欠落まで飲み込む。無かった platform が darwin のときだけ
+  // 独立レビューの指摘（中）: 語だけの分岐は Windows 向け feed の欠落まで飲み込む。無かった platform が darwin のときだけ
   const cond = b.slice(b.lastIndexOf("if (", i), open);
   if (!/darwin-/.test(cond)) return { ok: false, why: "分岐の条件に darwin- が無い（Windows の feed 欠落まで飲み込む）" };
   if (/logError\(/.test(branch)) return { ok: false, why: "分岐の中に logError がある" };
@@ -235,7 +237,9 @@ const check5 = (src: string): { ok: boolean; why: string } => {
 
 // ================= 8. 2z 反証 =================
 {
-  const z = edRaw.replace(/void ensureAudioRunning\(ctx\);/, 'if (ctx.state === "suspended") void ctx.resume().catch(() => {});');
+  // V209 (A-121・R-5): 試し再生は ▶ の前に ensureAudioRunning を待つ形になった（`void ensureAudioRunning(ctx);` → `await ensureAudioRunning(getAudioCtx());`）。
+  //  その待ちを `=== "suspended"` の直書きに戻した写しで、検査2 が赤になることを見る（確かめる中身は同じ）
+  const z = edRaw.replace(/await ensureAudioRunning\(getAudioCtx\(\)\);/, 'if (getAudioCtx().state === "suspended") void getAudioCtx().resume().catch(() => {});');
   check("8 2z: 試し再生を `=== \"suspended\"` に戻した写しは検査2 が赤", z !== edRaw && check2([{ f: "z", src: z }]).length === 1);
 }
 
@@ -316,7 +320,7 @@ const check5 = (src: string): { ok: boolean; why: string } => {
     lines.length = 0;
     const r3 = (await mod.ensureAudioRunning!(c1)) as FakeCtx;
     check("10c ★resume 失敗 → 新しい ctx を返し、getAudioCtx も同じ新しい ctx・古いのは close", r3 !== c1 && mod.getAudioCtx!() === r3 && c1.closeCalls === 1 && FakeCtx.made.length === 2);
-    // Codex 指摘（低）: 作り直しのログは**実体**を見る（前は固定文字列を足して見ていたので消えても通った）
+    // 独立レビューの指摘（低）: 作り直しのログは**実体**を見る（前は固定文字列を足して見ていたので消えても通った）
     check("10c 作り直しは `[audio] ctx recreate reason=resume-failed` を 1 行残す", lines.length === 1 && lines[0] === "[audio] ctx recreate reason=resume-failed", lines.join(" | "));
     // (d) closed → 作り直し（resume は呼ばない）
     const c2 = r3;

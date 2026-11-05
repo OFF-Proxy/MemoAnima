@@ -252,7 +252,7 @@ body {
   box-shadow: 0 0 0 var(--ink);
 }
 
-/* V158（Codex 指摘②）: 「このコマの絵を消す」。もどす／やりなおす と**同じ見た目で真隣**だと、
+/* V158（独立レビューの指摘②）: 「このコマの絵を消す」。もどす／やりなおす と**同じ見た目で真隣**だと、
    確認を「次回から表示しない」にした人が、やり直しのつもりで押して1コマぶんの絵を消す。
    （Undo で戻せるが、気づかず描き続けると実害になる）
    ・左に区切りの余白を空けて「別のグループ」にする
@@ -423,6 +423,23 @@ button:disabled {
     gap: 10px;
     padding: 10px;
   }
+  /* V198 (A-104 E-1): 窓が狭いときは「ギャラリー」の文字をしまって線画だけにする（⚙ と同じ大きさ・title は残す）。
+     文字のままだと、縮むのが検索バーとロゴだけ（V153 の決まり）なので、最小の窓（900px）の es で検索の入力欄が
+     48px → 4px に潰れた（v198_smoke [U-1] の実測）。文字は消さずに透明にして切る＝高さ・読み上げは今までどおり */
+  #lib-gallery {
+    width: 48px;
+    overflow: hidden;
+    white-space: nowrap;
+    color: transparent;
+  }
+  #lib-gallery .btn-ic {
+    color: var(--ink);
+    margin-right: 0;
+  }
+  #lib-gallery .btn-ic svg.icon {
+    width: 1em;
+    height: 1em;
+  }
 }
 
 /* 左: アルバム */
@@ -446,6 +463,25 @@ button:disabled {
 .albbtns {
   display: flex;
   gap: 4px;
+}
+
+/* V200 (A-100): アルバムの操作は 4 つになった（＋・✏・まとめて .memoanima・🗑）。
+   - ボタンを少し細く（左右の余白 8px → 4px）。窓 1280px なら 7 言語とも見出しと同じ行に収まる
+   - それでも収まらない幅（窓 1100px 以下の 160px の列）では、ボタンの列を見出しの下の行へ**折り返す**。
+     はみ出して 🗑 が隠れない・見出しの「アルバム」が 2 行に潰れない（V199 までの 3 つでも、900px の en・es・pt は
+     34〜45px はみ出し、ja・ko・zh は見出しが潰れていた＝v200_smoke [U-8] の実測） */
+.albums h2 {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.albums h2 > span:first-child {
+  white-space: nowrap;
+}
+.albums h2 .albbtns {
+  margin-left: auto;
+}
+.albbtns .minibtn {
+  padding: 2px 4px;
 }
 
 #albums-list {
@@ -562,6 +598,36 @@ button:disabled {
   flex: 0 0 auto; /* 大きさは style（1:1）。flex で縮めない */
   image-rendering: pixelated; /* 1:1 なので効かない（念のため・バッキングがずれても補間しない） */
   background: transparent;
+}
+
+/* V204 (A-110): 再生バーの段（.screen-view と .controls の間・高さはつまみの 24px）。作品を選んでいないときは hidden で
+   場所を取らない（.screen-view・.controls の規則は変えない＝絵の枠はこの段の分だけ低くなり、V192b の枠いっぱいがそのまま効く）。
+   つまみは編集画面の不透明度と同じ部品（.uisl・溝は --paper2）。数字は幅を揃えて（tabular-nums）再生中に横へ揺れない */
+.seekrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  flex: 0 0 auto;
+}
+
+.seekrow[hidden] {
+  display: none;
+}
+
+.seek-host {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+}
+
+.seek-count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--ink-soft);
 }
 
 .controls {
@@ -1273,6 +1339,17 @@ svg.icon {
    ここでは重なり順と当たり判定だけを決める（#ed-overlay と同じ最小の書き方）。
    格子(.pxgrid, z-index:3)の上・ポインタは拾わない。バッキングは cssSize×devicePixelRatio で
    確保して物理pxに描く（editor.ts paintCursorLayer）。絵には焼かない */
+/* V208 (A-119): 範囲選択の線（境目の動く点線・囲んでいる途中の線・画面解像度）。格子の上・カーソル(4)と
+   変形の枠(5)の下＝ペン先の輪と変形のハンドルを隠さない。ポインタは拾わない */
+#ed-sel-ui {
+  pointer-events: none;
+  z-index: 3;
+}
+
+#ed-sel-ui[hidden] {
+  display: none;
+}
+
 #ed-cursor {
   pointer-events: none;
   z-index: 4;
@@ -1422,7 +1499,8 @@ svg.icon {
 #ed-mini-canvas.paper-clear,
 .fr canvas.paper-clear,
 #preview-host.paper-clear,
-#ap-mini.paper-clear {
+#ap-mini.paper-clear,
+#wb-preview.paper-clear {
   background: repeating-conic-gradient(#e2e2e2 0 25%, #fafafa 0 50%) 0/8px 8px;
 }
 
@@ -1483,6 +1561,10 @@ svg.icon {
   /* V158 (L-1): **カード自身はスクロールしない**。上下の段がそれぞれ中でスクロールする
      （1本の縦スクロールに縦積みしていたのが「レイヤーが押し出されて消える」の原因だった） */
   overflow: hidden;
+  /* V197 (A-101): 色の帯（.pal）の列の数と隙間。上段の下端のぼかし（.side-fade）が
+     **色見本 1 つぶんの高さ**を同じ式で求めるので、ここで 1 か所に持つ */
+  --pal-cols: 8;
+  --pal-gap: 5px;
 }
 
 /* V158 (L-1): 右パネルの2段。上段は比率ぶん・下段は残りぜんぶ（＝**常に見える**）。
@@ -1514,6 +1596,34 @@ svg.icon {
   gap: 8px;
 }
 
+/* ★V197 (A-101): 上段のスクロールの下端のぼかし（中身の最後の飾り・editor の #ed-side-topbody）。
+   原因（数字は V197 報告 §1）: 上段の下端で色見本が切れると、隠れた下半分の位置にちょうど仕切り
+   （#ed-side-vsplit）があり、わずかに覗いた見本が「仕切りの下に潜っている」ように見えていた——
+   その見本の真ん中を押すと仕切りに当たる。箱の縮み・当たり判定の広さではない（どちらも実測で否定）。
+   直し方: 続きがあるあいだ下端に **色見本 1 つぶんの高さ**の帯を貼る。上半分はぼかし・下半分はパネルの色。
+   真ん中が隠れた見本は必ず下半分（単色）に収まる＝見えない。見えている見本は真ん中が枠の中にある＝押せる。
+   - 高さ: padding の % は**横幅**が基準＝ .pal と同じ式（列の数・隙間）でパネルの幅とスクロールバーの有無に追従
+   - sticky で下端に貼り付く。一番下までスクロールすると最後の要素のすぐ下（見本 1 つぶんの空き）に収まり、
+     最後の要素には重ならない。ただしその空きのぶん、とても小さい枠では最後の要素の上側が切れる（少し戻せば見える）
+   - クリックは素通し（pointer-events: none）。仕切りの幅・見た目・動きは変えていない */
+.side-fade {
+  flex: 0 0 auto;
+  position: sticky;
+  bottom: 0;
+  margin-top: -8px; /* .side-secbody の gap（8px）を打ち消す＝一番下までスクロールしたときの空きは見本 1 つぶんだけ */
+  padding-top: calc((100% - (var(--pal-cols) - 1) * var(--pal-gap)) / var(--pal-cols));
+  background: linear-gradient(to bottom, transparent, var(--panel) 50%);
+  pointer-events: none;
+}
+
+/* ★V197 (A-101・コミット前レビューの指摘): 道具の設定を下端へ寄せて見せるとき（editor の revealToolOptions の
+   scrollIntoView({ block: "end" })）、確定／キャンセルが上の .side-fade の帯に隠れないよう、帯の高さだけ手前で止める。
+   scroll-margin は % を取れないので、同じ式をパネルの幅（--ed-side-w）から組む:
+   枠 26px（.side の padding 10×2＋border 3×2）・スクロールバーは引かない（重ねて出る Mac のときの大きいほう） */
+#ed-toolopts {
+  scroll-margin-bottom: calc((var(--ed-side-w) - 26px - (var(--pal-cols) - 1) * var(--pal-gap)) / var(--pal-cols));
+}
+
 .side-sechead {
   display: flex;
   align-items: center;
@@ -1528,6 +1638,113 @@ svg.icon {
 .side-sechead > span:first-child {
   margin-right: auto;
   white-space: nowrap;
+}
+
+/* ★V215 (A-124・REQ_color_section §2-1): 色の段。上段の中・道具のスクロール（#ed-side-topbody）の外・その下＝いつも見える。
+   - 道具の段は残りぜんぶ（基準 0 から伸びる）。色の段は中身の高さで、上段が足りないとき（窓が低い・比率が小さい）だけ縮んで
+     中でスクロールする（道具の段が 1 行も残らない組み合わせ＝報告書の tight）。見える段数は editor の fitColorRows が決める
+   - 横の余白 4px（外へ -4px）: 帯の枠の外側の余白（選んだ色の枠 3＋1px）がこの段で切れないように。中身の幅は前と同じ
+   - 色の段は .side-secbody を使わない（道具の段を畳む規則 `.side.fold-top .side-top .side-secbody` に掛からない＝畳んでも見えたまま）
+   - 見本の大きさを求める式（.pal-rows）がこの段の中身の幅（cqw）を使うので、inline-size の入れ物にする */
+#ed-side-topbody {
+  flex-basis: 0;
+}
+
+.side-col {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 -4px;
+  padding: 0 4px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  container-type: inline-size;
+}
+
+.side .side-colhead > h3 {
+  margin: 0 auto 0 2px; /* 見出しの字は左・ボタンは右へ寄せる（.side h3 の上下の余白は見出しの行の中では要らない） */
+  flex-wrap: nowrap;
+}
+
+/* よく使う色の見出しと［＋ いまの色］の 1 行（狭いときはボタンを次の行へ折り返す） */
+.side-favrow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.side .side-favrow > h3 {
+  margin: 0 auto 0 2px;
+}
+
+
+/* 狭い右の列（色の段の中身が 230px 未満＝幅 220 のあたり）: 長い見出し（es のフルカラー「Color (color completo)」など）と
+   ［整理］・畳むが 1 行に入るよう、［整理］の左右の余白と見出しの字の間を詰める（C-6・v215_ui の実測。既定の幅では変えない） */
+@container (max-width: 230px) {
+  .side .side-colhead > h3 {
+    margin-left: 0;
+    letter-spacing: 0;
+  }
+
+  .side-colhead > #ed-pal-tidy {
+    padding-left: 3px;
+    padding-right: 3px;
+  }
+}
+.side-colbody {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 帯（#ed-pal）とよく使う色（#ed-favpal）: 見える段数（--rows・fitColorRows）の行の高さちょうどの枠。超えたら**この枠の中だけ**で
+   行ごとに吸い付いてスクロールする＝止まった所では、見えている見本は真ん中が枠の中・真ん中が切れた見本は見えない（V197 と同じ性質）。
+   見本の大きさの式は前と同じ（.pal の --pal-cols・--pal-gap・中身の幅）。スクロールバーは出さず（幅を変えない）、続きがある端に線を出す */
+.pal-rows {
+  --sw: calc((100cqw - (var(--pal-cols) - 1) * var(--pal-gap)) / var(--pal-cols));
+  box-sizing: border-box;
+  margin: -4px;
+  padding: 4px;
+  max-height: calc(var(--rows, 3) * var(--sw) + (var(--rows, 3) - 1) * var(--pal-gap) + 8px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-snap-type: y mandatory;
+  scroll-padding-block: 4px;
+  scrollbar-width: none;
+}
+
+.pal-rows::-webkit-scrollbar {
+  display: none;
+}
+
+/* 色の段の最後の枠（よく使う色）は下へはみ出さない（-4px のぶん色の段があふれて、細いスクロールバーで見本が縮んでいた） */
+.side-colbody > .pal-rows:last-child {
+  margin-bottom: 0;
+}
+
+.pal-rows > .sw {
+  scroll-snap-align: start;
+}
+
+.pal-rows.more-up {
+  box-shadow: inset 0 2px 0 var(--line);
+}
+
+.pal-rows.more-down {
+  box-shadow: inset 0 -2px 0 var(--line);
+}
+
+.pal-rows.more-up.more-down {
+  box-shadow: inset 0 2px 0 var(--line), inset 0 -2px 0 var(--line);
+}
+
+.side.fold-col .side-colbody {
+  display: none;
 }
 
 /* 段を畳んだとき: 見出しだけ残して相手が伸びる（見出しが残るので戻し方が分かる） */
@@ -1569,7 +1786,7 @@ svg.icon {
   opacity: 0.45;
 }
 
-/* V158（Codex 指摘④）: 掴めることが**触る前に**分かるように、線の真ん中へ短い刻みを1つ。
+/* V158（独立レビューの指摘④）: 掴めることが**触る前に**分かるように、線の真ん中へ短い刻みを1つ。
    hover の色変化はマウスにしか効かない（ペン・タッチでは title も出ない）ので、
    「ただの仕切り線」に見えたままだと高さを変えられることに気づけない */
 .ed-vsplit::after {
@@ -1852,8 +2069,9 @@ svg.icon {
 
 .pal {
   display: grid;
-  grid-template-columns: repeat(8, 1fr);
-  gap: 5px;
+  /* V197 (A-101): 値は .side の --pal-cols / --pal-gap（上段の下端のぼかしと同じ式）。右パネルの外では従来の値 */
+  grid-template-columns: repeat(var(--pal-cols, 8), 1fr);
+  gap: var(--pal-gap, 5px);
 }
 
 .sw {
@@ -1931,7 +2149,7 @@ svg.icon {
 }
 /* V157 (D-1): ロック中の行。**👁オフ（アイコンが薄くなるだけ）と取り違えない**ように、
    行の左に太い帯を出して斜めの地を敷く。「押せない」ではなく「守られている」の見た目にする
-   （Codex レビューの観点）。ロックしていない作品では1行も効かない */
+   （独立レビューの観点）。ロックしていない作品では1行も効かない */
 .lay.locked,
 .lay-folder.locked {
   border-left-width: 10px;
@@ -2016,6 +2234,21 @@ svg.icon {
   outline-offset: -1px;
 }
 
+/* V208 (A-120): ドラッグ中、入る先のフォルダの行と中の行（見えているもの）を薄く塗る。
+   .lay の背景の一括指定とロックの縞（background-image）を崩さないよう、::after で上に重ねる */
+.lay.lay-dropzone {
+  position: relative;
+}
+
+.lay.lay-dropzone::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 10px;
+  background: rgba(var(--blue-rgb), 0.12);
+  pointer-events: none;
+}
+
 /* M3.8: 複数選択（active はさらに強調＝既存 outline） */
 .lay.sel {
   box-shadow: inset 0 0 0 2px var(--blue);
@@ -2047,6 +2280,39 @@ svg.icon {
 
 .drag-ghost.invalid {
   background: var(--red);
+}
+
+/* V208 (A-120): レイヤーのドラッグのゴーストだけ 2 行（1 行目＝掴んでいる物・2 行目＝入る先）。
+   フィルムのコマ・ライブラリのカードのゴーストは .drag-ghost のまま。長い名前は名前の所だけを切る */
+.lay-drag-ghost {
+  border-radius: 12px;
+}
+
+.lay-drag-ghost-head {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lay-drag-ghost-dest {
+  display: flex;
+  min-width: 0;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.lay-drag-ghost-dest[hidden] {
+  display: none;
+}
+
+.lay-drag-ghost-fix {
+  flex: 0 0 auto;
+}
+
+.lay-drag-ghost-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* M3.8: DnD 挿入線（行間並べ替えのインジケータ） */
@@ -2180,7 +2446,7 @@ svg.icon {
 /* L-2: 表示言語だけは横に並べきれない（6言語目で1行に入らない・BACKLOG §E「余り 28px」）。
    V157 (A-14-2): `flex-wrap` のままだと `.oni .lv { flex: 1 }` が効いて
    **2行目に余った1つが横幅いっぱいに伸びる**（7言語ある今は「繁體中文」が1つだけ残る）。
-   grid にすると列幅が決まるので伸びない。Cowork の推奨は「3列」だったが、
+   grid にすると列幅が決まるので伸びない。要件の推奨は「3列」だったが、
    **列数を幅から決める**形にした——言語が7つになった今 3列だと 3+3+1、
    幅の狭い窓では3列すら入らない（V152「狭い幅は開発機で再現しない」の教訓）。
    `auto-fit` なら入るだけ並び、余った1つも**1列ぶんの幅のまま**で伸びない。 */
@@ -2632,6 +2898,16 @@ input[type="text"] {
   margin: 0 0 12px;
 }
 
+/* V175b (A-108): 更新の窓のお知らせ（latest.json の notes）。項目ごとの改行をそのまま見せる。
+   改行が生きると窓が縦に長くなるので、高さに上限を置いてスクロールさせる
+   （アプリの窓の最小 900×540 でもボタンの列が画面の中に残る）。.modal-path 全体は変えない
+   （ほかの窓でも使っている）。中身は main.ts の presentUpdate が textContent で入れる */
+#up-notes {
+  white-space: pre-line;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
 /* M6-6 R-2: 変形モードラベル（カーソル非依存の視覚補助。ペン入力ではCSSカーソルが見えないため） */
 .xmode-label {
   position: absolute;
@@ -3035,6 +3311,9 @@ input[type="text"] {
   margin: 0 0 12px;
   font-size: 13px;
   line-height: 1.7;
+  /* V198 (A-104 E-3): 「さいきん増えたこと」の先頭のギャラリーの 1 文を改行で分ける。
+     ほかのステップの文に改行は無い（7 言語とも）＝見た目は変わらない */
+  white-space: pre-line;
 }
 
 .guide-bubble .g-actions {
@@ -3136,6 +3415,79 @@ input[type="text"] {
 .toast.show {
   opacity: 1;
   transform: translateY(0);
+}
+
+/* V198 (A-104 E-2): 書き出しのあとの案内（1 行目は今までの文・その下に 1 行とボタン）。
+   トーストの中だけに出す＝新しい窓は作らない・消えれば元どおり。色・出入りの動きはふつうのトーストと同じ。
+   押せるのはこの形のトーストだけ（#toast-host そのものはクリックを素通しのまま） */
+.toast.toast-act {
+  white-space: normal;
+  border-radius: 14px;
+  padding: 8px 14px 10px;
+}
+/* 押せるのは出ている間だけ（消えかけの 0.3 秒のフェード中は、下の物を押せるよう素通しに戻す） */
+.toast.toast-act.show {
+  pointer-events: auto;
+}
+.toast-act .toast-head {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.toast-act .toast-more {
+  margin-top: 4px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.toast-act .toast-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* ---------------- V204 (A-111): ゆらゆらのダイアログ（見本つき） ---------------- */
+.wb-box {
+  /* 基底 .modal-box の max-width:480px を打ち消す（audio-panel・imgimp-box と同じ教訓）。
+     900×540 の窓でも画面に収まるよう、高さは窓に合わせて縦にスクロール */
+  width: min(520px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 見本の枠: 中身 320×240（CSS の px）＝見本を 1 倍以上で出せる大きさ。拡大は presentFit が整数倍で（CSS では引き伸ばさない） */
+.wb-prev {
+  width: 320px;
+  height: 240px;
+  margin: 0 auto 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--paper2);
+}
+
+.wb-prev canvas {
+  flex: 0 0 auto;
+  image-rendering: pixelated;
+}
+
+.wb-srow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.wb-srow .uisl {
+  flex: 1 1 auto;
+}
+
+.wb-sval {
+  min-width: 2ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------------- M8-1: 📷 画像を取り込む（さつえいGUI） ---------------- */

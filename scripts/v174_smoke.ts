@@ -27,6 +27,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import ts from "typescript";
 
 let pass = 0;
 let fail = 0;
@@ -61,7 +62,7 @@ const ng = (why: string): V => ({ ok: false, why });
 
 /** `callee(…)` の実引数を **1 つずつ**取り出す。
  *
- *  ⚠ 素朴な括弧数えは **2 通りで黙って素通りする**（Codex のリリース前レビューで実証）:
+ *  ⚠ 素朴な括弧数えは **2 通りで黙って素通りする**（リリース前の独立レビューで実証）:
  *   ① `console.log (x)` のように**括弧の前に空白**があると、`callee + "("` では見つからない
  *   ② `console.log(")", 生出力)` のように**文字列の中に括弧**があると、そこで閉じたと誤解して
  *      **2 つめ以降の引数を見ない**（＝広く取るどころか、狭く取って見逃す）
@@ -183,6 +184,9 @@ const EXPECT_UPDATER = {
   ],
   pubkey:
     "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlEQjYzMzYwRjZDMUMxQzAKUldUQXdjSDJZRE8yblV5MzBrZ2xGUEJ0TWI5SUtxd3BQSDgxMlhCYkZjQkZvL3hVYlhBcUJMMTIK",
+  // ★V207 (T・REQ_tauri_2_12.md §3 (2)): 更新の「版の確かめ」をオンにした＝**名指しで 1 つだけ**足した（pubkey と windows のあいだ）。
+  //  ほかの 3 つの値と並びは字のまま固定。綴りが updater に読まれていることは src-tauri/src/lib.rs の v207_tests（cargo test --lib）が見る
+  requireSignedVersion: true,
   windows: { installMode: "passive" },
 };
 const checkS3 = (src: string): V => {
@@ -201,7 +205,7 @@ const checkS3 = (src: string): V => {
 };
 {
   const v = checkS3(confRaw);
-  check("[S-3] plugins.updater が v1.8.0 と一字一句同じ（endpoints / pubkey / windows.installMode）", v.ok, v.why);
+  check("[S-3] plugins.updater が v1.8.0 と一字一句同じ（endpoints / pubkey / windows.installMode）＋V207 で足した requireSignedVersion: true の 1 つだけ", v.ok, v.why);
   const conf = confRaw ? JSON.parse(confRaw) : {};
   check(
     "[S-3b] plugins.updater のキーの並びも同じ",
@@ -209,35 +213,54 @@ const checkS3 = (src: string): V => {
   );
 }
 
-// ================= [S-4] feed の platforms は windows-x86_64 だけ =================
+// ================= [S-4] 既定の道（--with-mac 無し）の feed は windows-x86_64 だけ =================
 // darwin を足すのは V175。この回で足すと、Mac で更新が転んだときに
 // 「署名が悪いのか feed が悪いのか」を切り分けられない（REQ §0-c-1）
+//
+// V175 で狭めた（V200 の [S-5] と同じ作法）: V175 で make_release.ts に `--with-mac` が入り、feed の組み立ては
+// mac_update.ts の buildFeed へ移った。前の検査は「make_release.ts に platforms のブロックが 2 つあり、どちらも
+// windows だけ」「--with-mac / darwin の字面が無い」で、V175 の形では**正しくても赤**になる。
+// 守りたいのは「**指定が無ければ** darwin は 1 つも入らない」なので、それを次の 4 つで見る:
+//   (a) make_release.ts に darwin の字面が無い（darwin のキーは buildFeed の `mac` からしか生まれない）
+//   (b) buildFeed の呼び出しの `mac:` は、どれも `macStaged ? … : undefined`（Mac の配信物を作ったときだけ）
+//   (c) macStaged に値が入るのは `if (macDir !== null)` の中の prepareMacRelease だけ
+//   (d) macDir は `--with-mac` が無ければ null
+// 実際に組んで確かめる側（buildFeed に mac を渡さなければ windows だけ・--dry-run の出力）は v175_smoke の [S-1]・[S-3]
 const checkS4 = (src: string): V => {
   if (src === "") return ng("make_release.ts を読めない");
-  const blocks: string[] = [];
-  let i = 0;
-  for (;;) {
-    const at = src.indexOf("platforms: {", i);
-    if (at < 0) break;
-    const b = block(src.slice(at), "platforms: {");
-    if (b === "") return ng("platforms のブロックを切り出せない（検査が黙る）");
-    blocks.push(b);
-    i = at + b.length;
-  }
+  // コメントは外して見る（説明に darwin と書くのは正しい）
+  const code = ts.createPrinter({ removeComments: true }).printFile(ts.createSourceFile("make_release.ts", src, ts.ScriptTarget.Latest, true));
+  if (/darwin/.test(code)) return ng("★make_release.ts のコードに darwin の字面がある（buildFeed の mac 以外から darwin が入り得る）");
+  const calls = callArgList(src, "buildFeed");
   // ⚠ 空振り（0 件）は**赤**。make_release.ts の書き方が変わって検査が素通りする形を塞ぐ
-  if (blocks.length < 2)
-    return ng(`platforms のブロックが ${blocks.length} 件しか無い（--dry-run 用と本番用の 2 件あるはず）`);
-  for (const b of blocks) {
-    const keys = [...b.matchAll(/"([^"]+)"\s*:\s*\{/g)].map((m) => m[1]);
-    if (JSON.stringify(keys) !== JSON.stringify(["windows-x86_64"]))
-      return ng(`★platforms のキーが ${JSON.stringify(keys)}`);
+  if (calls.length < 2) return ng(`buildFeed の呼び出しが ${calls.length} 件しか無い（--dry-run 用と本番用の 2 件あるはず）`);
+  for (const c of calls) {
+    const arg = c.join(",");
+    const m = /\bmac\s*:\s*([\s\S]*?)\s*,?\s*\}\s*$/.exec(arg);
+    if (!m) return ng("★buildFeed の呼び出しに mac: が無い（どこで darwin が決まるのか読めない）");
+    if (!/^macStaged\s*\?[\s\S]*:\s*undefined$/.test(m[1].trim())) return ng(`★buildFeed の mac が macStaged の有無で決まっていない（${m[1].trim().slice(0, 60)}）`);
   }
+  const assigns = [...src.matchAll(/\bmacStaged(?:\s*:\s*[^=;\n?]+)?\s*=(?!=)\s*([^;\n]+)/g)].map((x) => x[1].trim());
+  if (assigns.length !== 2 || assigns[0] !== "null" || !assigns[1].startsWith("prepareMacRelease("))
+    return ng(`★macStaged に値を入れる所が「null で始めて prepareMacRelease で 1 回」ではない（${assigns.join(" / ")}）`);
+  const at = src.indexOf("macStaged = prepareMacRelease(");
+  const guard = src.lastIndexOf("if (macDir !== null) {", at);
+  if (guard < 0 || src.slice(guard, at).includes("}")) return ng("★prepareMacRelease が if (macDir !== null) の中に無い");
+  // 頭から「--with-mac が無ければ null」までのあいだに、値を返す道が無いこと（あいだで許すのは投げることだけ）
+  const head = /const macDir: string \| null = \(\(\) => \{([\s\S]*?)\n  const at = process\.argv\.indexOf\("--with-mac"\);\s*if \(at < 0\) return null;/.exec(src);
+  if (!head || /\breturn\b/.test(head[1])) return ng("★macDir が「--with-mac が無ければ null」になっていない");
   return ok();
 };
 {
   const v = checkS4(relRaw);
-  check("[S-4] make_release.ts の feed の platforms は windows-x86_64 だけ（darwin は V175）", v.ok, v.why);
-  check("[S-4b] make_release.ts に --with-mac / darwin の字面が無い（V175 を先走っていない）", !/--with-mac|darwin/.test(relRaw));
+  check("[S-4] 既定の道（--with-mac 無し）の feed に darwin は入らない（make_release.ts の配線）", v.ok, v.why);
+  // 組み立てそのものも動かして見る（mac を渡さなければ windows だけ・キーの並びも同じ）
+  const mu = await import("./mac_update.ts");
+  const f = mu.buildFeed({ version: "9.9.9", notes: "n", pubDate: "2026-01-01T00:00:00.000Z", windows: { signature: "s", url: "u" } });
+  check(
+    "[S-4b] buildFeed に mac を渡さなければ platforms は windows-x86_64 だけ（実際に組んで見る）",
+    JSON.stringify(Object.keys(f.platforms)) === JSON.stringify(["windows-x86_64"])
+  );
 }
 
 // ================= [S-5] mac_build.ts に名義・Key ID・Issuer ID の直書きが無い =================
@@ -315,7 +338,7 @@ const checkS6 = (src: string): V => {
   //
   //  ⚠ はじめは `inherit` という**字面だけ**を禁じていたが、同じ「素通し」は別の書き方でも書ける
   //   （`stdio: ["ignore", 1, 2]` の数値のファイル記述子／`stdio: ["ignore", process.stdout, process.stderr]`）。
-  //   Cowork の反証で 3 通りが緑のまま通った。**禁止の言葉を並べる限り、書き方の数だけ穴が空く**。
+  //   確認の反証で 3 通りが緑のまま通った。**禁止の言葉を並べる限り、書き方の数だけ穴が空く**。
   //   → **許す形を 1 つだけ決めて、数を合わせる**。`spawn` / `spawnSync` の呼び出しの数と、
   //     `stdio: ["ignore", "pipe", "pipe"]` の数が**一致しなければ赤**。
   //   ⚠ したがって、新しく外部コマンドを足すときは**この形をそのまま書くこと**（書き方を変えると赤くなる）。
@@ -365,7 +388,7 @@ const checkS7 = (src: string): V => {
   const fin = block(src, "} finally ");
   if (fin === "") return ng("★finally ブロックが無い（例外で消し忘れる経路ができる）");
   // ★**素の文**であること。`false ? removeThrowawaySignatures(dir) : 0` のように
-  //  呼んだ字面だけ残して実際には呼ばない形が素通りした（Codex の指摘）
+  //  呼んだ字面だけ残して実際には呼ばない形が素通りした（独立レビューの指摘）
   if (!/const removed = removeThrowawaySignatures\(bundleDir\);/.test(fin))
     return ng("★finally で消していない（呼び出しが素の文になっていない）");
   if (!/const left = assertNoSignatures\(bundleDir\);/.test(fin))
@@ -431,7 +454,7 @@ const checkS12 = (src: string): V => {
 
 // ================= [S-10] ★字面ではなく、実際に動かして確かめる =================
 //
-// Codex のリリース前レビューが、[S-6]・[S-7] の**字面の検査**を **10 通り**の書き換えで
+// リリース前の独立レビューが、[S-6]・[S-7] の**字面の検査**を **10 通り**の書き換えで
 // すり抜けられることを実証した（「消したことにする」「別の名前に移してから出す」など）。
 // 字面の穴は上で塞いだが、**いちばん大事な 2 つ（名義を伏せる／.sig を消す）は動かして**確かめる。
 // `mac_build.ts` は読み込んだだけでは何もしない（`isEntry` の分岐）ので、ここから呼べる。
@@ -504,12 +527,17 @@ const checkS12 = (src: string): V => {
   conf3b.plugins.updater = { pubkey: u.pubkey, endpoints: u.endpoints, windows: u.windows };
   check("[S-8] 反証 3z': キーを並べ替えただけの写しも [S-3] が赤", !checkS3(JSON.stringify(conf3b, null, 2)).ok);
 
-  // 4z: feed に darwin を足す
-  const rel4 = relRaw.replace(
-    /"windows-x86_64"\s*:\s*\{/,
-    '"darwin-aarch64": { signature: "x", url: "y" },\n      "windows-x86_64": {'
-  );
-  check("[S-8] 反証 4z: feed に darwin を足した写しは [S-4] が赤", relRaw !== rel4 && !checkS4(rel4).ok);
+  // 4z: 既定の道に darwin を入れる（V175 で狭めた [S-4] の反証。どの書き換えでも赤になること）
+  const REL4: [string, string][] = [
+    ["darwin のキーを直に書く", relRaw.replace("const nsisNames: string[] = [];", 'const nsisNames: string[] = []; const extra = "darwin-aarch64";')],
+    ["mac を macStaged に関係なく渡す", relRaw.replace("mac: macStaged ? {", "mac: true ? {")],
+    ["--with-mac が無くても macDir を空でなくする", relRaw.replace("if (at < 0) return null;", 'if (at < 0) return ".";')],
+    ["--with-mac の前で値を返す", relRaw.replace('  const at = process.argv.indexOf("--with-mac");', '  if (process.argv.length > 0) return ".";\n  const at = process.argv.indexOf("--with-mac");')],
+    ["prepareMacRelease を if (macDir !== null) の外に出す", relRaw.replace("if (macDir !== null) {\n  console.log(\"== Mac の配信物", "if (true) {\n  console.log(\"== Mac の配信物")],
+    ["macStaged に別の所から値を入れる", relRaw.replace("let stagedFeed: StagedFeed | null = null;", "let stagedFeed: StagedFeed | null = null;\nmacStaged = fake;")],
+  ];
+  for (const [why, rel4] of REL4)
+    check(`[S-8] 反証 4z: ${why}写しは [S-4] が赤`, relRaw !== rel4 && !checkS4(rel4).ok);
 
   // 5z: 名義・Key ID・Issuer ID をそれぞれ直書きする
   const mutIssuer = macRaw + '\nconst x = "69a6de80-1234-47e3-e053-5b8c7c11a4d1";\n';
@@ -533,7 +561,7 @@ const checkS12 = (src: string): V => {
     macRaw !== "" && mutNoClean !== macRaw && !checkS7(mutNoClean).ok
   );
 
-  // ★Codex のリリース前レビューが見つけた抜け道。**当時はこの 8 通りが全部素通り（緑）だった**。
+  // ★リリース前の独立レビューが見つけた抜け道。**当時はこの 8 通りが全部素通り（緑）だった**。
   //  同じ形が二度と通らないよう、反証として毎回走らせる
   const BYPASS_S6: [string, string][] = [
     ["括弧の前に空白を入れる", macRaw + "\nconsole.log (cs.text);\n"],
@@ -543,7 +571,7 @@ const checkS12 = (src: string): V => {
     ["分割代入で取り出す", macRaw + "\nconst { text } = cs;\nconsole.log(text);\n"],
     // ★最後に残った穴。受け取る名前を短い別名にすると「生出力らしい名前」の網から外れた
     ["流し込みから伏せ字を外す", macRaw.replace("console.log(`  │ ${scrub(line)}`)", "console.log(`  │ ${line}`)")],
-    // ★Cowork の反証（12〜14 個目）。`inherit` の字面を避けるだけで同じ「素通し」が書けた
+    // ★確認の反証（12〜14 個目）。`inherit` の字面を避けるだけで同じ「素通し」が書けた
     //  → 禁止の言葉を並べるのをやめ、**許す形と数を合わせる**ようにした（checkS6 の (b)）
     [
       "受け口を数値のファイル記述子にする",
@@ -563,7 +591,7 @@ const checkS12 = (src: string): V => {
   ];
   // ⚠ 写しが元と同じ（＝書き換えが当たらなかった）ときも**赤**にする。反証が黙るのを防ぐ
   for (const [why, mut] of BYPASS_S6)
-    check(`[S-8] 反証 6z★（Codex）${why} も [S-6] が赤`, macRaw !== "" && mut !== macRaw && !checkS6(mut).ok);
+    check(`[S-8] 反証 6z★（独立レビュー）${why} も [S-6] が赤`, macRaw !== "" && mut !== macRaw && !checkS6(mut).ok);
 
   // ★実機 1 回目の R-5（.dmg が公証されていなかった）を直した段を、二度と外せないようにする
   const mutNoNotary = macRaw.replace('"notarytool"', '"echo"');
@@ -594,7 +622,7 @@ const checkS12 = (src: string): V => {
     ["あとで exitCode を 0 に戻す", macRaw + "\nprocess.exitCode = 0;\n"],
   ];
   for (const [why, mut] of BYPASS_S7)
-    check(`[S-8] 反証 7z★（Codex）${why} も [S-7] が赤`, macRaw !== "" && mut !== macRaw && !checkS7(mut).ok);
+    check(`[S-8] 反証 7z★（独立レビュー）${why} も [S-7] が赤`, macRaw !== "" && mut !== macRaw && !checkS7(mut).ok);
 }
 
 // ================= [S-9] 触っていないことの確認（この回の一行は「中身を変えない」） =================

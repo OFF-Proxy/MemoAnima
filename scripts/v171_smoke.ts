@@ -8,7 +8,7 @@
 //
 // 1. 7言語の i18n の値に対象絵文字（icons.json ＋ 付録 A 追加分）が残っていない（許可: キー名で）
 // 2. src/**/*.ts（i18n・icons 除く・コメント除外）に `icon: "絵文字"` / `textContent = "絵文字"` の形が無い
-// 3. src/icons/*.svg が 86 個で icons.json の id と一致・viewBox 0 0 20 20・path に色なし・stroke-width 1.8
+// 3. src/icons/*.svg が 87 個（V198 で gallery を 1 つ足した・V171 は 86）で icons.json の id と一致・viewBox 0 0 20 20・path に色なし・stroke-width 1.8
 // 4. `{icon:xxx}` の id 集合が 7言語で同じ・全部 icons.json にある
 // 5. index.html の data-icon が全部 icons.json にある
 // 6. 反証 1z: ja の1キーに絵文字を戻した写しは検査1 が赤
@@ -58,6 +58,9 @@ const ALLOW_KEYS: Record<string, string[]> = {
   "keys.cmd.framePrev.hint": ["←"],
   "keys.cmd.frameNext.hint": ["→"],
   "ed.layerclip.pasteTo.btn": ["→"], // 「貼り付け → {layerShort}」の文章記号（先頭の 📋 は剥がす）
+  "ed.layerclip.pasteToFrames.btn": ["→"], // V199 (A-105): 「貼り付け → コマ {from}〜{to}」の文章記号（上と同じ形）
+  "ed.layerclip.pasteOverTo.btn": ["→"], // V203 (A-109): 「重ね貼り → {layerShort}」の文章記号（隣の貼り付けと同じ形）
+  "ed.layerclip.pasteOverToFrames.btn": ["→"], // V203 (A-109): 「重ね貼り → コマ {from}〜{to}」の文章記号（同上）
 };
 
 /** 辞書ファイルから key → value（1行1キーの形だけ・複数行の値は無い） */
@@ -131,7 +134,8 @@ const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*
 // ================= 3. SVG の素材 =================
 const svgCheck = (files: string[]): { ok: boolean; why: string } => {
   const ids = files.map((f) => f.replace(/\.svg$/, "")).sort();
-  if (ids.length !== 86) return { ok: false, why: `svg=${ids.length}` };
+  // V198 (A-104 E-1): ライブラリの「ギャラリー」の線画 gallery を 1 つ足した（86 → 87）。足す回はここも直す
+  if (ids.length !== 87) return { ok: false, why: `svg=${ids.length}` };
   if (JSON.stringify(ids) !== JSON.stringify([...IDS].sort())) return { ok: false, why: "id 集合が違う" };
   for (const f of files) {
     const s = read(`src/icons/${f}`);
@@ -146,7 +150,7 @@ const svgCheck = (files: string[]): { ok: boolean; why: string } => {
 const SVG_FILES = fs.readdirSync(path.join(root, "src/icons")).filter((f) => f.endsWith(".svg"));
 {
   const r = svgCheck(SVG_FILES);
-  check("3 ★svg が 86 個・icons.json の id と一致・viewBox 0 0 20 20・path に色なし・stroke-width 1.8", r.ok, r.why);
+  check("3 ★svg が 87 個・icons.json の id と一致・viewBox 0 0 20 20・path に色なし・stroke-width 1.8", r.ok, r.why);
   check("3 icons.json の id は重複なし・英小文字とハイフンだけ", new Set(IDS).size === IDS.length && IDS.every((i) => /^[a-z0-9-]+$/.test(i)));
 }
 
@@ -181,7 +185,7 @@ const phEqual = (dicts: Map<string, Map<string, string>>): { ok: boolean; why: s
   check("5 ★index.html の data-icon が全部 icons.json にある", vals.length >= 10 && bad.length === 0, `n=${vals.length} 未知=${bad.join(",")}`);
   const left = [...html.matchAll(TARGET_RE)].map((m) => m[1]);
   check("5 index.html に対象の絵文字が残っていない（コメント除く）", left.length === 0, left.join(""));
-  // Codex 指摘（低）: CSS の `content: "♪"` の再混入は見張っていなかった。擬似要素の content に対象文字が無いことも固定
+  // 独立レビューの指摘（低）: CSS の `content: "♪"` の再混入は見張っていなかった。擬似要素の content に対象文字が無いことも固定
   const css = read("src/styles.css").replace(/\/\*[\s\S]*?\*\//g, "");
   const cssBad = [...css.matchAll(/content:\s*"([^"]*)"/g)].map((m) => m[1]).filter((v) => TARGET_RE.test(v) && (TARGET_RE.lastIndex = 0) === 0);
   check("5 styles.css の content: に対象の絵文字が無い（♪ は mask に置き換えた）", cssBad.length === 0, cssBad.join(","));

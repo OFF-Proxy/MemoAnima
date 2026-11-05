@@ -54,6 +54,59 @@ export function repeatWav(wav: Uint8Array, n: number): Uint8Array {
   return out;
 }
 
+/** ★V216b (A-134・C-28): 44バイトヘッダ WAV（pcmS16ToWav 由来）の終わりに無音を足して `sec` 秒にする（短くはしない）。
+ *  曲が主の回数つきの書き出しで、曲の 1 回ぶんを 1 回ぶんの映像（曲の長さ×fps を切り上げたコマ）の長さにそろえる */
+export function padWavToSec(wav: Uint8Array, sec: number): Uint8Array {
+  const HDR = 44;
+  const v0 = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
+  const ch = v0.getUint16(22, true);
+  const rate = v0.getUint32(24, true);
+  const block = ch * 2;
+  const want = Math.round(sec * rate) * block;
+  const pcmLen = wav.length - HDR;
+  if (want <= pcmLen) return wav;
+  const out = new Uint8Array(HDR + want); // 足したところは 0＝無音
+  out.set(wav, 0);
+  const v = new DataView(out.buffer);
+  v.setUint32(4, 36 + want, true);
+  v.setUint32(40, want, true);
+  return out;
+}
+
+/** ★V216b (A-134・C-28): MP4 の回数つきの書き出しの並べ方（純関数・m5／v216b の検査が見る）。
+ *  - 曲が主（`audio.songPrimary`＝「曲の長さ」で BGM がある）で回数 2 回以上: 1 回ぶんの映像は「曲の長さ×fps を切り上げたコマ」
+ *    （その中でアニメを繰り返す）・曲の 1 回ぶんはその長さまで終わりに無音を足す＝1 回ぶんの絵と音の長さをそろえてから回数ぶん並べる
+ *    （映像は全部のコマを渡すので `-stream_loop` を使わない＝syncMode は "audioToAnim" の引数の形）。曲の頭ごとにアニメも頭から
+ *  - それ以外は今のまま（アニメの 1 周を回数ぶん・音は 1 回ぶんを回数ぶんつなぐ）。回数 1 は音も映像も今と同じ */
+export function mp4LoopPlan(
+  srcCount: number,
+  fps: number,
+  loops: number,
+  audio: ExportAudio | null
+): { total: number; cycle: number; frameOf: (i: number) => number; audio: ExportAudio | null } {
+  const songLoop = loops > 1 && !!audio && audio.songPrimary === true;
+  if (!songLoop) {
+    const effAudio =
+      audio && loops > 1
+        ? { wav: repeatWav(audio.wav, loops), durationSec: audio.durationSec * loops, syncMode: audio.syncMode }
+        : audio;
+    return { total: srcCount * loops, cycle: srcCount, frameOf: (i) => i % srcCount, audio: effAudio };
+  }
+  const f = fps > 0 ? fps : 8;
+  const cycle = Math.max(1, Math.ceil(audio!.durationSec * f - 1e-9));
+  const cycleSec = cycle / f;
+  return {
+    total: cycle * loops,
+    cycle,
+    frameOf: (i) => (i % cycle) % srcCount,
+    audio: {
+      wav: repeatWav(padWavToSec(audio!.wav, cycleSec), loops),
+      durationSec: cycleSec * loops,
+      syncMode: "audioToAnim",
+    },
+  };
+}
+
 /** ファイル拡張子から mime（対応: mp3/wav/ogg） */
 export function mimeFromExt(name: string): string | null {
   const ext = name.toLowerCase().split(".").pop() ?? "";
@@ -255,6 +308,30 @@ interface SeNode {
   startedAt: number;
   /** V172: このノードを繋いだ ctx。作り直しの後に `pauseSe` が別の ctx の時計で経過を測らないため */
   ctx: AudioContext;
+  /** ★V209 (A-121): 鳴り始める時刻（予約した時刻・ctx の秒）。これより前に ⏸ したら「まだ鳴り始めていない」 */
+  startAt: number;
+  /** V209: 鳴り始めの位置（素材の秒） */
+  offset0: number;
+  /** V209: 切られる時刻（周のつなぎ目・終わり・曲の終わり・ctx の秒）。null は切らない */
+  cutAt: number | null;
+  /** V209: ⏸ で畳んだ続きを鳴らしたものか（まだ鳴り始めていないうちに ⏸ したら、捨てずに畳み直す） */
+  cont: boolean;
+}
+
+/** ★V209 (A-121): 予約した BGM のノード 1 つ（集合で持つ＝次の周の頭出しも含めて全部取り消せる） */
+interface BgmNode {
+  node: AudioBufferSourceNode;
+  gain: GainNode;
+  /** 鳴り始める時刻（ctx の秒） */
+  startAt: number;
+}
+
+/** ★V209 (A-121): 畳んだ SE の続き。remain は切られるまでの残り（秒・null は切らない） */
+interface SePausedEntry {
+  buf: AudioBuffer;
+  track: SeTrack | null;
+  offset: number;
+  remain: number | null;
 }
 
 /**
@@ -264,13 +341,8 @@ interface SeNode {
 export class AudioPreview {
   private cacheFor: BgmTrack | null = null;
   private buffer: AudioBuffer | null = null;
-  private node: AudioBufferSourceNode | null = null;
-  private gain: GainNode | null = null;
-  /** start/stop の競合ガード（decode await 中の stop 後に遅延再生しない） */
-  private seq = 0;
-  /** restart 用に直近の再生パラメータを保持 */
-  private lastTrack: BgmTrack | null = null;
-  private lastRate = 1;
+  /** ★V209 (A-121): 予約した BGM（鳴っているものと、次の周の頭出し）。止める・⏸ で全部取り消す */
+  private bgmNodes = new Set<BgmNode>();
   /** M5-1: SE の decode キャッシュ（トラック実体キー。invalidate でクリア） */
   private seCache = new Map<SeTrack, AudioBuffer>();
   /** M11-1: 発火中のSEノード。SEは多重発火するので単一参照ではなく集合で持つ。
@@ -282,76 +354,136 @@ export class AudioPreview {
   private seEpoch = 0;
   /** M11-9: 一時停止で畳んだSEの「続き」。resumeSe() で offset から鳴らし直す。
    *  stopSe()（＝完全な停止）では捨てる＝続きは残さない */
-  private sePaused: { buf: AudioBuffer; track: SeTrack | null; offset: number }[] = [];
+  private sePaused: SePausedEntry[] = [];
 
   /** トラック変更（差し替え/削除/適用）時に呼ぶ */
   invalidate() {
     this.stop();
     this.cacheFor = null;
     this.buffer = null;
-    this.lastTrack = null;
     this.seCache.clear();
   }
 
   /**
-   * BGM再生開始。startFrameSec = 再生開始フレームの位置（アニメ時間・秒）。
-   * rate = FPS_TABLE[現在speedIndex]/FPS_TABLE[baseSpeedIndex]（M5-1 速度連動・ピッチも変わる）。
-   * M6-3 統一仕様: 音は**ワンショット**（トリム区間を1回）。アニメがループで先頭に
-   * 戻るたびに呼び出し側が restart() を呼び、頭出しから鳴り直す（モード共通・書き出し不変）。
+   * ★V209 (A-121): ▶ の前の音の用意（V157 D-4 を SE にも広げた）。BGM か SE があるときは**それだけで** ensureAudioRunning を待ち
+   * （BGM が無くても・SE だけでも）、BGM と鳴らす SE のデコードを待つ。2 回目からはキャッシュで待たない。
+   * 返す ctx は running のときだけ（自動再生の制限などで running にならなければ null＝絵は performance.now() で進む）。
+   * BGM がデコードできなければ bgm は null（BGM なしとして続ける）。
+   * 鳴らし方（BGM はコマの時刻表どおりに予約・ループの頭出し・SE のつなぎ目）は `playClock.ts` の駆動部が決める（M6-3・A-1・M11-1 の規則もそこ）。
    */
-  async start(track: BgmTrack | null | undefined, startFrameSec: number, rate = 1) {
-    // M11-9: 鳴っているSEは止めるが、**畳んだ続き（sePaused）には触れない**。
-    // ループ折り返しの restart() で前の周回を切る挙動（M11-1）はそのまま、
-    // かつ ⏸→▶ の再開で startPlayback → start() → resumeSe() の順に呼べるようにするため
-    this.stopBgm();
-    this.killLiveSe();
-    this.lastTrack = track ?? null;
-    this.lastRate = rate;
-    if (!track || track.muted) return;
-    const mySeq = ++this.seq;
+  async preparePlay(track: BgmTrack | null | undefined, se: SeTrack[]): Promise<{ ctx: AudioContext | null; bgm: AudioBuffer | null }> {
+    const wantBgm = !!track && !track.muted;
+    if (!wantBgm && se.length === 0) return { ctx: null, bgm: null };
+    let ctx: AudioContext | null = null;
     try {
       // V172 (G-2): running でなければ復帰（interrupted も）。作り直されたら返ってきた ctx を使う
-      const ctx = await ensureAudioRunning(sharedCtx());
-      if (this.cacheFor !== track || !this.buffer) {
-        const buf = await decodeAudio(track.data);
-        if (mySeq !== this.seq) return; // decode 中に stop/再start された
-        this.buffer = buf;
-        this.cacheFor = track;
-      }
-      if (mySeq !== this.seq) return;
-      const { trimStartSec, trimEndSec, usableSec } = normalizeTrim(
-        this.buffer.duration,
-        track.trimStartMs,
-        track.trimEndMs
-      );
-      if (usableSec <= 0) return;
-      const node = ctx.createBufferSource();
-      node.buffer = this.buffer;
-      node.playbackRate.value = rate;
-      const gain = ctx.createGain();
-      gain.gain.value = Math.max(0, Math.min(1, track.volume));
-      node.connect(gain);
-      gain.connect(ctx.destination);
-      // アニメ時間 startFrameSec ぶん進んだ位置 = バッファ時間では rate 倍進む
-      const offset = trimStartSec + Math.min(usableSec, Math.max(0, startFrameSec * rate));
-      node.start(0, offset, Math.max(0, trimEndSec - offset));
-      this.node = node;
-      this.gain = gain;
+      ctx = await ensureAudioRunning(sharedCtx());
     } catch {
-      // デコード不可・自動再生制限などは無音で続行（プレビューは補助機能）
+      ctx = null;
+    }
+    const bgm = wantBgm && track ? await this.loadBgm(track) : null;
+    if (se.length > 0) await this.prepareSe(se);
+    return { ctx: ctx && (ctx.state as string) === "running" ? ctx : null, bgm };
+  }
+
+  /** V209: BGM のデコード（キャッシュはトラックの実体ごと）。デコードできなければ null */
+  async loadBgm(track: BgmTrack): Promise<AudioBuffer | null> {
+    if (this.cacheFor === track && this.buffer) return this.buffer;
+    try {
+      const buf = await decodeAudio(track.data);
+      this.buffer = buf;
+      this.cacheFor = track;
+      return buf;
+    } catch {
+      return null; // デコード不可は BGM なし（プレビューは補助機能）
     }
   }
 
-  /** A-1: アニメが先頭へループした瞬間に呼ぶ（stop→頭出しから再スタート。decode/rateは使い回し） */
-  restart() {
-    // M11-1: BGMがある場合は start() の先頭の stop() が SE もまとめて止める。
-    // BGMが無い作品はここで早期 return するため SE が止まらず、周回ごとに重なっていた
-    // （BGMの有無で折り返しの挙動が変わらないように、明示的に止める）
-    if (!this.lastTrack) {
-      this.stopSe();
-      return;
+  /** V209: デコード済みの SE（無ければ undefined＝鳴らさない） */
+  seBuffer(track: SeTrack): AudioBuffer | undefined {
+    return this.seCache.get(track);
+  }
+
+  /** ★V209 (A-121): BGM を when（ctx の秒）に、素材の offset 秒から予約する（トリムの終わりまで・stopAt があればそこで止める）。
+   *  when が過ぎていたら、過ぎたぶん頭を飛ばして今から鳴らす（見えていない間から戻ったとき・予約が間に合わなかったとき） */
+  scheduleBgm(
+    ctx: AudioContext,
+    plan: { buf: AudioBuffer; trimEnd: number; rate: number; volume: number },
+    when: number,
+    offset: number,
+    stopAt: number | null
+  ) {
+    try {
+      const now = ctx.currentTime;
+      if (when < now) {
+        offset += (now - when) * plan.rate;
+        when = now;
+      }
+      if (!(offset < plan.trimEnd - 1e-6)) return;
+      if (stopAt != null && stopAt <= when + 1e-4) return;
+      const node = ctx.createBufferSource();
+      node.buffer = plan.buf;
+      node.playbackRate.value = plan.rate;
+      const gain = ctx.createGain();
+      gain.gain.value = Math.max(0, Math.min(1, plan.volume));
+      node.connect(gain);
+      gain.connect(ctx.destination);
+      node.start(when, offset, Math.max(0, plan.trimEnd - offset));
+      if (stopAt != null) node.stop(stopAt);
+      const entry: BgmNode = { node, gain, startAt: when };
+      node.onended = () => {
+        this.bgmNodes.delete(entry);
+        try {
+          node.disconnect();
+          gain.disconnect();
+        } catch {
+          /* noop */
+        }
+      };
+      this.bgmNodes.add(entry);
+    } catch {
+      /* 自動再生制限などは無音で続行 */
     }
-    void this.start(this.lastTrack, 0, this.lastRate);
+  }
+
+  /** V209: まだ鳴り始めていない BGM のうち、when 以降に始まるものを取り消す（ループの切り替えで次の周の頭出しを入れ直す） */
+  cancelBgmFrom(when: number) {
+    for (const e of [...this.bgmNodes]) {
+      if (e.startAt < when) continue;
+      this.bgmNodes.delete(e);
+      this.killNode(e.node, e.gain);
+    }
+  }
+
+  /** V209: 予約した BGM の止める時刻を入れ直す（null は何もしない） */
+  restopBgm(at: number | null) {
+    if (at == null) return;
+    for (const e of this.bgmNodes) {
+      try {
+        e.node.stop(Math.max(at, e.startAt));
+      } catch {
+        /* noop */
+      }
+    }
+  }
+
+  /** V209: 予約した BGM の音量を変える（音の窓の試し再生で、鳴らしながら音量を動かしたとき） */
+  setBgmVolume(v: number) {
+    for (const e of this.bgmNodes) e.gain.gain.value = Math.max(0, Math.min(1, v));
+  }
+
+  private killNode(node: AudioBufferSourceNode, gain: GainNode) {
+    try {
+      node.stop();
+    } catch {
+      /* noop */
+    }
+    try {
+      node.disconnect();
+      gain.disconnect();
+    } catch {
+      /* noop */
+    }
   }
 
   stop() {
@@ -361,22 +493,11 @@ export class AudioPreview {
     this.stopSe();
   }
 
-  /** BGM だけ止める（SEには触れない） */
-  private stopBgm() {
-    this.seq++;
-    try {
-      this.node?.stop();
-    } catch {
-      /* noop */
-    }
-    try {
-      this.node?.disconnect();
-      this.gain?.disconnect();
-    } catch {
-      /* noop */
-    }
-    this.node = null;
-    this.gain = null;
+  /** BGM だけ止める（SEには触れない）。★V209: 予約した次の周の頭出しも含めて**全部**取り消す（今までは鳴っているノード 1 つだけ） */
+  stopBgm() {
+    const all = [...this.bgmNodes];
+    this.bgmNodes.clear();
+    for (const e of all) this.killNode(e.node, e.gain);
   }
 
   /** M11-1: 鳴っているSEノードを止める（BGMにも「続き」にも触れない）。
@@ -415,27 +536,40 @@ export class AudioPreview {
   pauseSe() {
     const fired = this.killLiveSe();
     for (const e of fired) {
-      // 経過時間 = いまの時刻 - このノードの「0秒地点」。start(0, offset) で始めたものは
-      // startedAt に offset を引いた値を入れてあるので、**繰り返しても累積しない**。
       // V172: 時計は**そのノードを繋いだ ctx** のもの（作り直しの後に別の ctx の時計で測らない）
-      const played = e.ctx.currentTime - e.startedAt;
+      const now = e.ctx.currentTime;
+      // ★V209 (A-121): 予約しただけでまだ鳴り始めていないもの（鳴り始めの時刻が今より後）。
+      //  ⏸→▶ で続きから鳴らすもの（cont）は、元の続きの位置と切られるまでの残りのまま畳み直す（捨てない・短くしない）。
+      //  コマの時刻に予約しただけのものは捨てる（▶ のあと、そのコマの時刻にまた予約される）
+      if (e.startAt > now) {
+        if (e.cont) this.sePaused.push({ buf: e.buf, track: e.track, offset: e.offset0, remain: e.cutAt == null ? null : e.cutAt - e.startAt });
+        continue;
+      }
+      // 経過時間 = いまの時刻 - このノードの「0秒地点」。start(when, offset) で始めたものは
+      // startedAt に offset を引いた値を入れてあるので、**繰り返しても累積しない**。
+      const played = now - e.startedAt;
       if (!isFinite(played) || played < 0) continue;
       if (played >= e.buf.duration) continue; // 鳴り終わっている＝続きは無い
-      this.sePaused.push({ buf: e.buf, track: e.track, offset: played });
+      // ★V209: 切られる時刻を過ぎていたら続きは無い・まだなら切られるまでの残りを持ち越す
+      if (e.cutAt != null && e.cutAt <= now) continue;
+      this.sePaused.push({ buf: e.buf, track: e.track, offset: played, remain: e.cutAt == null ? null : e.cutAt - now });
     }
   }
 
   /** M11-9: 一時停止したSEを続きから鳴らす。**続きから鳴らしたトラックの id** を返す
    *  （呼び出し側が「開始コマのSE」を二重に鳴らさないために使う）。
    *  音量・ミュートは**再開時点の**トラックの値を読む */
-  resumeSe(): string[] {
+  resumeSe(when?: number, ctx?: AudioContext): string[] {
     const pending = this.sePaused;
     this.sePaused = [];
     const ids: string[] = [];
     for (const p of pending) {
       if (p.offset >= p.buf.duration) continue; // 長さを超えていたら鳴らさない
       if (p.track?.muted) continue; // 一時停止中にミュートされた
-      this.playSeBuffer(p.buf, p.track, p.offset);
+      if (p.remain != null && !(p.remain > 0)) continue; // ★V209: 切られる時刻を過ぎていた
+      if (when == null || !ctx) this.playSeBuffer(p.buf, p.track, p.offset);
+      // ★V209 (A-121): 新しい起点（when）から、切られるまでの残りで止める
+      else this.scheduleSe(ctx, p.buf, p.track, when, p.offset, p.remain == null ? null : when + p.remain, true);
       if (p.track) ids.push(p.track.id);
     }
     return ids;
@@ -445,6 +579,75 @@ export class AudioPreview {
    *  SEの編集（差し替え・削除・ミュート・配置換え）から呼ぶ＝消えた音源の続きが後から鳴らないように */
   discardPausedSe() {
     this.sePaused = [];
+  }
+
+  /** ★V209 (A-121): SE を when（ctx の秒）に、素材の offset 秒から予約する。cutAt があればそこで切る（周のつなぎ目・終わり・曲の終わり）。
+   *  when が過ぎていたら、過ぎたぶん頭を飛ばして今から鳴らす（書き出しと同じ所が聞こえる）。切られる時刻か素材の終わりを過ぎていたら鳴らさない。
+   *  SE は速度連動しない（playbackRate は既定の 1 のまま） */
+  scheduleSe(ctx: AudioContext, buf: AudioBuffer, track: SeTrack | null, when: number, offset: number, cutAt: number | null, cont = false) {
+    try {
+      const now = ctx.currentTime;
+      if (when < now) {
+        offset += now - when;
+        when = now;
+      }
+      if (cutAt != null && cutAt <= when + 1e-4) return;
+      if (!(offset < buf.duration)) return;
+      const node = ctx.createBufferSource();
+      node.buffer = buf;
+      const gain = ctx.createGain();
+      gain.gain.value = Math.max(0, Math.min(1, track ? track.volume : 1));
+      node.connect(gain);
+      gain.connect(ctx.destination);
+      const entry: SeNode = { node, gain, buf, track, startedAt: when - offset, ctx, startAt: when, offset0: offset, cutAt, cont };
+      node.onended = () => {
+        this.seNodes.delete(entry);
+        try {
+          node.disconnect();
+          gain.disconnect();
+        } catch {
+          /* noop */
+        }
+      };
+      node.start(when, offset);
+      if (cutAt != null) node.stop(cutAt);
+      this.seNodes.add(entry);
+    } catch {
+      /* noop */
+    }
+  }
+
+  /** V209: まだ鳴り始めていない SE のうち、when 以降に始まるものを取り消す（ループの切り替えで次の周の頭の SE を入れ直す） */
+  cancelSeFrom(when: number) {
+    for (const e of [...this.seNodes]) {
+      if (e.startAt < when) continue;
+      this.seNodes.delete(e);
+      this.killNode(e.node, e.gain);
+    }
+  }
+
+  /** V209: 鳴っている（予約した）SE の切る時刻を入れ直す（null は切らない＝止めの予約は外せないので、そのとき触らない） */
+  recutSe(cutAt: number | null) {
+    if (cutAt == null) {
+      // 切らない側へ（1 コマの作品で再生中にループを入れた）: 止めの予約は外せないので、切る予約のあるものを今の位置から切らずに鳴らし直す
+      for (const e of [...this.seNodes]) {
+        if (e.cutAt == null) continue;
+        const now = e.ctx.currentTime;
+        this.seNodes.delete(e);
+        this.killNode(e.node, e.gain);
+        if (e.startAt > now) this.scheduleSe(e.ctx, e.buf, e.track, e.startAt, e.offset0, null, e.cont);
+        else this.scheduleSe(e.ctx, e.buf, e.track, now, now - e.startedAt, null, e.cont);
+      }
+      return;
+    }
+    for (const e of this.seNodes) {
+      e.cutAt = cutAt;
+      try {
+        e.node.stop(Math.max(cutAt, e.startAt));
+      } catch {
+        /* noop */
+      }
+    }
   }
 
   /** M11-9: 一時停止（⏸）。BGM は止める（▶ で現在のコマ位置から鳴り直す＝従来どおり）。
@@ -503,13 +706,18 @@ export class AudioPreview {
       // M11-1: 停止できるよう集合で保持する（登録は start 成功後＝例外時に集合へ残さない）
       // M11-9: 一時停止で「どこまで鳴ったか」を出せるよう、素材と 0秒地点も持たせる。
       // startedAt から offset を引いておくので、一時停止と再開を繰り返しても経過が累積しない
+      const at = ctx.currentTime;
       const entry: SeNode = {
         node,
         gain,
         buf,
         track,
-        startedAt: ctx.currentTime - offset,
+        startedAt: at - offset,
         ctx,
+        startAt: at,
+        offset0: offset,
+        cutAt: null,
+        cont: offset > 0,
       };
       node.onended = () => {
         this.seNodes.delete(entry); // stopSe 由来の終了でも安全（delete は冪等）
@@ -544,6 +752,9 @@ export interface ExportMixSpec {
    *  これが無いと範囲書き出しで BGM が常に曲の頭から鳴る（SE は frameSe が
    *  範囲先頭起点なので元から正しい）。**必須**にして全呼び出し元で明示する。 */
   rangeStartSec: number;
+  /** ★V216b (A-134・C-29): 範囲の頭より前のコマの SE id 群（作品の先頭から範囲の頭の手前まで・長さ＝範囲の頭のコマ番号）。
+   *  曲が主でないとき、範囲の頭にまだ鳴っている SE を途中から鳴らすのに使う。全範囲なら空か無し */
+  preRangeSe?: (string[] | undefined)[];
 }
 
 /** ミックスの実行計画（時刻・尺・rate）。レンダと独立の純関数＝m5_smoke で機械検証する */
@@ -555,15 +766,16 @@ export interface MixPlan {
     trimStartSec: number;
     trimEndSec: number;
     usableSec: number;
-    /** audioToAnim=尺までループ / animToAudio=1回 */
+    /** V209 (A-121): 常に偽（どちらの形も 1 回だけ。audioToAnim は以前はトリム区間を尺までループしていた） */
     loop: boolean;
     volume: number;
     /** M10-11: 音源のどこから鳴らし始めるか（バッファ時間・秒）。
      *  範囲書き出しで「全体を書き出して切り取ったもの」と同じ音にするための開始位置。 */
     offsetSec: number;
   } | null;
-  /** SE発火イベント（seトラックid・出力時刻）。animToAudio でアニメが n 周する場合は毎周分 */
-  seEvents: { id: string; atSec: number }[];
+  /** SE発火イベント（seトラックid・出力時刻）。animToAudio でアニメが n 周する場合は毎周分。
+   *  ★V216b (A-134・C-29): offsetSec＝SE のどこから鳴らすか（範囲の頭より前に鳴り始めた SE の続き）。0 のときは付けない */
+  seEvents: { id: string; atSec: number; offsetSec?: number }[];
 }
 
 /**
@@ -573,11 +785,14 @@ export interface MixPlan {
 export function computeMixPlan(
   spec: ExportMixSpec,
   bgmDurSec: number | null,
-  decodedSeIds: Set<string>
+  decodedSeIds: Set<string>,
+  /** V216b (A-134・C-29): SE の長さ（秒・デコードしたもの）。範囲の頭より前の SE がまだ鳴っているかを見る */
+  seDurSec?: Map<string, number>
 ): MixPlan {
   const fps = spec.fps > 0 ? spec.fps : 8;
   const frameCount = spec.frameSe.length;
-  const animDurSec = Math.max(0.05, frameCount / fps);
+  // ★V216b (A-134・C-30): 1 周の長さの下限は 1 コマの長さ（前の 50ms の決まった下限は 24／30fps の 1 コマで映像と合わなかった）
+  const animDurSec = Math.max(1 / fps, frameCount / fps);
   let bgm: MixPlan["bgm"] = null;
   if (spec.bgm && !spec.bgm.muted && bgmDurSec != null && bgmDurSec > 0) {
     const rate = bgmPlaybackRate(spec.speedIndex, spec.bgm.baseSpeedIndex);
@@ -587,16 +802,18 @@ export function computeMixPlan(
       spec.bgm.trimEndMs
     );
     if (usableSec > 0) {
-      const loop = spec.syncMode === "audioToAnim";
+      // ★V209 (A-121・REQ_playback_clock §2 (5)): audioToAnim も BGM を**繰り返さない**（アプリ内の再生と同じ
+      //  ＝1 周の中で 1 回だけ。曲が短ければ残りは無音）。欄は残して常に偽（今までは true でトリム区間をループしていた）
+      const loop = false;
       // M10-11: 範囲書き出しの開始位置。
-      // audioToAnim は書き出し全体で BGM がトリム区間をループしているので、
-      // 範囲先頭までに進んだバッファ時間 (rangeStartSec * rate) を usableSec で
-      // 剰余する（範囲先頭が2周目以降に当たっても正しい位置になる）。
+      // audioToAnim は範囲先頭までに進んだバッファ時間 (rangeStartSec * rate) をトリムの頭に足す
+      // （V209: 繰り返さないので剰余しない。トリムの終わりを越えたらトリムの終わりに留める＝鳴らす長さ 0 の無音）。
       // animToAudio は曲がマスターで範囲はコマ側の都合なので、音は動かさない。
       // どちらも rangeStartSec = 0 なら offsetSec = trimStartSec ＝ 従来と完全一致。
-      const offsetSec = loop
-        ? trimStartSec + ((Math.max(0, spec.rangeStartSec) * rate) % usableSec)
-        : trimStartSec;
+      const offsetSec =
+        spec.syncMode === "audioToAnim"
+          ? Math.min(trimEndSec, trimStartSec + Math.max(0, spec.rangeStartSec) * rate)
+          : trimStartSec;
       bgm = {
         rate,
         trimStartSec,
@@ -616,7 +833,25 @@ export function computeMixPlan(
   // SEイベント: コマ時刻 = i/fps（範囲先頭起点）。animToAudio でアニメが繰り返す場合は毎周
   const seById = new Map(spec.se.map((s) => [s.id, s]));
   const loops = spec.syncMode === "animToAudio" ? Math.ceil(outDurSec / animDurSec) : 1;
-  const seEvents: { id: string; atSec: number }[] = [];
+  const seEvents: { id: string; atSec: number; offsetSec?: number }[] = [];
+  // ★V216b (A-134・C-29): 曲が主でないとき（「アニメの長さ」・BGM が無いかミュートの「曲の長さ」）の範囲は、通しの音の切り出し
+  //  ＝範囲の頭より前に鳴り始めて、まだ鳴っている SE を途中から鳴らす（曲が主のときの範囲は今のまま＝範囲のコマを曲の頭から繰り返す）
+  const songPrimary = spec.syncMode === "animToAudio" && !!bgm;
+  const pre = spec.preRangeSe ?? [];
+  if (!songPrimary && pre.length > 0 && seDurSec) {
+    for (let j = 0; j < pre.length; j++) {
+      const ids = pre[j];
+      if (!ids) continue;
+      const startSec = (j - pre.length) / fps; // 範囲の頭から見た鳴り始め（負）
+      for (const id of ids) {
+        const t = seById.get(id);
+        const dur = seDurSec.get(id);
+        if (!t || t.muted || !decodedSeIds.has(id) || dur == null) continue;
+        if (startSec + dur <= 1e-6) continue; // もう鳴り終わっている
+        seEvents.push({ id, atSec: 0, offsetSec: -startSec });
+      }
+    }
+  }
   for (let k = 0; k < loops; k++) {
     for (let i = 0; i < frameCount; i++) {
       const ids = spec.frameSe[i];
@@ -634,7 +869,7 @@ export function computeMixPlan(
 }
 
 const MIX_SAMPLE_RATE = 48000;
-/** レンダ尺の上限（Codex指摘#3: 長尺 animToAudio の Float32 レンダバッファ＋WAV の
+/** レンダ尺の上限（独立レビューの指摘#3: 長尺 animToAudio の Float32 レンダバッファ＋WAV の
  *  同時保持でメモリが膨らむため）。20分 ≒ 48000Hz×2ch×4byte×1200s ≒ 460MB が実用上限 */
 export const MAX_MIX_DURATION_SEC = 1200;
 
@@ -667,9 +902,10 @@ export async function renderExportMix(spec: ExportMixSpec): Promise<ExportAudio 
       bgmBuf = null;
     }
   }
-  // 使う（配置があり非ミュートの）SEだけデコード
+  // 使う（配置があり非ミュートの）SEだけデコード（V216b: 範囲の頭より前の SE も＝続きを鳴らすか長さで決める）
   const usedIds = new Set<string>();
   for (const ids of spec.frameSe) for (const id of ids ?? []) usedIds.add(id);
+  for (const ids of spec.preRangeSe ?? []) for (const id of ids ?? []) usedIds.add(id);
   const seBufs = new Map<string, AudioBuffer>();
   for (const t of spec.se) {
     if (t.muted || !usedIds.has(t.id)) continue;
@@ -679,7 +915,12 @@ export async function renderExportMix(spec: ExportMixSpec): Promise<ExportAudio 
       /* 壊れたSEはスキップ */
     }
   }
-  const plan = computeMixPlan(spec, bgmBuf ? bgmBuf.duration : null, new Set(seBufs.keys()));
+  const plan = computeMixPlan(
+    spec,
+    bgmBuf ? bgmBuf.duration : null,
+    new Set(seBufs.keys()),
+    new Map([...seBufs].map(([id, b]) => [id, b.duration]))
+  );
   if (!plan.bgm && plan.seEvents.length === 0) return null; // 全ミュート/音なし → 無音経路
   if (plan.outDurSec > MAX_MIX_DURATION_SEC) {
     throw new Error(
@@ -702,17 +943,10 @@ export async function renderExportMix(spec: ExportMixSpec): Promise<ExportAudio 
     gain.gain.value = plan.bgm.volume;
     node.connect(gain);
     gain.connect(ctx.destination);
-    if (plan.bgm.loop) {
-      // audioToAnim: トリム区間をループして尺まで（レンダ長で自然に打ち切り）
-      node.loop = true;
-      node.loopStart = plan.bgm.trimStartSec;
-      node.loopEnd = plan.bgm.trimEndSec;
-      // M10-11: 範囲書き出しでは曲の頭ではなく「範囲先頭に対応する位置」から鳴らす
-      node.start(0, plan.bgm.offsetSec);
-    } else {
-      // animToAudio: 1回だけ（offset/duration はバッファ時間）
-      node.start(0, plan.bgm.trimStartSec, plan.bgm.usableSec);
-    }
+    // ★V209 (A-121): どちらの形も 1 回だけ（offset/duration はバッファ時間・レンダ長で自然に打ち切り）。
+    //  M10-11: 範囲書き出しでは曲の頭ではなく「範囲先頭に対応する位置」（offsetSec）から鳴らす。
+    //  長さは負にしない（負の duration で start が投げると合成ごと落ちて音の入っていない .mp4 になる）
+    node.start(0, plan.bgm.offsetSec, Math.max(0, plan.bgm.trimEndSec - plan.bgm.offsetSec));
   }
   for (const ev of plan.seEvents) {
     const buf = seBufs.get(ev.id);
@@ -724,12 +958,16 @@ export async function renderExportMix(spec: ExportMixSpec): Promise<ExportAudio 
     gain.gain.value = Math.max(0, Math.min(1, track.volume));
     node.connect(gain);
     gain.connect(ctx.destination);
-    node.start(ev.atSec);
+    // V216b (A-134・C-29): 範囲の頭より前に鳴り始めた SE は途中から（offsetSec が無ければ頭から＝今と同じ）
+    if (ev.offsetSec) node.start(ev.atSec, ev.offsetSec);
+    else node.start(ev.atSec);
   }
   const rendered = await ctx.startRendering();
   return {
     wav: audioBufferToWav(rendered),
     durationSec: plan.outDurSec,
     syncMode: spec.syncMode,
+    // V216b (A-134・C-28): 曲が主（出力の長さが曲で決まる）＝回数つきの書き出しで 1 回ぶんを曲の長さにそろえる
+    songPrimary: spec.syncMode === "animToAudio" && !!plan.bgm,
   };
 }

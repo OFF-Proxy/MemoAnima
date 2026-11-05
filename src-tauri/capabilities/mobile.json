@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "mobile",
+  "description": "V211 (M-1b): Capability for the main window on iOS (and Android in M-1c). Only what the mobile entry uses: core (events such as tauri://suspended and tauri://resumed, the app's own commands)",
+  "platforms": ["iOS", "android"],
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

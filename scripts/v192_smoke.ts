@@ -53,6 +53,9 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
+// V205 (A-113): model.ts の cloneFrame を意図して変えた回（名指し）と、新しい回から順に外す純関数（[S-5]）
+import { undoFrom } from "./v205_named.ts";
+import { readEditorSource } from "./editorSource";
 
 let pass = 0;
 let fail = 0;
@@ -76,12 +79,19 @@ async function safe(fn: () => Promise<V> | V): Promise<V> {
 const root = path.resolve(import.meta.dirname, "..");
 const REPORT = process.argv.includes("--report");
 const BASE = "2166690"; // V192 の前（A-93 起票のコミット）
+/** V197 (A-103) の saveWorker.ts（PV6 だけを書く形）の SHA-256（改行は LF）。[S-5] の注記を見よ */
+const SAVE_WORKER_V197_SHA = "71a1a421fac2fb806b943e034a947068948222177847b4515a154eede942c1eb";
 const sha = (b: Uint8Array | string) => crypto.createHash("sha256").update(b).digest("hex");
 const log = (s: string) => console.log(s);
 
 // ================= 木（本物・写し）を読む =================
 type Tree = { root: string; read(rel: string): string };
 const lf = (x: string) => x.replace(/\r\n/g, "\n");
+/** ★V213 (M-2a): editor.ts の描く処理はコア（src/editor/core/editorCore.ts）へ移った。エディタのコードの性質を見る所は
+ *  editor.ts とコアの字を並べたもの（editorSource.ts の readEditorSource）を読む。前の回の基準と比べる所（[S-5] の pairs）は除く */
+const readEd = (T: Tree) => lf(readEditorSource(T.root));
+/** 描く所（SITES）の字: editor.ts のものは editor.ts とコアを並べて読む */
+const readSite = (T: Tree, rel: string) => (rel === "src/editor/editor.ts" ? readEd(T) : T.read(rel));
 const realTree: Tree = { root, read: (rel) => lf(fs.readFileSync(path.join(root, rel), "utf8")) };
 function baseBlob(rel: string): string | null {
   try {
@@ -502,7 +512,7 @@ function S4(T: Tree): V {
   if (!rules.some((r) => r.sel.includes(".ap-big canvas"))) why.push("CSS: .ap-big canvas の規則が無い");
   // 描く所
   for (const s of SITES) {
-    const raw = fnText(T.read(s.file), s.fn);
+    const raw = fnText(readSite(T, s.file), s.fn);
     if (!raw) {
       why.push(`${s.r}: ${s.file} に ${s.fn} が無い（検査の窓が壊れた）`);
       continue;
@@ -539,14 +549,14 @@ function S4(T: Tree): V {
   const draws = dec.match(/\.drawImage\([^)]*\)/g) ?? [];
   if (draws.length !== 1 || !/^\.drawImage\(img, 0, 0\)$/.test(draws[0])) why.push(`decodeImageRgba の drawImage が 1:1 でない（${draws.join(" / ") || "無い"}）`);
   // R-3（F-0）: 見えなくなったコマ一覧のサムネはバッキングを手放す
-  const rb = noComments(fnText(T.read("src/editor/editor.ts"), "rebuildFilm") ?? "");
+  const rb = noComments(fnText(readEd(T), "rebuildFilm") ?? "");
   if (!/if \(!e\.isIntersecting\) \{[^}]*releaseCanvas\(cv\)/.test(rb)) why.push("rebuildFilm: 見えなくなったサムネを releaseCanvas していない（F-0）");
   const ff = fnText(sv, "fitFor");
   if (!ff || !/currentDpr\(\)/.test(ff) || !/fitDisplay\(/.test(ff)) why.push("fitFor が fitDisplay(…, currentDpr()) を通らない");
   if (!/devicePixelRatio/.test(fnText(sv, "currentDpr") ?? "")) why.push("currentDpr が devicePixelRatio を読まない");
   // 大きさ・dpr の変化で作り直す
   const lib = T.read("src/library.ts");
-  const ed = T.read("src/editor/editor.ts");
+  const ed = readEd(T);
   if ((lib.match(/\bwatchFit\(/g) ?? []).length < 2) why.push("library.ts: 再生画面とサムネの棚の watchFit が 2 つ無い");
   // R-1: 見えなくなったサムネも手放す（canvas の画素はブラウザが捨てない＝棚で見た枚数ぶん増える）
   const rs = noComments(fnText(lib, "renderShelf") ?? "");
@@ -706,32 +716,57 @@ async function S5(T: Tree): Promise<V> {
     }
   }
   // 封筒（editor.ts の保存）と取り込み（main.ts）の PNG の道・データの形のファイル
-  const pairs: [string, string][] = [
-    ["src/editor/editor.ts", "frameToPngBlob(this.project, this.project.thumbFrame)"],
-    ["src/main.ts", "frameToPngBlob(project, project.thumbFrame ?? 0)"],
+  // ★V201 (M-1a): editor.ts の保存は手順を共通の部品（saveCore.ts の saveWork）へ移し、サムネはその thumb の口（部品が渡す
+  //  作品 p＝this.project）で描く形になった。前と同じ行かは、口の名前（p）を前の名前（this.project）に戻し、字下げをそろえて比べる
+  //  （中身は同じ: frameToPngBlob を等倍で呼び、Blob をそのまま Uint8Array に）。部品がその PNG を書く口へ渡すことも見る
+  const pairs: [string, string, string][] = [
+    ["src/editor/editor.ts", "frameToPngBlob(p, p.thumbFrame ?? 0)", "frameToPngBlob(this.project, this.project.thumbFrame)"],
+    ["src/main.ts", "frameToPngBlob(project, project.thumbFrame ?? 0)", "frameToPngBlob(project, project.thumbFrame ?? 0)"],
   ];
-  for (const [file, needle] of pairs) {
+  for (const [file, needle, needleBefore] of pairs) {
     const now = T.read(file);
     const before = baseBlob(file);
     if (!before) {
       why.push(`${file}: 前が読めない`);
       continue;
     }
-    const grab = (src: string) => {
-      const i = src.indexOf(needle);
+    const grab = (src: string, nd: string) => {
+      const i = src.indexOf(nd);
       if (i < 0) return null;
-      return src.slice(Math.max(0, src.lastIndexOf("\n", i - 1)), src.indexOf("\n", src.indexOf("thumb", i + needle.length) + 1));
+      return src
+        .slice(Math.max(0, src.lastIndexOf("\n", i - 1)), src.indexOf("\n", src.indexOf("thumb", i + nd.length) + 1))
+        .replace(/^[ \t]+/gm, "");
     };
-    const gn = grab(now);
-    const gb = grab(before);
+    const gn = grab(now, needle)?.split(needle).join(needleBefore) ?? null;
+    const gb = grab(before, needleBefore);
     if (!gn || !gb) why.push(`${file}: サムネの PNG の行が見つからない`);
     else if (gn !== gb) why.push(`${file}: サムネの PNG を作る行が前と違う`);
   }
-  for (const f of ["src/editor/render.ts", "src/editor/serialize.ts", "src/editor/pv6.ts", "src/editor/model.ts", "src/editor/saveWorker.ts"]) {
+  {
+    // 部品: サムネの口の戻り（PNG）をそのまま書く口へ渡す。editor: 書く口はそれを save_project の第 3 引数へ
+    const core = T.read("src/editor/saveCore.ts");
+    const ed = readEd(T);
+    if (!/const thumb = await d\.thumb\(p\);/.test(core) || !/d\.write\(\{ kind: d\.kind, baseName: d\.baseName, data: bytes, thumb \}\)/.test(core))
+      why.push("saveCore.ts: サムネの口の PNG をそのまま書く口へ渡していない");
+    if (!/thumb: async \(p\) => \{\s*const blob = await frameToPngBlob\(p, p\.thumbFrame \?\? 0\);/.test(ed) ||
+        // ★V216b (A-126): 書く口は「その作品のファイル」と「置き換えてよい」も渡す形（書く所の確かめつき）になった（v216b_smoke [W]・v216b_ui が見る）。
+        //  ここではサムネの PNG をそのまま save_project の第 3 引数へ渡すことだけを見る（V216b の名指しの差分を外した字＝前の形と、今の字の第 3 引数）
+        !(/write: async \(w\) => \(\{ path: await this\.cb\.saveProject\(ctx, w\.data, w\.thumb\) \}\),/.test(undoFrom(216, "src/editor/editor.ts", T.read("src/editor/editor.ts")) ?? "") &&
+          /const path = await this\.cb\.saveProject\(ctx, w\.data, w\.thumb, \{/.test(ed)))
+      why.push("editor.ts: 保存のサムネの口・書く口の形が違う");
+  }
+  for (const f of ["src/editor/render.ts", "src/editor/serialize.ts", "src/editor/pv6.ts", "src/editor/model.ts"]) {
     const before = baseBlob(f);
     if (!before) why.push(`${f}: 前が読めない`);
-    else if (sha(before) !== sha(T.read(f))) why.push(`${f} が V192 の前と違う`);
+    // ★V205 (A-113): model.ts の cloneFrame は V205 で意図して変えた（このコマだけの表示色も写す）。名指しの差分（scripts/v205_named.ts の
+    //  fixtures）を新しい回から順に外してから比べる（undoFrom(203, …)。render・serialize・pv6 は名指しの差分が無い＝外してもそのまま）
+    else if (sha(before) !== sha(undoFrom(203, f, T.read(f)) ?? "")) why.push(`${f} が V192 の前と違う`);
   }
+  // ★V197 (A-103): saveWorker.ts は V197 で**意図して**変えた（旧形式＝gzip の枝を消して PV6 だけに）。
+  //  ここで守りたいのは「サムネの縮小（V192）が保存の道を変えない」こと＝V192 の前ではなく **V197 の形**と比べる
+  //  （改行を LF にした SHA-256）。V197 の中身（どの mode を渡しても PV6）は v197_smoke [B-5] が動かして見る。
+  //  次に saveWorker.ts を意図して変える回は、この値を更新して報告書に書く
+  if (sha(T.read("src/editor/saveWorker.ts")) !== SAVE_WORKER_V197_SHA) why.push("src/editor/saveWorker.ts が V197 の形と違う");
   return why.length ? ng(why.slice(0, 6).join("／")) : ok();
 }
 
@@ -773,7 +808,9 @@ async function S6(T: Tree): Promise<V> {
     if (!/classList\.toggle\("paper-clear"/.test(body)) why.push(`${s.r}: paper-clear の付け外しが無い`);
   }
   const before = baseBlob("src/styles.css");
-  const pc = (css: string) => cssRules(css).filter((r) => r.sel.some((x) => /paper-clear/.test(x))).map((r) => r.sel.join(",") + "{" + r.body.trim() + "}").join("\n");
+  // ★V204 (A-111): ゆらゆらの見本（#wb-preview）を今の市松の規則に足した。その 1 つのセレクタだけを名指しで外して前と比べる
+  //  （ほかのセレクタ・中身は前と字まで同じ。見本に市松が付くことは v204_smoke [E-*] が引き継ぐ）
+  const pc = (css: string) => cssRules(css).filter((r) => r.sel.some((x) => /paper-clear/.test(x))).map((r) => r.sel.filter((x) => x !== "#wb-preview.paper-clear").join(",") + "{" + r.body.trim() + "}").join("\n");
   if (!before) why.push("styles.css の前が読めない");
   else if (pc(before) !== pc(T.read("src/styles.css"))) why.push("paper-clear の CSS が前と違う");
   return why.length ? ng(why.join("／")) : ok();
@@ -1069,7 +1106,7 @@ async function S11(T: Tree) {
 function S12(T: Tree): V {
   const why: string[] = [];
   const lib = T.read("src/library.ts");
-  const ed = T.read("src/editor/editor.ts");
+  const ed = readEd(T);
   const sv = T.read("src/editor/scaledView.ts");
   const ds = T.read("src/editor/downscale.ts");
   const pfx = noComments(fnText(lib, "previewFit") ?? "");
@@ -1094,7 +1131,7 @@ function S12(T: Tree): V {
 }
 
 // ================= 写し（[S-8] 反証） =================
-const COPY_FILES = ["src/editor/downscale.ts", "src/editor/scaledView.ts", "src/library.ts", "src/editor/editor.ts", "src/styles.css", "index.html", "src/main.ts", "src/editor/render.ts", "src/editor/serialize.ts", "src/editor/pv6.ts", "src/editor/model.ts", "src/editor/saveWorker.ts"];
+const COPY_FILES = ["src/editor/downscale.ts", "src/editor/scaledView.ts", "src/library.ts", "src/editor/editor.ts", "src/editor/core/editorCore.ts", "src/styles.css", "index.html", "src/main.ts", "src/editor/render.ts", "src/editor/serialize.ts", "src/editor/pv6.ts", "src/editor/model.ts", "src/editor/saveWorker.ts", "src/editor/saveCore.ts"]; // V201: 保存の共通の部品（[S-5] が読む）／V213: コア（readEd が読む・無い木では飛ばす）
 const tmpRoot = path.join(root, "node_modules", ".v192-smoke", String(process.pid));
 function copyTree(tag: string, mutate?: (rel: string, s: string) => string): Tree {
   const dir = path.join(tmpRoot, tag);
@@ -1125,7 +1162,7 @@ async function main() {
   const r4 = await safe(() => S4(realTree));
   check("[S-4] 静的（CSS で引き伸ばさない・全部 presentFit・縮める枝は downscaleArea・作り直し）", r4.ok, r4.why);
   const r5 = await safe(() => S5(realTree));
-  check("[S-5] データを変えない（保存するサムネの PNG が前と同じ・render/serialize/pv6/model/saveWorker 不変）", r5.ok, r5.why);
+  check("[S-5] データを変えない（保存するサムネの PNG が前と同じ・render/serialize/pv6/model は V192 の前と同じ・saveWorker は V197 の形）", r5.ok, r5.why);
   const r6 = await safe(() => S6(realTree));
   check("[S-6] 透明の紙（透明のまま混ぜる・paper-clear はそのまま）", r6.ok, r6.why);
   await safe(async () => (await S7(realTree), ok()));

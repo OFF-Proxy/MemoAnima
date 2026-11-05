@@ -37,6 +37,12 @@ aes_keys*.txt
 # M7-3: 配布物の生成先（zip/LICENSES はビルド生成物・コミットしない）
 /dist-release/
 
+# V175: Mac のリハーサルの「古い版の役」（mac_build.ts --rehearsal-old の出力・配らない）
+/dist-rehearsal/
+
+# V207: 版の確かめを見る「断る役」（mac_build.ts --rehearsal-reject の出力・配らない・dist-rehearsal/ と別）
+/dist-rehearsal-reject/
+
 # MAT-1: photo2memo のテスト入力（個人写真）・リポジトリ直下の生成物をコミットしない
 /*.jpg
 /*.jpeg
@@ -51,14 +57,27 @@ aes_keys*.txt
 /tools/fonts/download/
 /tools/fonts/sample_sheet.png
 
-# M9-1c/1d: ローカル環境固有の設定（絶対パス・SDカードのドライブレターを含む）。
-# .claude/ 全体ではなく個別に指定する（共有したい設定を置く余地を残す）。
-# どちらも .git/info/exclude やグローバル ignore はマシン依存＝他クローンで無効なので、
-# リポジトリ管理下の .gitignore に明示する。
-.claude/settings.local.json
-.claude/scheduled_tasks.lock
-
 # U-1: 更新の署名鍵（絶対にコミットしない）
 *.key
 *.key.pub
 .tauri/
+
+# V211 (M-1b): モバイルのビルド。生成物（`tauri ios init`・M-1c の `tauri android init` が作る＝作り直せる・チームの ID が入る）
+/src-tauri/gen/apple/
+/src-tauri/gen/android/
+# 配るファイル（コミットしない）
+*.ipa
+*.xcarchive
+*.apk
+*.aab
+# 署名の鍵とプロビジョニング（リポジトリの外に置く）
+*.jks
+*.keystore
+keystore.properties
+*.p12
+*.p8
+*.cer
+*.mobileprovision
+*.provisionprofile
+# モバイルの画面のビルドの出力（vite.mobile.config.ts）
+/dist-mobile/

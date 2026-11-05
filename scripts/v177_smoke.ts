@@ -21,7 +21,7 @@
 // [S-3]  まとめの前後で logicalRaw が変わらない（D-12）
 // [S-4]  論理 32MiB 以上の作りもので、同じ中身の塊が 1 つにまとまる／開き直すと全コマ 1 画素も違わない（D-2）
 // [S-4b] 幅のズレ（p.indexBits が 8 のまま起きている Uint16Array がある）大きい作品も、まとめて開き直すと全画素一致
-//        （Codex 2 回目の指摘: V163 の幅の防御を外しても v177 単体では緑だった穴を塞ぐ）
+//        （独立レビュー 2 回目の指摘: V163 の幅の防御を外しても v177 単体では緑だった穴を塞ぐ）
 // [S-5]  まとめたファイルは遅延の道で開く／同じ塊を指す 2 コマは別の実体で、片方に描いても他方は変わらない（D-3）
 // [S-6]  一括の道で、📌 でない層が同じ塊を指していても別の実体（§1-3 の 12 コマ・D-5）
 // [S-7]  📌 が普通の層と同じ実体にならない（普通の層を先に展開しても・D-13）
@@ -899,7 +899,7 @@ if (LIB) {
   // [S-4] まとめる段を外した写し
   const noMerge = await mutant("cur", [["if (pv6OpensLazily(logicalRaw)) {", "if (false) {"]]);
   check("[S-4] 反証 4z: まとめる段を外した写しは [S-4] が赤（塊の数が減らない）", !bad(noMerge) && !(await s4(noMerge.tree!)).ok, noMerge.why);
-  // [S-4b] 幅の防御（起きている Uint16Array があればヘッダは 16）を外した写し（Codex 2 回目が示した書き換えそのもの）
+  // [S-4b] 幅の防御（起きている Uint16Array があればヘッダは 16）を外した写し（独立レビュー 2 回目が示した書き換えそのもの）
   const zureOff = await mutant("cur", [["        if (b instanceof Uint16Array) {\n", "        if (false && b instanceof Uint16Array) {\n"]]);
   check("[S-4b] 反証 4bz: 幅の防御を外した写しは [S-4b] が赤（ヘッダが 8 のまま＝開けない）", !bad(zureOff) && !(await s4b(zureOff.tree!)).ok, zureOff.why);
 

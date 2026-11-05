@@ -25,6 +25,7 @@ export type PerfOp =
   | "open.project" // ライブラリ → エディタ（.memoanima）
   | "open.note" // ライブラリ → エディタ（.kwz / .ppm）
   | "open.preview" // ライブラリで選んだときのプレビュー読み込み
+  | "note.convert" // V200 (A-100): まとめ変換の 1 件（.kwz／.ppm → .memoanima のバイト列。読む・書くは含まない）
   | "save"
   // コマ
   | "frame.goto"

@@ -1,5 +1,5 @@
 // V174: Mac の署名・公証・staple を **ビルドから検査まで 1 本**で通す（REQ §4 [4-b]）。
-//   実行（Mac の作業用ユーザーで）: npx tsx scripts/mac_build.ts [--skip-build]
+//   実行（Mac の作業用ユーザーで）: npx tsx scripts/mac_build.ts [--skip-build | --rehearsal-old | --rehearsal-reject]
 //   出力: src-tauri/target/universal-apple-darwin/release/bundle/{dmg,macos}/
 //
 // ★このファイルがある理由は「手で打たせない」こと。
@@ -24,17 +24,94 @@
 //   R-8  実行ファイルに私的なパス（ホーム）が残っていない（--remap-path-prefix が Mac でも効くか）
 //   R-11 成果物の置き場に .sig が 1 本も無い
 //   R-12 .app.tar.gz が **staple 済みの .app** から作られている（★この回でいちばん知りたい未知）
+//
+// V175: `--rehearsal-old`（REQ §10-3 の 3）＝ Mac の中だけで更新を通すリハーサルの「古い版の役」を作る。
+//   普段との違いは一時 config の 2 つだけ: **版が 1 つ小さい**（mac_update.ts の rehearsalOldVersion）と、
+//   **更新の確認先が 127.0.0.1 だけ**（＋ http で受けるための dangerousInsecureTransportProtocol）。
+//   公開鍵はそのまま（本物の鍵の署名だけを受ける）。tauri.conf.json は 1 行も変えない。
+//   署名・公証・検査は普段と同じ。成果物（.app と .dmg）は **dist-rehearsal/ へ移して**普段の置き場から外し、
+//   この回の .app.tar.gz と .sig は**必ず消す**（古い版の役は配らない）。
+//
+// V207: `--rehearsal-reject`（REQ_tauri_2_12.md §5 の T-7 ②）＝ 更新の「版の確かめ」が効いていることを見る「断る役」を作る。
+//   作りは `--rehearsal-old` と同じ（版が 1 つ小さい・確認先は 127.0.0.1 だけ・前検査・後始末も同じ）で、違いは 2 つだけ:
+//   ① 一時 config の updater に **pubkey だけ**を足す（使い捨ての鍵の公開鍵。`rejectTempConfig`）
+//   ② 置き場は **dist-rehearsal-reject/**（dist-rehearsal/ は消さない・触らない）
+//   公開鍵は**決まった場所のファイル**（`REJECT_PUBKEY_FILE`・scripts/mac_update_reject.ts の prepare が作る）からだけ読む。
+//   秘密鍵は読まない。環境変数や引数から公開鍵を受け取る口は作らない。tauri.conf.json の本物の公開鍵と同じなら止める。
+//   普段と `--rehearsal-old` の一時 config（`tempConfig`）は 1 文字も変えていない。
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { REHEARSAL_FEED_URL, SIGNER_ENV_NAMES, parseMinisignPublicKey, rehearsalOldVersion } from "./mac_update.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const conf = JSON.parse(fs.readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"));
 const product: string = conf.productName;
 const skipBuild = process.argv.includes("--skip-build");
+/** V207: 版の確かめを見る「断る役」を作る（古い版の役と同じ作りで、pubkey だけ使い捨ての鍵・置き場も分ける） */
+const rehearsalReject = process.argv.includes("--rehearsal-reject");
+/** V175: リハーサルの「古い版の役」を作る（普段の配る物とは置き場を分ける）。V207: 断る役も古い版の役の 1 つ */
+const rehearsalOld = process.argv.includes("--rehearsal-old") || rehearsalReject;
+/** 古い版の役の置き場（.gitignore 済み・配らない） */
+const rehearsalDir = path.join(root, "dist-rehearsal");
+/** V207: 断る役の置き場（.gitignore 済み・配らない・dist-rehearsal/ とは別） */
+const rejectDir = path.join(root, "dist-rehearsal-reject");
+
+/** V207: 断る役の使い捨ての鍵の置き場（開発用ユーザーのホームの、リポの外・フォルダは 700）。作るのは mac_update_reject.ts の prepare */
+export const REJECT_KEY_DIR = path.join(os.homedir(), "memoanima-reject-key");
+/** 秘密鍵（600）。★mac_build.ts はこれを**読まない**（署名は mac_update_reject.ts だけ） */
+export const REJECT_KEY_FILE = path.join(REJECT_KEY_DIR, "reject.key");
+/** 公開鍵（tauri signer generate が書く `<秘密鍵>.pub`）。mac_build.ts が読むのはこれだけ */
+export const REJECT_PUBKEY_FILE = `${REJECT_KEY_FILE}.pub`;
+
+/**
+ * ビルドに渡す一時 config（`--config`）。tauri.conf.json に**重ねる**だけ（配列は置き換え・オブジェクトは足し合わせ）。
+ *  - 普段: `createUpdaterArtifacts` だけ（V174 から不変。置くと鍵の無い環境のビルドが最後に落ちる＝U-1 の実測）
+ *  - 古い版の役: それに**版**と、updater の**確認先を 127.0.0.1 だけ**にしたものと、http で受ける許可を足す。
+ *    pubkey と windows は書かない＝tauri.conf.json のまま（本物の鍵の署名しか受けない）
+ * ★`v175_smoke.ts` [S-9] が**実際に呼んで**中身を確かめる（export しているのはそのため）
+ */
+export function tempConfig(rehearsal: boolean): Record<string, unknown> {
+  if (!rehearsal) return { bundle: { createUpdaterArtifacts: true } };
+  return {
+    version: rehearsalOldVersion(conf.version),
+    bundle: { createUpdaterArtifacts: true },
+    plugins: { updater: { endpoints: [REHEARSAL_FEED_URL], dangerousInsecureTransportProtocol: true } },
+  };
+}
+
+/** V207: 公開鍵が tauri.conf.json の本物と同じなら投げる（字が同じ・鍵の番号が同じ、のどちらでも）。形が違っても投げる */
+export function assertNotRealPubkey(pubkey: string): void {
+  const real: string = conf.plugins.updater.pubkey;
+  const pk = parseMinisignPublicKey(pubkey);
+  if (pubkey.trim() === real.trim() || pk.keyId.equals(parseMinisignPublicKey(real).keyId)) {
+    throw new Error("★断る役の公開鍵が tauri.conf.json の本物と同じです（本物の鍵の署名を受ける役になります）。止めました");
+  }
+}
+
+/**
+ * V207: 断る役の一時 config。**古い版の役（tempConfig(true)）に、updater の pubkey だけを足した形**
+ * （版・確認先・http の許可は古い版の役と同じ）。本物の公開鍵なら投げる。
+ * ★`v207_smoke.ts` [R] が実際に呼んで中身を確かめる（export しているのはそのため）
+ */
+export function rejectTempConfig(pubkey: string): Record<string, unknown> {
+  assertNotRealPubkey(pubkey);
+  const c = tempConfig(true) as { version: string; bundle: unknown; plugins: { updater: Record<string, unknown> } };
+  return { version: c.version, bundle: c.bundle, plugins: { updater: { ...c.plugins.updater, pubkey } } };
+}
+
+/** V207: 断る役の公開鍵を決まった場所のファイルから読む（秘密鍵は読まない）。無い・形が違う・本物と同じなら投げる */
+export function readRejectPubkey(file: string = REJECT_PUBKEY_FILE): string {
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
+    throw new Error("断る役の公開鍵がありません（先に npx tsx scripts/mac_update_reject.ts prepare で使い捨ての鍵の組を作ってください）");
+  }
+  const pubkey = fs.readFileSync(file, "utf8").trim();
+  assertNotRealPubkey(pubkey);
+  return pubkey;
+}
 
 const TARGET = "universal-apple-darwin";
 const bundleDir = path.join(root, "src-tauri", "target", TARGET, "release", "bundle");
@@ -81,12 +158,13 @@ export function scrub(s: string): string {
 }
 
 // ---------------- 外部コマンド ----------------
-type Captured = { code: number; text: string };
+export type Captured = { code: number; text: string };
 
 /** 外部コマンドを**必ず pipe で**受ける。返した中身は判定と伏せ字だけが読む。
  *  ⚠ 標準入力は `ignore`。対話を求めるコマンドはここで**止まらずに落ちる**ので、
- *   プロンプトを出させない手当て（`CI`）は呼ぶ側が渡すこと */
-function capture(cmd: string, args: string[], extraEnv?: NodeJS.ProcessEnv): Captured {
+ *   プロンプトを出させない手当て（`CI`）は呼ぶ側が渡すこと
+ *  V175: リハーサルの配り手（mac_update_rehearsal.ts）も**この漏斗を通す**ので export した */
+export function capture(cmd: string, args: string[], extraEnv?: NodeJS.ProcessEnv): Captured {
   const r = spawnSync(cmd, args, {
     cwd: root,
     encoding: "utf8",
@@ -97,13 +175,33 @@ function capture(cmd: string, args: string[], extraEnv?: NodeJS.ProcessEnv): Cap
   return { code: r.status ?? -1, text: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
-function hasMarker(c: Captured, marker: string): boolean {
+/** V207: tauri（build・signer generate）の子に渡す環境。親の鍵の環境変数 6 つ（mac_update.ts の SIGNER_ENV_NAMES・
+ *  大小だけ違う名前も）を外してから、渡すものだけを入れる。tauri build が鍵として読むのは
+ *  TAURI_SIGNING_PRIVATE_KEY と _PASSWORD の 2 つだけ（CLI 2.12.4 の src/bundle.rs）だが、残りの 4 つも子に渡さない。
+ *  外すのは undefined で上書きする形（spawn は undefined の欄を子に渡さない）＝capture の重ね方でも効く */
+export function tauriChildEnv(extra: NodeJS.ProcessEnv, parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const e: NodeJS.ProcessEnv = { ...parent };
+  const names: readonly string[] = SIGNER_ENV_NAMES;
+  for (const n of names) e[n] = undefined;
+  for (const k of Object.keys(parent)) if (names.includes(k.toUpperCase())) e[k] = undefined;
+  for (const [k, v] of Object.entries(extra)) e[k] = v;
+  return e;
+}
+
+export function hasMarker(c: Captured, marker: string): boolean {
   return c.text.includes(marker);
+}
+
+/** V175 (V174 の持ち越し [S-13]): 公証が通ったか。**終了コードだけで決めない**——
+ *  `notarytool` は審査が `Invalid` でも終了コード 0 を返し得る。`status: Accepted` を見る
+ *  （`v175_smoke.ts` [S-10] が偽の返事を渡して確かめる） */
+export function notaryAccepted(c: Captured): boolean {
+  return c.code === 0 && hasMarker(c, "status: Accepted");
 }
 
 /** 落ちたときに出してよい行だけを拾う。**判定に必要な語を含む行**に限り、伏せ字を通してから返す。
  *  ⚠ ここを通さずに出力を画面へ出す道は作らないこと（`v174_smoke.ts` [S-6] が固定している） */
-function safeLines(c: Captured): string[] {
+export function safeLines(c: Captured): string[] {
   const KEEP = [
     /Authority=/,
     /TeamIdentifier=/,
@@ -182,6 +280,26 @@ function preflight() {
   }
   console.log("  公証の鍵: 実在・権限 600");
   console.log(`  製品名: ${product} ／ ターゲット: ${TARGET}`);
+  if (rehearsalReject) {
+    if (process.argv.includes("--rehearsal-old")) throw new Error("--rehearsal-reject と --rehearsal-old は一緒に使えません（どちらか 1 つの役を作ります）");
+    readRejectPubkey();
+    console.log("  ★断る役: 公開鍵は使い捨ての鍵（~/memoanima-reject-key の .pub・本物と違う）・置き場は dist-rehearsal-reject/");
+  }
+  if (rehearsalOld) {
+    if (skipBuild) throw new Error("--rehearsal-old と --skip-build は一緒に使えません（古い版の役は必ずその場でビルドします）");
+    console.log(
+      `  ★リハーサルの古い版の役: 版 ${rehearsalOldVersion(conf.version)}（tauri.conf.json は ${conf.version}）・更新の確認先は 127.0.0.1 だけ`
+    );
+    // 普段のビルドの配信物が残っていると、この回が作り直して最後に消す＝運ぶ前なら失われる。黙って進まない
+    const left = findOne(path.join(bundleDir, "macos"), ".app.tar.gz");
+    if (left.found > 0) {
+      throw new Error(
+        "普段のビルドの配信物（.app.tar.gz）が置き場に残っています。--rehearsal-old はこれを作り直して最後に消します\n" +
+          "  → Windows へ運び終えていれば、置き場ごと消してからもう一度実行してください:\n" +
+          "     rm -rf src-tauri/target/universal-apple-darwin/release/bundle"
+      );
+    }
+  }
 }
 
 // ---------------- 使い捨ての updater 署名鍵 ----------------
@@ -198,9 +316,9 @@ function makeThrowawayKey(dir: string): string {
   //  tauri が**パスワードの入力を待つ**。標準入力は閉じてあるので、そこで固まるか分かりにくく落ちる。
   //  CI のワークフローが無事なのは、ランナーに `CI=true` が最初から入っているためで、
   //  作者の Mac には無い——**同じ形で動かすために、ここで明示的に渡す**
-  const r = capture("npm", ["run", "tauri", "--", "signer", "generate", "-w", keyPath, "--password", ""], {
+  const r = capture("npm", ["run", "tauri", "--", "signer", "generate", "-w", keyPath, "--password", ""], tauriChildEnv({
     CI: "true",
-  });
+  }));
   if (r.code !== 0 || !fs.existsSync(keyPath)) {
     for (const s of safeLines(r)) console.log(`      │ ${s}`);
     throw new Error("使い捨ての updater 署名鍵を作れませんでした");
@@ -216,7 +334,7 @@ function runStreaming(cmd: string, args: string[], env: NodeJS.ProcessEnv): Prom
     // ★素通しにしない。1 行ずつ伏せ字を通してから出す
     //  （バンドラは署名のときに名義をそのまま出すことがある）
     // ⚠ 受け取る名前は `line` にしておくこと。回帰ゲートは「生出力らしい名前」を見張っていて、
-    //  ここを短い別名にすると**見張りの網から外れる**（Codex のリリース前レビューで実証された穴）
+    //  ここを短い別名にすると**見張りの網から外れる**（リリース前の独立レビューで実証された穴）
     const pump = (s: NodeJS.ReadableStream | null) => {
       if (s) readline.createInterface({ input: s }).on("line", (line) => console.log(`  │ ${scrub(line)}`));
     };
@@ -233,14 +351,13 @@ async function build(tmp: string) {
   // ⚠ createUpdaterArtifacts は tauri.conf.json に置かない。
   //  置くと**鍵の無い環境の `npm run tauri:build` が最後に必ず落ちる**（U-1 の実測）
   const cfg = path.join(tmp, "updater.json");
-  fs.writeFileSync(cfg, JSON.stringify({ bundle: { createUpdaterArtifacts: true } }), "utf8");
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
+  fs.writeFileSync(cfg, JSON.stringify(rehearsalReject ? rejectTempConfig(readRejectPubkey()) : tempConfig(rehearsalOld)), "utf8");
+  const env: NodeJS.ProcessEnv = tauriChildEnv({
     // 個人情報監査: panic の位置情報などに埋まるホームの絶対パスを消す（R-8）
     RUSTFLAGS: `--remap-path-prefix=${os.homedir()}=~`,
     TAURI_SIGNING_PRIVATE_KEY: keyText,
     TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "",
-  };
+  });
   console.log("  公証は Apple の返事待ちで数分〜かかります（混んでいると長引きます）");
   const code = await runStreaming("npm", ["run", "tauri:build", "--", "--target", TARGET, "--config", cfg], env);
   if (code !== 0) throw new Error(`ビルドが失敗しました（終了コード ${code}）`);
@@ -299,7 +416,7 @@ function notarizeDmg(dmgPath: string) {
     "--wait",
   ]);
   // ⚠ 終了コードだけでは足りない。提出そのものが通っても、審査が `Invalid` で返ることがある
-  if (sub.code !== 0 || !hasMarker(sub, "status: Accepted")) {
+  if (!notaryAccepted(sub)) {
     for (const s of safeLines(sub)) console.log(`      │ ${s}`);
     throw new Error(
       ".dmg の公証が通りませんでした（R-5）\n" +
@@ -411,9 +528,99 @@ export function assertNoSignatures(dir: string): string[] {
   return listSignatures(dir);
 }
 
+// ---------------- V175: 古い版の役を分ける（--rehearsal-old） ----------------
+//
+// ★古い版の役は**配らない**。確認先が 127.0.0.1 の .app が普段の置き場に残ると、次に配る物と取り違え得る。
+//  だから成果物は dist-rehearsal/ へ**移し**（写すのではない＝置き場には残らない）、配信物（.app.tar.gz）は消す。
+//  make_release.ts --with-mac も中の版が違えば止まる（二重の網）。
+
+/** `dir` の下（入れ子の奥まで）で `suffix` で終わるファイル */
+export function listFilesEndingWith(dir: string, suffix: string): string[] {
+  const out: string[] = [];
+  const walk = (d: string) => {
+    if (!fs.existsSync(d)) return;
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory() && !e.name.endsWith(".app")) walk(p);
+      else if (e.isFile() && e.name.endsWith(suffix)) out.push(p);
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+/** 古い版の役の配信物を消す（★この回の .app.tar.gz は配らない）。消した本数を返す */
+export function removeRehearsalTarballs(dir: string): number {
+  let n = 0;
+  for (const p of listFilesEndingWith(dir, ".app.tar.gz")) {
+    try {
+      fs.unlinkSync(p);
+      n++;
+    } catch {
+      // 消せなかったものは呼ぶ側の確かめが拾って赤にする
+    }
+  }
+  return n;
+}
+
+/** .app の Info.plist の版（読めなければ ""） */
+function appVersion(appPath: string): string {
+  try {
+    const xml = fs.readFileSync(path.join(appPath, "Contents", "Info.plist"), "utf8");
+    return /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]*)<\/string>/.exec(xml)?.[1]?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** 同じボリュームなら rename（署名も公証のチケットもそのまま）。違えば ditto で写してから元を消す */
+function moveInto(src: string, dst: string) {
+  try {
+    fs.renameSync(src, dst);
+  } catch {
+    const r = capture("ditto", [src, dst]);
+    if (r.code !== 0) throw new Error("古い版の役を dist-rehearsal/ へ移せませんでした");
+    fs.rmSync(src, { recursive: true, force: true });
+  }
+}
+
+/** 古い版の役（版が rehearsalOldVersion のもの**だけ**）を dist-rehearsal/ へ移す。普段のビルドの物は動かさない。
+ *  V207: 断る役は dist-rehearsal-reject/ へ（dist-rehearsal/ は消さない） */
+function separateRehearsal() {
+  const outDir = rehearsalReject ? rejectDir : rehearsalDir;
+  const outName = rehearsalReject ? "dist-rehearsal-reject/" : "dist-rehearsal/";
+  console.log(`== 古い版の役を ${outName} へ分ける（配らない・REQ §10-3） ==`);
+  const old = rehearsalOldVersion(conf.version);
+  const appPath = path.join(bundleDir, "macos", `${product}.app`);
+  const dmgDir = path.join(bundleDir, "dmg");
+  const dmgs = fs.existsSync(dmgDir) ? fs.readdirSync(dmgDir).filter((n) => n.endsWith(".dmg") && n.includes(`_${old}_`)) : [];
+  const appIsOld = fs.existsSync(appPath) && appVersion(appPath) === old;
+  if (!appIsOld && dmgs.length === 0) {
+    judge(`古い版の役（版 ${old}）の .app と .dmg が置き場にあります`, false);
+    return;
+  }
+  fs.rmSync(outDir, { recursive: true, force: true });
+  fs.mkdirSync(outDir, { recursive: true });
+  if (appIsOld) {
+    const dst = path.join(outDir, `${product}.app`);
+    moveInto(appPath, dst);
+    const vf = capture("codesign", ["--verify", "--deep", "--strict", "--verbose=2", dst]);
+    judge(`${outName} の .app も署名の検証が通ります（移しても壊れていない）`, vf.code === 0, vf);
+    const st = capture("xcrun", ["stapler", "validate", dst]);
+    judge(`${outName} の .app にも公証のチケットがあります`, st.code === 0, st);
+  } else judge(`古い版の役（版 ${old}）の .app が置き場にあります`, false);
+  for (const n of dmgs) {
+    const dst = path.join(outDir, n);
+    moveInto(path.join(dmgDir, n), dst);
+    const st = capture("xcrun", ["stapler", "validate", dst]);
+    judge(`${outName} の .dmg（${n}）にも公証のチケットがあります`, st.code === 0, st);
+  }
+  if (dmgs.length !== 1) judge(`古い版の役の .dmg がちょうど 1 つ（いま ${dmgs.length} 個）`, false);
+}
+
 // ---------------- 本体 ----------------
 async function main() {
-  console.log(`== V174: Mac の署名・公証ビルド（${product}） ==`);
+  console.log(`== V174: Mac の署名・公証ビルド（${product}）${rehearsalReject ? "・V207 断る役（版の確かめを見る）" : rehearsalOld ? "・V175 リハーサルの古い版の役" : ""} ==`);
   preflight();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "memoanima-mac-"));
   try {
@@ -425,10 +632,14 @@ async function main() {
     if (!fs.existsSync(appPath)) {
       judge("成果物の .app が見つかります", false);
     } else {
+      // V175: どの版を検査しているのかを先に確かめる（--skip-build で古い版の役を拾っていないか）
+      const want = rehearsalOld ? rehearsalOldVersion(conf.version) : conf.version;
+      judge(`成果物の .app の版（Info.plist）が ${want}`, appVersion(appPath) === want);
       verifyApp(appPath);
       verifyNoPrivatePaths(appPath);
     }
-    const dmg = findOne(path.join(bundleDir, "dmg"), ".dmg");
+    // V175: 古い版の役は版の入った名前で選ぶ（普段のビルドの .dmg が残っていても取り違えない）
+    const dmg = findOne(path.join(bundleDir, "dmg"), rehearsalOld ? `_${rehearsalOldVersion(conf.version)}_universal.dmg` : ".dmg");
     if (dmg.path === "") judge(`成果物の .dmg が 1 つ見つかります（いま ${dmg.found} 個）`, false);
     else {
       // ⚠ 順番が命。**公証して staple してから**でないと、R-5 は必ず赤になる
@@ -451,6 +662,23 @@ async function main() {
     } else {
       console.log("  OK: R-11 成果物の置き場に署名は 1 本も残っていません");
     }
+    if (rehearsalOld) {
+      // V175: 古い版の役は配らない。成果物は dist-rehearsal/ へ移し、この回の配信物は消す（例外のあとでも）。
+      // R-11 の消し込み（上の素の文）より**後ろ**に置き、ここで何が起きても消し込みは済んでいる形にした
+      try {
+        try {
+          separateRehearsal();
+        } catch (e) {
+          judge(`古い版の役を dist-rehearsal/ へ分けられました（${scrub(e instanceof Error ? e.message : String(e))}）`, false);
+        }
+        console.log("== 古い版の役の配信物（.app.tar.gz）の消し込み ==");
+        const gone = removeRehearsalTarballs(bundleDir);
+        console.log(`  古い版の役の .app.tar.gz を ${gone} 本消しました`);
+        judge("置き場に古い版の役の .app.tar.gz が 1 本も残っていません", listFilesEndingWith(bundleDir, ".app.tar.gz").length === 0);
+      } catch (e) {
+        judge(`古い版の役の後始末が最後まで通りました（${scrub(e instanceof Error ? e.message : String(e))}）`, false);
+      }
+    }
     try {
       fs.rmSync(tmp, { recursive: true, force: true });
     } catch {
@@ -462,6 +690,18 @@ async function main() {
   if (ngCount || process.exitCode === 1) {
     console.log(`== 赤: 通らなかった検査が ${ngCount} 件あります ==`);
     process.exitCode = 1;
+  } else if (rehearsalReject) {
+    console.log(`== 緑: 断る役（版 ${rehearsalOldVersion(conf.version)}・公開鍵は使い捨ての鍵）を dist-rehearsal-reject/ に作りました（配らない） ==`);
+    console.log("   次: 別名で /Applications に置く（ditto は前の物に重ねるので、先に消す）:");
+    console.log("       rm -rf /Applications/MemoAnima-rehearsal-reject.app");
+    console.log("       ditto dist-rehearsal-reject/MemoAnima.app /Applications/MemoAnima-rehearsal-reject.app");
+    console.log("   ⚠ /Applications/MemoAnima.app（本物）と MemoAnima-rehearsal.app（① の役）には置かない・上書きしない");
+  } else if (rehearsalOld) {
+    console.log(`== 緑: 古い版の役（版 ${rehearsalOldVersion(conf.version)}）を dist-rehearsal/ に作りました（配らない） ==`);
+    console.log("   次: 別名で /Applications に置く（ditto は前の物に重ねるので、先に消す）:");
+    console.log("       rm -rf /Applications/MemoAnima-rehearsal.app");
+    console.log("       ditto dist-rehearsal/MemoAnima.app /Applications/MemoAnima-rehearsal.app");
+    console.log("   ⚠ /Applications/MemoAnima.app（本物）には置かない・上書きしない（REQ §10-3 の P-0）");
   } else {
     console.log("== 緑: R-1 / R-2 / R-3 / R-5 / R-8 / R-11 / R-12 がすべて通りました ==");
     console.log("   次: .dmg を Release へ（R-4 は quarantine を消さずに別の入口で確かめます）");
@@ -472,7 +712,7 @@ async function main() {
  *
  *  読み込んだだけでは何もしない形にしてあるのは、回帰ゲート（`v174_smoke.ts`）が
  *  **この中の関数を実際に動かして**確かめられるようにするため。
- *  字面だけの検査は、書き方を少し変えるだけで抜けられる——Codex のリリース前レビューが
+ *  字面だけの検査は、書き方を少し変えるだけで抜けられる——リリース前の独立レビューが
  *  `.sig` の消し込みと生出力の見張りについて **10 通りの抜け道**を実証した。
  *  「消したことにする」「別の名前に移してから出す」は、**動かしてみないと捕まらない**。 */
 const isEntry =

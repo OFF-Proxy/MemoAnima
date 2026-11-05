@@ -219,7 +219,7 @@ export async function encodePV6(
 ): Promise<{ bytes: Uint8Array; stats: Pv6Stats } | null> {
   // 防御: 16bit バッファ（起きている Uint16Array／眠り控えの bits:16）が1枚でもあれば
   // ヘッダは indexBits:16 として書く——serialize.ts の encodeProjectHead と同じ判定
-  //（Codex V163 指摘①: p.indexBits が 8 のままズレていると「8bit ヘッダ＋16bit 塊」の
+  //（独立レビュー V163 指摘①: p.indexBits が 8 のままズレていると「8bit ヘッダ＋16bit 塊」の
   //  自分で読めないファイルができる。眠りは**起こさずに**控えの幅だけ見る）
   let bits: 8 | 16 = p.indexBits === 16 ? 16 : 8;
   if (bits === 8) {
@@ -278,7 +278,7 @@ export async function encodePV6(
         blobs.push(z);
         metas.push({ o: off, n: z.length, b: bbits, r: raw, c: crc32(z) });
         off += z.length;
-        // u32 の上限は**塊を積むたび**に見る（Codex 指摘④: 全部圧縮し終えてから
+        // u32 の上限は**塊を積むたび**に見る（独立レビューの指摘④: 全部圧縮し終えてから
         // 気づくのでは、4GiB 級で何分も待たせた末に失敗する）
         if (off > U32_MAX) {
           throw new Error(`PV6: blob section exceeds u32 trailer (${off} bytes)`);
@@ -542,7 +542,7 @@ async function readPv6Header(
  *  ISIZE（末尾4B＝展開後長）・raw 長が画素数どおり。withCrc で全塊の CRC32 走査を足す（tier1.5）。
  *  **verifyPV6 と通常の読み込み（decodePv6）の両方がここを通る**——読み込み時に壊れた塊が
  *  眠り控えとして紛れ込み、あとでコマ移動や書き出しのときに初めて落ちるのを防ぐ
- *（Codex V163 指摘③）。戻り値は不合格の理由（ASCII・ログ用）／null＝合格。 */
+ *（独立レビュー V163 指摘③）。戻り値は不合格の理由（ASCII・ログ用）／null＝合格。 */
 function blobTableIssue(
   bytes: Uint8Array,
   blobBase: number,

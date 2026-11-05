@@ -1,8 +1,8 @@
 // ★生成物（scripts/gen_icons.ts）。手で直さない。src/icons/*.svg を直したら `npx tsx scripts/gen_icons.ts` で作り直す。
-// 元: src/icons/icons.json（86 個・grid 20・stroke 1.8）
+// 元: src/icons/icons.json（87 個・grid 20・stroke 1.8）
 export const ICON_GRID = 20;
 export const ICON_STROKE = 1.8;
-export const ICON_IDS = ["hand","pen","brush","eraser","fill","shape","text","eyedrop","move","select","transform","warp","copyprev","clear","audio","select-lasso","select-auto","shape-rect","shape-ellipse","fill-enclose","warp-push","warp-bulge","warp-pinch","warp-corner","select-invert","select-expand","select-contract","line-thicken","line-thin","cut-to-layer","copy-to-layer","tex-solid","tex-spray","tex-sand","flip-h","flip-v","eye","eye-off","zoom","chev-right","chev-down","chev-left","chev-up","play","pause","stop","skip-first","skip-last","prev","next","loop","trash","undo","redo","lock","unlock","pin","merge-down","clipboard","audio-file","se-place","listen","audio-muted","save","folder","folder-open","import","export","image","camera","project","gear","display","palette","language","keyboard","mouse","log","quit","update","help","check","close","warn","invert","focus"] as const;
+export const ICON_IDS = ["hand","pen","brush","eraser","fill","shape","text","eyedrop","move","select","transform","warp","copyprev","clear","audio","select-lasso","select-auto","shape-rect","shape-ellipse","fill-enclose","warp-push","warp-bulge","warp-pinch","warp-corner","select-invert","select-expand","select-contract","line-thicken","line-thin","cut-to-layer","copy-to-layer","tex-solid","tex-spray","tex-sand","flip-h","flip-v","eye","eye-off","zoom","chev-right","chev-down","chev-left","chev-up","play","pause","stop","skip-first","skip-last","prev","next","loop","trash","undo","redo","lock","unlock","pin","merge-down","clipboard","audio-file","se-place","listen","audio-muted","save","folder","folder-open","import","export","image","camera","project","gear","display","palette","language","keyboard","mouse","log","quit","update","help","check","close","warn","invert","focus","gallery"] as const;
 export type IconId = (typeof ICON_IDS)[number];
 /** <svg> の中身（path 等）だけ。ルート属性は icon() が付ける */
 export const ICON_INNER: Record<IconId, string> = {
@@ -92,4 +92,5 @@ export const ICON_INNER: Record<IconId, string> = {
   "warn": "<path d=\"M10 3l7.5 13h-15z\"/><path d=\"M10 8v4\"/><circle cx=\"10\" cy=\"13.8\" r=\"0.75\" fill=\"currentColor\" stroke=\"none\"/>",
   "invert": "<circle cx=\"10\" cy=\"10\" r=\"7\"/><path d=\"M10 3a7 7 0 0 1 0 14z\" fill=\"currentColor\" stroke=\"none\"/>",
   "focus": "<path d=\"M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4\"/><circle cx=\"10\" cy=\"10\" r=\"1.6\" fill=\"currentColor\" stroke=\"none\"/>",
+  "gallery": "<path d=\"M6.5 7L10 3.5 13.5 7\"/><rect x=\"3\" y=\"7\" width=\"14\" height=\"10\" rx=\"1\"/><rect x=\"6.5\" y=\"10\" width=\"7\" height=\"4\" rx=\"0.5\"/>",
 };

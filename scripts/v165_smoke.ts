@@ -15,6 +15,7 @@
 // 5. 配線の走査（D-1〜D-4 の実装がある・壊すなリストが生きている）
 import fs from "node:fs";
 import path from "node:path";
+import { readEditorSource } from "./editorSource";
 import {
   COMMANDS,
   BUILTIN_PRESETS,
@@ -159,7 +160,7 @@ const TAPS: TapMod[] = ["Control", "Shift", "Alt"];
   check("4 予約キーの規則は不変", RESERVED_CODES.has("Space") && COMMANDS.length > 0);
 }
 
-// ================= 4b. ModTapWatcher（Codex 指摘①⑤の本体・時計を差し替えて全条件を叩く） =================
+// ================= 4b. ModTapWatcher（独立レビューの指摘①⑤の本体・時計を差し替えて全条件を叩く） =================
 {
   let now = 0;
   const w = new ModTapWatcher(() => now);
@@ -172,8 +173,8 @@ const TAPS: TapMod[] = ["Control", "Shift", "Alt"];
   check(`4b しきい値ちょうど（${MOD_TAP_MS}ms）は発動する`, tap("Alt", MOD_TAP_MS) === "Alt");
   check("4b しきい値を超えたら発動しない", tap("Alt", MOD_TAP_MS + 1) === null);
   check("4b ★押しっぱなし（repeat）は候補にしない", tap("Alt", 10, { repeat: true }) === null);
-  check("4b ★描画中など blocked のときは候補にしない（Codex 指摘①）", tap("Alt", 10, { blocked: true }) === null);
-  // ★Codex 指摘①の本体: 描画中に押して、ペンを離してから修飾キーを離す
+  check("4b ★描画中など blocked のときは候補にしない（独立レビューの指摘①）", tap("Alt", 10, { blocked: true }) === null);
+  // ★独立レビューの指摘①の本体: 描画中に押して、ペンを離してから修飾キーを離す
   {
     const v = new ModTapWatcher(() => now);
     v.down("Alt", { blocked: true }); // 描いている最中に押した
@@ -210,7 +211,7 @@ const TAPS: TapMod[] = ["Control", "Shift", "Alt"];
   check("4b pending は候補の有無を返す", (() => { const v = new ModTapWatcher(() => now); v.down("Shift"); const p = v.pending; v.cancel(); return p === "Shift" && v.pending === null; })());
 }
 
-// ================= 4c. 押しっぱなし専用の操作はタップに割り当てない（Codex 指摘④） =================
+// ================= 4c. 押しっぱなし専用の操作はタップに割り当てない（独立レビューの指摘④） =================
 {
   check("4c ★xform.peek は hold 専用として印が付いている", isHoldOnlyCommand("xform.peek"));
   check("4c ふつうの操作は hold 専用ではない", !isHoldOnlyCommand("edit.undo") && !isHoldOnlyCommand("tool.pen"));
@@ -223,7 +224,7 @@ const TAPS: TapMod[] = ["Control", "Shift", "Alt"];
   // t() は辞書が読めない環境では [key] を返すことがあるので、**キー名が入っていること**だけ見る
   const lab = keyLabel({ code: "", tap: "Alt" });
   check("5 タップの表示に Alt が入る", lab.includes("Alt") || lab.includes("keys.tap.label"), lab);
-  // Codex 指摘⑦: KeyboardEvent.key は "Control" だが、画面と案内文の表記は "Ctrl"
+  // 独立レビューの指摘⑦: KeyboardEvent.key は "Control" だが、画面と案内文の表記は "Ctrl"
   const ctrlLab = keyLabel({ code: "", tap: "Control" });
   check("5 ★Control のタップは「Ctrl」と出す（Control とは出さない）", ctrlLab.includes("Ctrl") && !ctrlLab.includes("Control"), ctrlLab);
   check("5 従来の表示は不変（Ctrl+S）", keyLabel({ code: "KeyS", ctrl: true }) === "Ctrl+S");
@@ -232,7 +233,8 @@ const TAPS: TapMod[] = ["Control", "Shift", "Alt"];
 
 // ================= 6. 配線の走査 =================
 {
-  const ed = fs.readFileSync(path.join(root, "src/editor/editor.ts"), "utf8");
+  // ★V213 (M-2a): editor.ts の描く処理はコア（src/editor/core/editorCore.ts）へ移った＝editor.ts とコアの字を並べて見る
+  const ed = readEditorSource(root);
   const main = fs.readFileSync(path.join(root, "src/main.ts"), "utf8");
   const km = fs.readFileSync(path.join(root, "src/keymap.ts"), "utf8");
   const css = fs.readFileSync(path.join(root, "src/styles.css"), "utf8");
@@ -275,27 +277,27 @@ const TAPS: TapMod[] = ["Control", "Shift", "Alt"];
   check("6 tap は bindingKey で最初に見る（修飾と混ざらない）", /if \(b\.tap\) return tapEventKey\(b\.tap\);/.test(km));
   check("6 設定画面に単体タップの案内が常設されている", /km-tapnote/.test(main) && /keys\.tap\.msg/.test(main));
 
-  // ---- Codex 指摘の対応（再発防止） ----
+  // ---- 独立レビューの指摘の対応（再発防止） ----
   // ①: 候補を立てる時点で「描いている最中か」を見る
   check(
-    "6 ★候補を立てる時点で描画中・ダイアログ・文字入力・IME を見る（Codex ①）",
+    "6 ★候補を立てる時点で描画中・ダイアログ・文字入力・IME を見る（独立レビュー ①）",
     /this\.modTap\.down\(e\.key, \{[\s\S]{0,320}?this\.pointerDown[\s\S]{0,200}?this\.dialogOpen\(\)[\s\S]{0,200}?this\.isTextEntry\(e\.target\)[\s\S]{0,120}?e\.isComposing/.test(ed)
   );
   // ②: 衝突の確認は複製より先（キャンセルしても組み合わせだけ残らない）
   const iConflict = main.indexOf("conflict = findConflict(currentPreset(), b, cmd);");
   const iEnsure = main.indexOf("if (!(await ensureEditablePreset()))");
-  check("6 ★衝突の確認が自動複製より先（Codex ②）", iConflict > 0 && iEnsure > iConflict, `conflict=${iConflict} ensure=${iEnsure}`);
+  check("6 ★衝突の確認が自動複製より先（独立レビュー ②）", iConflict > 0 && iEnsure > iConflict, `conflict=${iConflict} ensure=${iEnsure}`);
   // ③: タップも道具巡回の規則を通る（先頭固定にしない）
-  check("6 ★タップも道具の同キー巡回を通る（Codex ③）", /const id = this\.pickCommandFromIds\(ids\);/.test(ed) && /private pickCommandFromIds/.test(ed));
+  check("6 ★タップも道具の同キー巡回を通る（独立レビュー ③）", /const id = this\.pickCommandFromIds\(ids\);/.test(ed) && /private pickCommandFromIds/.test(ed));
   check("6 押したときの巡回も同じ関数を使う", /id = this\.pickCommandFromIds\(ids\); \/\/ V165/.test(ed));
   // ④: hold 専用はタップに割り当てない（設定画面で断る・実行側でも保険）
-  check("6 ★設定画面が hold 専用のタップ割り当てを断る（Codex ④）", /if \(b\.tap && isHoldOnlyCommand\(cmd\)\)/.test(main) && /keys\.tap\.holdOnly\.msg/.test(main));
+  check("6 ★設定画面が hold 専用のタップ割り当てを断る（独立レビュー ④）", /if \(b\.tap && isHoldOnlyCommand\(cmd\)\)/.test(main) && /keys\.tap\.holdOnly\.msg/.test(main));
   check("6 実行側にも保険がある", /if \(isHoldOnlyCommand\(id\)\) return;/.test(ed));
   // ⑤: ホーム画面でもタップが効く
-  check("6 ★ホーム画面にもタップの道がある（Codex ⑤）", /const homeKeyUpHandler = /.test(main) && /window\.addEventListener\("keyup", homeKeyUpHandler\)/.test(main));
+  check("6 ★ホーム画面にもタップの道がある（独立レビュー ⑤）", /const homeKeyUpHandler = /.test(main) && /window\.addEventListener\("keyup", homeKeyUpHandler\)/.test(main));
   check("6 ホームの候補も blur とポインタで捨てる", /window\.addEventListener\("blur", homeModTapCancel\)/.test(main) && /window\.addEventListener\("pointerdown", homeModTapCancel, true\)/.test(main));
   // ⑥: 設定画面の取得中も blur で候補を捨てる
-  check("6 ★割り当て待ち中も blur で候補を捨てる（Codex ⑥）", /window\.addEventListener\("blur", onBlur\)/.test(main) && /window\.removeEventListener\("blur", onBlur\)/.test(main));
+  check("6 ★割り当て待ち中も blur で候補を捨てる（独立レビュー ⑥）", /window\.addEventListener\("blur", onBlur\)/.test(main) && /window\.removeEventListener\("blur", onBlur\)/.test(main));
   // しきい値は1か所（keymap.ts）だけに置く
   check("6 ★しきい値の定数は keymap.ts の1か所", /export const MOD_TAP_MS = 250;/.test(km) && !/MOD_TAP_CAPTURE_MS/.test(main));
   check("6 editor も keymap の値を使う（自前の 250 を持たない）", !/MOD_TAP_MS = 250/.test(ed));

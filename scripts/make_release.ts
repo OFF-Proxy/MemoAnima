@@ -7,6 +7,18 @@
 //              一時フォルダへ出すので **dist-release/ を1バイトも触らない**（M12-4 §2）
 // ※ PowerShell 版ではなく node 版にしている（常駐セキュリティソフトが .ps1 を検疫した実績があるため）
 //
+// V175: `--with-mac <フォルダ>`（REQ_mac_signing_and_update.md §2・§10-5）。**この指定があるときだけ**
+//   latest.json に darwin-aarch64 / darwin-x86_64 を足す。**指定が無ければ出力は v1.9.5 と 1 バイトも違わない**。
+//   フォルダには Mac で作った .app.tar.gz を**ちょうど 1 つ**だけ置く（.sig があれば止まる＝Mac の使い捨て鍵の
+//   署名を持ち込ませない・中の Info.plist の版が違えば止まる）。dist-release/ に
+//   <製品名>_<版>_universal.app.tar.gz として写し、**Windows の本物の鍵**で署名し、tauri.conf.json の公開鍵で
+//   確かめてから（R-15）feed に入れる。feed は書く前と書いたあと読み直して §2「明示」の 8 項目を検査する。
+//   門番・署名・R-15・明示の検査は、どれも dist-release/ へ写す前にある＝**検査で止まったときは何も増えない**。
+//   最後の写す段（zip → LICENSES → NSIS → Mac → latest.json）の書き込みそのものが失敗したときは途中物が残り得るが、
+//   latest.json は最後に写す（写した先が食い違えば消す）ので、配る feed が半端になることはない。
+//   `--dry-run --with-mac`: Mac の部分は本物の鍵で最後まで通し、**一時フォルダに書く**（dist-release/ に触らない）。
+//   Windows の署名は仮の文字列のまま。出てきた一時フォルダを Mac のリハーサルへ運ぶ（§10-3）
+//
 // U-1（U1-A / U1-D）でここが変わった:
 //   1. `npx tauri build --no-bundle` の **`--no-bundle` を外した**。設定上 NSIS は元から対象
 //      （`bundle.targets: "all"`）で、作られていなかった理由はこのフラグだけだった
@@ -19,11 +31,40 @@ import * as path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { zipSync } from "fflate";
+// V175: feed の組み立て・検査・署名の確かめは 1 か所（mac_update.ts）に集めた。Mac のリハーサルと出す日の check-live も同じ関数を通る
+import {
+  DRY_RUN_WINDOWS_SIGNATURE,
+  assertReleaseSignature,
+  buildFeed,
+  commitStaged,
+  inspectMacDir,
+  installMacStaged,
+  makeTauriSigner,
+  prepareMacRelease,
+  signingEnvProblem,
+  signingEnvSummary,
+  stageFeed,
+  stagingDir,
+  type MacStaged,
+  type StagedFeed,
+} from "./mac_update.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** M12-4: 中身の確認だけしたいとき。ビルドもせず zip も書かない（`--skip-build` を含む） */
 const dryRun = process.argv.includes("--dry-run");
 const skipBuild = dryRun || process.argv.includes("--skip-build");
+/** V175: Mac の .app.tar.gz を置いたフォルダ。**`--with-mac` が無ければ null＝darwin は組み立てない**（REQ §2 の漏斗） */
+const macDir: string | null = (() => {
+  // `--with-mac=<フォルダ>` と打つと下の indexOf に当たらず**黙って既定の道**になる。打ち間違いは止める
+  if (process.argv.some((a) => a.startsWith("--with-mac") && a !== "--with-mac")) {
+    throw new Error("--with-mac とフォルダのあいだは空白で区切ってください（--with-mac=… の形は読みません）");
+  }
+  const at = process.argv.indexOf("--with-mac");
+  if (at < 0) return null;
+  const v = process.argv[at + 1] ?? "";
+  if (v === "" || v.startsWith("--")) throw new Error("--with-mac のあとに .app.tar.gz を置いたフォルダを書いてください");
+  return path.resolve(v);
+})();
 
 const conf = JSON.parse(
   fs.readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8")
@@ -36,7 +77,7 @@ const DOWNLOAD_BASE = `https://github.com/OFF-Proxy/MemoAnima/releases/download/
 
 // ---------------- A-5: 自己検査 ----------------
 //
-// 由来: `docs/handoff/CODEX_review_v1_3_0.md` / `docs/BACKLOG_v1_3_1.md` A-5。
+// 由来: v1.3.0 の出荷前の独立レビュー（台帳 A-5）。
 // v1.3.0 の直前に `scripts/m1121_export_check.mts` へ絶対パスが残っていたのを、
 // 「走査したあとにファイルが増え、誰も測り直していなかった」ために両者とも見落とした。
 // **宣言ではなく、出荷のたびに毎回測る**のがここの役目。
@@ -153,6 +194,19 @@ function preflight() {
         "     前の版の見出しを今の版へ**付け替えて**ください（節を2つに分けると、前の版の項目は載りません）"
     );
   }
+  // (4b) V217: **更新のお知らせを長くしすぎない**（上限 NOTES_MAX 文字・`[...notes].length` で数える）。
+  //     更新の窓を描くのは**今入っている古い版**。v1.9.5 以前の窓はお知らせを改行せず、高さの上限も無いまま
+  //     真ん中に置くので、長いと最小の窓（900×540）で［今すぐ更新］が画面の外へ出る（v1.9.5 の styles.css で
+  //     組んで測った: 約 950 文字で窓の上が画面の外へ）。v2.0.0 の窓は直っているが、古い版から直接上げる人がいる間は要る。
+  const NOTES_MAX = 900;
+  if ([...notes].length > NOTES_MAX) {
+    throw new Error(
+      `A-5 自己検査で止めました: 更新のお知らせ（latest.json の notes）が ${[...notes].length} 文字で、上限 ${NOTES_MAX} 文字を超えています\n` +
+        "  → v1.9.5 以前の更新の窓はお知らせを改行せず、高さの上限も無いので、長いと最小の窓（900×540）で\n" +
+        "     ［今すぐ更新］が画面の外へ出ます。README.txt の「■ v<版> で変わったこと」の節を短くしてください\n" +
+        "     （詳しい内容は見出しが「■ v<版> で」で始まらない別の節に書けば、notes には入りません）"
+    );
+  }
   console.log(`  README.txt に「■ v${version} で…」の節あり（notes ${[...notes].length} 文字）`);
 
   // (5) V154: 英語版にも今の版の節があるか。**notes には使わない**が、同梱の README_en.txt に
@@ -169,6 +223,15 @@ function preflight() {
     );
   }
   console.log(`  README_en.txt に v${version} の節あり`);
+
+  // (6) V175: --with-mac の材料。**3 分のビルドを待たずに**ここで落とす（--dry-run でも鍵が無ければ止まる）
+  if (macDir !== null) {
+    const problem = signingEnvProblem();
+    if (problem) throw new Error(`A-5 自己検査で止めました（--with-mac）: ${problem}`);
+    console.log(`  ${signingEnvSummary()}`);
+    const mac = inspectMacDir(macDir, version);
+    console.log(`  Mac の配信物: ${mac.tarFile}（Info.plist の版 ${mac.app.version} が tauri.conf.json と一致・.sig なし）`);
+  }
 }
 
 function checkExeBytes(exe: Buffer) {
@@ -223,6 +286,15 @@ if (!fs.existsSync(exePath)) {
   throw new Error(`exe が見つかりません: ${exePath}（先にビルドしてください）`);
 }
 
+// V175 (--with-mac): Mac の配信物を **出力先に触る前に**一時フォルダで写し・署名し・R-15 で確かめる。
+// ここで落ちれば LICENSES.txt も zip も作られない。★公開鍵は tauri.conf.json からだけ読む（引数・環境変数の口を作らない）
+const updaterPubkey: string = conf.plugins.updater.pubkey;
+let macStaged: MacStaged | null = null;
+if (macDir !== null) {
+  console.log("== Mac の配信物（--with-mac・REQ §2 の漏斗） ==");
+  macStaged = prepareMacRelease({ macDir, version, product, pubkey: updaterPubkey, sign: makeTauriSigner() });
+}
+
 // 2) LICENSES.txt を自動生成
 console.log("== LICENSES.txt 生成 ==");
 // M12-4: --dry-run のときだけ一時フォルダへ出す。dist-release/ の既存物に指1本触れないため
@@ -230,7 +302,10 @@ const outDir = dryRun
   ? fs.mkdtempSync(path.join(os.tmpdir(), "memoanima-dryrun-"))
   : path.join(root, "dist-release");
 fs.mkdirSync(outDir, { recursive: true });
-execSync(`npx tsx scripts/make_licenses.ts "${path.join(outDir, "LICENSES.txt")}"`, {
+// V175: 本番は一時フォルダに作り、確かめが全部通ってから dist-release/ へ写す（下の 7）。
+// 途中で止まっても dist-release/ に半端な物を残さない（--dry-run は元から一時フォルダ）
+const licensesDir = dryRun ? outDir : stagingDir("memoanima-licenses-");
+execSync(`npx tsx scripts/make_licenses.ts "${path.join(licensesDir, "LICENSES.txt")}"`, {
   cwd: root,
   stdio: "inherit",
 });
@@ -241,7 +316,7 @@ const files: Record<string, Uint8Array> = {
   [`${product}.exe`]: exe,
   "README.txt": fs.readFileSync(path.join(root, "release-assets", "README.txt")),
   "README_en.txt": fs.readFileSync(path.join(root, "release-assets", "README_en.txt")),
-  "LICENSES.txt": fs.readFileSync(path.join(outDir, "LICENSES.txt")),
+  "LICENSES.txt": fs.readFileSync(path.join(licensesDir, "LICENSES.txt")),
 };
 
 /**
@@ -310,37 +385,45 @@ if (dryRun) {
   // **署名済みビルドを待たずに**捕まえられる。dist-release/ には触れない（一時フォルダのみ）。
   const previewNotes = buildNotes();
   showNotes(previewNotes);
-  const preview = {
+  // V175: 組み立ては本番と同じ buildFeed。Windows の署名だけは仮の文字列（検査は「仮」と分かる形で通す）
+  const preview = buildFeed({
     version,
     notes: previewNotes,
-    pub_date: new Date().toISOString(),
-    platforms: {
-      "windows-x86_64": {
-        signature: "<ビルド後に .sig の中身が入ります（--dry-run では出せません）>",
-        url: `${DOWNLOAD_BASE}/${product}_${version}_x64-setup.exe`,
-      },
-    },
-  };
+    pubDate: new Date().toISOString(),
+    windows: { signature: DRY_RUN_WINDOWS_SIGNATURE, url: `${DOWNLOAD_BASE}/${product}_${version}_x64-setup.exe` },
+    mac: macStaged ? { signature: macStaged.signature, url: `${DOWNLOAD_BASE}/${macStaged.tarName}` } : undefined,
+  });
+  const staged = stageFeed(preview, {
+    version,
+    withMac: macStaged !== null,
+    placeholderWindowsSignature: DRY_RUN_WINDOWS_SIGNATURE,
+  });
+  if (macStaged) installMacStaged(macStaged, outDir);
+  commitStaged(staged.file, outDir, "latest.json");
   const previewPath = path.join(outDir, "latest.json");
-  fs.writeFileSync(previewPath, JSON.stringify(preview, null, 2), "utf8");
   console.log(`（latest.json のプレビュー: ${previewPath}）`);
   console.log(`（LICENSES.txt の出力先は一時フォルダ: ${outDir}）`);
+  if (macStaged) {
+    console.log("== Mac のリハーサルへ運ぶもの（REQ §10-3 の 2・この一時フォルダの 3 つ） ==");
+    for (const n of ["latest.json", macStaged.tarName, `${macStaged.tarName}.sig`]) {
+      console.log(`${String(fs.statSync(path.join(outDir, n)).size).padStart(12)}  ${n}`);
+    }
+    console.log(`  場所: ${outDir}`);
+    console.log("  ⚠ この latest.json の Windows の署名は仮の文字列です。配信には使えません（リハーサル専用）");
+  }
   process.exit(0);
 }
 
 // ★ zip を書く直前。ここで止まれば dist-release/ には zip が増えない
 checkExeBytes(exe);
 
-const zipped = zipSync(files, { level: 9 });
-const zipPath = path.join(outDir, zipName);
-fs.writeFileSync(zipPath, zipped);
-
 // 5) U1-A: NSIS インストーラと updater の配信物を dist-release/ へ集める。
 //    **新しいビルド系は作らない**——`tauri build` が bundle/nsis/ へ置いたものを拾うだけ。
 //    MSI（bundle/msi/）は**わざと拾わない**: 既定で管理者権限が要り、perUser 一択という
 //    U-1 の前提（tauri#7184）と食い違うため。配るのは NSIS だけ
+//    V175: ここでは**読むだけ**にした。写すのは feed の検査が通って zip を書いたあと（下の 7）
 const nsisDir = path.join(root, "src-tauri", "target", "release", "bundle", "nsis");
-const collected: string[] = [];
+const nsisNames: string[] = [];
 let sigText = "";
 let setupName = "";
 if (fs.existsSync(nsisDir)) {
@@ -348,8 +431,7 @@ if (fs.existsSync(nsisDir)) {
     // 前回のビルドの成果物が残っていることがあるので、**この版のものだけ**拾う
     if (!name.includes(version)) continue;
     if (!/\.(exe|sig)$/i.test(name)) continue;
-    fs.copyFileSync(path.join(nsisDir, name), path.join(outDir, name));
-    collected.push(name);
+    nsisNames.push(name);
     if (/-setup\.exe$/i.test(name)) setupName = name;
     if (/\.sig$/i.test(name)) sigText = fs.readFileSync(path.join(nsisDir, name), "utf8").trim();
   }
@@ -357,22 +439,46 @@ if (fs.existsSync(nsisDir)) {
 
 // 6) U-1: updater の feed（`latest.json`）。**tauri は作ってくれない**ので、ここで組み立てる。
 //    これを GitHub Releases に置き、memoanima.com の Worker がそのまま返す（プロキシ）
+//    V175: **zip を書く前に**組み立てて検査する（REQ §2「明示」・書いたあとの読み直しは一時フォルダで）。
+//    Windows の署名も R-15 で確かめる（出力は変えない）。1 つでも落ちれば、zip もインストーラも
+//    Mac の配信物も latest.json も dist-release/ に増えない
+let stagedFeed: StagedFeed | null = null;
 if (setupName && sigText) {
+  console.log("== R-15 配る署名を tauri.conf.json の公開鍵で確かめる ==");
+  // V207: 信頼コメントの版も出す版（tauri.conf.json の version）と同じか（tauri build は CLI 2.12 から必ず版を入れる）
+  assertReleaseSignature(path.join(nsisDir, setupName), sigText, updaterPubkey, setupName, version, "Windows のインストーラ");
   // 節の始まりは版で固定されているので、後ろの語（増えたこと／直したこと）は自由でよい。
   // V153: 空のまま出すと**全利用者の更新ダイアログが白紙**になる。黙って進まない
   const notes = buildNotes();
   showNotes(notes);
-  const feed = {
+  const feed = buildFeed({
     version,
     notes,
-    pub_date: new Date().toISOString(),
-    platforms: {
-      "windows-x86_64": { signature: sigText, url: `${DOWNLOAD_BASE}/${setupName}` },
-    },
-  };
-  fs.writeFileSync(path.join(outDir, "latest.json"), JSON.stringify(feed, null, 2), "utf8");
-  collected.push("latest.json");
+    pubDate: new Date().toISOString(),
+    windows: { signature: sigText, url: `${DOWNLOAD_BASE}/${setupName}` },
+    mac: macStaged ? { signature: macStaged.signature, url: `${DOWNLOAD_BASE}/${macStaged.tarName}` } : undefined,
+  });
+  stagedFeed = stageFeed(feed, { version, withMac: macStaged !== null });
+} else if (macStaged) {
+  // 片方だけの feed を作らない（Windows の項目が無い feed は、Windows 全利用者の更新を止める）
+  throw new Error(
+    "--with-mac で止めました: Windows のインストーラと .sig（bundle/nsis/）が見つからないので feed を作れません（何も書いていません）"
+  );
 }
+
+const zipped = zipSync(files, { level: 9 });
+const zipPath = path.join(outDir, zipName);
+fs.writeFileSync(zipPath, zipped);
+
+// 7) V175: 確かめ終わったものだけを dist-release/ へ写す
+commitStaged(path.join(licensesDir, "LICENSES.txt"), outDir, "LICENSES.txt");
+const collected: string[] = [];
+for (const name of nsisNames) {
+  fs.copyFileSync(path.join(nsisDir, name), path.join(outDir, name));
+  collected.push(name);
+}
+if (macStaged) collected.push(...installMacStaged(macStaged, outDir));
+if (stagedFeed) collected.push(commitStaged(stagedFeed.file, outDir, "latest.json"));
 
 console.log(`== 完成: ${zipPath} (${(zipped.length / 1024 / 1024).toFixed(1)} MB) ==`);
 show();
@@ -380,6 +486,10 @@ if (collected.length) {
   console.log(`== インストーラと updater の配信物（U1-A / U1-B） ==`);
   for (const n of collected) {
     console.log(`${String(fs.statSync(path.join(outDir, n)).size).padStart(12)}  ${n}`);
+  }
+  if (macStaged) {
+    // REQ §10-5: Release に足す添付は .app.tar.gz だけ。その .sig は添付しない（中身は latest.json に入っている）
+    console.log(`※ ${macStaged.tarName}.sig は Release に添付しません（中身は latest.json に入っています・REQ §10-5）`);
   }
 } else {
   console.log(

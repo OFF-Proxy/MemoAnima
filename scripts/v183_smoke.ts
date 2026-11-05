@@ -6,7 +6,7 @@
 //   A-82 ほかの修飾キーが 1 つでも押されている間に押した修飾キーは、単体タップの候補にしない（Windows も Mac も）。
 //        押されているかは**イベントのフラグ**で見る（押したキー自身のフラグは除く）。実行側（ModTapWatcher）と
 //        設定画面の取得（main.ts の captureKey）は同じ関数（keymap.ts の tapCandidateOf）で決める
-//   A-83 V181 の Codex 2 回目で「全ゲート緑」だった書き換え 9 通り（Y01〜Y06・Y08・Y09・Y16）を検査で赤にする
+//   A-83 V181 の 独立レビュー 2 回目で「全ゲート緑」だった書き換え 9 通り（Y01〜Y06・Y08・Y09・Y16）を検査で赤にする
 //        （製品のコードは変えない）
 //
 // [S-1] ★修飾キー（Ctrl / Shift / Alt / Meta）の 3 つ・4 つ重ねの全順列 × 離す順 × Windows / Mac で、4 つの口
@@ -17,10 +17,10 @@
 //       「Windows で Win を押したまま Ctrl / Shift / Alt をトン」だけ（同じ規則の帰結・発動しなくなる向きだけ）。
 //       ModTapWatcher の総当たり: 旧版との差は全部「ほかの修飾キーのフラグが立った keydown で旧版が候補を立て、
 //       それが発動した」形だけ。設定画面の取得と実行側の判定が総当たりで 1 つも食い違わない。
-//       IME の変換中（isComposing・keyCode 229・両方）はホーム画面と editor が動かない（Codex 1 回目の Z04・2 回目の W13）。
-//       押したときは門番が開いていて、離すときに閉じた形（入力欄へ移った・ダイアログ・IME）でもタップが動かない（Codex 2 回目の W09）。
+//       IME の変換中（isComposing・keyCode 229・両方）はホーム画面と editor が動かない（独立レビュー 1 回目の Z04・2 回目の W13）。
+//       押したときは門番が開いていて、離すときに閉じた形（入力欄へ移った・ダイアログ・IME）でもタップが動かない（独立レビュー 2 回目の W09）。
 //       実行側と取得が同じ関数を呼び、呼び出し元がイベントのフラグを渡す（構文木）。型では mods の渡し忘れがエラー
-//       （TypeScript に写しを型検査させる・Codex 1 回目の Z12・2 回目の W07 / W08 / C02）
+//       （TypeScript に写しを型検査させる・独立レビュー 1 回目の Z12・2 回目の W07 / W08 / C02）
 // [S-3] ★A-83（V181 の検査の穴・製品は変えない）:
 //   ① Y06 本物の editor.ts の pointerCommandFor（3 ボタン × 修飾 16 × プリセット 5）を Mac / Windows で:
 //       Windows は V181 の前の木と一致・Mac は ⌘ を含まない行が Windows と同じ・⌘ の行は Ctrl に畳んだ行と同じ
@@ -28,19 +28,19 @@
 //       placeholder）: Mac は Ctrl / Alt / Shift の語が残らず・この回の前の t() と同じ・Windows は辞書の原文のまま
 //   ③ Y01・Y09・Y16 文字の入力欄の受け口／Y02・Y03 波形のホイール: **構文木で取り出して動かす**（captureKey と同じ道）。
 //       入力欄は**登録を含むブロックごと**、打ちかけの文字あり／なしの両方で組み立て、偽の要素に実際に付いた受け口へ打鍵を送る
-//       （Codex 1 回目の中1: 条件つき・途中の return で付かない形）。同じブロックの input・✓ / ✕・フォーカスを戻す動きも見る
-//       （Codex 2 回目: 行き場の無いフォーカス＝activeElement が body・打った文字の置き換え）。波形は受け口と、同じ入れ物の本物の
+//       （独立レビュー 1 回目の中1: 条件つき・途中の return で付かない形）。同じブロックの input・✓ / ✕・フォーカスを戻す動きも見る
+//       （独立レビュー 2 回目: 行き場の無いフォーカス＝activeElement が body・打った文字の置き換え）。波形は受け口と、同じ入れ物の本物の
 //       localX（const＝あとから差し替えられない・枠の左端が 0 でない・表示の幅と絵の幅が違う canvas・カーソルの位置 2 つ・
-//       Codex 1 回目の中2・2 回目の W05 / W06）。受け口の種類と passive と囲む条件（if・関数の境目・switch / default・付ける前に抜ける道）の表・
+//       独立レビュー 1 回目の中2・2 回目の W05 / W06）。受け口の種類と passive と囲む条件（if・関数の境目・switch / default・付ける前に抜ける道）の表・
 //       Esc で取消・Ctrl+Enter（Mac は ⌘ も）で確定・
 //       preventDefault ＋ stopPropagation・IME 中は何もしない・Ctrl（Mac は ⌘）＋ホイールの拡大の向きとカーソルの位置・素のホイールの移動・
 //       音が無いときは何もしない。V181 の前の木とこの回の前の木からも同じ道で取り出して比べる
 //   ④ Y04・Y05 addEventListener の配線（editor の mount / unmount・ホーム・取得）を、囲む条件（関数の境目・switch / default・
 //       付ける前に抜ける道＝起動時は DEV の診断ページだけ）まで構文木で表と突き合わせる・付けた口は外す
-// [S-4] ★Codex の Y01〜Y16（V181 の Codex 2 回目の書き換えそのもの）を当てて、16 通りとも挙げた群が赤
+// [S-4] ★独立レビューの Y01〜Y16（V181 の 独立レビュー 2 回目の書き換えそのもの）を当てて、16 通りとも挙げた群が赤
 // [S-0] 無改変の写しでは全部緑
 // [S-R] 反証 34 通り（A-82 の直しを戻す・強すぎる形・呼び出し元がフラグを渡さない・配線を外す・付ける前に抜ける道・型・
-//       Codex 1 回目の Z04 / Z10 / Z12 / Z13 と 2 回目の W01〜W06 / W08〜W10 / W13 を字面のまま）
+//       独立レビュー 1 回目の Z04 / Z10 / Z12 / Z13 と 2 回目の W01〜W06 / W08〜W10 / W13 を字面のまま）
 //
 // ★反証は**実ファイルを書き換えた写し**で走らせる（V177〜V181 と同じ流儀）。写しは node_modules/.v183-smoke/<pid>/
 //  （サンドボックスでは環境変数 V183_SMOKE_WORK。その祖先に node_modules があること）。書き換えは**ちょうど 1 か所**に
@@ -53,6 +53,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
+import { readEditorSource } from "./editorSource";
 
 let pass = 0;
 let fail = 0;
@@ -137,7 +138,9 @@ async function loadTree(dir: string, label: string): Promise<Tree> {
     D,
     Editor: E.Editor,
     mainSrc: rd("src/main.ts"),
-    edSrc: rd("src/editor/editor.ts"),
+    // ★V213 (M-2a): editor.ts の描く処理はコア（src/editor/core/editorCore.ts）へ移った＝editor.ts とコアの字を並べて見る
+    //  （配線の表〔ほかの所の付け外し・modTap.down〕がコアへ移った字を見落とさないように。コアが無い木では editor.ts だけ）
+    edSrc: readEditorSource(dir),
     kmSrc: rd("src/keymap.ts"),
   };
 }
@@ -338,7 +341,7 @@ const short = (code: string) =>
     code
   ] ?? code;
 /** 1 打鍵（押す・離す・くり返し・keyup が来ないまま離れた）／クリック／フォーカスが外れた／時間／描いている間 */
-/** IME の変換中の打鍵（isComposing・keyCode 229）。★Codex 1 回目の Z04（ホーム画面の IME の門番を外しても緑）を見る */
+/** IME の変換中の打鍵（isComposing・keyCode 229）。★独立レビュー 1 回目の Z04（ホーム画面の IME の門番を外しても緑）を見る */
 type Ime = "composing" | "229" | "both";
 type Ev =
   | { k: "down"; code: string; rep?: boolean; ime?: Ime }
@@ -789,7 +792,7 @@ function families(): Fam[] {
       if (a === b) continue;
       out.push({ fam: "lost", desc: `${short(a)}${short(b)}`, s: [d(a), { k: "blur" }, { k: "lost", code: a }, d(b), u(b)] });
     }
-  // ★Codex 1 回目の Z04: IME の変換中の打鍵（単体のタップ・修飾キー＋文字）。ホーム画面・editor の門番が止める形も旧版と同じ
+  // ★独立レビュー 1 回目の Z04: IME の変換中の打鍵（単体のタップ・修飾キー＋文字）。ホーム画面・editor の門番が止める形も旧版と同じ
   for (const ime of ["composing", "229", "both"] as const) {
     for (const c of MODS4) out.push({ fam: "ime", desc: `${ime} tap ${short(c)}`, s: [d(c, false, ime), u(c, ime)] });
     for (const m of MOD16)
@@ -822,7 +825,7 @@ interface ListenerCall {
   type: string;
   fn: ts.Expression;
   opts?: ts.Expression;
-  /** ★Codex 1 回目の Z13: 付ける口を囲む条件（scope から呼び出しまでの if / 三項 / && など）。「条件つきでしか付けない」書き換えを見る */
+  /** ★独立レビュー 1 回目の Z13: 付ける口を囲む条件（scope から呼び出しまでの if / 三項 / && など）。「条件つきでしか付けない」書き換えを見る */
   cond: string;
 }
 /** 文 st の中で、囲む関数から抜ける道（return / throw・st の外のループへ出る break / continue）を、そこへ至る条件つきで並べる。
@@ -879,7 +882,7 @@ function exitPaths(st: ts.Node, sf: ts.SourceFile): ExitPath[] {
   walk(st, [], false, false);
   return out;
 }
-/** ★Codex 2 回目の前に塞いだ形: 付ける口より前の文に「抜ける道」があると、条件の表には出ないまま付かない道ができる。
+/** ★独立レビュー 2 回目の前に塞いだ形: 付ける口より前の文に「抜ける道」があると、条件の表には出ないまま付かない道ができる。
  *  抜ける道を並べ、**全部が DEV の診断ページ（`import.meta.env.DEV && …`）なら 1 語にまとめる**（本番では付ける前に抜けない、が表に残る） */
 function exitsBefore(n: ts.Node, scope: ts.Node, sf: ts.SourceFile): string {
   const paths: ExitPath[] = [];
@@ -916,7 +919,7 @@ function guardsOf(n: ts.Node, scope: ts.Node, sf: ts.SourceFile): string {
     else if (ts.isIterationStatement(p, false)) out.unshift("loop");
     else if (ts.isCatchClause(p)) out.unshift("catch");
     else if (p !== scope && ts.isFunctionLike(p)) {
-      // ★Codex 2 回目の W02: 関数の中で付ける口は、その関数が呼ばれたときだけ付く。どの関数か（名前・何の引数か）を残す
+      // ★独立レビュー 2 回目の W02: 関数の中で付ける口は、その関数が呼ばれたときだけ付く。どの関数か（名前・何の引数か）を残す
       //  （第三者レビューの T02: オブジェクトのメソッド・アクセサの中へ移す形も）
       const q = p.parent;
       const named = (p as ts.FunctionLikeDeclaration).name;
@@ -1046,7 +1049,7 @@ interface Extracted {
   rows: string[];
   fnText: string;
   free: string[];
-  /** 波形だけ: 同じ入れ物にある `localX`（画面の座標 → 波形の x）。★Codex 1 回目の Z10（枠の左端を引き忘れる）を見るため、差し替えずに本物を使う */
+  /** 波形だけ: 同じ入れ物にある `localX`（画面の座標 → 波形の x）。★独立レビュー 1 回目の Z10（枠の左端を引き忘れる）を見るため、差し替えずに本物を使う */
   localX?: { fnText: string; free: string[] };
 }
 /** 文字の入力欄（buildToolOptions の中の `const ta = $("#ed-textinput")`）の受け口の表と、キーの受け口 */
@@ -1072,10 +1075,10 @@ function textareaListeners(src: string): Extracted {
   visit(m);
   if (!block) throw new Error("#ed-textinput の入れ物が無い");
   const calls = listenerCalls(block, sf, (r) => r === "ta");
-  // ★Codex 2 回目の W01: ブロックごと条件の中へ入れる形（`if (!this.textDraft) { const ta = … }`）は、ブロックの中からは見えない。
+  // ★独立レビュー 2 回目の W01: ブロックごと条件の中へ入れる形（`if (!this.textDraft) { const ta = … }`）は、ブロックの中からは見えない。
   //  ブロックそのものを囲む条件（buildToolOptions から）も表の 1 行にする
   const blockRow = `ta ブロック${guardsOf(block, m, sf)}`;
-  // ★Codex 1 回目の中1（Z13）: 関数だけを取り出して呼ぶと、**実際に付くか**（条件つき・途中の return）が見えない。
+  // ★独立レビュー 1 回目の中1（Z13）: 関数だけを取り出して呼ぶと、**実際に付くか**（条件つき・途中の return）が見えない。
   //  登録を含むブロックごと返し、偽の入力欄に付いた受け口へ打鍵を送る（textareaBattery）
   return {
     rows: [blockRow, ...calls.map((c) => `ta.${c.method}(${c.type}, ${fnKind(c.fn, sf)}${c.opts ? `, ${optsText(c.opts, sf)}` : ""})${c.cond}`)],
@@ -1171,7 +1174,15 @@ function buildTextarea(T: Tree, X: Extracted, withDraft: boolean, focusElsewhere
     focusTextInput: () => void calls.push("focus"),
     cancelTextDraft: () => void calls.push("cancel"),
     commitTextDraft: () => void calls.push("commit"),
-  };
+  } as Record<string, unknown> & { textDraft: { text: string } | null };
+  // ★V214 (M-2b-1a): 入力欄の input の中身はコアの setTextDraftText へ移った（PC は `this.setTextDraftText(ta.value)` を呼ぶだけ）。
+  //  偽の this に、**その木のコアの本物の本文**を this＝偽の this で束ねて置く（字で書き写すと、コアの中身を壊す反証 R23・R32・R43 が
+  //  この偽物に隠れて素通りする）。コアの無い前の木（B83・B81）は呼ばない＝置かない（呼べば例外で赤）
+  const stt = classMethod(ts.createSourceFile("editorCore.ts", T.edSrc, ts.ScriptTarget.Latest, true), "EditorCore", "setTextDraftText");
+  if (stt?.body) {
+    const params = stt.parameters.map((p) => p.getText()).join(", ");
+    self.setTextDraftText = compileFn(`(${params}) => ${stt.body.getText()}`, freeIdentifiers(stt), env, self).fn as unknown as (t: string) => void;
+  }
   // ブロック（{ … }）を関数の本文として動かす（compileFn と同じく、囲む関数の変数は env から・this は self）
   compileFn(`() => ${X.fnText}`, X.free, env, self).fn({});
   const built = calls.splice(0).join("+") || "-";
@@ -1296,17 +1307,17 @@ function wheelExpect(mac: boolean): string[] {
         }
   return out;
 }
-/** 受け口の表。★Codex 1 回目の Z13（`if (!this.textDraft) ta.addEventListener(...)`＝打ちかけの間だけ付かない）を見るため、
+/** 受け口の表。★独立レビュー 1 回目の Z13（`if (!this.textDraft) ta.addEventListener(...)`＝打ちかけの間だけ付かない）を見るため、
  *  付ける口を囲む条件と、付ける前に抜ける道も表に入れる（入力欄の 2 つは無し・波形は `if (cv)` の中で、重い処理の最中と
  *  もう開いているときは openAudioPanel が先に抜ける＝どちらも以前からの正しい道） */
 const TA_ROWS = [
-  'ta ブロック [else this.tool === "fill" ／ else this.tool === "shape" ／ if this.tool === "text"]', // 文字の道具のときだけ組む（Codex 2 回目の W01）
+  'ta ブロック [else this.tool === "fill" ／ else this.tool === "shape" ／ if this.tool === "text"]', // 文字の道具のときだけ組む（独立レビュー 2 回目の W01）
   "ta.add(input, arrow)",
   "ta.add(keydown, arrow)",
 ];
 const WAVE_ROWS = [
-  "localX = const（受け口が呼ぶ座標の変換・あとから差し替えられない）", // Codex 2 回目の W06
-  // 受け口は bind の中で付け、bind は render の中で呼び、render は開いたときに条件なしで呼ぶ（Codex 2 回目の W02・第三者レビューの T03＝
+  "localX = const（受け口が呼ぶ座標の変換・あとから差し替えられない）", // 独立レビュー 2 回目の W06
+  // 受け口は bind の中で付け、bind は render の中で呼び、render は開いたときに条件なしで呼ぶ（独立レビュー 2 回目の W02・第三者レビューの T03＝
   //  呼ばれない関数の中へ移す／音があるときだけ呼ぶ、の形）
   "bind() の呼び出し ×1 [fn render ／ 先に抜ける道: if this.busyKind → return ／ if this.audioPanelEl → return]",
   "render() の呼び出し ×3 [fn bind ／ fn box.querySelector(\"#ap-load\")?.addEventListener の引数 ／ if done ／ 先に抜ける道: if self.busyKind → return ／ if !sel → return ／ if this.busyKind → return ／ if this.audioPanelEl → return] [fn bind ／ fn box.querySelector(\"#ap-del\")?.addEventListener の引数 ／ 先に抜ける道: if this.busyKind → return ／ if this.audioPanelEl → return] [先に抜ける道: if this.busyKind → return ／ if this.audioPanelEl → return]",
@@ -1390,7 +1401,7 @@ const KEY_HANDLERS = new Set([
   "loneAltGuard",
   "reloadGuardHandler",
 ]);
-/** いまの配線（2026-09-26・この回の前と同じ）。**変えたらこの表も直す**（黙らない）。[…] は付ける口を囲む条件（Codex 1 回目の Z13）と、
+/** いまの配線（2026-09-26・この回の前と同じ）。**変えたらこの表も直す**（黙らない）。[…] は付ける口を囲む条件（独立レビュー 1 回目の Z13）と、
  *  付ける前に抜ける道（unmount は「mount していなければ抜ける」・起動時は DEV の診断ページ 6 つだけ＝本番では抜けない） */
 const EXPECTED_WIRING = [
   "editor.mount document.add(visibilitychange, this.winLogHandler) [if this.inputLog]",
@@ -1561,7 +1572,7 @@ function familyLines(T: Tree, mac: boolean): { lines: string[]; meta: Fam[]; por
 //  ⚠ 組み込みのプリセットや取得の形を**わざと**変えた回は赤になる: [S-2r]（旧版の木との行ごとの比較）の差が意図どおりかを
 //  先に確かめてから写し直す（指紋だけ写すと、この検査は何も見なくなる）
 // Windows はこの回の前（1854b5c4cb083877）から「Win を押したままのトン」の 96 行（ModTapWatcher・editor・取得 24 行ずつ＋ホーム 8 行 × 3）だけ変わった（[S-2r] が中身を見る）。
-// Mac はこの回の前と同じ値（[S-2r] が 1 行も違わないことを見る）。Codex 1 回目・2 回目の対応で IME の形（isComposing・keyCode 229・両方 × 52 通り）を
+// Mac はこの回の前と同じ値（[S-2r] が 1 行も違わないことを見る）。独立レビュー 1 回目・2 回目の対応で IME の形（isComposing・keyCode 229・両方 × 52 通り）を
 // 足して 946 → 1,102 通りにした
 const FAMILY_FP: Record<string, string> = { win: "705275e3a7022d6e", mac: "685f8b6df2ab7583" };
 
@@ -1843,7 +1854,7 @@ const EXPECTED_SAME_FN = [
   "main homeModTap.down e.key {blocked: false; mods: e; repeat: e.repeat}",
   "editor this.modTap.down e.key mods=e",
 ];
-/** ★Codex 1 回目の Z12・2 回目の W07 / W08 / C02: 「アプリの呼び出し元が mods を渡し忘れたら build が落ちる」は型にしか無い約束。
+/** ★独立レビュー 1 回目の Z12・2 回目の W07 / W08 / C02: 「アプリの呼び出し元が mods を渡し忘れたら build が落ちる」は型にしか無い約束。
  *  構文の形で見ると、同じ意味の書き換え（型の別名）で赤になる。**TypeScript に写しの keymap.ts を型検査させて**確かめる:
  *  付け忘れ 3 通りに `@ts-expect-error`（エラーにならなくなると、それ自体が TS2578 のエラー）・正しい呼び方は通る */
 function typeProbe(T: Tree): string[] {
@@ -1954,7 +1965,7 @@ async function groupS2(T: Tree, B: Tree | null, depth: { w: number; c: number })
         return st.taps > 0 ? ok() : ng(`タップで終わった並びが 0（${st.seqs} 通り）`);
       });
     }
-    await add("[S-2] ★IME の変換中（isComposing・keyCode 229）は、ホーム画面の Ctrl+, とタップ・editor のタップと Ctrl+Z が動かない（キャンバス・ページ本体が対象でも。入力欄は IME でなくても動かない。対照: IME でなく入力欄でもなければ動く・Codex 1 回目の Z04）", () => {
+    await add("[S-2] ★IME の変換中（isComposing・keyCode 229）は、ホーム画面の Ctrl+, とタップ・editor のタップと Ctrl+Z が動かない（キャンバス・ページ本体が対象でも。入力欄は IME でなくても動かない。対照: IME でなく入力欄でもなければ動く・独立レビュー 1 回目の Z04）", () => {
       const bad: string[] = [];
       const H = compileHome(T);
       for (const mac of [false, true]) {
@@ -1975,7 +1986,7 @@ async function groupS2(T: Tree, B: Tree | null, depth: { w: number; c: number })
       setMac(T, null);
       return bad.length ? ng(bad.join(" ／ ")) : ok();
     });
-    await add("[S-2] ★押したときは門番が開いていて、離すときに閉じた形（入力欄へ移った・ダイアログが開いた・ホームは IME も）では、ホーム画面と editor のタップが動かない（離したときの門番・対照: 閉じなければ動く・Codex 2 回目の W09）", () => {
+    await add("[S-2] ★押したときは門番が開いていて、離すときに閉じた形（入力欄へ移った・ダイアログが開いた・ホームは IME も）では、ホーム画面と editor のタップが動かない（離したときの門番・対照: 閉じなければ動く・独立レビュー 2 回目の W09）", () => {
       const bad: string[] = [];
       const H = compileHome(T);
       for (const mac of [false, true]) {
@@ -2370,7 +2381,7 @@ const allGreen = ALL.every((g) => res0[g].every((x) => x.v.ok));
 check("[S-0] 無改変の写しでは全部緑", allGreen);
 
 // =====================================================================================
-// [S-4] ★Codex の Y01〜Y16 ／ [S-R] 反証
+// [S-4] ★独立レビューの Y01〜Y16 ／ [S-R] 反証
 // =====================================================================================
 interface Mutation {
   id: string;
@@ -2383,10 +2394,12 @@ const PF = "src/platform.ts";
 const KM = "src/keymap.ts";
 const MA = "src/main.ts";
 const ED = "src/editor/editor.ts";
+// ★V214 (M-2b-1a): 入力欄の input の中身（打ちかけへ文字を入れる）はコアの setTextDraftText へ移った＝その字を壊す反証の的
+const CORE = "src/editor/core/editorCore.ts";
 const II = "src/i18n/index.ts";
-// ★V181 の Codex 2 回目（review_v181.py の M 表）の書き換えを**そのまま**写した（from / to の字面も同じ）。
+// ★V181 の 独立レビュー 2 回目（review_v181.py の M 表）の書き換えを**そのまま**写した（from / to の字面も同じ）。
 //  V181 の報告書 §12: Y01〜Y06・Y08・Y09・Y16 が全ゲート緑（＝検査の穴）、Y07・Y10〜Y15 は v181 で赤
-const CODEX_Y: (Edit & { id: string; why: string })[] = [
+const REVIEW_Y: (Edit & { id: string; why: string })[] = [
   { id: "Y01", file: ED, why: "textarea commit becomes cancel", from: "            this.commitTextDraft();\n          }\n        });\n        $(\"#ed-text-ok\")", to: "            this.cancelTextDraft();\n          }\n        });\n        $(\"#ed-text-ok\")" },
   { id: "Y02", file: ED, why: "wheel listener passive", from: "          { passive: false }\n        );\n      }\n      box.querySelector(\"#ap-apply\")", to: "          { passive: true }\n        );\n      }\n      box.querySelector(\"#ap-apply\")" },
   { id: "Y03", file: ED, why: "wheel zoom direction reversed", from: "setZoom(zoomT - Math.sign(e.deltaY) * 0.08, v0 + frac * vd, frac);", to: "setZoom(zoomT + Math.sign(e.deltaY) * 0.08, v0 + frac * vd, frac);" },
@@ -2424,7 +2437,7 @@ const Y_EXPECT: Record<string, Group[]> = {
   Y16: ["S-3"],
 };
 const MUTATIONS: Mutation[] = [
-  ...CODEX_Y.map((y) => ({ id: y.id, why: `Codex ${y.why}`, edits: [{ file: y.file, from: y.from, to: y.to }], expect: Y_EXPECT[y.id] })),
+  ...REVIEW_Y.map((y) => ({ id: y.id, why: `独立レビュー ${y.why}`, edits: [{ file: y.file, from: y.from, to: y.to }], expect: Y_EXPECT[y.id] })),
   // ---- [S-R] A-82 の直し ----
   {
     id: "R01",
@@ -2499,7 +2512,7 @@ const MUTATIONS: Mutation[] = [
     edits: [{ file: KM, from: "  if (!f) return false;", to: "  if (!f || !isMacPlatform()) return false;" }],
     expect: ["S-1"],
   },
-  // ---- 配線（④）: Codex の Y04 / Y05 のほかに ----
+  // ---- 配線（④）: 独立レビューの Y04 / Y05 のほかに ----
   {
     id: "R11",
     why: "取得の keyup を capture で受けない",
@@ -2518,22 +2531,22 @@ const MUTATIONS: Mutation[] = [
     edits: [{ file: MA, from: '  window.addEventListener("blur", homeModTapCancel);\n', to: "" }],
     expect: ["S-3"],
   },
-  // ---- Codex 1 回目（V183）の書き換えのうち、この回の最初の検査（9e48b63）で全ゲート緑だった 4 通り（字面もそのまま） ----
+  // ---- 独立レビュー 1 回目（V183）の書き換えのうち、この回の最初の検査（9e48b63）で全ゲート緑だった 4 通り（字面もそのまま） ----
   {
     id: "R14",
-    why: "Codex Z04: ホーム画面が IME の変換中を止めない",
+    why: "独立レビュー Z04: ホーム画面が IME の変換中を止めない",
     edits: [{ file: MA, from: "if (e.isComposing || e.keyCode === 229) return true;", to: "if (false) return true;" }],
     expect: ["S-2"],
   },
   {
     id: "R15",
-    why: "Codex Z10: 波形の座標（localX）が枠の左端を引き忘れる",
+    why: "独立レビュー Z10: 波形の座標（localX）が枠の左端を引き忘れる",
     edits: [{ file: ED, from: "return ((e.clientX - r.left) / r.width) * cv.width;", to: "return (e.clientX / r.width) * cv.width;" }],
     expect: ["S-3"],
   },
   {
     id: "R16",
-    why: "Codex Z12: 型の overload で mods を任意にする（渡し忘れても build が通る）",
+    why: "独立レビュー Z12: 型の overload で mods を任意にする（渡し忘れても build が通る）",
     edits: [
       {
         file: KM,
@@ -2555,7 +2568,7 @@ const MUTATIONS: Mutation[] = [
     ],
     expect: ["S-3"],
   },
-  // ---- 付ける前に抜ける道・型・同じブロックのほかの口（Codex 2 回目の前に自分で塞いだ形） ----
+  // ---- 付ける前に抜ける道・型・同じブロックのほかの口（独立レビュー 2 回目の前に自分で塞いだ形） ----
   {
     id: "R19",
     why: "起動時: ホーム画面のキーの受け口より前に、本番でも抜ける return を差し込む",
@@ -2595,67 +2608,69 @@ const MUTATIONS: Mutation[] = [
   {
     id: "R23",
     why: "文字の入力欄: 打った文字を打ちかけへ入れない（input の受け口の中身）",
-    edits: [{ file: ED, from: "          this.textDraft.text = ta.value;\n", to: "" }],
+    // ★V214 (M-2b-1a): 打ちかけへ文字を入れる 1 行はコアの setTextDraftText へ移った（`ta.value` は引数 `s` になった）。壊し方は同じ
+    edits: [{ file: CORE, from: "    this.textDraft.text = s;\n", to: "" }],
     expect: ["S-3"],
   },
-  // ---- Codex 2 回目（e8629f8・自前の書き換え）のうち全ゲート緑だったもの（字面のまま）。W07 は R21 と同じ・W11 は赤だった ----
+  // ---- 独立レビュー 2 回目（e8629f8・自前の書き換え）のうち全ゲート緑だったもの（字面のまま）。W07 は R21 と同じ・W11 は赤だった ----
   {
     id: "R24",
-    why: "Codex 2 回目 W01: 入力欄のブロックごと、打ちかけの間は組まない（`if (!this.textDraft) {`）",
+    why: "独立レビュー 2 回目 W01: 入力欄のブロックごと、打ちかけの間は組まない（`if (!this.textDraft) {`）",
     edits: [{ file: ED, from: "      {\n        const ta = $(\"#ed-textinput\") as HTMLTextAreaElement;", to: "      if (!this.textDraft) {\n        const ta = $(\"#ed-textinput\") as HTMLTextAreaElement;" }],
     expect: ["S-3"],
   },
   {
     id: "R25",
-    why: "Codex 2 回目 W02: 波形のホイールの受け口を、呼ばれない関数の中へ移す",
+    why: "独立レビュー 2 回目 W02: 波形のホイールの受け口を、呼ばれない関数の中へ移す",
     edits: [{ file: ED, from: "        cv.addEventListener(\n          \"wheel\",", to: "        void (() => cv.addEventListener(\n          \"wheel\"," }, { file: ED, from: "          { passive: false }\n        );\n      }\n      box.querySelector(\"#ap-apply\")", to: "          { passive: false }\n        ));\n      }\n      box.querySelector(\"#ap-apply\")" }],
     expect: ["S-3"],
   },
   {
     id: "R26",
-    why: "Codex 2 回目 W03: editor の mount の keydown を、届かない switch の default へ移す",
+    why: "独立レビュー 2 回目 W03: editor の mount の keydown を、届かない switch の default へ移す",
     edits: [{ file: ED, from: "    window.addEventListener(\"keydown\", this.keydownHandler);", to: "    switch (0 as number) { case 0: break; default: window.addEventListener(\"keydown\", this.keydownHandler); }" }],
     expect: ["S-3"],
   },
   {
     id: "R27",
-    why: "Codex 2 回目 W04: 入力欄: フォーカスの行き場が無い（activeElement ＝ body）ときは keydown を付ける前に return",
+    why: "独立レビュー 2 回目 W04: 入力欄: フォーカスの行き場が無い（activeElement ＝ body）ときは keydown を付ける前に return",
     edits: [{ file: ED, from: "        ta.addEventListener(\"keydown\", (e) => {", to: "        if (document.activeElement === document.body) return;\n        ta.addEventListener(\"keydown\", (e) => {" }],
     expect: ["S-3"],
   },
   {
     id: "R28",
-    why: "Codex 2 回目 W05: 波形の localX を 100 で頭打ちに",
+    why: "独立レビュー 2 回目 W05: 波形の localX を 100 で頭打ちに",
     edits: [{ file: ED, from: "return ((e.clientX - r.left) / r.width) * cv.width;", to: "return Math.min(100, ((e.clientX - r.left) / r.width) * cv.width);" }],
     expect: ["S-3"],
   },
   {
     id: "R29",
-    why: "Codex 2 回目 W06: 波形の localX を let にして、あとから 0 を返す関数に差し替える",
+    why: "独立レビュー 2 回目 W06: 波形の localX を let にして、あとから 0 を返す関数に差し替える",
     edits: [{ file: ED, from: "        const localX = (e: { clientX: number }) => {", to: "        let localX = (e: { clientX: number }) => {" }, { file: ED, from: "        const localY = (e: { clientY: number }) => {", to: "        localX = (_e: { clientX: number }) => 0;\n        const localY = (e: { clientY: number }) => {" }],
     expect: ["S-3"],
   },
   {
     id: "R30",
-    why: "Codex 2 回目 W08: 型の overload の mods を `ModFlags | undefined` に（undefined を渡せる）",
+    why: "独立レビュー 2 回目 W08: 型の overload の mods を `ModFlags | undefined` に（undefined を渡せる）",
     edits: [{ file: KM, from: "down(key: string, opts: { repeat?: boolean; blocked?: boolean; mods: ModFlags }): void;", to: "down(key: string, opts: { repeat?: boolean; blocked?: boolean; mods: ModFlags | undefined }): void;" }],
     expect: ["S-2"],
   },
   {
     id: "R31",
-    why: "Codex 2 回目 W09: ホーム画面の keyup が門番（入力欄・ダイアログ・IME）を見ない",
+    why: "独立レビュー 2 回目 W09: ホーム画面の keyup が門番（入力欄・ダイアログ・IME）を見ない",
     edits: [{ file: MA, from: "  if (!key || homeKeyBlocked(e)) return;", to: "  if (!key || (homeKeyBlocked(e) && e.type !== \"keyup\")) return;" }],
     expect: ["S-2"],
   },
   {
     id: "R32",
-    why: "Codex 2 回目 W10: 入力欄の input が打ちかけを置き換えず、足していく",
-    edits: [{ file: ED, from: "          this.textDraft.text = ta.value;", to: "          this.textDraft.text += ta.value;" }],
+    why: "独立レビュー 2 回目 W10: 入力欄の input が打ちかけを置き換えず、足していく",
+    // ★V214 (M-2b-1a): 打ちかけへ文字を入れる 1 行はコアの setTextDraftText へ移った（`ta.value` は引数 `s` になった）。壊し方は同じ
+    edits: [{ file: CORE, from: "    this.textDraft.text = s;", to: "    this.textDraft.text += s;" }],
     expect: ["S-3"],
   },
   {
     id: "R33",
-    why: "Codex 2 回目 W13: ホーム画面の IME の門番を「どちらか片方だけのとき」にする（本物の変換中＝両方立つと通る）",
+    why: "独立レビュー 2 回目 W13: ホーム画面の IME の門番を「どちらか片方だけのとき」にする（本物の変換中＝両方立つと通る）",
     edits: [{ file: MA, from: "if (e.isComposing || e.keyCode === 229) return true;", to: "if (!!e.isComposing !== (e.keyCode === 229)) return true;" }],
     expect: ["S-2"],
   },
@@ -2683,7 +2698,7 @@ const MUTATIONS: Mutation[] = [
     ],
     expect: ["S-3"],
   },
-  // ---- 第三者レビュー（Codex 3 回目の代わり・9e2e390・自前の書き換え）の書き換え（字面のまま）。T15 は安全な対照（下の SAFE）----
+  // ---- 第三者レビュー（独立レビュー 3 回目の代わり・9e2e390・自前の書き換え）の書き換え（字面のまま）。T15 は安全な対照（下の SAFE）----
   {
     id: "R36",
     why: "第三者 T01: editor の mount: keydown / keyup の登録を名前付きブロックに入れ、'break wire'（ラベル付き break）で抜ける道を作る（document.hidden のとき＝裏で開いた作品ではキーが一切効かない）",
@@ -2729,7 +2744,8 @@ const MUTATIONS: Mutation[] = [
   {
     id: "R43",
     why: "第三者 T08: 文字の入力欄: 打った文字を trim してから打ちかけへ入れる（先頭・末尾の空白と改行が消える）",
-    edits: [{ file: ED, from: "          this.textDraft.text = ta.value;\n", to: "          this.textDraft.text = ta.value.trim();\n" }],
+    // ★V214 (M-2b-1a): 打ちかけへ文字を入れる 1 行はコアの setTextDraftText へ移った（`ta.value` は引数 `s` になった）。壊し方は同じ
+    edits: [{ file: CORE, from: "    this.textDraft.text = s;\n", to: "    this.textDraft.text = s.trim();\n" }],
     expect: ["S-3"],
   },
   {
@@ -2782,18 +2798,18 @@ const MUTATIONS: Mutation[] = [
   },
   {
     id: "R17",
-    why: "Codex Z13: 文字の入力欄のキーの受け口を、打ちかけの間は付けない",
+    why: "独立レビュー Z13: 文字の入力欄のキーの受け口を、打ちかけの間は付けない",
     edits: [{ file: ED, from: 'ta.addEventListener("keydown", (e) => {', to: 'if (!this.textDraft) ta.addEventListener("keydown", (e) => {' }],
     expect: ["S-3"],
   },
 ];
 /** ★安全な対照: 動きも約束も変えない書き換え。**当てても全部緑のまま**であること（検査が字面に寄りすぎて「壊していないのに赤」に
- *  ならないか）。Codex 2 回目の C02（型を別名へ）・第三者レビューの T15（捕まえる throw を前に置く）・自前の L01（何も囲まないラベルの break）。
- *  ⚠ Codex 2 回目の C01（登録を if (true) で囲む）は**赤のまま**＝囲む条件の表は字面で固定する設計（報告書 §6） */
+ *  ならないか）。独立レビュー 2 回目の C02（型を別名へ）・第三者レビューの T15（捕まえる throw を前に置く）・自前の L01（何も囲まないラベルの break）。
+ *  ⚠ 独立レビュー 2 回目の C01（登録を if (true) で囲む）は**赤のまま**＝囲む条件の表は字面で固定する設計（報告書 §6） */
 const SAFE: { id: string; why: string; edits: Edit[] }[] = [
   {
     id: "C02",
-    why: "Codex 2 回目 C02（安全な対照）: 必須の opts の型を別名へ移す（呼び出しの約束は同じ）",
+    why: "独立レビュー 2 回目 C02（安全な対照）: 必須の opts の型を別名へ移す（呼び出しの約束は同じ）",
     edits: [
       {
         file: KM,

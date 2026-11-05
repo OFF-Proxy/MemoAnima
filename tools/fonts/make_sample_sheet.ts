@@ -63,7 +63,7 @@ const FONTS: FontDef[] = [
   { key: "kaku", label: "Zen Kaku Gothic New", file: "kaku.woff2", family: "M10Kaku", sizes: [12, 16, 20, 24], maxMidTone: 100 },
   // ★DotGothic16 は **outline** に切り替わった（作者決定 2026-09-22・設計グリッドが無いことの実測を受けて）。
   //   dot かどうかは上の isDot() が fonts.ts から読むので、ここには書かない。
-  //   ⚠ V176 で一度、アプリは dot のまま**この表だけ** outline にして緑にしかけた（Codex が指摘）。
+  //   ⚠ V176 で一度、アプリは dot のまま**この表だけ** outline にして緑にしかけた（独立レビューが指摘）。
   //   いまは**アプリ自身が outline で描く**ので、検査がそれに従うのが正しい
   { key: "dot16", label: "DotGothic16", file: "dot16.woff2", family: "M10Dot16", sizes: [12, 16, 20, 24, 32, 48], maxMidTone: 100 },
   { key: "tegaki", label: "Yomogi", file: "tegaki.woff2", family: "M10Tegaki", sizes: [16, 20, 24], maxMidTone: 100 },

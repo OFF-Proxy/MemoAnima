@@ -20,6 +20,10 @@ export interface FrameClipEntry {
   layers: IndexBuf[];
   /** M5-1: SE配置（SeTrack id 群）。貼り付け先に同 id が存在するものだけ残す（REQ確定規則） */
   se?: string[];
+  /** V205 (A-113): このコマだけのレイヤーの表示色（"#RRGGBB"）。`layers` と同じ並び（下→上の実効描画順）で、色の無いレイヤーは ""。
+   *  コマに色が 1 つも無ければ持たない。貼るときは絵と同じく**位置**で貼り先のレイヤーへ付ける（id ではない）。
+   *  文字列なので畳まない（packClip／unpackClip は触らない） */
+  colors?: string[];
   /** V156 (P-5): 畳んであるときの gzip 列（`layers` と入れ替わりで入る） */
   layersZ?: Uint8Array[];
   /** V156 (P-5): 畳んだ中身が 16bit 索引だったか（開くとき同じ幅に戻す） */
@@ -80,7 +84,7 @@ export async function unpackClip(clip: FrameClip): Promise<void> {
   clip.packed = false;
 }
 
-/** V166 (Codex 指摘・優先度高③): **開く前に**「開いたら何バイトになるか」を答える。
+/** V166 (独立レビューの指摘・優先度高③): **開く前に**「開いたら何バイトになるか」を答える。
  *
  *  ★なぜ要るか: 貼り付けは `unpackClip` で**クリップ全体を生バッファへ展開してから**
  *   見積もりに来ていた。1,098コマ×20レイヤーなら、断るより先に 1.57GB を確保してしまう
@@ -97,7 +101,7 @@ export function clipUnpackedBytes(clip: FrameClip): number {
   return n;
 }
 
-/** V166 (Codex 指摘・優先度高②): コピーが写し取る量（`makeClip` が確保する量）。
+/** V166 (独立レビューの指摘・優先度高②): コピーが写し取る量（`makeClip` が確保する量）。
  *  `makeClip` は「選んだコマ × そのコマの実効レイヤー数」だけ `copyIndexBuf` する。 */
 export function clipCopyBytes(p: Project, indices: number[]): number {
   const w = p.indexBits === 16 ? 2 : 1;
@@ -141,12 +145,16 @@ export function makeClip(p: Project, indices: number[]): FrameClip {
   const frames: FrameClipEntry[] = indices.map((fi) => {
     const f = p.frames[fi];
     const ids = effectiveLayerIds(p, f);
-    return {
+    const entry: FrameClipEntry = {
       // M11-16: 透明の紙（0）は "" のまま持つ。壊れた添字（colorTable に無い）は従来どおり白へ
       paperHex: f.paper === 0 ? "" : p.colorTable[f.paper] || "#ffffff",
       layers: ids.map((id) => copyIndexBuf(f.layers[id] ?? allocIndexBuf(p))),
       se: f.se && f.se.length > 0 ? [...f.se] : undefined,
     };
+    // V205 (A-113): このコマだけの表示色を、絵と同じ並びで写す（色の無いコマは持たない）
+    const fc = f.layerColors;
+    if (fc && ids.some((id) => !!fc[id])) entry.colors = ids.map((id) => fc[id] ?? "");
+    return entry;
   });
   return { palette: [...p.colorTable], frames };
 }
@@ -157,6 +165,9 @@ export function makeClip(p: Project, indices: number[]): FrameClip {
  *   必要なら ensureColor が 16bit 自動昇格する（昇格検知は呼び出し側が indexBits を比較）。
  * - レイヤー数差: 不足分は透明・余剰分（クリップ側が多い）は最上位へ下→上順に焼き込み。
  * - 返る Frame の layers は現 layerDefs（下→上）に対応。order は undefined（標準順）。
+ * - V205 (A-113): このコマだけの表示色（`colors`）は絵と同じく k 番目を `layerDefs[k]` のレイヤーへ（id ではなく位置）。
+ *   貼り先で 📌（全コマ共通）のレイヤーの位置には付けない（絵もそこには入らない）・最上位へ焼き込む余りの色は捨てる・
+ *   色が 1 つも付かなければ `layerColors` のキーを作らない。運ぶのはコマだけの色（`LayerDef.displayColor` は貼り先のまま）
  */
 export function buildFramesFromClip(p: Project, clip: FrameClip): Frame[] {
   // 1) 使用色の収集（index 0=透明は除外）
@@ -212,11 +223,19 @@ export function buildFramesFromClip(p: Project, clip: FrameClip): Frame[] {
     // （同一メモ=保持／別メモ=未知SEは自動で外れる。REQ §3 確定規則）
     const validSe = new Set((p.audio?.se ?? []).map((s) => s.id));
     const se = e.se ? [...new Set(e.se)].filter((id) => validSe.has(id)) : [];
-    return {
+    const out: Frame = {
       paper: paperIdx[fi],
       layers,
       order: undefined,
       se: se.length > 0 ? se : undefined,
     };
+    // V205 (A-113): 表示色は位置で（defs[k] へ）。📌 の位置と、defs より先（最上位へ焼き込んだ余り）の色は付けない
+    const colors: Record<string, string> = {};
+    for (let k = 0; k < defs.length; k++) {
+      const c = e.colors?.[k];
+      if (c && defs[k].shared !== true) colors[defs[k].id] = c;
+    }
+    if (Object.keys(colors).length > 0) out.layerColors = colors;
+    return out;
   });
 }

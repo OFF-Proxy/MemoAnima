@@ -65,7 +65,7 @@ export function projectSource(p: Project): FrameSource {
       const u32 = compositeFrame(p, i);
       const out = new Uint8ClampedArray(u32.buffer.slice(0, PIXELS * 4));
       // 先回り: 次の数コマを裏で起こしておく（待たずに進む）。
-      // ★Codex 指摘（低）: MP4 のループは `i % count` で末尾から先頭へ戻るので、**回り込んで**先回りする
+      // ★独立レビューの指摘（低）: MP4 のループは `i % count` で末尾から先頭へ戻るので、**回り込んで**先回りする
       //  （ループしない書き出しでは末尾で 0/1 コマ目を余分に起こすだけ＝数 MB・只で眠りに戻る）
       const n = p.frames.length;
       for (let k = 1; k <= EXPORT_PREWAKE && n > 0; k++) {

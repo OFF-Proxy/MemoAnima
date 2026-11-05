@@ -20,6 +20,7 @@
 // 6. i18n（7言語・差し込み）
 import fs from "node:fs";
 import path from "node:path";
+import { readEditorSource } from "./editorSource";
 import {
   snapshotBytes,
   saveSnapshotPlan,
@@ -46,7 +47,8 @@ function check(name: string, ok: boolean, detail = "") {
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (p: string) => fs.readFileSync(path.join(root, p), "utf8");
-const edRaw = read("src/editor/editor.ts");
+// V213: editor.ts とコア（src/editor/core/editorCore.ts）を合わせて読む（数え方は同じ）
+const edRaw = readEditorSource(root);
 const libRaw = read("src/library.ts");
 const strip = (s: string) => s.replace(/^[ \t]*\/\/.*$/gm, ""); // 自分のコメントに当たらない（V165/V167 の反省）
 const ed = strip(edRaw);
@@ -158,23 +160,77 @@ function bodyOf(src: string, fn: string): string | null {
   return end < 0 ? src.slice(start) : src.slice(start, end);
 }
 
+/** V213: PC が上書きするフック（`protected override 名前(…)`）の本体。コアの同名の既定（何もしない）ではなく画面側を見る */
+function pcHookBody(src: string, fn: string): string {
+  const m = new RegExp(
+    `\\n  protected override ${fn}\\s*(?:<[^>]{0,60}>)?\\s*(?:\\([^)]*\\)|\\([\\s\\S]{0,400}?\\))\\s*(?::[^{]{0,120})?\\{`
+  ).exec(src);
+  if (!m) return "";
+  const start = m.index + m[0].length;
+  const end = src.indexOf("\n  }", start);
+  return end < 0 ? src.slice(start) : src.slice(start, end);
+}
+
+/** V213: prepareSnapshot（コア）の「保存の準備…」の表示の行（数字・止まって見えるときの文言・タイマー）は
+ *  PC の savePrepShow へ分けた。表示の検査は両方の本体を合わせて見る（前の木では savePrepShow が無い＝prepareSnapshot だけ） */
+function prepView(src: string): string {
+  return (bodyOf(src, "prepareSnapshot") ?? "") + "\n" + pcHookBody(src, "savePrepShow");
+}
+
+/** 止まった判定のタイマーを finally で必ず止める。前の字: prepareSnapshot の finally の中で `clearInterval(stallTimer);`。
+ *  今の字: prepareSnapshot の finally が `this.savePrepShow("end", …)` を呼び、PC の savePrepShow の "end" がタイマーを止める */
+function stallTimerClearedInFinally(src: string): boolean {
+  const prep = bodyOf(src, "prepareSnapshot") ?? "";
+  if (/clearInterval\(stallTimer\);/.test(prep)) return true;
+  return (
+    /finally \{[\s\S]{0,200}?this\.savePrepShow\("end", prog\);/.test(prep) &&
+    /case "end":\s*clearInterval\(this\.savePrepStallTimer\);/.test(pcHookBody(src, "savePrepShow"))
+  );
+}
+
 // ================= 3. 保存の配線 =================
 {
   const save = bodyOf(ed, "runBackgroundSave") ?? "";
   check("3 runBackgroundSave が見つかる", save !== "");
-  const iPrep = save.indexOf("await this.prepareSnapshot()");
-  const iExpect = save.indexOf("const expectFrames = this.project.frames.length;");
-  const iEpoch = save.indexOf("const epoch0 = this.editEpoch;");
-  const iPost = save.indexOf("worker.postMessage({");
-  check("3 ★写す前に見積もる（prepareSnapshot を呼ぶ）", iPrep >= 0);
-  check("3 ★待ちは基準点（expectFrames / epoch0）より**前**", iPrep >= 0 && iPrep < iExpect && iPrep < iEpoch, `prep=${iPrep} expect=${iExpect} epoch=${iEpoch}`);
-  check("3 基準点は postMessage より前（従来どおり）", iEpoch >= 0 && iEpoch < iPost);
-  check("3 断られたら写さない（null で return false）", /if \(!prep\) return false;/.test(save));
+  // ★V201 (M-1a): 「見積り → 書く値 → 基準点 → 写し」の並びは共通の部品（saveCore.ts の saveWork）の中に移った。
+  //  editor は見積り（prepareSnapshot）を部品の prepare の口として渡し、断られたら（stage "refused"）写さずに false を返す。
+  //  見張る中身は同じ: 待ちは基準点より前・基準点は写し（postMessage）より前・断られたら写さない
+  const core = read("src/editor/saveCore.ts").replace(/\r\n/g, "\n");
+  const sw = (() => {
+    // V202 (M-1a): saveWork に型の欄（書く口の戻りを広げるジェネリクス）を足したので、名前の後ろの `<` も受ける（中身の見張りは同じ）
+    const at = core.search(/export async function saveWork[<(]/);
+    return at < 0 ? "" : core.slice(at, core.indexOf("\n}\n", at));
+  })();
+  check("3 部品の saveWork が見つかる", sw !== "");
+  const iPrep = sw.indexOf("if (d.prepare && !(await d.prepare())) return { ok: false, stage: \"refused\" };");
+  const iStamp = sw.indexOf("stamp = stampForSave(p, ");
+  const iExpect = sw.indexOf("const expectFrames = p.frames.length;");
+  const iEpoch = sw.indexOf("const edited = d.markEdits();");
+  const iPost = sw.indexOf("const encoded = d.encode(p);");
+  check(
+    "3 ★写す前に見積もる（editor が prepareSnapshot を部品の prepare の口に渡し、部品が最初に待つ）",
+    iPrep >= 0 && /prepare: async \(\) => \(await this\.prepareSnapshot\(\)\) !== null,/.test(save)
+  );
+  check(
+    "3 ★待ちは基準点（expectFrames / 編集の回数の控え）より**前**（書く値をそろえるのは待ちのあと）",
+    iPrep >= 0 && iPrep < iStamp && iStamp < iExpect && iPrep < iEpoch,
+    `prep=${iPrep} stamp=${iStamp} expect=${iExpect} epoch=${iEpoch}`
+  );
+  check(
+    "3 基準点は写し（encode の口＝postMessage）より前（従来どおり）",
+    iEpoch >= 0 && iEpoch < iPost && /markEdits: \(\) => \{\s*const epoch0 = this\.editEpoch;/.test(save)
+  );
+  check(
+    "3 断られたら写さない（部品は refused を返して写しの口を呼ばない・editor は return false）",
+    iPrep >= 0 && iPrep < iPost && /if \(r\.stage === "refused"\) return false;/.test(save)
+  );
 
   const prep = bodyOf(ed, "prepareSnapshot") ?? "";
   check("3 prepareSnapshot が見つかる", prep !== "");
   // ★V161-A: ロックを足していない
-  check("3 ★待ちの間にロックを掛けない（beginBusy / ed-busy が無い）", !/beginBusy\(/.test(prep) && !/ed-busy/.test(prep) && !/runHeavy\(/.test(prep));
+  // V213: 表示の行は PC の savePrepShow へ分けたので、そちらにもロックが無いことを見る
+  const prepAll = prepView(ed);
+  check("3 ★待ちの間にロックを掛けない（beginBusy / ed-busy が無い）", !/beginBusy\(/.test(prepAll) && !/ed-busy/.test(prepAll) && !/runHeavy\(/.test(prepAll));
   check("3 ★soft を超えたら掃除を待つ（plan=sweep）", /saveSnapshotPlan\(est\.est\)/.test(prep) && /await this\.sweepPass\(\);/.test(prep));
   check("3 ★1周ごとに条件を見直す（無限に回さない: clone になった／窓の外に起きているコマが無い／画面を離れた）",
     /if \(saveSnapshotPlan\(est\.est\) === "clone"\) break;/.test(prep) && /if \(prog\.outside === 0\) break;/.test(prep) && /if \(!this\.mounted\) break;/.test(prep));
@@ -191,12 +247,12 @@ function bodyOf(src: string, fn: string): string | null {
   check("3 ピルは段階に合わせて描き直す", /this\.renderSavePhase\(\);[\s\S]{0,60}?el\.hidden = false;/.test(bodyOf(ed, "updateSavePill") ?? ""));
   const wait = bodyOf(ed, "waitForSave") ?? "";
   check("3 ★waitForSave（閉じる・別名・書き出しの前）も同じ段階の文言を出す（中央向け）", /this\.cb\.busy\?\.\(this\.savePhaseText\("central"\)\)/.test(wait));
-  // Codex 指摘（中）×2: 中央表示（モーダル）は「描き続けられます」と言わない／進みが止まったら文言を切り替える
+  // 独立レビューの指摘（中）×2: 中央表示（モーダル）は「描き続けられます」と言わない／進みが止まったら文言を切り替える
   const phaseText = bodyOf(ed, "savePhaseText") ?? "";
   check("3 ★中央表示は「描き続けられます」を言わない（prepareWait を使う）", /where === "central"\) return t\("ed\.save\.prepareWait\.msg", v\);/.test(phaseText));
   check("3 ★進みが止まったら文言を切り替える（prepareStalled）", /this\.savePrepStalled \? t\("ed\.save\.prepareStalled\.msg", v\) : t\("ed\.save\.prepare\.msg", v\)/.test(phaseText));
-  check("3 止まった判定は時間で見る（3秒・1秒ごと）", /SAVE_PREP_STALL_MS = 3000;/.test(ed) && /setInterval\(\(\) => \{[\s\S]{0,300}?SAVE_PREP_STALL_MS/.test(bodyOf(ed, "prepareSnapshot") ?? ""));
-  check("3 止まった判定のタイマーは finally で必ず止める", /clearInterval\(stallTimer\);/.test(bodyOf(ed, "prepareSnapshot") ?? ""));
+  check("3 止まった判定は時間で見る（3秒・1秒ごと）", /SAVE_PREP_STALL_MS = 3000;/.test(ed) && /setInterval\(\(\) => \{[\s\S]{0,300}?SAVE_PREP_STALL_MS/.test(prepView(ed)));
+  check("3 止まった判定のタイマーは finally で必ず止める", stallTimerClearedInFinally(ed));
   check("3 写しに入ったら「保存中」へ戻す", /this\.setSavePhase\("save"\);/.test(save));
   check("3 掃除の1周は Promise で待てる（sweepJob）", /private sweepJob: Promise<void> \| null = null;/.test(ed) && /this\.sweepJob = job;/.test(ed));
   check("3 掃除の進みをピルへ流す口がある", /this\.sweepProgressCb\?\.\(\);/.test(ed));
@@ -242,19 +298,20 @@ function wakeSites(src: string): { fn: string; prepare: boolean }[] {
     "deleteFolderWithContents", // フォルダごと削除（全コマ×消す枚数）
     "deleteLayerInner", // レイヤー削除（全コマ×1枚）
     "mergeLayerDownInner", // レイヤー統合（全コマ×2枚）
-    "pasteLayerAllFramesInner", // 全コマへレイヤー貼り付け
+    "pasteLayerClipInto", // 全コマ・範囲へレイヤー貼り付け（V199 で pasteLayerAllFramesInner から名前が変わった。見積もりは同じ関数の先頭）
     "sharedScanOthersDiffer", // 📌 の見比べ（read）
     "toggleLayerSharedInner", // 📌 の切り替え
   ].sort();
+  // V199 (A-105): 全コマへレイヤー貼り付けの prepare は、**触った面だけ**を wakeLayer で起こす形（pushLayerPasteHistory）に変わった
+  //  ＝全コマを起こす wakeLayersAllFrames を呼ばない（起こす量は前より少ない）。一覧から外した（5 → 4）
   const EXPECT_PREPARE = [
     "deleteFolderWithContents",
     "deleteLayerInner",
     "mergeLayerDownInner",
-    "pasteLayerAllFramesInner",
     "toggleLayerSharedInner",
   ].sort();
   check("4 ★直接の呼び出し元は一覧どおり（editor.ts・6か所）", JSON.stringify(direct) === JSON.stringify(EXPECT_DIRECT), `実際=${direct.join(",")}`);
-  check("4 ★履歴の prepare は一覧どおり（5か所）", JSON.stringify(prepare) === JSON.stringify(EXPECT_PREPARE), `実際=${prepare.join(",")}`);
+  check("4 ★履歴の prepare は一覧どおり（4か所・V199 で 5 → 4）", JSON.stringify(prepare) === JSON.stringify(EXPECT_PREPARE), `実際=${prepare.join(",")}`);
   // (a) 直接の呼び出し元は同じ関数に見積りがある
   for (const fn of EXPECT_DIRECT) {
     const body = bodyOf(ed, fn) ?? "";
@@ -262,10 +319,16 @@ function wakeSites(src: string): { fn: string; prepare: boolean }[] {
   }
   // (b) prepare の許可一覧（理由: 元の操作が同じ面を見積り済み。undo/redo が起こすのは同じレイヤー・
   //     控えの実体は履歴予算（bytes）が持つ。V166 の判断を踏襲＝この回では見積りを足さない）
-  check("4 prepare の5か所は許可一覧に載っている（理由は報告書 §N）", EXPECT_PREPARE.length === 5);
+  check("4 prepare の4か所は許可一覧に載っている（理由は報告書 §N・V199 で 5 → 4）", EXPECT_PREPARE.length === 4);
   // 書き出しの入口は呼んでいない
   check("4 ★書き出しの入口（#ed-export）で全コマを起こさない", !/#ed-export"\)\.onclick = async[\s\S]{0,1600}?wakeLayersAllFrames\(/.test(ed));
   check("4 ★書き出しの入口（library.exportSelected）で全コマを起こさない", wakeSites(lib).length === 0 && !/wakeLayersAllFrames/.test(lib));
+  // V201 (M-1a): 保存とオートセーブの手順を移した共通の部品も走査する（前は editor.ts と library.ts だけを見ていた）。
+  //  部品は作品まるごとを起こさない（写しは眠った控えのまま Worker へ渡す・オートセーブも控えをそのまま写す）
+  {
+    const coreSrc = read("src/editor/saveCore.ts");
+    check("4 ★保存の共通の部品（saveCore.ts）で全コマを起こさない（呼び出し 0・import も無い）", coreSrc !== "" && wakeSites(coreSrc).length === 0 && !/wakeLayersAllFrames|wakeFrame\b|wakeLayer\b/.test(coreSrc));
+  }
   // PerfOp の**列挙そのもの**を読む（コメントに「export.wake」と書いてあっても引っかからない・v159 と同じ作法）
   const perfBlock = read("src/perf.ts").match(/export type PerfOp =([\s\S]*?);/)?.[1] ?? "";
   const perfOps = new Set((perfBlock.match(/^\s*\|\s*"([a-z.]+)"/gm) ?? []).map((l) => l.replace(/^\s*\|\s*"|"$/g, "")));
@@ -290,7 +353,7 @@ function wakeSites(src: string): { fn: string; prepare: boolean }[] {
   const mainTs = read("src/main.ts");
   check("5 ★getFrameRgba は Promise を返す型（同期版を残さない）", /getFrameRgba\(i: number\): Promise<Uint8ClampedArray>;/.test(fsrc) && !/getFrameRgba\(i: number\): Uint8ClampedArray/.test(fsrc));
   check("5 exporter.ts に同期の getFrameRgba 定義が残っていない", !/getFrameRgba\(i: number\): Uint8ClampedArray/.test(exp));
-  // ★呼ぶ側は全部 await。**src/ と scripts/ の全ファイル**を走査する（Codex 指摘・低: exporter.ts だけ見ていて、
+  // ★呼ぶ側は全部 await。**src/ と scripts/ の全ファイル**を走査する（独立レビューの指摘・低: exporter.ts だけ見ていて、
   //  tsc の範囲外にある scripts/ の取りこぼし（m1120 / m1122）を見逃していた）。
   //  「呼び出し」＝ `.getFrameRgba(` / `collectGifPalette(` の直後が引数（定義・型・プロパティ名は除く）
   const listTs = (dir: string): string[] => {
@@ -327,9 +390,9 @@ function wakeSites(src: string): { fn: string; prepare: boolean }[] {
   }
   check("5 ★src/ と scripts/ の呼び出しは全部 await（取りこぼし無し）", calls >= 8 && leaks.length === 0, `${leaks.length} 件 / 全 ${calls}: ${leaks.slice(0, 4).join(" | ")}`);
   check("5 collectGifPalette は async（main.ts も await）", /export async function collectGifPalette/.test(exp) && /await collectGifPalette\(src, whiteBg\)/.test(mainTs));
-  // Codex 指摘（中）: GIF の二重走査を省く（見積りのパレットを渡す）
+  // 独立レビューの指摘（中）: GIF の二重走査を省く（見積りのパレットを渡す）
   check("5 ★GIF は見積りのパレットを書き出しへ渡す（二重走査しない）", /gifPalette\?: number\[\] \| null;/.test(exp) && /o\.gifPalette !== undefined \? o\.gifPalette : await collectGifPalette\(src, o\.whiteBg\)/.test(exp) && /gifPalette: format === "gif" \? gifPal : undefined,/.test(mainTs));
-  // Codex 指摘（低）: MP4 のループ境界でも先回りが効く（回り込み）
+  // 独立レビューの指摘（低）: MP4 のループ境界でも先回りが効く（回り込み）
   check("5 先回りは末尾から先頭へ回り込む（MP4 ループ）", /p\.frames\[\(i \+ k\) % n\]/.test(fsrc));
   check("5 exportGif は Promise executor の同期ループを async 関数に組み替えた", /export async function exportGif\(/.test(exp) && !/return new Promise\(\(resolve, reject\) => \{\s*\n\s*const scaler = new FrameScaler/.test(exp));
   check("5 withRange は供給元の Promise をそのまま通す", /getFrameRgba: \(i\) => src\.getFrameRgba\(lo \+ i\)/.test(fsrc));
@@ -383,8 +446,8 @@ function wakeSites(src: string): { fn: string; prepare: boolean }[] {
   const LANGS = ["ja", "en", "es", "ko", "pt-BR", "zh-Hans", "zh-Hant"];
   const NEEDED: Record<string, string[]> = {
     "ed.save.prepare.msg": ["{n}", "{total}"],
-    "ed.save.prepareStalled.msg": ["{n}", "{total}"], // Codex 指摘（中）: 進みが止まったとき
-    "ed.save.prepareWait.msg": ["{n}", "{total}"], // Codex 指摘（中）: 中央表示（モーダル）向け
+    "ed.save.prepareStalled.msg": ["{n}", "{total}"], // 独立レビューの指摘（中）: 進みが止まったとき
+    "ed.save.prepareWait.msg": ["{n}", "{total}"], // 独立レビューの指摘（中）: 中央表示（モーダル）向け
     "ed.save.tooBig.msg": ["{est}", "{max}"],
   };
   for (const lang of LANGS) {

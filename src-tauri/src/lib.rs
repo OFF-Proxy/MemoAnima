@@ -10,11 +10,19 @@
 //! - `load_settings`/`save_settings` : アプリ設定の永続化（M2・ライブラリフォルダ等）
 //! - `discord_presence_set` : Discord のプレイ状況を出す／消す（V193・デスクトップだけ・積むだけで待たない）
 
+// V211 (M-1b): モバイルの登録の表（mobile_app.rs）は PC の命令の一部だけを出すので、残りは iOS では使われない（警告を出さない）
+#![cfg_attr(mobile, allow(dead_code))]
+
 pub mod library;
 pub mod pclib;
 // V193 (A-95): Discord にプレイ状況を表示する。**デスクトップだけ**（モバイルには入れない）
 #[cfg(desktop)]
 mod discord;
+// V211 (M-1b): モバイル（iOS）の入口と登録の表。デスクトップの run() と登録の表は下のまま
+#[cfg(mobile)]
+mod mobile_app;
+#[cfg(mobile)]
+pub use mobile_app::run;
 
 use std::fs;
 use std::path::Path;
@@ -28,6 +36,9 @@ fn app_info() -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         // M7-1 R-C: タイトル下の表示（バージョン＋非公式表明）に使う
         "milestone": "非公式・非営利のファンツール",
+        // V201 (M-1a・要件 §4-6): ビルドの対象の OS（windows・macos・ios・android）。PC はこの値を使わない
+        //  （モバイルの入口が受け取って、判定を読む前に platform.ts の setPlatformOs へ渡す）
+        "os": std::env::consts::OS,
     })
 }
 
@@ -211,7 +222,8 @@ fn save_project(
     data: Vec<u8>,
     thumb_png: Vec<u8>,
 ) -> Result<String, String> {
-    pclib::save_project(&lib_root, &album, &name, &data, &thumb_png)
+    // V216b (A-126): 画面は呼ばない命令（C-24）。登録は外さず、**置き換えない側**を通す（その作品のファイル無し・置き換え無し）
+    pclib::save_project_checked(&lib_root, &album, &name, &data, &thumb_png, pclib::SaveGuard::default())
 }
 
 /// サムネイルPNGをキャッシュから読む（無ければ null）。
@@ -269,7 +281,7 @@ fn export_write(path: String, data: Vec<u8>, first: bool) -> Result<(), String> 
 
 /// 単一ファイル形式: `AMAS1\n<meta JSON 1行>\n<gzipプロジェクトバイト列>`
 /// meta と data を1ファイルで原子的に置換する（2ファイル分割だと片方だけ新しくなる
-/// クラッシュ窓があり、復元時に別ファイルへ上書きし得る — Codexレビュー指摘#1）。
+/// クラッシュ窓があり、復元時に別ファイルへ上書きし得る — 独立レビューの指摘#1）。
 const AUTOSAVE_MAGIC: &[u8] = b"AMAS1\n";
 
 fn autosave_paths(
@@ -286,6 +298,17 @@ fn autosave_paths(
 
 /// tmp書き→（既存があれば.bak退避→）rename の原子的置換（save_project と同じ作法）
 fn atomic_replace(dir: &std::path::Path, dest: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    atomic_replace_with(dir, dest, bytes, |p, b| fs::write(p, b))
+}
+
+/// `atomic_replace` の本体。`write` は一時ファイルを書く 1 手（本物は `fs::write`）。
+/// V201 (P-4): テストが「書いている途中で失敗する」を差し込めるように口を開けた
+fn atomic_replace_with(
+    dir: &std::path::Path,
+    dest: &std::path::Path,
+    bytes: &[u8],
+    write: impl Fn(&std::path::Path, &[u8]) -> std::io::Result<()>,
+) -> Result<(), String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let name = dest
@@ -293,7 +316,11 @@ fn atomic_replace(dir: &std::path::Path, dest: &std::path::Path, bytes: &[u8]) -
         .and_then(|n| n.to_str())
         .unwrap_or("autosave");
     let tmp = dir.join(format!("{name}.{}.tmp", N.fetch_add(1, Ordering::SeqCst)));
-    fs::write(&tmp, bytes).map_err(|e| format!("書き込み失敗: {e}"))?;
+    if let Err(e) = write(&tmp, bytes) {
+        // ★V201 (P-4): 書いている途中で失敗したら、書きかけの一時ファイルを消す（前は ? で抜けて残っていた）
+        pclib::remove_tmp(&tmp);
+        return Err(format!("書き込み失敗: {e}"));
+    }
     // V154 (W-1・要件 §2-b ①): 確定の3手順は `pclib::commit_replace` に一本化した。
     // **オートセーブはこの経路**で、15秒ごとに走る＝危険な窓が開く回数は手動保存の比ではない。
     // 以前はここにも同じ3手順が別に書いてあり、`.bak` を消していた（＝窓で死ぬと戻せない）。
@@ -385,7 +412,9 @@ fn save_autosave_raw(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) ->
     save_autosave_impl(&app, parts[0], &meta)
 }
 
-/// プロジェクト保存（raw ボディ版）: 封筒 = [meta JSON{libRoot,album,name}][data][thumbPng]
+/// プロジェクト保存（raw ボディ版）: 封筒 = [meta JSON{libRoot,album,name,workFile?,replace?}][data][thumbPng]
+/// ★V216b (A-126): `workFile`＝その作品のファイル（文字列か null）・`replace`＝［置き換える］を選んだ（真のときだけ）。
+///  **欄が無いときは置き換えない側**（DEV の画像取り込みは在る名前で断られる）。比べるのは pclib（`save_project_checked`）
 #[tauri::command]
 fn save_project_raw(request: tauri::ipc::Request<'_>) -> Result<String, String> {
     let body = raw_body(&request)?;
@@ -396,7 +425,57 @@ fn save_project_raw(request: tauri::ipc::Request<'_>) -> Result<String, String> 
             .map(str::to_string)
             .ok_or_else(|| format!("meta.{k} がありません"))
     };
-    pclib::save_project(&s("libRoot")?, &s("album")?, &s("name")?, parts[0], parts[1])
+    let work_file = meta.get("workFile").and_then(|v| v.as_str()).map(str::to_string);
+    let guard = pclib::SaveGuard {
+        work_file: work_file.as_deref(),
+        allow_replace: meta.get("replace").and_then(|v| v.as_bool()) == Some(true),
+    };
+    pclib::save_project_checked(&s("libRoot")?, &s("album")?, &s("name")?, parts[0], parts[1], guard)
+}
+
+/// V216b (A-126): 保存先の名前の空き（"own"／"taken"／"reserved"／"free"）。読むだけ・パスは返さない
+#[tauri::command]
+fn save_target_status(
+    lib_root: String,
+    album: String,
+    name: String,
+    work_file: Option<String>,
+) -> Result<pclib::NameStatus, String> {
+    pclib::save_target_status(&lib_root, &album, &name, work_file.as_deref())
+}
+
+/// V216b (A-126): 空いている名前の案（`名前`／`名前 (2)`〜）。読むだけ
+#[tauri::command]
+fn free_project_name(lib_root: String, album: String, name: String) -> Result<String, String> {
+    pclib::free_project_name(&lib_root, &album, &name)
+}
+
+/// V216b (A-126): その作品のファイルの大きさと更新時刻（オートセーブの印）。ライブラリの中の .memoanima だけ・読むだけ
+#[tauri::command]
+fn work_file_stamp(lib_root: String, path: String) -> Option<pclib::WorkFileStamp> {
+    pclib::work_file_stamp(&lib_root, &path)
+}
+
+/// V200 (A-100): まとめ変換（アルバムの .kwz／.ppm → .memoanima）の 1 件を作る（raw ボディ版）。
+/// 封筒は `save_project_raw` と同じ [meta JSON{libRoot,album,name}][data][thumbPng]。
+/// 書くのは `pclib::create_project`（名前・一時ファイル・照合・サムネは保存と同じ。**同じ名前が在れば作らない**）
+#[tauri::command]
+fn create_project_raw(request: tauri::ipc::Request<'_>) -> Result<pclib::CreateProjectResult, String> {
+    let body = raw_body(&request)?;
+    let (meta, parts) = parse_save_envelope(body, 2)?;
+    let s = |k: &str| -> Result<String, String> {
+        meta.get(k)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| format!("meta.{k} がありません"))
+    };
+    pclib::create_project(&s("libRoot")?, &s("album")?, &s("name")?, parts[0], parts[1])
+}
+
+/// V200 (A-100): その名前の `.memoanima` がもう在るか（まとめ変換の確認の件数）。読むだけ・パスは返さない
+#[tauri::command]
+fn projects_taken(lib_root: String, album: String, names: Vec<String>) -> Result<Vec<bool>, String> {
+    pclib::projects_taken(&lib_root, &album, &names)
 }
 
 // V163: V161-B の「保存の gzip を Rust で行う」チャンク集積（gz_begin/gz_chunk/gz_abort/
@@ -405,33 +484,50 @@ fn save_project_raw(request: tauri::ipc::Request<'_>) -> Result<String, String> 
 // 2.1GB の JSON を分割して流し込む仕掛けそのものが要らない。
 // 書き込み側（pclib::save_project ＝ tmp→.bak→rename→照合）は従来と1手も変わらない。
 
-fn parse_autosave(bytes: &[u8], path: &std::path::Path) -> Option<serde_json::Value> {
+/// AMAS1 を印（meta）と作品のバイト列に分ける（形が違えば None）
+fn parse_autosave(bytes: &[u8]) -> Option<(serde_json::Value, &[u8])> {
     let rest = bytes.strip_prefix(AUTOSAVE_MAGIC)?;
     let nl = rest.iter().position(|&b| b == b'\n')?;
     let meta: serde_json::Value = serde_json::from_slice(&rest[..nl]).ok()?;
-    let data = &rest[nl + 1..];
-    Some(serde_json::json!({
-        "meta": meta,
-        "data": data,
-        "path": path.to_string_lossy(),
-    }))
+    Some((meta, &rest[nl + 1..]))
 }
 
-/// オートセーブがあれば {meta, data, path} を返す（無ければ null）。
-/// 置換途中クラッシュに備え `.bak` からの復旧も試みる。
+/// V201 (P-3): オートセーブを JS へ渡す封筒。`[u32 LE 頭の長さ][{meta, path} の JSON][作品のバイト列]`。
+/// 頭は空白で埋めて、作品のバイト列が 8 の倍数の位置から始まるようにする（JS が写さずにビューのまま読めるように）。
+/// JS の側は `saveCore.ts` の `readAutosaveEnvelope`（同じ形を v201_smoke [E-1] と下の単体テストが見る）
+fn pack_autosave_payload(meta: &serde_json::Value, path: &std::path::Path, data: &[u8]) -> Vec<u8> {
+    let mut head = serde_json::to_vec(&serde_json::json!({
+        "meta": meta,
+        "path": path.to_string_lossy(),
+    }))
+    .unwrap_or_default();
+    while (4 + head.len()) % 8 != 0 {
+        head.push(b' ');
+    }
+    let mut out = Vec::with_capacity(4 + head.len() + data.len());
+    out.extend_from_slice(&(head.len() as u32).to_le_bytes());
+    out.extend_from_slice(&head);
+    out.extend_from_slice(data);
+    out
+}
+
+/// オートセーブがあれば、封筒（`pack_autosave_payload`）を**生のバイト列**で返す（無ければ空の本体）。
+/// V201 (P-3): 前は {meta, data, path} の data を JSON の数の配列で返していた（大きい作品のオートセーブは、
+/// 起動のたびにレンダラが同じ所で落ちる＝V169 と同じ形）。`read_file_raw` と同じく `tauri::ipc::Response` で返す。
+/// 置換途中クラッシュに備え `.bak` からの復旧も試みる（読む順・控えに回る条件は前と同じ）。
 #[tauri::command]
-fn load_autosave(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+fn load_autosave(app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {
     let (dir, file) = autosave_paths(&app)?;
     for p in [file.clone(), dir.join("current.asv.bak")] {
         if p.is_file() {
             if let Ok(bytes) = fs::read(&p) {
-                if let Some(v) = parse_autosave(&bytes, &p) {
-                    return Ok(Some(v));
+                if let Some((meta, data)) = parse_autosave(&bytes) {
+                    return Ok(tauri::ipc::Response::new(pack_autosave_payload(&meta, &p, data)));
                 }
             }
         }
     }
-    Ok(None)
+    Ok(tauri::ipc::Response::new(Vec::new()))
 }
 
 /// オートセーブを破棄する（.bak・一時ファイルも含む）。
@@ -583,6 +679,47 @@ fn open_log_folder(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("フォルダを開けません: {e}"))
 }
 
+/// V198 (A-104 E-2): 作品の `.memoanima` がライブラリの中に在るか（書き出しのあとの「保存先を開く」を出すか）。
+/// 場所は**保存と同じ決め方**で組む（`pclib::existing_project_file`）。読むだけ・パスは返さない
+#[tauri::command]
+fn project_file_exists(lib_root: String, album: String, name: String) -> bool {
+    pclib::existing_project_file(&lib_root, &album, &name).is_some()
+}
+
+/// V198 (A-104 E-2): 作品の `.memoanima` を OS のファイラー（エクスプローラー・Finder）で**選んだ状態で**開く。
+/// **パスをフロントに返さない・断りの文にも入れない**（W-10。`open_log_folder` と同じ考え方）。
+/// plugin-opener の断りの文はパスを含むものがある（NoParent 等）ので、種類の名前だけにして返す。
+/// async＝メインスレッドで待たない（plugin-opener 自身の命令も async）。通信はしない（OS にパスを渡すだけ）
+#[tauri::command]
+async fn reveal_project_file(
+    app: tauri::AppHandle,
+    lib_root: String,
+    album: String,
+    name: String,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let p = pclib::existing_project_file(&lib_root, &album, &name)
+        .ok_or_else(|| "not found".to_string())?;
+    app.opener()
+        .reveal_item_in_dir(p)
+        .map_err(|e| format!("reveal failed ({})", opener_error_kind(&e)))
+}
+
+/// V198: plugin-opener の断りを**パスの入らない**短い名前にする（ログに 1 行で書けるように）
+fn opener_error_kind(e: &tauri_plugin_opener::Error) -> String {
+    use tauri_plugin_opener::Error as E;
+    match e {
+        E::Io(io) => format!("io {:?}", io.kind()),
+        E::NoParent(_) => "no parent".into(),
+        E::UnsupportedPlatform => "unsupported".into(),
+        #[cfg(windows)]
+        E::Win32Error(w) => format!("win32 {:#010x}", w.code().0),
+        #[cfg(windows)]
+        E::FailedToConvertPathToItemIdList(_) => "item id list".into(),
+        _ => "other".into(),
+    }
+}
+
 /// V193 (A-95): Discord のプレイ状況を出す／消す（起動時・⚙・言語の切り替えでフロントから）。
 /// **積むだけで待たない**（接続は discord.rs の専用スレッドが持つ・失敗はそこで握りつぶす）。
 /// 渡せるのは「オンか」と「固定の 1 文（UI の言語）」だけ＝作品名・パスが入る口は無い
@@ -592,6 +729,16 @@ fn discord_presence_set(enabled: bool, details: String) {
     discord::set(enabled, details);
     #[cfg(not(desktop))]
     let _ = (enabled, details);
+}
+
+/// V175 (REQ §10-2): Mac で更新が済んだあとに開き直す（フロントは Mac のときだけ呼ぶ）。
+/// updater は Mac では .app を置き換えるだけで、閉じも開き直しもしない（Windows はインストーラが閉じる）。
+/// 新しいプラグインは足さず、本体の `AppHandle::restart` を呼ぶだけ。
+/// **async にしてある**のは、restart をメインスレッドの外から呼ぶため——そうすると本体は終了の知らせ
+///（`RunEvent::Exit`）を通してから開き直す＝下の `run` の Discord の後始末も通る（メインスレッドからだと飛ばされる）
+#[tauri::command]
+async fn restart_after_update(app: tauri::AppHandle) {
+    app.restart();
 }
 
 #[tauri::command]
@@ -683,7 +830,7 @@ fn migrate_old_config_dir(new_dir: &Path) {
     }
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(desktop)]
 pub fn run() {
     // V193 (A-95): 起動時刻を覚えるだけ（Discord の「経過時間」の起点。通信はしない）
     #[cfg(desktop)]
@@ -729,6 +876,8 @@ pub fn run() {
             fix_renamed_projects,
             probe_project_file,
             open_log_folder,
+            project_file_exists,
+            reveal_project_file,
             list_albums,
             create_album,
             rename_album,
@@ -739,6 +888,11 @@ pub fn run() {
             set_note_order,
             save_project,
             save_project_raw,
+            create_project_raw,
+            projects_taken,
+            save_target_status,
+            free_project_name,
+            work_file_stamp,
             export_write,
             save_autosave,
             save_autosave_raw,
@@ -753,7 +907,8 @@ pub fn run() {
             library_health,
             dir_exists,
             append_log,
-            discord_presence_set
+            discord_presence_set,
+            restart_after_update
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -768,4 +923,117 @@ pub fn run() {
         #[cfg(not(desktop))]
         let _ = event;
     });
+}
+
+#[cfg(test)]
+mod v201_tests {
+    use super::*;
+
+    /// ★P-3: 封筒の形（[u32 LE 頭の長さ][{meta, path}][作品]・作品は 8 の倍数の位置から・頭の JSON は空白を除けば元のまま）
+    #[test]
+    fn autosave_payload_layout() {
+        for (title, n) in [("", 0usize), ("作品", 1), ("ab", 7), ("長い名前の作品".repeat(9).as_str(), 1000)] {
+            let meta = serde_json::json!({ "title": title, "album": "a", "askSaveTarget": false });
+            let data: Vec<u8> = (0..n).map(|i| (i * 31 % 256) as u8).collect();
+            let path = std::path::Path::new("C:\\x\\autosave\\current.asv");
+            let b = pack_autosave_payload(&meta, path, &data);
+            let hl = u32::from_le_bytes(b[0..4].try_into().unwrap()) as usize;
+            assert_eq!((4 + hl) % 8, 0, "作品が 8 の倍数の位置から始まらない");
+            let head: serde_json::Value = serde_json::from_slice(&b[4..4 + hl]).unwrap();
+            assert_eq!(head["meta"], meta);
+            assert_eq!(head["path"], "C:\\x\\autosave\\current.asv");
+            assert_eq!(&b[4 + hl..], &data[..]);
+            assert!(b[4..4 + hl].iter().rev().take_while(|&&c| c == b' ').count() < 8);
+        }
+    }
+
+    /// ★P-4: オートセーブも、一時ファイルを書いている途中で失敗したら書きかけを残さない（前の世代はそのまま）
+    #[test]
+    fn autosave_write_failure_leaves_no_tmp() {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "v201-lib-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let names = || {
+            let mut v: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+            v.sort();
+            v
+        };
+        let dest = dir.join("current.asv");
+        fs::write(&dest, b"PREV").unwrap();
+        let e = atomic_replace_with(&dir, &dest, b"NEW", |p, _| {
+            fs::write(p, b"HA")?;
+            Err(std::io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        let left = names();
+        let prev = fs::read(&dest).unwrap();
+        // 本物の 1 手では今までどおり（前の世代は .bak・一時ファイルは残らない）
+        atomic_replace(&dir, &dest, b"NEW").unwrap();
+        let after = names();
+        let now = fs::read(&dest).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(e.starts_with("書き込み失敗: "), "{e}");
+        assert_eq!(left, vec!["current.asv"], "書きかけが残った");
+        assert_eq!(prev, b"PREV");
+        assert_eq!(after, vec!["current.asv", "current.asv.bak"]);
+        assert_eq!(now, b"NEW");
+    }
+
+    /// AMAS1 を分ける形は前と同じ（印は 1 行目の JSON・作品はその後ろ全部）。壊れたものは None
+    #[test]
+    fn parse_autosave_same_as_before() {
+        let mut f = AUTOSAVE_MAGIC.to_vec();
+        f.extend_from_slice(br#"{"title":"t"}"#);
+        f.push(b'\n');
+        f.extend_from_slice(&[1, 2, 3, b'\n', 4]);
+        let (m, d) = parse_autosave(&f).unwrap();
+        assert_eq!(m["title"], "t");
+        assert_eq!(d, &[1, 2, 3, b'\n', 4]);
+        assert!(parse_autosave(b"AMAS2\n{}\nx").is_none());
+        assert!(parse_autosave(b"AMAS1\n{not json\nx").is_none());
+        assert!(parse_autosave(b"AMAS1\n{}").is_none());
+    }
+}
+
+/// V207 (T・REQ_tauri_2_12.md §3 (2)): 更新の「版の確かめ」（tauri.conf.json の `plugins.updater.requireSignedVersion`）が、
+/// updater の設定として**本当に読まれている**こと。updater の設定は知らないキーを黙って捨てるので、綴りを 1 文字誤ると
+/// 「オンのつもりでオフ」のまま誰も気づけない。そこで tauri.conf.json の `plugins.updater` を updater の `Config` に通して見る。
+/// 空振りしていないことも同じ試しの中で見る（綴りを変えた・false・キーが無い → どれも false）。
+/// updater の crate はデスクトップだけ（Cargo.toml）なので、この試しも同じ cfg の下に置く
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod v207_tests {
+    fn updater_of(v: serde_json::Value) -> tauri_plugin_updater::Config {
+        serde_json::from_value(v).expect("updater の設定として読めない")
+    }
+
+    #[test]
+    fn require_signed_version_is_read_by_the_updater() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json が読めない");
+        let up = conf["plugins"]["updater"].clone();
+        let c = updater_of(up.clone());
+        assert!(c.require_signed_version, "requireSignedVersion が updater に読まれていない（綴り・版）");
+        assert!(!c.allow_downgrades, "allowDowngrades がオンになっている（既定の false のまま書かない）");
+        assert!(!c.dangerous_insecure_transport_protocol, "http の確認先を許している");
+        assert_eq!(c.endpoints.len(), 2, "配信元が 2 つではない");
+        assert_eq!(c.pubkey, up["pubkey"].as_str().unwrap_or(""), "公開鍵が tauri.conf.json と違う");
+        // 空振りしていないこと（pubkey は必須・endpoints も入れる）
+        let with = |key: Option<(&str, serde_json::Value)>| {
+            let mut v = serde_json::json!({ "endpoints": up["endpoints"].clone(), "pubkey": up["pubkey"].clone() });
+            if let Some((k, x)) = key {
+                v[k] = x;
+            }
+            updater_of(v).require_signed_version
+        };
+        assert!(with(Some(("requireSignedVersion", serde_json::json!(true)))), "正しい綴りの true が読めない（試しが効いていない）");
+        assert!(with(Some(("require-signed-version", serde_json::json!(true)))), "別名の綴りが読めない（updater の版が違う）");
+        assert!(!with(Some(("requireSignedVersio", serde_json::json!(true)))), "綴りを 1 文字変えても true になった");
+        assert!(!with(Some(("requireSignedversion", serde_json::json!(true)))), "大文字を 1 つ変えても true になった");
+        assert!(!with(Some(("requireSignedVersion", serde_json::json!(false)))), "false を書いても true になった");
+        assert!(!with(None), "キーが無くても true になった（既定が false ではない）");
+    }
 }

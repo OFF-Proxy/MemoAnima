@@ -13,7 +13,7 @@
 //       Node の navigator（動かしている機械の OS を名乗る）では判定しない＝検査の結果が機械で変わらない。
 //       navigator の platform / userAgent を読むのは src/platform.ts だけ。
 //       ★**注入しない経路（アプリと同じ）**: navigator を差し替えて木を新しい実体として読み込み直し、最初の呼び出しで
-//       Mac / Windows と判定して覚える（Codex 1 回目: 注入の経路しか見ていなかった）
+//       Mac / Windows と判定して覚える（独立レビュー 1 回目: 注入の経路しか見ていなかった）
 // [S-1] ★Mac のふり: 組み込み 2 プリセット＋固定キーの Ctrl 系が **⌘ の打鍵で全部一致**（control でも・両方押しても）。
 //       ⇧⌘Z が edit.redo（利用者の割り当てがあればそちらが勝つ）・⌘＋クリック・⌘ の単押し（タップ）。
 //       全コード × ⇧/⌥ で ⌘ の照合と登録が Ctrl と同じ（⌘＋⌥ も）。
@@ -419,7 +419,7 @@ function makeCapture(T: Tree) {
     win,
     perf
   ) as () => { promise: Promise<unknown>; cancel: () => void };
-  /** 直前の run で流したイベントごとの「既定の動きを止めたか（P）・伝わるのを止めたか（S）」（Codex 1 回目の低 3） */
+  /** 直前の run で流したイベントごとの「既定の動きを止めたか（P）・伝わるのを止めたか（S）」（独立レビュー 1 回目の低 3） */
   let flags = "";
   /** 一連の操作を流して、取れた割り当て（JSON）／"pending"（まだ待っている）／"null"（Escape）を返す */
   async function run(acts: Act[]): Promise<string> {
@@ -450,7 +450,7 @@ function makeCapture(T: Tree) {
   }
   return { run, flags: () => flags };
 }
-// ★Codex 1 回目の低 3: ホーム画面の ⌘,（V153）の preventDefault がどの検査にも入っていなかった。
+// ★独立レビュー 1 回目の低 3: ホーム画面の ⌘,（V153）の preventDefault がどの検査にも入っていなかった。
 //  captureKey と同じく、main.ts の homeKeyBlocked / homeKeyHandler / homeKeyUpHandler を**そのまま取り出して**動かす。
 //  main.ts のほかの変数（editorOpen・homeLookup・homeModTap・openSettingsMenu・document）は引数で渡す
 const BODY_T = { tagName: "BODY" };
@@ -855,14 +855,17 @@ function symOrderOk(s: string): boolean {
 // ★辞書の「Ctrl」「Alt」「Shift」を含む文言の件数（2026-09-25・54cfbf5 の辞書を数えた）。**増減したら分類し直す**
 // V195（2026-10-05）: 7 言語とも +3（`ed.color.delete.msg`・`ed.color.deleted.toast`・`ed.color.usedHistory.toast`。
 //   どれも「Ctrl+Z」＝キーの表記として ⌘Z に置き換わる側＝NON_KEY_EXPECTED には入れない。置き換えの検査は緑のまま）
+// V215（2026-11-01・A-125［整理］）: ja は +2（`ed.color.tidy.confirm.msg`・`ed.color.tidy.done.toast`）・ほかの 6 言語は +4
+//   （その 2 つと `ed.color.tidy.confirmKeep.msg`・`ed.color.tidy.keptOnly.toast`。ja のこの 2 つは「取り消しの記録」と書き、Ctrl+Z を書かない）。
+//   どれも「Ctrl+Z」＝キーの表記＝NON_KEY_EXPECTED には入れない
 const DICT_COUNTS: Record<string, { entries: number; Ctrl: number; Alt: number; Shift: number }> = {
-  ja: { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
-  en: { entries: 18, Ctrl: 14, Alt: 2, Shift: 9 },
-  es: { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
-  "pt-BR": { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
-  ko: { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
-  "zh-Hans": { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
-  "zh-Hant": { entries: 17, Ctrl: 14, Alt: 2, Shift: 8 },
+  ja: { entries: 19, Ctrl: 16, Alt: 2, Shift: 8 },
+  en: { entries: 22, Ctrl: 18, Alt: 2, Shift: 9 },
+  es: { entries: 21, Ctrl: 18, Alt: 2, Shift: 8 },
+  "pt-BR": { entries: 21, Ctrl: 18, Alt: 2, Shift: 8 },
+  ko: { entries: 21, Ctrl: 18, Alt: 2, Shift: 8 },
+  "zh-Hans": { entries: 21, Ctrl: 18, Alt: 2, Shift: 8 },
+  "zh-Hant": { entries: 21, Ctrl: 18, Alt: 2, Shift: 8 },
 };
 /** キーではない語として「Ctrl / Alt / Shift」を含む訳文（言語・辞書のキー）。Mac でも置き換えない */
 const NON_KEY_EXPECTED = ["en ed.tone.ditherShift.label"];
@@ -937,7 +940,7 @@ async function groupSA(T: Tree): Promise<R[]> {
     }
     return bad.length === 0 ? ok() : ng(bad.join(" / "));
   });
-  // ★Codex 1 回目の穴: 上の検査は「純関数」と「注入」しか通らず、**アプリが使う経路**（注入しない
+  // ★独立レビュー 1 回目の穴: 上の検査は「純関数」と「注入」しか通らず、**アプリが使う経路**（注入しない
   //  isMacPlatform() が最初の呼び出しで navigator を読んで覚える）を Mac の navigator で一度も動かしていなかった
   //  （覚えの初期値を false にしても 107/0 のまま）。**この木の src をもう一度写して新しい実体として読み込み**、
   //  navigator を差し替えたまま、注入を一度もしないで動かす＝起動したアプリと同じ道
@@ -1202,7 +1205,7 @@ async function groupS1(T: Tree): Promise<R[]> {
         return ng(`比べた ${compared} 行・許した差 ${JSON.stringify(allowed)}`);
       return ok();
     });
-    // ★Codex 1 回目の表 3（⌘＋⌥ のときだけ畳まない書き換え）が、組み込みの反証の字面が当たらない赤でしか
+    // ★独立レビュー 1 回目の表 3（⌘＋⌥ のときだけ畳まない書き換え）が、組み込みの反証の字面が当たらない赤でしか
     //  赤くならなかった＝⌘ と ⌥ を一緒に押す形を検査が見ていなかった。**全コード × ⇧ / ⌥ の 4 通り**で見る
     await add("[S-1] ★全コード × ⇧/⌥ の 4 通り（＋クリック 3 × 4）で、⌘・control・両方の照合キーと登録の形が「Ctrl の割り当て」と同じ・M は立たない", () => {
       const bad: string[] = [];
@@ -1239,7 +1242,7 @@ async function groupS1(T: Tree): Promise<R[]> {
       }
       return bad.length ? ng(`${bad.length}/${n}: ${bad.slice(0, 3).join(" / ")}`) : ok();
     });
-    // ★Codex 1 回目の中 1: 押しっぱなしのくり返し。**走らせない**が、Mac では既定の動き（メニューの Copy 等・警告音）を止める
+    // ★独立レビュー 1 回目の中 1: 押しっぱなしのくり返し。**走らせない**が、Mac では既定の動き（メニューの Copy 等・警告音）を止める
     await add("[S-1] ★本物の editor.ts: ⌘C / ⌘X / ⌘V / ⌘S / ⇧⌘S / ⇧⌘C / ⇧⌘V / ⌘, の押しっぱなし（くり返し）は走らせず preventDefault・⌘Z / ⌘Y はくり返し効く", () => {
       const cases: [string, string, Mods, string][] = [
         ["c", "KeyC", { meta: true }, "- pd"],
@@ -1573,7 +1576,7 @@ async function groupS3(T: Tree, rows?: DictRow[]): Promise<R[]> {
       const got = ["Control", "Shift", "Alt"].map((m) => T.K.modLabel(m)).join(",");
       return got === "⌘,⇧,⌥" ? ok() : ng(got);
     });
-    // ★Codex 1 回目の低 4: いまの辞書の複数形（`_other`）に Ctrl/Alt/Shift を含む文言が無いので、t() の複数形の道
+    // ★独立レビュー 1 回目の低 4: いまの辞書の複数形（`_other`）に Ctrl/Alt/Shift を含む文言が無いので、t() の複数形の道
     //  だけ置き換えを外しても緑だった。**検査の写しの ja.ts にだけ** 1 行足して、その道を実際に通す（本物の辞書は触らない）
     await add("[S-3] ★t() の複数形の道（{count} で `_other` を引く）も置き換える: Mac「⌘Z を 3 回」・Windows「Ctrl+Z を 3 回」", async () => {
       const F = await freshCopy(T, [
@@ -1621,7 +1624,7 @@ async function groupS4(T: Tree): Promise<R[]> {
       add(`[S-4] ★Mac のふり: ${label} → ${JSON.stringify(expect)}（取った打鍵は preventDefault ＋ stopPropagation）`, async () => {
         const got = await C.run(acts);
         if (got !== JSON.stringify(expect)) return ng(`取れた形 ${got}`);
-        // Codex 1 回目の低 3: 取った打鍵（最後に流したイベント）の既定の動きを止めていること（Mac のメニューへ回さない）
+        // 独立レビュー 1 回目の低 3: 取った打鍵（最後に流したイベント）の既定の動きを止めていること（Mac のメニューへ回さない）
         const last = C.flags().split(",").pop();
         if (last !== "PS") return ng(`取った打鍵の preventDefault / stopPropagation が ${last}（期待 PS・全体 ${C.flags()}）`);
         const back = saved(got);
@@ -1706,8 +1709,9 @@ function chainOf(n: ts.Node): string {
   }
   return names.join(">") || "(top)";
 }
-/** `ctrlKey` / `metaKey` の読み（プロパティ・添字・分割代入）と getModifierState を全部拾う */
-function modReads(dir: string): string[] {
+/** `ctrlKey` / `metaKey` の読み（プロパティ・添字・分割代入）と getModifierState を全部拾う。
+ *  ★V213: サンプルへの写し（isSampleCopy）は `copies` へ分ける（数え方は同じ・置き場所が別なだけ） */
+function modReads(dir: string, copies: string[] = []): string[] {
   const out: string[] = [];
   for (const [file, src] of srcFiles(dir)) {
     const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true);
@@ -1717,13 +1721,75 @@ function modReads(dir: string): string[] {
       else if (ts.isElementAccessExpression(n) && ts.isStringLiteral(n.argumentExpression)) prop = n.argumentExpression.text;
       else if (ts.isBindingElement(n) && ts.isObjectBindingPattern(n.parent))
         prop = (n.propertyName ?? n.name).getText(sf).replace(/["']/g, "");
-      if (prop === "ctrlKey" || prop === "metaKey") out.push(`${file}|${chainOf(n)}|${prop}`);
+      if (prop === "ctrlKey" || prop === "metaKey") (isSampleCopy(n, prop) ? copies : out).push(`${file}|${chainOf(n)}|${prop}`);
       else if (prop === "getModifierState") out.push(`${file}|${chainOf(n)}|getModifierState`);
       n.forEachChild(visit);
     };
     visit(sf);
   }
   return out.sort();
+}
+/** ★V213 (M-2a): コアのサンプルへの**写し**。PC の `sampleOf(e)` は `{ …, ctrl: e.ctrlKey, meta: e.metaKey }` を返す
+ *  （コアは描くときに受け取る点の形を 1 つにした＝`StrokeSample`）。ここは**判断をしていない**（読んだ値をそのまま
+ *  サンプルの ctrl / meta に置くだけ）ので、上の「判断に直読みしてよい所」の表（15 か所）には入れず、別に縛る:
+ *   ① 写しは「`return { … }` の中の `ctrl: <名前>.ctrlKey` / `meta: <名前>.metaKey`」の形だけを数え、表 EXPECTED_SAMPLE_COPY と
+ *      過不足なく一致（ほかの所で同じ形を書けば余分＝赤。sampleOf で形を変えれば直読みの表の余分＝赤）
+ *   ② サンプルの ctrl / meta を**読む所が 0**（型で見る＝`StrokeSample` の値の `.ctrl` / `.meta`・添字・分割代入）。
+ *      写した値で Ctrl を判断すると primaryMod を通らない（Mac の ⌘ が畳まれない）ので、写しを判断の抜け道にさせない
+ *  V213 より前の木には sampleOf も StrokeSample も無い＝どちらも 0 件（直読みの表は前と同じ 15 か所） */
+function isSampleCopy(n: ts.Node, prop: string): boolean {
+  const pa = n.parent;
+  return (
+    ts.isPropertyAccessExpression(n) &&
+    ts.isIdentifier(n.expression) &&
+    !!pa &&
+    ts.isPropertyAssignment(pa) &&
+    pa.initializer === n &&
+    pa.name.getText() === (prop === "ctrlKey" ? "ctrl" : "meta") &&
+    ts.isObjectLiteralExpression(pa.parent) &&
+    !!pa.parent.parent &&
+    ts.isReturnStatement(pa.parent.parent)
+  );
+}
+const EXPECTED_SAMPLE_COPY = ["src/editor/editor.ts|sampleOf|ctrlKey", "src/editor/editor.ts|sampleOf|metaKey"].sort();
+/** `StrokeSample` の値から ctrl / meta を読む所（型を見る）。`probe` はサンプルの x を読む所の数（型が引けている＝空振りしていない印） */
+function sampleModReads(dir: string): { reads: string[]; probe: number } {
+  const files = srcFiles(dir).map(([f]) => path.join(dir, f));
+  const prog = ts.createProgram(files, {
+    target: ts.ScriptTarget.ESNext,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    strict: true,
+    noEmit: true,
+    skipLibCheck: true,
+    noResolve: true,
+    types: [],
+  });
+  const checker = prog.getTypeChecker();
+  const isSample = (t: ts.Type): boolean =>
+    t.isUnion() ? t.types.some(isSample) : (t.aliasSymbol ?? t.getSymbol())?.getName() === "StrokeSample";
+  const reads: string[] = [];
+  let probe = 0;
+  const srcRoot = path.join(dir, "src");
+  for (const sf of prog.getSourceFiles()) {
+    if (!path.resolve(sf.fileName).startsWith(srcRoot)) continue;
+    const file = path.relative(dir, sf.fileName).replace(/\\/g, "/");
+    const visit = (n: ts.Node) => {
+      let recv: ts.Node | null = null;
+      let prop = "";
+      if (ts.isPropertyAccessExpression(n)) [recv, prop] = [n.expression, n.name.text];
+      else if (ts.isElementAccessExpression(n) && ts.isStringLiteral(n.argumentExpression)) [recv, prop] = [n.expression, n.argumentExpression.text];
+      else if (ts.isBindingElement(n) && ts.isObjectBindingPattern(n.parent))
+        [recv, prop] = [n.parent, (n.propertyName ?? n.name).getText(sf).replace(/["']/g, "")];
+      if (recv && (prop === "ctrl" || prop === "meta" || prop === "x") && isSample(checker.getTypeAtLocation(recv))) {
+        if (prop === "x") probe++;
+        else reads.push(`${file}|${chainOf(n)}|${prop}`);
+      }
+      n.forEachChild(visit);
+    };
+    visit(sf);
+  }
+  return { reads: reads.sort(), probe };
 }
 /** 名前で呼んでいる所（`primaryMod(…)` 等）を全部拾う */
 function callSites(dir: string, fname: string): string[] {
@@ -1776,8 +1842,12 @@ const EXPECTED_PRIMARY = [
 const EXPECTED_SHAPES = [
   "src/editor/editor.ts|openAudioPanel>bind|if (primaryMod(e))",
   'src/editor/editor.ts|buildToolOptions|if ((e.code === "Enter" || e.code === "NumpadEnter") && primaryMod(e))',
-  'src/editor/editor.ts|updateSelection|if (kind === "folder" && !ev.shiftKey && !primaryMod(ev))',
-  "src/editor/editor.ts|onKeyDown|if (this.textDraft && primaryMod(e))",
+  // ★V214 (M-2b-1a): フォルダの行の選び方と Enter の確定はコア（selectLayerRow・enterKey(primary)）へ移った。primaryMod を呼ぶのは
+  //  前と同じ PC の 2 関数で、判断はその値を受けたコアがする（`kind === "folder" && !m.shift && !m.primary`／`this.textDraft && primary`＝
+  //  式の意味は前と同じ。動きは [S-1] が updateSelection と ⌘Enter を本物で叩いて見る）。表は PC の呼ぶ所の形に合わせた（数は同じ 6）。
+  //  updateSelection の形は if でも変数でもない（コアへ渡す 1 文）＝下の「?」の形を**切らずに**全部持つ（primary: primaryMod(ev) まで縛る）
+  "src/editor/editor.ts|updateSelection|?this.selectLayerRow( id, kind, { ctrlOrMeta: ev.ctrlKey || ev.metaKey, shift: ev.shiftKey, primary: primaryMod(ev) }, this.displayRows.map((r) => r.id) );",
+  "src/editor/editor.ts|onKeyDown|if (this.enterKey(primaryMod(e)))",
   "src/main.ts|captureKey>onPointer|const mods = primaryMod(e) || e.altKey || e.shiftKey",
   "src/main.ts|captureKey>onPointer|if (unfoldedMeta(e))",
 ].sort();
@@ -1785,7 +1855,8 @@ const EXPECTED_SHAPES = [
 function conditionShapes(dir: string, fnames: string[]): string[] {
   const out: string[] = [];
   for (const [file, src] of srcFiles(dir)) {
-    if (file !== "src/editor/editor.ts" && file !== "src/main.ts") continue;
+    // ★V213: editor.ts のコードの一部はコア（src/editor/core/editorCore.ts）へ移った＝コアも画面側と同じに見る（いまは呼ぶ所 0）
+    if (file !== "src/editor/editor.ts" && file !== "src/editor/core/editorCore.ts" && file !== "src/main.ts") continue;
     const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true);
     const visit = (n: ts.Node) => {
       if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && fnames.includes(n.expression.text)) {
@@ -1796,7 +1867,9 @@ function conditionShapes(dir: string, fnames: string[]): string[] {
         if (host && ts.isIfStatement(host)) out.push(`${file}|${chainOf(n)}|if (${norm(host.expression.getText(sf))})`);
         else if (host && ts.isVariableDeclaration(host))
           out.push(`${file}|${chainOf(n)}|${norm((host.parent as ts.VariableDeclarationList).getText(sf))}`);
-        else out.push(`${file}|${chainOf(n)}|?${norm(p.getText(sf)).slice(0, 80)}`);
+        // ★V214: 前は 80 字で切っていた（そのときは表に「?」の形が無かった）。V214 でコアへ渡す 1 文が表に入ったので、
+        //  切ると primaryMod の所が表から落ちる＝全部持つ（縛りは強くなるだけ）
+        else out.push(`${file}|${chainOf(n)}|?${norm(p.getText(sf))}`);
       }
       n.forEachChild(visit);
     };
@@ -1822,11 +1895,19 @@ function multisetDiff(got: string[], want: string[]): string {
 async function groupS5(T: Tree): Promise<R[]> {
   const r: R[] = [];
   const add = async (name: string, fn: () => V | Promise<V>) => r.push({ name, v: await safe(fn) });
-  const reads = modReads(T.dir);
-  if (process.env.V181_PRINT_READS) console.log(reads.join("\n"));
+  const copies: string[] = [];
+  const reads = modReads(T.dir, copies);
+  if (process.env.V181_PRINT_READS) console.log([...reads, ...copies.map((c) => `${c}（サンプルへの写し）`)].join("\n"));
   await add(`[S-5] ★ctrlKey / metaKey の直読みは表の ${EXPECTED_READS.length} か所だけ（構文木・分割代入と添字も数える）`, () => {
     const d = multisetDiff(reads, EXPECTED_READS);
     return d ? ng(d) : ok();
+  });
+  await add(`[S-5] ★V213: コアのサンプルへの写し（ctrl: e.ctrlKey / meta: e.metaKey）は表の ${EXPECTED_SAMPLE_COPY.length} か所だけ・サンプルの ctrl / meta を読む所は 0（型で見る）`, () => {
+    const d = multisetDiff(copies, EXPECTED_SAMPLE_COPY);
+    if (d) return ng(`写し: ${d}`);
+    const sm = sampleModReads(T.dir);
+    if (sm.probe === 0) return ng("サンプルの型が引けない（StrokeSample の x を読む所が 0＝検査が黙る）");
+    return sm.reads.length ? ng(`★サンプルの ctrl / meta を読んでいる（primaryMod を通らない判断）: ${sm.reads.join(", ")}`) : ok();
   });
   await add(`[S-5] ★primaryMod を呼ぶ所が表の ${EXPECTED_PRIMARY.length} か所`, () => {
     const d = multisetDiff(callSites(T.dir, "primaryMod"), EXPECTED_PRIMARY);
@@ -1972,6 +2053,7 @@ const PF = "src/platform.ts";
 const KM = "src/keymap.ts";
 const MA = "src/main.ts";
 const ED = "src/editor/editor.ts";
+const CORE = "src/editor/core/editorCore.ts"; // ★V213: editor.ts の描く処理の移り先
 const MUTATIONS: Mutation[] = [
   // ---- [S-1] 折り畳み（Mac のふりで ⌘ が効く） ----
   {
@@ -2037,17 +2119,19 @@ const MUTATIONS: Mutation[] = [
   {
     id: "R07",
     why: "入力欄の外の ⌘Enter（文字の確定）が ctrlKey を直に読む",
-    edits: [{ file: ED, from: "if (this.textDraft && primaryMod(e)) {", to: "if (this.textDraft && e.ctrlKey) {" }],
+    // ★V214 (M-2b-1a): 文字の確定の判断はコアの enterKey(primary) へ移った。PC は `this.enterKey(primaryMod(e))` で渡す＝同じ壊し方をそこに当てる
+    edits: [{ file: ED, from: "if (this.enterKey(primaryMod(e))) {", to: "if (this.enterKey(e.ctrlKey)) {" }],
     expect: ["S-1", "S-5"],
   },
   {
     id: "R08",
     why: "フォルダの行の Ctrl 判定が ctrlKey を直に読む",
+    // ★V214 (M-2b-1a): フォルダの行の判断はコアの selectLayerRow へ移った。PC は `primary: primaryMod(ev)` で渡す＝同じ壊し方をそこに当てる
     edits: [
       {
         file: ED,
-        from: 'if (kind === "folder" && !ev.shiftKey && !primaryMod(ev))',
-        to: 'if (kind === "folder" && !ev.shiftKey && !ev.ctrlKey)',
+        from: "primary: primaryMod(ev) }",
+        to: "primary: ev.ctrlKey }",
       },
     ],
     expect: ["S-1", "S-5"],
@@ -2252,13 +2336,45 @@ const MUTATIONS: Mutation[] = [
   {
     id: "R29",
     why: "分割代入で ctrlKey を読む（別名に移す形）",
+    // ★V214 (M-2b-1a): 文字の確定の判断はコアの enterKey(primary) へ移った。PC の `this.enterKey(primaryMod(e))` に当てる
     edits: [
       {
         file: ED,
-        from: "      if (this.textDraft && primaryMod(e)) {",
-        to: "      const { ctrlKey: held } = e;\n      if (this.textDraft && (primaryMod(e) || held)) {",
+        from: "      if (this.enterKey(primaryMod(e))) {",
+        to: "      const { ctrlKey: held } = e;\n      if (this.enterKey(primaryMod(e) || held)) {",
       },
     ],
+    expect: ["S-5"],
+  },
+  // ★V213: コアのサンプルへの写し（sampleOf）を判断の抜け道にする
+  {
+    id: "R53",
+    why: "コアがサンプルの ctrl を読んで判断する（写した値は primaryMod を通らない）",
+    edits: [
+      {
+        file: CORE,
+        from: "    const pt = this.samplePixel(s);\n    this.pointerDown = true;\n",
+        to: "    const pt = this.samplePixel(s);\n    if (s.ctrl) return \"\";\n    this.pointerDown = true;\n",
+      },
+    ],
+    expect: ["S-5"],
+  },
+  {
+    id: "R54",
+    why: "コアがサンプルの meta を分割代入で読む（別名に移す形）",
+    edits: [
+      {
+        file: CORE,
+        from: "    const pt = this.samplePixel(s);\n    this.pointerDown = true;\n",
+        to: "    const pt = this.samplePixel(s);\n    const { meta: held } = s;\n    if (held) return \"\";\n    this.pointerDown = true;\n",
+      },
+    ],
+    expect: ["S-5"],
+  },
+  {
+    id: "R55",
+    why: "サンプルへの写しで Ctrl と ⌘ を畳む（写しの形を変える＝判断を sampleOf に持ち込む）",
+    edits: [{ file: ED, from: "ctrl: e.ctrlKey, meta: e.metaKey };", to: "ctrl: e.ctrlKey || e.metaKey, meta: e.metaKey };" }],
     expect: ["S-5"],
   },
   // ---- [S-6] 入力欄 ----
@@ -2298,7 +2414,7 @@ const MUTATIONS: Mutation[] = [
     expect: ["S-A"],
   },
   {
-    // ★Codex 1 回目の形そのもの（注入の経路しか見ていないと緑のまま）
+    // ★独立レビュー 1 回目の形そのもの（注入の経路しか見ていないと緑のまま）
     id: "R34",
     why: "判定の覚えの初期値を false にする（アプリは Mac でも一度も Mac と判定しない）",
     edits: [{ file: PF, from: "let detected: boolean | null = null;", to: "let detected: boolean | null = false;" }],
@@ -2328,10 +2444,10 @@ const MUTATIONS: Mutation[] = [
     ],
     expect: ["S-A"],
   },
-  // ---- Codex 1 回目の指摘の形そのもの（どれも以前は v181 と旧 6 ゲートが緑） ----
+  // ---- 独立レビュー 1 回目の指摘の形そのもの（どれも以前は v181 と旧 6 ゲートが緑） ----
   {
     id: "R37",
-    why: "設定画面の取得で取った打鍵の preventDefault を外す（Codex 表 8）",
+    why: "設定画面の取得で取った打鍵の preventDefault を外す（独立レビュー 表 8）",
     edits: [
       {
         file: MA,
@@ -2343,7 +2459,7 @@ const MUTATIONS: Mutation[] = [
   },
   {
     id: "R38",
-    why: "ホーム画面の ⌘, の preventDefault を外す（Codex 表 9）",
+    why: "ホーム画面の ⌘, の preventDefault を外す（独立レビュー 表 9）",
     edits: [
       {
         file: MA,
@@ -2355,7 +2471,7 @@ const MUTATIONS: Mutation[] = [
   },
   {
     id: "R39",
-    why: "t() の複数形の道だけ置き換えを通さない（Codex 表 10）",
+    why: "t() の複数形の道だけ置き換えを通さない（独立レビュー 表 10）",
     edits: [
       {
         file: "src/i18n/index.ts",
@@ -2367,7 +2483,7 @@ const MUTATIONS: Mutation[] = [
   },
   {
     id: "R40",
-    why: "⌘ と ⌥ を一緒に押したときだけ畳まない（Codex 表 3）",
+    why: "⌘ と ⌥ を一緒に押したときだけ畳まない（独立レビュー 表 3）",
     edits: [
       {
         file: PF,
@@ -2379,7 +2495,7 @@ const MUTATIONS: Mutation[] = [
   },
   {
     id: "R41",
-    why: "押しっぱなしのくり返しを Mac でも止めない（Codex 中 1 の直す前の形）",
+    why: "押しっぱなしのくり返しを Mac でも止めない（独立レビュー 中 1 の直す前の形）",
     edits: [{ file: ED, from: "    if (isMacPlatform()) e.preventDefault();\n  }", to: "  }" }],
     expect: ["S-1"],
   },
@@ -2395,7 +2511,7 @@ const MUTATIONS: Mutation[] = [
     edits: [{ file: ED, from: "      if (e.repeat) return this.swallowRepeatOnMac(e);", to: "      if (e.repeat) return;" }],
     expect: ["S-1"],
   },
-  // ---- 第三者レビュー（Codex 2 回目の代わり）の形そのもの（どれも以前は v181 と旧 6 ゲートが緑） ----
+  // ---- 第三者レビュー（独立レビュー 2 回目の代わり）の形そのもの（どれも以前は v181 と旧 6 ゲートが緑） ----
   {
     id: "R44",
     why: "入力欄の中の確定が Shift+Enter でも効く（X01）",
