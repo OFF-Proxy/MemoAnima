@@ -48,6 +48,8 @@
 //   この検査の NON_KEY_EXPECTED にも足す（Mac で ⇧ に化けるのを防ぐ）。
 
 import crypto from "node:crypto";
+import { V220_SRC_NEW } from "./v220_named.ts"; // ★V220（M-2b-1b）: 次の回の名指し（新しい src を数えから外す）
+import { V221_SRC_NEW } from "./v221_named.ts"; // ★V221（M-2b-2）: その次の回の名指し（新しい src を数えから外す）
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -1689,6 +1691,10 @@ function srcFiles(dir: string): [string, string][] {
     }
   };
   walk(path.join(dir, "src"));
+  // ★V220（M-2b-1b）: V220 で足した src（モバイルの部品）は名指しで外す＝V220 の差分を外した木で数える（振り分け層のサンプルへの写しは
+  //  v220_smoke [D] が同じ決まり〔判断に使わない・写すのは sampleOf だけ〕で見る）
+  out.splice(0, out.length, ...out.filter(([f]) => !V220_SRC_NEW.includes(f)));
+  out.splice(0, out.length, ...out.filter(([f]) => !V221_SRC_NEW.includes(f))); // ★V221（M-2b-2）: V221 で足した src（モバイルの描く画面・保存の画面）も名指しで外す
   return out.sort((a, b) => (a[0] < b[0] ? -1 : 1));
 }
 /** そのノードを囲む**名前のある**入れ物の並び（関数・メソッド・クラスのフィールド・関数を入れた変数） */

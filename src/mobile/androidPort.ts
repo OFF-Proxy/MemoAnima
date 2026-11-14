@@ -9,6 +9,8 @@
 // ★`@tauri-apps/api` はここでも読まない（invoke を受け取る形）。invoke は makeAndroidPort の引数だけで、呼ぶときは命令の名前を文字で直に書く
 //  （v202_smoke [K-2] の決まり＝名前を替えて PC の命令を呼ぶ道を作らない）。iOS と PC の口（port.ts の makeMobilePort）は変えない。
 //  ほかの命令（引数が JSON の物だけ）は makeMobilePort のものをそのまま使う
+// ★V224 (M-2c): ライブラリの命令（libraryList・thumbRead ほか 9）も makeMobilePort のまま。サムネの読み（4MiB まで）は戻りが ArrayBuffer・
+//  Uint8Array・数の配列のどれでも port.ts の asBytes で Uint8Array に揃う。サムネの書き（1MiB まで）は base64 の文字列で渡す
 import { readAutosaveEnvelope } from "../editor/saveCore";
 import { makeMobilePort, MobileRefusal, packRawBody, REFUSALS, type Fingerprint, type InvokeLike, type MobilePort, type RefusalCode, type SaveResult } from "./port";
 

@@ -1,0 +1,4 @@
+{
+  "_": "V224 (A-3・REQ_mobile_m2_editor.md §5-4): src-tauri/gen/android（コミットしない・tauri android init が作るひな形）へ scripts/mobile_build.ts が当てるもの。android-init のあとと、android のビルドの前（今ある gen/android にも）に当てる。今ある値は残し、足りない値だけを足す。★density・fontScale は足さない（V224 の確かめ: 足すと WebView が新しい密度で組み直さず〔CSS の幅 412 のまま・dpr だけ 1.875〕画面の左上に縮んで出て、文字の大きさを変えたあと RenderThread が止まり ANR〔Input dispatching timed out・主スレッドは syncAndDrawFrame〕。今の「作り直す → 起動の提案から戻す」のまま）",
+  "mainActivityConfigChangesAdd": []
+}

@@ -1,0 +1,1499 @@
+/* V225 (M-2b-3b-2／M-2c・UI docs/REQ_mobile_ui_v1.md §6): 描く画面の外の画面（設定・ライブラリ）の見た目。
+   ★色は mobile.css の変数だけ（U-9・scripts/v158_color_check.ts のモバイルの節が見る）。
+   ★位置と大きさは UI §6 の 11 型（1194×834）の実寸と、docs/handoff/V225_boards/README.md の測った位置。
+   ★横と縦（中）の形は CSS が決める（JS は画面の大きさを読まない）。縦の形はモックが無い（UI §6-8・§6-11 の方針で作った）。 */
+
+#mb-screens {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+#mb-screens > * {
+  pointer-events: auto;
+}
+.mb-app,
+.mb-app * {
+  box-sizing: border-box;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.mb-app input {
+  -webkit-user-select: text;
+  user-select: text;
+}
+.mb-app [hidden] {
+  display: none !important;
+}
+.mb-app {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  font-family: var(--font-ui);
+  color: var(--ink);
+  /* 紙＋点（24px ごとに 2px の点＝PC のライブラリと同じ） */
+  background-color: var(--paper);
+  background-image: radial-gradient(var(--dotC) 1px, transparent 1.2px);
+  background-size: 24px 24px;
+}
+.mb-app .mb-btn {
+  touch-action: manipulation;
+}
+
+/* ---------------- 上の帯（設定とライブラリで同じ） ---------------- */
+.mb-topbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 60px;
+  padding: 0 18px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: var(--tangerine);
+  border-bottom: 4px solid var(--line);
+  color: var(--ink-on-accent);
+}
+.mb-topbar-title {
+  font-size: 20px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.mb-card {
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+.mb-soon {
+  opacity: 0.45;
+}
+.mb-dim {
+  opacity: 0.4;
+}
+
+/* ---------------- 設定（UI §6-11） ---------------- */
+.mb-set-back {
+  height: 44px;
+  padding: 0 16px 0 10px;
+  gap: 6px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+  box-shadow: 0 4px 0 var(--ink);
+  white-space: nowrap;
+  margin-top: -4px;
+}
+.mb-set-main {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  top: 72px;
+  bottom: 22px;
+  display: flex;
+  gap: 16px;
+}
+.mb-set-navbox {
+  flex: none;
+  width: 268px;
+  padding: 8px;
+  overflow-y: auto;
+}
+.mb-set-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mb-set-navrow {
+  width: 100%;
+  height: 54px;
+  padding: 0 16px;
+  justify-content: flex-start;
+  gap: 14px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  font-size: 15px;
+  font-weight: 700;
+}
+.mb-set-navrow.mb-on {
+  border-color: var(--line);
+  background: var(--panel);
+  box-shadow: 0 3px 0 var(--ink);
+}
+.mb-set-navname {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mb-set-navsep {
+  height: 0;
+  margin: 8px 10px;
+  border-top: 2px dashed var(--sep);
+}
+.mb-set-navnote {
+  display: block;
+  margin: 14px 10px 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.mb-set-bodybox {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+}
+.mb-set-body {
+  flex: 1;
+  min-width: 0;
+  padding: 24px 28px 28px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+}
+.mb-set-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-bottom: 9px;
+  margin: 0 -4px 4px;
+  padding-left: 4px;
+  border-bottom: 3px solid var(--line);
+}
+.mb-set-title {
+  font-size: 22px;
+  line-height: 26px;
+  font-weight: 700;
+}
+.mb-set-hint {
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--ink-soft);
+}
+.mb-set-label {
+  font-size: 16px;
+  line-height: 22px;
+  font-weight: 700;
+}
+.mb-set-row {
+  min-height: 68px;
+  padding: 9px 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 2px dashed var(--sep);
+}
+/* 絵の付いた行（ジェスチャー）は、絵の箱 50＋上下 11＝行の送り 74 */
+.mb-set-row:has(> .mb-set-gicon) {
+  padding: 11px 0;
+  gap: 22px;
+}
+.mb-set-seg .mb-seg-item:has(.mb-ic) {
+  padding: 0 19px;
+}
+.mb-set-row.mb-noline:has(> .mb-set-gicon) {
+  padding-bottom: 5px;
+}
+.mb-set-row > .mb-set-chip {
+  align-self: flex-start;
+  margin-top: 5px;
+}
+.mb-set-row.mb-noline,
+.mb-set-row:last-child {
+  border-bottom: none;
+}
+.mb-set-rowtext {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.mb-dimrow .mb-set-rowtext,
+.mb-dimrow > .mb-set-hint,
+.mb-dimrow .mb-set-gicon {
+  opacity: 0.45;
+}
+.mb-set-block {
+  padding: 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-bottom: 2px dashed var(--sep);
+}
+.mb-set-block .mb-set-row {
+  padding: 0;
+  min-height: 0;
+}
+.mb-set-blockhead {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+.mb-set-langs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+}
+.mb-set-lang {
+  height: 52px;
+  padding: 0 14px;
+  justify-content: flex-start;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 700;
+  box-shadow: 0 4px 0 var(--ink);
+}
+.mb-set-lang.mb-on {
+  background: var(--yellow);
+  color: var(--ink-on-accent);
+}
+.mb-set-radio {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 3px solid currentColor;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.mb-set-lang.mb-on .mb-set-radio::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.mb-set-seg {
+  flex: none;
+  padding: 4px;
+  gap: 4px;
+  border-radius: 14px;
+}
+.mb-set-seg .mb-seg-item {
+  flex: 1 0 auto;
+  height: 38px;
+  min-width: 92px;
+  padding: 0 14px;
+  gap: 6px;
+  font-size: 13px;
+  overflow: visible;
+}
+.mb-set-seg .mb-seg-item.mb-on {
+  color: var(--ink-on-accent);
+}
+.mb-set-switch {
+  position: relative;
+  flex: none;
+  width: 56px;
+  height: 32px;
+  padding: 0;
+  border-radius: 999px;
+  border: 3px solid var(--line);
+  background: var(--surface-2);
+  box-shadow: none;
+}
+.mb-set-switch.mb-on {
+  background: var(--green);
+}
+.mb-set-knob {
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 3px solid var(--line);
+  background: var(--panel);
+  transition: transform 0.12s;
+}
+.mb-set-switch.mb-on .mb-set-knob {
+  transform: translateX(24px);
+}
+/* スイッチの当たり（見た目 56×32 → 上下に 9 ずつ広げて 50。横は 56 あるので広げない） */
+.mb-set-switch::before {
+  content: "";
+  position: absolute;
+  inset: -9px 0;
+}
+.mb-set-handctl {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.mb-set-handpic {
+  position: relative;
+  flex: none;
+  width: 130px;
+  height: 84px;
+  border: 3px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper2);
+  overflow: hidden;
+}
+.mb-set-handpic > span {
+  position: absolute;
+  border: 2px solid var(--line);
+  background: var(--panel);
+}
+.mb-hp-tools {
+  left: 6px;
+  top: 6px;
+  width: 12px;
+  height: 56px;
+  border-radius: 4px;
+}
+.mb-hp-art {
+  left: 28px;
+  right: 28px;
+  top: 6px;
+  height: 56px;
+  border-radius: 2px;
+}
+.mb-hp-side {
+  right: 6px;
+  top: 6px;
+  width: 12px;
+  height: 56px;
+  border-radius: 4px;
+  background: var(--yellow) !important;
+}
+.mb-hp-bar {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 14px;
+  border-width: 2px 0 0 !important;
+}
+.mb-left-hand .mb-hp-tools {
+  left: auto;
+  right: 6px;
+}
+.mb-left-hand .mb-hp-side {
+  right: auto;
+  left: 6px;
+}
+.mb-set-previewbox {
+  position: relative;
+  height: 76px;
+  padding: 6px 12px;
+  border: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--ink);
+  overflow: hidden;
+}
+.mb-set-preview {
+  display: block;
+  image-rendering: pixelated;
+  color: var(--ink);
+}
+.mb-set-previewcap {
+  position: absolute;
+  right: 12px;
+  bottom: 5px;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.mb-set-gicon {
+  flex: none;
+  width: 50px;
+  height: 50px;
+  border: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.mb-set-chip {
+  flex: none;
+  height: 30px;
+  padding: 0 14px;
+  border: 2px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.mb-set-subrow {
+  padding: 0 0 14px 66px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  border-bottom: 2px dashed var(--sep);
+}
+.mb-set-note,
+.mb-set-warnbox {
+  margin: 12px 0 4px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.mb-set-warnbox {
+  border-color: var(--red);
+  background: var(--warn-bg);
+}
+.mb-set-stats {
+  padding: 16px 0 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 50px;
+}
+.mb-set-go {
+  flex: none;
+  height: 50px;
+  padding: 0 20px;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  background: var(--green);
+  color: var(--ink-on-accent);
+  box-shadow: 0 4px 0 var(--ink);
+  white-space: nowrap;
+}
+.mb-set-app {
+  padding: 6px 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 2px dashed var(--sep);
+}
+.mb-set-applogo {
+  flex: none;
+  width: 64px;
+  height: 64px;
+  border: 3px solid var(--line);
+  border-radius: 16px;
+  background: var(--tangerine) url("../../src-tauri/icons/ios/AppIcon-60x60@2x.png") center / cover no-repeat;
+}
+.mb-set-link {
+  width: 100%;
+  min-height: 56px;
+  padding: 4px;
+  justify-content: space-between;
+  border: none;
+  border-bottom: 2px dashed var(--sep);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+}
+.mb-set-legal {
+  display: block;
+  margin-top: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ink-soft);
+}
+
+/* ---- 縦（中）と、幅の足りない窓: 区分を上の 1 段（横に送れる）にして、中身をその下に全幅（UI §6-11 の★・モックなし） ---- */
+@media (orientation: portrait), (max-width: 999px) {
+  .mb-set-main {
+    flex-direction: column;
+    gap: 12px;
+  }
+  .mb-set-navbox {
+    width: auto;
+    overflow-x: auto;
+    overflow-y: hidden;
+    touch-action: pan-x;
+  }
+  .mb-set-nav {
+    flex-direction: row;
+    align-items: center;
+    width: max-content;
+  }
+  .mb-set-navrow {
+    width: auto;
+    padding: 0 14px;
+    gap: 8px;
+  }
+  .mb-set-navname {
+    flex: none;
+    overflow: visible;
+  }
+  .mb-set-navsep {
+    width: 0;
+    height: 30px;
+    margin: 0 6px;
+    border-top: none;
+    border-left: 2px dashed var(--sep);
+  }
+  .mb-set-navnote {
+    max-width: 260px;
+    margin: 0 10px;
+  }
+  .mb-set-body {
+    padding: 18px 20px 24px;
+  }
+  .mb-set-row {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .mb-set-rowtext {
+    flex: 1 1 320px;
+  }
+  .mb-set-seg .mb-seg-item {
+    min-width: 72px;
+  }
+}
+
+/* =====================================================================================
+   ライブラリ（UI §6）。位置と大きさ（アルバムの列・再生・操作・棚）は library/rules.ts が決めて、画面が left/top/width/height を当てる。
+   ここは中の並びと見た目。11 型（1194×834）の実寸は docs/handoff/V225_boards/README.md の測った位置
+   ===================================================================================== */
+.mb-lib > .mb-card,
+.mb-lib-preview {
+  position: absolute;
+}
+.mb-lib-top {
+  height: var(--lib-topbar, 60px);
+  gap: 12px;
+  padding: 0 18px;
+}
+.mb-lib-mark {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  margin-top: -4px;
+  border-radius: 10px;
+  background: var(--panel) url("../../src-tauri/icons/ios/AppIcon-60x60@2x.png") center / cover no-repeat;
+}
+/* ロゴの場所（ボードは幅 37・高さ 28 のロゴの絵。絵の素材が無いので、アプリの名前を小さく 2 行で置く） */
+.mb-lib-word {
+  flex: none;
+  width: 37px;
+  max-height: 28px;
+  margin-top: -4px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+}
+.mb-lib-tabs {
+  flex: none;
+  height: 48px;
+  margin-top: -4px;
+  padding: 3px;
+  display: flex;
+  gap: 3px;
+  border: 3px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.mb-lib-tab {
+  height: 36px;
+  min-width: 126px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.mb-lib-tab.mb-on {
+  background: var(--panel);
+  box-shadow: 0 2px 0 var(--ink);
+}
+.mb-lib-searchbox {
+  flex: 0 1 200px;
+  min-width: 120px;
+  margin-left: 2px;
+  height: 44px;
+  margin-top: -4px;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 3px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-soft);
+}
+.mb-lib-search {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.mb-lib-search::placeholder {
+  color: var(--ink-soft);
+}
+.mb-lib-search::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+.mb-lib-spacer {
+  flex: 1;
+  min-width: 0;
+}
+.mb-lib-import,
+.mb-lib-new,
+.mb-lib-gear,
+.mb-lib-devexit {
+  flex: none;
+  height: 44px;
+  margin-top: -4px;
+  padding: 0 16px;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink-on-accent);
+  box-shadow: 0 4px 0 var(--ink);
+  white-space: nowrap;
+}
+.mb-lib-import {
+  background: var(--blue);
+}
+.mb-lib-new {
+  background: var(--red);
+}
+.mb-lib-gear {
+  width: 44px;
+  padding: 0;
+  background: var(--panel);
+  color: var(--ink);
+}
+/* 確かめ画面へ戻る小さな札（確かめ画面の印のビルドだけ・配置に入れない） */
+.mb-lib-devexit {
+  position: absolute;
+  left: 2px;
+  bottom: -22px;
+  z-index: 3;
+  height: 18px;
+  margin: 0;
+  padding: 0 6px;
+  font-size: 10px;
+  box-shadow: none;
+  background: var(--surface-2);
+  color: var(--ink);
+  opacity: 0.6;
+}
+
+/* ---- アルバムの列 ---- */
+.mb-lib-albums {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: opacity 0.2s;
+}
+.mb-lib-albumhead {
+  flex: none;
+  height: 40px;
+  padding-left: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mb-lib-sub {
+  font-size: 14px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.mb-lib-foldbtn {
+  flex: none;
+  height: 40px;
+  min-width: 88px;
+  padding: 0 10px;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.mb-lib-albumrows {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 0 6px;
+}
+.mb-lib-album {
+  flex: none;
+  width: 100%;
+  height: 52px;
+  padding: 0 12px;
+  justify-content: space-between;
+  gap: 8px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  touch-action: none;
+}
+.mb-lib-album.mb-on {
+  border-color: var(--line);
+  background: var(--panel);
+  box-shadow: 0 3px 0 var(--ink);
+}
+.mb-lib-album.mb-drop {
+  border-color: var(--green);
+}
+.mb-lib-albumname {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mb-lib-count {
+  flex: none;
+  min-width: 28px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+}
+.mb-lib-album.mb-on .mb-lib-count {
+  background: var(--red);
+  color: var(--ink-on-accent);
+}
+.mb-lib-albumops {
+  flex: none;
+  display: flex;
+  gap: 6px;
+}
+.mb-lib-aop {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 4px;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.mb-lib-albumops.mb-noicon .mb-ic {
+  display: none;
+}
+.mb-lib-albumops.mb-noicon .mb-lib-aop {
+  font-size: 12px;
+  letter-spacing: -0.02em;
+}
+.mb-lib-hint {
+  flex: none;
+  display: block;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+
+/* ---- 再生 ---- */
+.mb-lib-preview {
+  border: 4px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  overflow: hidden;
+  line-height: 0;
+}
+.mb-lib-canvas,
+.mb-lib-bigthumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+.mb-lib-bigthumb {
+  position: absolute;
+  inset: 0;
+  object-fit: contain;
+}
+.mb-paper-clear {
+  background: repeating-conic-gradient(var(--surface-2) 0% 25%, var(--panel) 0% 50%) 50% / 16px 16px;
+}
+.mb-lib-playmark {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 84px;
+  height: 84px;
+  margin: -42px 0 0 -42px;
+  border-radius: 999px;
+  border: 4px solid var(--line);
+  background: var(--green);
+  color: var(--ink-on-accent);
+  box-shadow: 0 5px 0 var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.mb-lib-stagenote {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  padding: 8px 12px;
+  border: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* ---- 操作 ---- */
+.mb-lib-ops {
+  padding: 13px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+  overflow: hidden;
+}
+.mb-lib-ops.mb-none .mb-lib-transport,
+.mb-lib-ops.mb-none .mb-lib-actions {
+  opacity: 0.38;
+  pointer-events: none;
+}
+.mb-lib-transport {
+  flex: none;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mb-lib-round {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+}
+.mb-lib-round.mb-on {
+  background: var(--yellow);
+  color: var(--ink-on-accent);
+}
+.mb-lib-play {
+  width: 50px;
+  height: 50px;
+  background: var(--green);
+  color: var(--ink-on-accent);
+}
+.mb-lib-seek {
+  position: relative;
+  flex: 1;
+  min-width: 80px;
+  height: 44px;
+  margin: 0 4px;
+  touch-action: none;
+}
+.mb-lib-seektrack {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 12px;
+  margin-top: -6px;
+  border: 3px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper2);
+  overflow: hidden;
+}
+.mb-lib-seekfill {
+  display: block;
+  height: 100%;
+  background: var(--yellow);
+}
+.mb-lib-seekknob {
+  position: absolute;
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  margin: -12px 0 0 -12px;
+  border: 3px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  pointer-events: none;
+}
+.mb-lib-pos {
+  flex: none;
+  min-width: 58px;
+  font-size: 15px;
+  color: var(--ink-soft);
+  text-align: center;
+  white-space: nowrap;
+}
+.mb-lib-titleblock {
+  min-height: 0;
+  padding: 0 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mb-lib-titleline {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+.mb-lib-name {
+  min-width: 0;
+  font-size: 18px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mb-lib-albumtag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.mb-lib-chips {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  min-height: 28px;
+}
+.mb-lib-chip {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border: 2px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.mb-lib-chip-app {
+  background: var(--red);
+  color: var(--ink-on-accent);
+  font-weight: 700;
+}
+.mb-lib-actions {
+  flex: none;
+  display: flex;
+  gap: 8px;
+}
+.mb-lib-act {
+  flex: none;
+  height: 44px;
+  min-width: 90px;
+  padding: 0 14px;
+  gap: 6px;
+  font-size: 15px;
+  font-weight: 700;
+  box-shadow: 0 4px 0 var(--ink);
+  white-space: nowrap;
+}
+.mb-lib-edit {
+  background: var(--blue);
+  color: var(--ink-on-accent);
+}
+.mb-lib-export {
+  background: var(--green);
+  color: var(--ink-on-accent);
+}
+.mb-lib-morebtn {
+  min-width: 44px;
+  width: 44px;
+  padding: 0;
+}
+.mb-lib-act.mb-open,
+.mb-lib-sortbtn.mb-open,
+.mb-lib-albumbtn.mb-open {
+  background: var(--yellow);
+  color: var(--ink-on-accent);
+}
+.mb-lib-row2 {
+  flex: none;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-left: 3px;
+}
+
+/* ---- 棚 ---- */
+.mb-lib-shelf {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.mb-lib-shelfhead {
+  flex: none;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mb-lib-shelftitle {
+  flex: 1;
+  min-width: 0;
+  padding-left: 4px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.mb-lib-albumtitle {
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mb-lib-sortbtn {
+  flex: none;
+  width: 44px;
+  height: 44px;
+}
+.mb-lib-albumbtn {
+  flex: 1;
+  min-width: 0;
+  height: 52px;
+  padding: 0 14px;
+  justify-content: flex-start;
+  gap: 8px;
+  border-radius: 14px;
+  box-shadow: 0 4px 0 var(--ink);
+}
+.mb-lib-albumbtn .mb-lib-albumname {
+  flex: 0 1 auto;
+}
+.mb-lib-albumbtn .mb-lib-sub {
+  flex: 1;
+  text-align: left;
+}
+.mb-lib-grid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr));
+  gap: 10px;
+  align-content: start;
+  padding: 3px 3px 8px;
+}
+.mb-lib-card {
+  min-width: 0;
+  padding: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  overflow: hidden;
+  touch-action: none;
+}
+.mb-lib-card,
+.mb-lib-card.mb-on {
+  background: var(--panel);
+  color: var(--ink);
+}
+.mb-lib-card.mb-on {
+  border-color: var(--red);
+  box-shadow: 0 0 0 1px var(--red), 0 3px 0 var(--ink);
+}
+.mb-lib-card.mb-held {
+  opacity: 0.5;
+}
+.mb-lib-pic {
+  position: relative;
+  display: block;
+  aspect-ratio: 4 / 3;
+  border-bottom: 3px solid var(--line);
+  background: var(--paper);
+  overflow: hidden;
+}
+.mb-lib-thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+  background: var(--panel);
+}
+/* サムネが無い作品は、紙の色の札に名前だけ */
+.mb-lib-picname {
+  position: absolute;
+  inset: 0;
+  padding: 6px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  overflow: hidden;
+  word-break: break-all;
+}
+.mb-lib-card.mb-nothumb .mb-lib-picname {
+  display: flex;
+}
+.mb-lib-cardname {
+  height: 30px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  min-width: 0;
+}
+.mb-lib-cardname > span:first-child {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mb-lib-cardframes {
+  flex: none;
+  font-weight: 400;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.mb-lib-cardframes:empty {
+  display: none;
+}
+.mb-lib-emptybox {
+  grid-column: 1 / -1;
+  padding: 24px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  text-align: center;
+  border: 3px dashed var(--emptyB);
+  border-radius: 12px;
+}
+.mb-lib-emptytitle {
+  font-size: 14px;
+  font-weight: 700;
+}
+.mb-lib-emptymsg {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+
+/* ---- 浮かぶもの（移動先・その他・並び順・アルバムの一覧・作品のメニュー） ---- */
+.mb-lib-pop {
+  position: absolute;
+  z-index: 5;
+  width: 250px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
+}
+.mb-lib-pop-albums {
+  width: 308px;
+  padding: 10px 12px 12px;
+  gap: 10px;
+}
+.mb-lib-pop-more,
+.mb-lib-pop-sort {
+  width: 200px;
+}
+.mb-lib-pophead {
+  flex: none;
+  padding: 8px 10px 4px;
+  font-size: 16px;
+  font-weight: 700;
+}
+.mb-lib-poprows {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mb-lib-menurow {
+  flex: none;
+  width: 100%;
+  height: 48px;
+  padding: 0 12px;
+  justify-content: flex-start;
+  gap: 10px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  font-size: 15px;
+  font-weight: 700;
+}
+.mb-lib-menurow:active,
+.mb-lib-menurow.mb-on {
+  background: var(--surface-2);
+}
+.mb-lib-albumpick {
+  height: 52px;
+}
+.mb-lib-rowlabel {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mb-lib .mb-warn-text {
+  color: var(--delC);
+}
+.mb-lib-ghost {
+  position: absolute;
+  z-index: 8;
+  max-width: 220px;
+  padding: 8px 12px;
+  transform: translate(-50%, -130%);
+  border: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow-float);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+/* ---- 全画面で見る（UI §6-6。地はどちらの配色でも暗い） ---- */
+.mb-lib-theater {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: var(--theater-bg);
+}
+.mb-lib-theaterpic {
+  position: absolute;
+  border: 4px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  overflow: hidden;
+  line-height: 0;
+}
+.mb-lib-theaterbar {
+  position: absolute;
+  height: 56px;
+  padding: 0 14px 0 18px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink);
+  transition: opacity 0.26s, transform 0.26s;
+}
+.mb-lib-theaterbar .mb-lib-name {
+  flex: 0 1 auto;
+  max-width: 220px;
+  font-size: 15px;
+  margin-right: 6px;
+}
+.mb-lib-theaterbar.mb-hide {
+  opacity: 0;
+  transform: translateY(24px);
+  pointer-events: none;
+}
+.mb-lib-theaterclose {
+  position: absolute;
+  right: 16px;
+  top: 17px;
+  width: 50px;
+  height: 50px;
+  border-radius: 999px;
+  box-shadow: 0 4px 0 var(--ink);
+}
+
+/* ---- 「開いています」（UI §6-10: サムネ・文・進み具合の帯） ---- */
+.mb-opening {
+  width: 300px;
+  align-items: center;
+  text-align: center;
+}
+.mb-opening-pic {
+  display: block;
+  width: 160px;
+  height: 120px;
+  margin: 0 auto 4px;
+  border: 3px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  overflow: hidden;
+}
+.mb-opening-pic img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+  background: var(--panel);
+}
+
+/* ---- たたむ／広げるときの動き（0.32s。視差効果を減らすなら切る） ---- */
+.mb-lib.mb-folding .mb-lib-preview,
+.mb-lib.mb-folding .mb-lib-shelf {
+  transition: left 0.32s, top 0.32s, width 0.32s, height 0.32s;
+}
+.mb-lib.mb-folding .mb-lib-ops {
+  animation: mb-lib-ops-in 0.22s 0.22s both;
+}
+@keyframes mb-lib-ops-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mb-lib.mb-folding .mb-lib-preview,
+  .mb-lib.mb-folding .mb-lib-shelf,
+  .mb-lib-theaterbar {
+    transition: none;
+  }
+  .mb-lib.mb-folding .mb-lib-ops {
+    animation: none;
+  }
+}
+
+/* ---- 縦（中）: 上の帯は、検索を縮め、札を詰める（UI §6-8） ---- */
+.mb-lib[data-shape="medium"] .mb-lib-word {
+  display: none;
+}
+.mb-lib[data-shape="medium"] .mb-lib-tab {
+  min-width: 0;
+  padding: 0 10px;
+}
+.mb-lib[data-shape="medium"] .mb-lib-searchbox {
+  flex: 1 1 100px;
+  min-width: 90px;
+}
+.mb-lib[data-shape="medium"] .mb-lib-import,
+.mb-lib[data-shape="medium"] .mb-lib-new {
+  padding: 0 12px;
+}
+.mb-lib-guide {
+  position: absolute;
+  inset: var(--lib-topbar, 60px) 0 0 0;
+}
+/* 棚が狭い（アルバムを出している）ときは、札にコマの数を出さない（UI §6-4: 棚が広いときだけ） */
+.mb-lib[data-shape="wide"]:not(.mb-folded) .mb-lib-cardframes {
+  display: none;
+}
+/* 選んでいる行・札（白く浮き上がる形）の字は、面の上の字の色（描く画面の .mb-on〔黄の地に濃い字〕を受け継がない＝夜の紙で読める） */
+.mb-lib-album.mb-on,
+.mb-lib-tab.mb-on,
+.mb-set-navrow.mb-on,
+.mb-lib-menurow.mb-on {
+  color: var(--ink);
+}
+
+/* ---- 操作の島が狭い（第9・mini の横で、アルバムを出しているとき＝幅 488）: 再生の段と操作の段を詰める ---- */
+.mb-lib.mb-ops-narrow .mb-lib-transport {
+  gap: 4px;
+}
+.mb-lib.mb-ops-narrow .mb-lib-round {
+  width: 40px;
+  height: 40px;
+}
+.mb-lib.mb-ops-narrow .mb-lib-play {
+  width: 44px;
+  height: 44px;
+}
+.mb-lib.mb-ops-narrow .mb-lib-seek {
+  min-width: 56px;
+  margin: 0 2px;
+}
+.mb-lib.mb-ops-narrow .mb-lib-pos {
+  min-width: 48px;
+  font-size: 14px;
+}
+.mb-lib.mb-ops-narrow .mb-lib-actions {
+  gap: 6px;
+}
+.mb-lib.mb-ops-narrow .mb-lib-act {
+  min-width: 0;
+  padding: 0 10px;
+}
+.mb-lib.mb-ops-narrow .mb-lib-morebtn {
+  min-width: 40px;
+  width: 40px;
+  padding: 0;
+}
+/* 2 段の形: 名前と札は、操作のボタンに場所をゆずる（名前は … で切る・札は入るだけ） */
+.mb-lib-row2 .mb-lib-name {
+  flex: 0 1 auto;
+}
+.mb-lib-row2 .mb-lib-chips {
+  flex: 0 10 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+/* 縦で幅が 800 未満（mini の縦＝744）: 上の帯をさらに詰める */
+.mb-lib.mb-top-narrow .mb-lib-top {
+  gap: 8px;
+  padding: 0 12px;
+}
+.mb-lib.mb-top-narrow .mb-lib-searchbox {
+  min-width: 60px;
+  padding: 0 10px;
+}

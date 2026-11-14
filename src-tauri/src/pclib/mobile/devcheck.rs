@@ -233,12 +233,16 @@ pub mod commands {
     }
 }
 
+/// 試験用のライブラリの状態（1 つのプロセスの中の値）に触る試しを順に回す鍵（V220: settings.rs の試しも使う）
+#[cfg(test)]
+pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 状態は 1 つのプロセスの中の値なので、ここの試しは順に回す
-    static SERIAL: Mutex<()> = Mutex::new(());
+    // 状態は 1 つのプロセスの中の値なので、ここの試しは順に回す（V220: 設定とログの口の試しも同じ鍵で＝外へ出した [`super::SERIAL`]）
+    use super::SERIAL;
 
     fn d_at(lib: &Path) -> Dirs {
         Dirs::under(lib.to_path_buf(), &lib.join("..").join("cfg"))

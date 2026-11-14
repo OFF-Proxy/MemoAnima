@@ -55,9 +55,27 @@ export interface SessionOptions {
   yieldNow?: () => Promise<void>;
   /** オートセーブを途中で捨てるか（呼び出し側の基準） */
   autosaveAborted?: () => boolean;
+  /** ★V221: 便が列の順に来て書き始めるときの口（書く作品とその便の「捨てる」を、書き始めの印を取ってから返す・null＝書かない）。
+   *  `autosave()` に口を渡さなかった便（保存の途中で描き足していたときの書き直しも）はこれを使う。無ければ今どおり
+   *  （持っている作品・`autosaveAborted`） */
+  autosaveStart?: () => AutosaveStart | null;
   /** 書いた時刻（ISO 8601） */
   now?: () => string;
   log?: (line: string) => void;
+}
+
+/** ★V221: 書き始めるときに決めるもの（書く作品・その便の「捨てる」） */
+export interface AutosaveStart {
+  /** 書く作品（裏に回るときは浮かせる前の姿＝コアの workForBackground。ふだんは持っている作品） */
+  project: Project;
+  /** その便を途中で捨てるか（書き始めの印からの変化を見る） */
+  aborted: () => boolean;
+}
+
+/** ★V221: 便の口（渡さなければ SessionOptions.autosaveStart・それも無ければ今どおり）。
+ *  `start` は列の順が来たときに 1 回だけ呼ばれ、null を返すとその便は書かずに "skipped"（保存を押したときに、まだ書き始めていない便を取りやめる） */
+export interface AutosaveRequest {
+  start?: () => AutosaveStart | null;
 }
 
 export type SaveRequest =
@@ -206,19 +224,28 @@ export class MobileWorkSession {
     return run;
   }
 
-  /** ★オートセーブ（列に並べる） */
-  autosave(): Promise<AutosaveOutcome> {
-    return this.enqueue(() => this.autosaveNow());
+  /** ★オートセーブ（列に並べる）。V221: 口（req）で書く作品とその便の「捨てる」を渡せる（渡さなければ今どおり） */
+  autosave(req?: AutosaveRequest): Promise<AutosaveOutcome | "skipped"> {
+    return this.enqueue(() => this.autosaveNow(req));
   }
 
-  /** 列の中で書く（便を始めるとき＝写す前に世代を受け取る） */
-  private async autosaveNow(): Promise<AutosaveOutcome> {
+  /** 列の中で書く（便を始めるとき＝写す前に世代を受け取る）。V221: 書き始める前に口を呼び、null なら書かない */
+  private async autosaveNow(req?: AutosaveRequest): Promise<AutosaveOutcome | "skipped"> {
+    const startFn = req?.start ?? this.opts.autosaveStart;
+    let what: AutosaveStart;
+    if (startFn) {
+      const s = startFn();
+      if (!s) return "skipped";
+      what = s;
+    } else {
+      what = { project: this.project, aborted: () => this.opts.autosaveAborted?.() ?? false };
+    }
     const gen = await this.port.autosaveNextGen();
     try {
       return await autosaveWork({
-        project: this.project,
+        project: what.project,
         yieldNow: this.opts.yieldNow,
-        aborted: () => this.opts.autosaveAborted?.() ?? false,
+        aborted: what.aborted,
         // 列の中なので、保存・破棄と重ならない（遅れて届いた古い便は Rust が世代で断る）
         stillCurrent: () => true,
         meta: () => this.stamp() as unknown as Record<string, unknown>,

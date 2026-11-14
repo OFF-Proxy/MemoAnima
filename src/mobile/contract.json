@@ -19,7 +19,19 @@
     { "name": "mobile_autosave_read", "body": "args", "args": { "session": "0123456789abcdef0123456789abcdef" }, "argsType": "SessionArgs", "returns": "envelope:AutosaveMeta" },
     { "name": "mobile_autosave_delete", "body": "args", "args": { "session": "0123456789abcdef0123456789abcdef", "gen": 8 }, "argsType": "SessionGenArgs", "returns": "null" },
     { "name": "mobile_autosave_claim", "body": "args", "args": { "session": "0123456789abcdef0123456789abcdef", "gen": 9 }, "argsType": "SessionGenArgs", "returns": "null" },
-    { "name": "mobile_library_init", "body": "args", "args": { "album": "未分類" }, "argsType": "LibraryInitArgs", "returns": "LibraryInit" }
+    { "name": "mobile_library_init", "body": "args", "args": { "album": "未分類" }, "argsType": "LibraryInitArgs", "returns": "LibraryInit" },
+    { "name": "mobile_settings_read", "body": "none", "returns": "object" },
+    { "name": "mobile_settings_merge", "body": "args", "args": { "values": { "theme": "dark" } }, "argsType": "SettingsMergeArgs", "returns": "null" },
+    { "name": "mobile_log_append", "body": "args", "args": { "line": "[mobile] 見本" }, "argsType": "LogAppendArgs", "returns": "null" },
+    { "name": "mobile_library_list", "body": "none", "returns": "LibraryList" },
+    { "name": "mobile_library_stamp", "body": "none", "returns": "string" },
+    { "name": "mobile_thumb_read", "body": "args", "args": { "album": "A", "name": "作品.memoanima" }, "argsType": "WorkArgs", "returns": "raw" },
+    { "name": "mobile_thumb_write", "body": "args", "args": { "album": "A", "name": "作品.memoanima", "png": "iVBORw0KGgo=" }, "argsType": "ThumbWriteArgs", "returns": "null" },
+    { "name": "mobile_work_peek", "body": "args", "args": { "album": "A", "name": "作品.memoanima" }, "argsType": "WorkArgs", "returns": "WorkPeek" },
+    { "name": "mobile_delete_work", "body": "args", "args": { "album": "A", "name": "作品.memoanima" }, "argsType": "WorkArgs", "returns": "null" },
+    { "name": "mobile_delete_album", "body": "args", "args": { "album": "A" }, "argsType": "AlbumArgs", "returns": "null" },
+    { "name": "mobile_recoverable_list", "body": "none", "returns": "RecoverableItem[]" },
+    { "name": "mobile_recover", "body": "args", "args": { "album": "A", "name": "作品.memoanima" }, "argsType": "WorkArgs", "returns": "WorkPlace" }
   ],
   "androidCommands": [
     { "name": "mobile_chunk_begin", "args": { "kind": "saveNew", "total": 9 }, "argsType": "ChunkBeginArgs", "returns": "string" },
@@ -30,7 +42,8 @@
     { "name": "mobile_chunk_abort", "args": { "upload": "0123456789abcdef0123456789abcdef" }, "argsType": "UploadArgs", "returns": "null" },
     { "name": "mobile_read_begin", "args": { "kind": "work", "album": "A", "name": "作品.memoanima" }, "argsType": "ReadBeginArgs", "returns": "ReadHandle" },
     { "name": "mobile_read_slice", "args": { "download": "0123456789abcdef0123456789abcdef", "offset": 0, "len": 4 }, "argsType": "ReadSliceArgs", "returns": "raw" },
-    { "name": "mobile_read_end", "args": { "download": "0123456789abcdef0123456789abcdef" }, "argsType": "DownloadArgs", "returns": "null" }
+    { "name": "mobile_read_end", "args": { "download": "0123456789abcdef0123456789abcdef" }, "argsType": "DownloadArgs", "returns": "null" },
+    { "name": "mobile_move_task_to_back", "args": null, "argsType": "None", "returns": "null" }
   ],
   "types": {
     "SaveResult": ["fingerprint", "album", "name", "oursMoved", "keptCopies", "recordLeft"],
@@ -44,7 +57,11 @@
     "WorkHead": ["fingerprint", "album"],
     "EvacRecord": ["v", "album", "name", "sourceFingerprint", "newFingerprint"],
     "AutosaveMeta": ["title", "album", "name", "workId", "baseRev", "sourceFingerprint", "unsaved", "savedAt"],
-    "LibraryInit": ["steps", "ready"]
+    "LibraryInit": ["steps", "ready"],
+    "LibraryList": ["albums", "works"],
+    "LibraryWork": ["album", "name", "size", "sortedAt", "order", "thumb"],
+    "WorkPeek": ["workId", "frames", "speedIndex"],
+    "RecoverableItem": ["album", "name", "bakSize", "bakAt", "tmpCount"]
   },
   "initSteps": ["library", "album", "index", "mark"],
   "settingsKey": "mobileLibraryReady",
@@ -68,7 +85,10 @@
     "verify-failed",
     "outside",
     "unsupported",
-    "io"
+    "io",
+    "reserved-key",
+    "album-not-empty",
+    "album-has-files"
   ],
   "envelope": {
     "_": "読む命令（mobile_read_work・mobile_autosave_read）の封筒＝P-3 の pack_autosave_payload と同じ並び: [u32 LE 頭の長さ][{meta, path} の JSON（空白で埋めて作品が 8 の倍数の位置から）][作品]",

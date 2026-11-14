@@ -12,7 +12,14 @@
 //!  `contract.rs` の単体テストが、表と命令・型を突き合わせる（片側だけ変えると赤）。
 //! ★W-10: ログと断りの値に、作品名・パス・作品の中身を入れない（作品の中身や名前を返すのが役目の命令の戻り値は別）。
 //!  絶対パスを保存しない（決-4）。通信はしない。
+//! ★V220 (L6): `lib.rs` の頭の `#![cfg_attr(mobile, allow(dead_code))]` は PC のファイルなので変えない（PC は差分 0）。代わりにここで
+//!  モバイルのモジュールの使われないコードの警告を戻す（子のモジュールで lint を戻す形）。出てきた警告は、ここ（`pclib::mobile` の中）で
+//!  理由を書いた項目ごとの `allow` か `cfg` で片付ける。
 
+#![cfg_attr(mobile, warn(dead_code))]
+
+// V220 (M-2b-1b・決-17): モバイルのログの口（制御文字を落とす → 置き場を伏せる → 長さを切る）
+pub mod applog;
 // V212 (M-1c・D-M1-3): Android で大きいバイト列を分けて送る・受け取る（中身は cfg(android) に閉じない＝cargo test で回す）
 pub mod chunks;
 pub mod commands;
@@ -25,17 +32,24 @@ pub mod evac;
 pub mod find;
 pub mod fingerprint;
 pub mod init;
+// V224 (M-2c): ライブラリの命令（一覧・サムネ・ヘッダ・作品とアルバムを消す・控えから戻す。場所は Rust が決める）
+pub mod library;
 pub mod names;
 pub mod ops;
 pub mod place;
 pub mod save;
 pub mod sessions;
+// V220 (M-2b-1b・決-17): モバイルの設定の口（読む・渡したキーだけを直す）
+pub mod settings;
 
 #[cfg(test)]
 mod tests;
 // V212: 分けて送る・受け取る道の単体テスト
 #[cfg(test)]
 mod chunk_tests;
+// V224: ライブラリの命令の単体テスト
+#[cfg(test)]
+mod library_tests;
 
 use std::fs;
 use std::io;
@@ -110,6 +124,12 @@ pub mod code {
     pub const UNSUPPORTED: &str = "unsupported";
     /// そのほかの読み書きの失敗（種類はログに 1 行）
     pub const IO: &str = "io";
+    /// V220: 画面から書けない設定のキー（Rust が書く `mobileLibraryReady`・`__` で始まるもの）
+    pub const RESERVED_KEY: &str = "reserved-key";
+    /// V224 (L-4): 消そうとしたアルバムに作品が入っている
+    pub const ALBUM_NOT_EMPTY: &str = "album-not-empty";
+    /// V224 (L-4): 消そうとしたアルバムに、作品でもアプリの付属物でもないファイルかフォルダが入っている
+    pub const ALBUM_HAS_FILES: &str = "album-has-files";
 
     /// 全部（contract.rs が表と突き合わせる）
     pub const ALL: &[&str] = &[
@@ -131,6 +151,9 @@ pub mod code {
         OUTSIDE,
         UNSUPPORTED,
         IO,
+        RESERVED_KEY,
+        ALBUM_NOT_EMPTY,
+        ALBUM_HAS_FILES,
     ];
 }
 

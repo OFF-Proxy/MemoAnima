@@ -1,0 +1,1858 @@
+/* V221 (M-2b-2・UI docs/REQ_mobile_ui_v1.md §3・§5-1〜§5-9・§5-16・§5-17・§6-12): 描く画面（横＝広）と確認・お知らせの見た目。
+   ★色は mobile.css の変数だけ（U-9・v158_color_check のモバイルの節が見る）。
+   ★位置と大きさは UI §5-1 の 11 型（1194×834）の実寸。13 型は「列は四隅に寄せたまま」（指示書 ■3 の D-5）:
+     戻る・左の列・右の列①②は上からの位置、右の列③は下端を下の帯の上 24 に揃える（どちらの型でも bottom: 96）。
+   ★絵の要素に filter を掛けない（作品の色を変えない＝U-27・DU-13）。めくるは傾きだけ。 */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+.mb-ed,
+.mb-ed *,
+#mb-layer,
+#mb-layer * {
+  box-sizing: border-box;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.mb-ed input,
+.mb-ed textarea,
+.mb-ed select {
+  -webkit-user-select: text;
+  user-select: text;
+}
+/* hidden の属性を、display を書いた部品（パネル・帯・メニュー）でも効かせる */
+.mb-ed [hidden],
+#mb-layer [hidden] {
+  display: none !important;
+}
+.mb-ed {
+  position: fixed;
+  inset: 0;
+  touch-action: none;
+  font-family: var(--font-ui);
+  color: var(--ink);
+}
+
+/* ---------------- 地と絵 ---------------- */
+.mb-stage {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(45deg, var(--paper3) 0 8px, var(--paper4) 8px 16px);
+}
+.mb-pic {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: 4px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  transform-origin: center center;
+  box-sizing: content-box !important;
+}
+.mb-pic.mb-settling {
+  transition: transform 0.16s ease-out, width 0.16s ease-out, height 0.16s ease-out;
+}
+.mb-art,
+.mb-ovpix {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+.mb-ovui {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+
+/* ---------------- 島と押せるもの ---------------- */
+.mb-btn {
+  margin: 0; /* WebKit の button の既定の余白（2px）を消す（位置と間が UI §5-1 の実寸どおりになる） */
+  font: inherit;
+  color: inherit;
+  border: 3px solid var(--line);
+  background: var(--panel);
+  border-radius: 12px;
+  box-shadow: 0 3px 0 var(--ink);
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.mb-btn:active {
+  transform: translateY(3px);
+  box-shadow: none;
+}
+.mb-btn[aria-disabled="true"],
+.mb-off {
+  opacity: 0.38;
+}
+.mb-ic {
+  display: inline-flex;
+  line-height: 0;
+}
+.mb-ic-inline {
+  vertical-align: -3px;
+  margin: 0 2px;
+}
+.mb-round {
+  border-radius: 999px;
+}
+.mb-back {
+  position: absolute;
+  left: 21px;
+  top: 17px;
+  width: 50px;
+  height: 50px;
+  border-radius: 999px;
+  box-shadow: 0 4px 0 var(--ink);
+}
+.mb-col {
+  position: absolute;
+  width: 68px;
+  padding: 6px 3px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  transition: opacity 0.22s, transform 0.26s;
+}
+.mb-left {
+  left: 12px;
+  top: 83px;
+}
+.mb-right {
+  right: 12px;
+}
+.mb-file {
+  top: 17px;
+}
+.mb-sizes {
+  top: 211px;
+  gap: 3px;
+}
+.mb-panels {
+  bottom: 96px;
+}
+.mb-col-sep {
+  width: 44px;
+  height: 4px;
+  margin: 2.5px 0; /* 区切りの場所は 9（線 4＋上下 2.5）＝左の列 632（UI §5-1） */
+  border-radius: 2px;
+  background: var(--sep);
+  flex: none;
+}
+.mb-col-head {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  height: 14px;
+  line-height: 14px;
+}
+.mb-tool {
+  position: relative;
+  width: 56px;
+  height: 50px;
+  flex: none;
+  flex-direction: column;
+  gap: 1px;
+}
+.mb-tool-name {
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 12px;
+  white-space: nowrap;
+  /* 札より長い名前（ツールの設定）は札の外へはみ出して見せる（ボードと同じ・隣の島との間に収まる） */
+  overflow: visible;
+}
+.mb-has-format::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 6px;
+  height: 6px;
+  background: rgba(var(--ink-rgb), 0.45);
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+}
+.mb-on {
+  background: var(--yellow);
+  color: var(--ink-on-accent);
+}
+.mb-save {
+  background: var(--green);
+  color: var(--ink-on-accent);
+  box-shadow: 0 4px 0 var(--ink);
+}
+.mb-save.mb-saving .mb-ic {
+  animation: mb-spin 1s linear infinite;
+}
+.mb-file .mb-tool:not(.mb-save),
+.mb-panels .mb-tool:not(.mb-on) {
+  border-color: transparent;
+  box-shadow: none;
+  background: transparent;
+}
+.mb-left .mb-tool:not(.mb-on) {
+  background: var(--panel);
+}
+.mb-size {
+  width: 56px;
+  height: 38px;
+  flex: none;
+  border-color: transparent;
+  box-shadow: none;
+  background: transparent;
+}
+.mb-size.mb-on {
+  border-color: var(--line);
+  background: var(--yellow);
+  box-shadow: 0 3px 0 var(--ink);
+}
+.mb-size-dot {
+  display: block;
+  border-radius: 999px;
+  background: var(--ink);
+}
+.mb-color-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 3px solid var(--line);
+  background: var(--sw, var(--panel));
+}
+
+/* ---------------- 下の帯 ---------------- */
+.mb-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 72px;
+  padding: 4px 14px 20px;
+  border-top: 3px solid var(--line);
+  background: var(--panel);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.mb-bb {
+  min-width: 44px;
+  height: 44px;
+  flex: none;
+  padding: 0 4px;
+}
+.mb-bb-text {
+  font-size: 15px;
+  font-weight: 700;
+  padding-right: 6px;
+}
+.mb-play {
+  border-radius: 999px;
+  background: var(--green);
+  color: var(--ink-on-accent);
+}
+.mb-bar-sep {
+  width: 3px;
+  height: 30px;
+  border-radius: 2px;
+  background: var(--sep);
+  flex: none;
+}
+.mb-film {
+  flex: 1;
+  min-width: 0;
+  height: 48px;
+  border-radius: 10px;
+  background: var(--film-bg);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  touch-action: pan-x;
+}
+.mb-film::-webkit-scrollbar {
+  display: none;
+}
+.mb-fr {
+  position: relative;
+  flex: none;
+  width: 46px;
+  height: 36px;
+  border: 3px solid var(--panel);
+  border-radius: 4px;
+  background: var(--panel);
+}
+.mb-fr canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.mb-fr.mb-on {
+  border-color: var(--yellow);
+  background: var(--panel);
+}
+.mb-fr.mb-drop {
+  border-color: var(--blue);
+}
+.mb-fr-num {
+  position: absolute;
+  left: 2px;
+  top: 0;
+  font-size: 9px;
+  color: var(--ink-soft);
+}
+.mb-count {
+  font-size: 15px;
+  flex: none;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+.mb-hide.mb-on {
+  background: var(--yellow);
+}
+
+/* ---------------- ツールを隠す（列が左右の外へ・0.22s で薄く・0.26s で 24px ずれる） ---------------- */
+.mb-tools-hidden .mb-left {
+  opacity: 0;
+  transform: translateX(-24px);
+  pointer-events: none;
+}
+.mb-tools-hidden .mb-right {
+  opacity: 0;
+  transform: translateX(24px);
+  pointer-events: none;
+}
+.mb-muted .mb-sizes,
+.mb-muted .mb-panels {
+  opacity: 0.38;
+}
+
+/* ---------------- 浮かぶパネル・ツールの帯・メニュー ---------------- */
+.mb-panel {
+  position: absolute;
+  right: 92px;
+  bottom: 84px;
+  width: 300px;
+  max-height: calc(100% - 100px);
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow-float);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mb-panel-wide {
+  width: 320px;
+}
+.mb-strip {
+  position: absolute;
+  left: 92px;
+  top: 83px;
+  width: 300px;
+  max-height: calc(100% - 100px);
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow-float);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mb-strip-wide {
+  width: 344px;
+}
+.mb-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+}
+.mb-panel-title {
+  font-size: 16px;
+  font-weight: 700;
+  flex: 1;
+  min-width: 0;
+}
+.mb-soft {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.mb-sq {
+  width: 44px;
+  height: 44px;
+  flex: none;
+}
+.mb-close {
+  border-color: transparent;
+  box-shadow: none;
+  background: transparent;
+}
+.mb-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+.mb-hint {
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+.mb-seg {
+  display: flex;
+  padding: 3px;
+  gap: 3px;
+  border: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.mb-seg-item {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: 9px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.mb-seg-item.mb-on {
+  background: var(--yellow);
+  box-shadow: 0 2px 0 var(--ink);
+}
+.mb-switch-row {
+  width: 100%;
+  min-height: 44px;
+  justify-content: space-between;
+  border-color: transparent;
+  box-shadow: none;
+  background: transparent;
+  padding: 0 4px;
+}
+.mb-switch-label {
+  font-size: 14px;
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+}
+.mb-switch {
+  position: relative;
+  width: 56px;
+  height: 32px;
+  flex: none;
+  border-radius: 999px;
+  border: 3px solid var(--line);
+  background: var(--surface-2);
+}
+.mb-switch.mb-on {
+  background: var(--green);
+}
+.mb-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 2px solid var(--line);
+  transition: left 0.15s;
+}
+.mb-switch.mb-on .mb-knob {
+  left: 26px;
+}
+.mb-range-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  font-size: 13px;
+}
+.mb-range {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--yellow);
+}
+.mb-range-num {
+  min-width: 30px;
+  text-align: right;
+}
+.mb-btnrow,
+.mb-panel-foot {
+  display: flex;
+  gap: 6px;
+}
+.mb-wide {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 8px;
+  font-size: 14px;
+  font-weight: 700;
+}
+.mb-full {
+  width: 100%;
+}
+.mb-go {
+  background: var(--green);
+  color: var(--ink-on-accent);
+}
+.mb-warn {
+  background: var(--warn-bg);
+  border-color: var(--red);
+}
+.mb-warn-text {
+  color: var(--delC);
+}
+.mb-ops {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.mb-op {
+  min-height: 44px;
+  background: var(--surface-2);
+  font-size: 14px;
+  font-weight: 700;
+}
+.mb-ops2 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mb-nudge-row {
+  display: flex;
+  gap: 6px;
+}
+.mb-nums {
+  display: flex;
+  gap: 6px;
+}
+.mb-numrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.mb-numin,
+.mb-select,
+.mb-textin {
+  margin: 0; /* WebKit の入力欄の既定の余白（2px）を消す（帯の幅を越えない＝C9） */
+  font: inherit;
+  font-size: 16px;
+  min-width: 0;
+  min-height: 44px;
+  border: 3px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink);
+  padding: 4px 8px;
+}
+.mb-numin {
+  width: 64px;
+}
+.mb-textin {
+  width: 100%;
+  resize: none;
+}
+.mb-select {
+  width: 100%;
+}
+.mb-texrow {
+  display: flex;
+  gap: 6px;
+}
+.mb-tex {
+  flex: 1;
+  min-height: 64px;
+  height: auto;
+  padding: 4px 2px;
+  flex-direction: column;
+  font-size: 12px;
+  font-weight: 700;
+}
+.mb-tones {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 5px;
+}
+.mb-tone {
+  height: 44px;
+  border-radius: 10px;
+  box-shadow: 0 2px 0 var(--ink);
+}
+.mb-tone canvas {
+  width: 24px;
+  height: 24px;
+  image-rendering: pixelated;
+}
+.mb-swatches {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+}
+.mb-swatch {
+  height: 44px;
+  border-radius: 10px;
+  background: var(--sw, var(--panel));
+  box-shadow: 0 2px 0 rgba(var(--ink-rgb), 0.25);
+}
+.mb-swatch.mb-on {
+  outline: 3px solid var(--orange);
+  outline-offset: 2px;
+}
+.mb-swatch-sm {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--line);
+  border-radius: 8px;
+  display: inline-block;
+  flex: none;
+}
+.mb-clear {
+  background-color: var(--panel);
+  background-image: linear-gradient(45deg, var(--emptyB) 25%, transparent 25%, transparent 75%, var(--emptyB) 75%),
+    linear-gradient(45deg, var(--emptyB) 25%, transparent 25%, transparent 75%, var(--emptyB) 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+}
+.mb-chip {
+  margin-left: auto;
+  height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+  box-shadow: 0 2px 0 var(--ink);
+}
+.mb-colorpick {
+  width: 100%;
+  height: 140px;
+  border: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.mb-row,
+.mb-mrow {
+  width: 100%;
+  min-height: 48px;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 10px;
+  border-color: transparent;
+  box-shadow: none;
+  background: transparent;
+  font-size: 15px;
+}
+.mb-row-label {
+  flex: 1;
+  text-align: left;
+}
+.mb-layers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mb-lrow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 58px;
+  border: 3px solid var(--line);
+  border-radius: 12px;
+  padding-right: 6px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.mb-lrow.mb-active {
+  background: var(--orange-l);
+  border-color: var(--orange);
+}
+.mb-eye {
+  width: 44px;
+  height: 44px;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  flex: none;
+}
+.mb-lbody {
+  flex: 1;
+  min-width: 0;
+  height: 52px;
+  justify-content: flex-start;
+  gap: 8px;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  transition: transform 0.2s;
+}
+.mb-lthumb {
+  width: 52px;
+  height: 41px;
+  border: 2px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  flex: none;
+}
+.mb-lname {
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mb-lacts {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  transform: translateX(100%);
+  transition: transform 0.2s;
+  background: var(--panel);
+}
+.mb-lrow:not(.mb-swiped) .mb-lacts {
+  display: none; /* すべらせていない行では置かない（行の幅を越えない＝C9） */
+}
+.mb-lrow.mb-swiped .mb-lacts {
+  transform: none;
+}
+.mb-lact {
+  min-width: 64px;
+  height: 44px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.mb-mini {
+  width: 100%;
+  border: 3px solid var(--line);
+  border-radius: 8px;
+  image-rendering: pixelated;
+}
+.mb-menu {
+  position: absolute;
+  right: 92px;
+  top: 17px;
+  width: 270px;
+  padding: 8px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow-float);
+}
+.mb-menu-head {
+  padding: 6px 10px 10px;
+  border-bottom: 2px dashed var(--sep);
+  margin-bottom: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mb-menu-title {
+  font-size: 15px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mb-menu-sub,
+.mb-menu-size {
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.mb-framebar {
+  position: absolute;
+  bottom: 84px;
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow-float);
+}
+.mb-fb {
+  height: 44px;
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 2px 0 var(--ink);
+}
+
+/* ---------------- 札・案内 ---------------- */
+.mb-zoombadge {
+  position: absolute;
+  bottom: 88px;
+  transform: translateX(-50%);
+  height: 40px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s;
+}
+.mb-zoombadge.mb-show {
+  opacity: 1;
+}
+.mb-zoom-num {
+  font-size: 17px;
+}
+.mb-zoom-label {
+  font-size: 13px;
+}
+.mb-undobadge {
+  position: absolute;
+  top: 84px;
+  left: 50%;
+  transform: translateX(-50%);
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+.mb-undobadge.mb-show {
+  opacity: 1;
+}
+.mb-narrow {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.mb-narrow-box {
+  width: min(440px, calc(100% - 32px));
+  padding: 20px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow-float);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+.mb-narrow-title {
+  font-size: 17px;
+  font-weight: 700;
+}
+.mb-narrow-msg {
+  font-size: 14px;
+  line-height: 1.5;
+}
+.mb-busy .mb-left,
+.mb-busy .mb-right,
+.mb-busy .mb-bar {
+  opacity: 0.6;
+}
+
+/* ---------------- お知らせと確認（UI §5-9・§6-12） ---------------- */
+.mb-toast {
+  position: fixed;
+  top: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  min-height: 44px;
+  max-width: min(720px, calc(100% - 40px));
+  padding: 6px 8px 6px 20px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  z-index: 50;
+}
+.mb-toast-text {
+  line-height: 1.4;
+}
+.mb-toast-undo {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border-color: var(--paper);
+  background: var(--ink);
+  color: var(--paper);
+  box-shadow: none;
+  font-size: 13px;
+  font-weight: 700;
+}
+.mb-scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+  transition: padding-bottom 0.26s;
+}
+.mb-dialog {
+  width: 440px;
+  max-width: calc(100% - 32px);
+  max-height: calc(100% - 32px);
+  overflow-y: auto;
+  padding: 20px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow-float);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--ink);
+  font-family: var(--font-ui);
+}
+.mb-dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mb-dialog-title {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+.mb-dialog-body {
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-line;
+}
+.mb-dialog-skip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  min-height: 44px;
+}
+.mb-dialog-btns {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.mb-dialog-btns.mb-vertical {
+  flex-direction: column;
+}
+.mb-dlg-btn {
+  min-height: 50px;
+  padding: 0 18px;
+  font-size: 15px;
+  font-weight: 700;
+  flex: 1;
+}
+.mb-busybox {
+  width: 300px;
+}
+.mb-progress {
+  height: 14px;
+  border: 3px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.mb-progress-bar {
+  display: block;
+  height: 100%;
+  width: 40%;
+  background: var(--yellow);
+  animation: mb-indet 1.2s ease-in-out infinite;
+}
+
+/* 初めての保存（UI §5-16） */
+.mb-savebox {
+  width: 540px;
+}
+.mb-name {
+  margin: 0;
+  font: inherit;
+  font-size: 17px;
+  height: 54px;
+  width: 100%;
+  border: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--ink);
+  padding: 0 14px;
+}
+.mb-name:focus {
+  outline: 4px solid var(--ring);
+}
+.mb-name::selection {
+  background: var(--selBg);
+}
+.mb-albums {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.mb-kb .mb-albums {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+.mb-kb .mb-save-lead {
+  display: none;
+}
+.mb-album {
+  height: 44px;
+  padding: 0 14px;
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+  flex: none;
+}
+.mb-album-new {
+  border-style: dashed;
+  box-shadow: none;
+}
+.mb-savebody {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mb-savebody > * {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.mb-save-note {
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+.mb-save-err {
+  font-size: 13px;
+  color: var(--delC);
+  line-height: 1.45;
+}
+
+/* ---------------- 動き（視差効果を減らす・描いている間は出さない） ---------------- */
+@keyframes mb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes mb-indet {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+@keyframes mb-pop {
+  0% {
+    transform: scale(0.94);
+  }
+  60% {
+    transform: scale(1.02);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes mb-flipin {
+  0% {
+    transform: translateX(-50%) rotateX(90deg);
+  }
+  100% {
+    transform: translateX(-50%) rotateX(0);
+  }
+}
+@keyframes mb-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes mb-page {
+  0% {
+    rotate: x 9deg;
+    scale: 1 0.97;
+  }
+  100% {
+    rotate: x 0deg;
+    scale: 1 1;
+  }
+}
+.mb-anim-pop {
+  animation: mb-pop 0.24s ease-out;
+}
+.mb-anim-flip {
+  animation: mb-flipin 0.34s ease-out;
+}
+.mb-anim-fade {
+  animation: mb-fade 0.2s ease-out;
+}
+.mb-anim-page {
+  animation: mb-page 0.16s ease-out;
+}
+.mb-drawing .mb-anim-pop,
+.mb-drawing .mb-anim-page {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mb-anim-pop,
+  .mb-anim-flip,
+  .mb-anim-fade,
+  .mb-anim-page,
+  .mb-pic.mb-settling,
+  .mb-col {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* ---------------- 仮の一覧（開発用・M-2c で消す） ---------------- */
+.mb-dev {
+  position: fixed;
+  inset: 0;
+  overflow-y: auto;
+  padding: 24px;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+}
+.mb-dev-head,
+.mb-dev-albums,
+.mb-dev-works {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+  align-items: center;
+}
+.mb-dev-works {
+  flex-direction: column;
+  align-items: stretch;
+}
+.mb-dev-title {
+  font-size: 17px;
+  font-weight: 700;
+  width: 100%;
+}
+.mb-dev-btn {
+  font: inherit;
+  font-size: 15px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--ink);
+  text-align: left;
+}
+.mb-dev-btn.mb-on {
+  background: var(--yellow);
+  color: var(--ink-on-accent);
+}
+.mb-chipname {
+  display: inline-block;
+  padding: 6px 12px;
+  border: 3px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-weight: 700;
+  align-self: flex-start;
+}
+
+/* ---------------- ★V222 (M-2b-3a・UI §5-11・指示書 ■3 の E-4〜E-6・■4): 縦（中）— 834×1194 の実寸 ----------------
+   部品は横と同じもの（mobileEditor.ts の mbArrange が入れ物を移す）。置き方は根の .mb-shape-wide／.mb-shape-medium。
+   ツールの段の上・上の段とツールの段の横・パネルの上・帯と一覧の位置は JS（mbPlace・mbPositionPop）が書く。色は変数だけ（U-9）。 */
+.mb-top,
+.mb-toolrow {
+  position: absolute;
+  display: none;
+  align-items: center;
+  gap: 5px;
+  height: 68px;
+  padding: 6px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  transition: opacity 0.22s, transform 0.26s;
+}
+.mb-top {
+  top: 4px;
+}
+.mb-shape-medium .mb-top,
+.mb-shape-medium .mb-toolrow {
+  display: flex;
+}
+.mb-shape-medium .mb-left,
+.mb-shape-medium .mb-sizes,
+.mb-shape-medium .mb-panels {
+  display: none;
+}
+.mb-shape-medium .mb-back {
+  left: 16px;
+  top: 13px;
+}
+.mb-shape-medium .mb-file {
+  top: 4px;
+  right: 16px;
+  width: auto;
+  height: 68px;
+  padding: 6px;
+  flex-direction: row;
+}
+.mb-row-sep {
+  width: 4px;
+  height: 30px;
+  margin: 0 2.5px; /* 区切りの場所は 9（線 4＋左右 2.5）＝ツールの段 773（UI §5-11） */
+  border-radius: 2px;
+  background: var(--sep);
+  flex: none;
+}
+.mb-top .mb-bb {
+  width: 44px;
+  min-width: 44px;
+  height: 50px;
+  padding: 0;
+}
+.mb-top .mb-col-head {
+  min-width: 28px;
+  font-size: 11px;
+  text-align: center;
+  white-space: nowrap;
+  flex: none;
+}
+.mb-shape-medium .mb-size {
+  width: 40px;
+  height: 50px;
+}
+.mb-toolrow .mb-tool[data-tool]:not(.mb-on) {
+  background: var(--panel);
+}
+.mb-toolrow .mb-tool:not([data-tool]):not(.mb-on):not(.mb-group) {
+  border-color: transparent;
+  box-shadow: none;
+  background: transparent;
+}
+/* まとめたボタン: 札の後ろに右へ 5・上へ 5 ずらした札（--surface-2・縁 3）を重ねる。影で描く（箱の外へはみ出さない＝7 言語の数えで切れに数えない） */
+.mb-group-wrap {
+  position: relative;
+  width: 56px;
+  height: 50px;
+  flex: none;
+}
+.mb-group {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-shadow: 5px -5px 0 -3px var(--surface-2), 5px -5px 0 0 var(--line), 0 3px 0 var(--ink);
+}
+.mb-group:not(.mb-on) {
+  background: var(--panel);
+}
+.mb-shape-medium .mb-bar {
+  padding: 2px 13px 22px; /* 縦のボードの再生・ツールを隠すは上 1127.5（下の帯の上 1122 から 5.5） */
+}
+.mb-shape-medium .mb-onion {
+  width: 44px;
+  padding: 0;
+}
+.mb-shape-medium .mb-onion .mb-bb-text {
+  display: none;
+}
+/* パネル: 左右 16・上はツールの段の下 12（JS）・下 84。開いたまま描ける */
+.mb-shape-medium .mb-panel,
+.mb-shape-medium .mb-panel-wide {
+  left: 16px;
+  right: 16px;
+  width: auto;
+  bottom: 84px;
+  max-height: none;
+}
+.mb-ccols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+}
+.mb-ccol {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.mb-shape-medium .mb-ccol .mb-swatches {
+  grid-template-columns: repeat(7, 1fr);
+}
+.mb-swatch-empty {
+  border: 3px dashed var(--sep);
+  background: transparent;
+  box-shadow: none;
+}
+.mb-chip-mark {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+}
+/* 帯（塗り・図形・文字）と一覧（移動・範囲選択・変形・歪み）: 下端はツールの段の上 10（JS）・上 72 より上に出さない（JS の max-height） */
+.mb-shape-medium .mb-strip {
+  top: auto;
+}
+.mb-list {
+  position: absolute;
+  width: 344px;
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow-float);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mb-gcards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  flex: none;
+}
+.mb-gcard {
+  height: 60px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.mb-gcard:not(.mb-on) {
+  background: var(--surface-2);
+}
+.mb-shape-medium .mb-menu {
+  right: 16px;
+  top: 80px;
+  width: 280px;
+}
+.mb-shape-medium .mb-undobadge {
+  top: 140px;
+}
+.mb-medium .mb-toast {
+  top: 88px;
+}
+/* ツールを隠す（縦）: ツールの段（と開いているパネル・一覧）が下へ。戻る・上の段・ファイルの島・下の帯は残る */
+.mb-tools-hidden.mb-shape-medium .mb-toolrow {
+  opacity: 0;
+  transform: translateY(24px);
+  pointer-events: none;
+}
+.mb-tools-hidden.mb-shape-medium .mb-file {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+.mb-muted .mb-top .mb-size {
+  opacity: 0.38;
+}
+.mb-busy .mb-top,
+.mb-busy .mb-toolrow {
+  opacity: 0.6;
+}
+/* レイヤーの行（フォルダ・選んでいる・動かしている・落とす所） */
+.mb-lrow.mb-sel {
+  border-color: var(--orange);
+}
+.mb-lrow.mb-dragging {
+  opacity: 0.5;
+}
+.mb-lrow.mb-drop-into {
+  outline: 3px solid var(--blue);
+  outline-offset: -3px;
+}
+.mb-lrow.mb-drop-above {
+  box-shadow: 0 -5px 0 var(--blue);
+}
+.mb-layers.mb-drop-end {
+  box-shadow: 0 5px 0 var(--blue);
+}
+@media (prefers-reduced-motion: reduce) {
+  .mb-top,
+  .mb-toolrow {
+    transition: none;
+  }
+}
+
+/* =====================================================================================
+   ★V223 (M-2b-3b-1): 長押しから動かす・すべらせる／広げたタイムライン／色の四角と色相／横の詰め方／名前の欄の島と小窓
+   色は変数だけ（色の四角と色相は canvas＝colorMath.ts の計算。コマの色の目印と色のつまみは作品の値を --sw で受ける）
+   ===================================================================================== */
+
+/* ---- F-1: 長押しから動かせるもの（コマ・行）とすべらせるもの（行）・色の四角と色相は、OS のスクロールに渡さない。
+        入れ物を送るのは画面の側（ui/press.ts）。外すと、指を動かしたところでブラウザが送り始めて取り上げられる ---- */
+.mb-fr {
+  touch-action: none;
+}
+.mb-lrow {
+  touch-action: none;
+}
+.mb-cp-svbox {
+  touch-action: none;
+}
+.mb-cp-huebox {
+  touch-action: none;
+}
+
+/* ---- 変形の帯の数の欄（回転・横・縦）: 横の帯の幅（300）に 3 つ並ばない言語がある（ja で 4・ko で 20 はみ出した）＝入らない分は次の段へ ---- */
+.mb-nums {
+  flex-wrap: wrap;
+}
+
+/* ---- F-6: 範囲のコマは青の縁（いまのコマは黄のまま）・F-4: コマの色の目印 ---- */
+.mb-fr.mb-range {
+  border-color: var(--blue);
+  /* つまみの .mb-range（flex: 1）と名前が同じ＝範囲のコマの幅が伸び縮みしないように戻す */
+  flex: none;
+}
+.mb-fr.mb-on,
+.mb-fr.mb-on.mb-range {
+  border-color: var(--yellow);
+}
+.mb-fr-mark {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  bottom: 1px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--sw);
+  pointer-events: none;
+}
+
+/* ---- F-4・F-5: 広げたタイムラインの島（横＝左 88・右 88・下 84／縦＝左 16・右 16・下 84） ---- */
+.mb-expand.mb-on {
+  background: var(--yellow);
+}
+.mb-island {
+  position: absolute;
+  left: 88px;
+  right: 88px;
+  bottom: 84px;
+  padding: 12px;
+  background: var(--panel);
+  border: 3px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow-float);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mb-island[hidden] {
+  display: none;
+}
+.mb-shape-medium .mb-island {
+  left: 16px;
+  right: 16px;
+}
+.mb-tl-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  /* 札の当たり（::before＝下へ 5・右へ 4）が段と頭の外へはみ出したことにならないように、同じだけ余白を足して外側へ引く（位置は変わらない） */
+  padding: 5px 4px;
+  margin: -5px -4px;
+}
+.mb-tl-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 4px;
+  margin: -5px -4px;
+}
+.mb-tl-title {
+  min-width: 90px;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 40px;
+  white-space: nowrap;
+}
+.mb-tl-btn {
+  position: relative;
+  height: 40px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  flex: none;
+}
+/* 当たりは 44 以上（間と島の余白へ広げる＝U-4） */
+.mb-tl-btn::before {
+  content: "";
+  position: absolute;
+  inset: -5px -4px;
+}
+.mb-tl-btn.mb-warn {
+  background: var(--warn-bg);
+  border-color: var(--red);
+}
+.mb-tl-btn.mb-on {
+  background: var(--yellow);
+}
+.mb-tl-sq {
+  width: 40px;
+  padding: 0;
+}
+.mb-tl-speedbox {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.mb-tl-speed {
+  height: 40px;
+  width: auto;
+  min-width: 110px;
+}
+.mb-tl-filmbox {
+  height: 92px;
+  border-radius: 12px;
+  background: var(--film-bg);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 5px 0;
+  min-width: 0;
+}
+/* フィルムの穴（飾り） */
+.mb-tl-holes {
+  height: 6px;
+  margin: 0 12px;
+  flex: none;
+  background-image: linear-gradient(90deg, var(--film-hole) 0 10px, transparent 10px 21px);
+  background-size: 21px 6px;
+  background-repeat: repeat-x;
+  border-radius: 1px;
+}
+.mb-tl-film {
+  flex: 1;
+  height: auto;
+  border-radius: 0;
+  background: transparent;
+  gap: 6px;
+  padding: 0 16px;
+}
+.mb-fr-big {
+  width: 62px;
+  height: 48px;
+  border-radius: 6px;
+}
+.mb-fr-add {
+  flex: none;
+  width: 62px;
+  height: 48px;
+  border: 3px dashed var(--film-hole);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--film-hole);
+  box-shadow: none;
+}
+@keyframes mb-slide {
+  from {
+    transform: translateY(18px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+.mb-anim-slide {
+  animation: mb-slide 0.22s ease-out;
+}
+.mb-drawing .mb-anim-slide {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mb-anim-slide {
+    animation: none;
+  }
+}
+
+/* ---- F-8: 色の四角と色相（canvas）・色の値 ---- */
+.mb-cp {
+  display: flex;
+  flex: none;
+}
+.mb-cp-svbox,
+.mb-cp-huebox {
+  position: relative;
+  flex: none;
+}
+.mb-cp-sv,
+.mb-cp-hue {
+  display: block;
+  border-radius: 12px;
+}
+.mb-cp-hue {
+  border-radius: 999px;
+}
+.mb-cp-svbox::after,
+.mb-cp-huebox::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 3px solid var(--line);
+  border-radius: 12px;
+  pointer-events: none;
+}
+.mb-cp-huebox::after {
+  border-radius: 999px;
+}
+.mb-cp-knob {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  margin: -12px 0 0 -12px;
+  border-radius: 999px;
+  border: 3px solid var(--panel);
+  outline: 2px solid var(--line);
+  background: var(--sw);
+  pointer-events: none;
+  z-index: 1;
+}
+.mb-cp-knob[hidden] {
+  display: none;
+}
+.mb-cp-hknob {
+  position: absolute;
+  left: 50%;
+  width: 34px;
+  height: 14px;
+  margin: -7px 0 0 -17px;
+  border-radius: 999px;
+  border: 3px solid var(--line);
+  background: var(--panel);
+  pointer-events: none;
+  z-index: 1;
+}
+.mb-cp-medium .mb-cp-knob {
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+}
+.mb-cp-medium .mb-cp-hknob {
+  width: 36px;
+  height: 16px;
+  margin: -8px 0 0 -18px;
+}
+.mb-cp-col {
+  gap: 7px;
+}
+/* 「フルカラー」のスイッチの行: 見た目は高さ 32・当たりは上下へ広げて 44 */
+.mb-cp-switch {
+  min-height: 32px;
+  height: 32px;
+  flex: none;
+}
+.mb-cp-switch::before {
+  content: "";
+  position: absolute;
+  inset: -6px 0;
+}
+.mb-cp-switch {
+  position: relative;
+}
+.mb-cp-hexrow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  flex: none;
+}
+.mb-cp-hexrow::before {
+  content: "";
+  position: absolute;
+  inset: -5px 0;
+}
+.mb-cp-now {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border: 3px solid var(--line);
+  border-radius: 9px;
+  background-color: var(--sw);
+}
+.mb-hexin {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  margin: 0;
+  font: inherit;
+  font-size: 15px;
+  border: 3px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink);
+  padding: 0 12px;
+}
+.mb-hexin:focus {
+  outline: 4px solid var(--ring);
+}
+
+/* ---- F-9: 横の詰め方（UI §5-13。段は arrange.ts の wideTier）
+        段 1＝右の列の札 44／段 2＝左の列の札も 44・太さの札 32／段 3＝段 2＋「表示」をその他へ。太さの島の上はファイルの島の下＋16 ---- */
+.mb-shape-wide.mb-tier-1 .mb-right .mb-tool,
+.mb-shape-wide.mb-tier-2 .mb-right .mb-tool,
+.mb-shape-wide.mb-tier-3 .mb-right .mb-tool {
+  height: 44px;
+}
+.mb-shape-wide.mb-tier-1 .mb-sizes,
+.mb-shape-wide.mb-tier-2 .mb-sizes,
+.mb-shape-wide.mb-tier-3 .mb-sizes {
+  top: 193px;
+}
+.mb-shape-wide.mb-tier-2 .mb-left .mb-tool,
+.mb-shape-wide.mb-tier-3 .mb-left .mb-tool {
+  height: 44px;
+}
+.mb-shape-wide.mb-tier-2 .mb-size,
+.mb-shape-wide.mb-tier-3 .mb-size {
+  height: 32px;
+}
+
+/* ---- F-2・F-7: 名前の欄の島・まとめて足す・ゆらゆらの小窓 ---- */
+.mb-namebody {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mb-count-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mb-count-in {
+  width: 96px;
+  height: 44px;
+  text-align: center;
+  flex: none;
+}
+.mb-wobblebox {
+  width: 720px;
+}
+.mb-wobblebody {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  min-width: 0;
+}
+.mb-wb-prevbox {
+  flex: none;
+  line-height: 0;
+}
+.mb-wb-preview {
+  width: 320px;
+  height: 240px;
+  image-rendering: pixelated;
+  border: 3px solid var(--line);
+  border-radius: 8px;
+  background-color: var(--panel);
+}
+.mb-wb-opts {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mb-wb-opts .mb-seg-item {
+  text-overflow: ellipsis;
+  padding: 0 6px;
+}
+/* 対象の切り替えは縦に並べる（「選択中のレイヤーだけ（名前）」が横 2 つでは入らず、両端が切れた）。
+   それでも入らない名前は、字の入れ物で … にする（札は flex なので、札に付けた text-overflow は効かない） */
+.mb-wb-opts .mb-seg:last-child {
+  flex-direction: column;
+}
+.mb-wb-opts .mb-seg:last-child .mb-seg-item {
+  flex: none;
+}
+.mb-wb-opts .mb-seg-item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- ★V225 (UI §5-15): 利き手が左。広の左右のかたまりを、画面の真ん中を軸にそっくり入れ替える（上からの位置は同じ）。
+        下の帯と広げたタイムラインの島は入れ替えない。決まりは arrange.ts の widePartsFor（v225 [H] がこの字と突き合わせる） ---- */
+.mb-shape-wide.mb-hand-left .mb-back {
+  left: auto;
+  right: 21px;
+}
+.mb-shape-wide.mb-hand-left .mb-left {
+  left: auto;
+  right: 12px;
+}
+.mb-shape-wide.mb-hand-left .mb-right {
+  right: auto;
+  left: 12px;
+}
+.mb-shape-wide.mb-hand-left .mb-strip {
+  left: auto;
+  right: 92px;
+}
+.mb-shape-wide.mb-hand-left .mb-panel,
+.mb-shape-wide.mb-hand-left .mb-menu {
+  right: auto;
+  left: 92px;
+}
+.mb-tools-hidden.mb-hand-left .mb-left {
+  transform: translateX(24px);
+}
+.mb-tools-hidden.mb-hand-left .mb-right {
+  transform: translateX(-24px);
+}

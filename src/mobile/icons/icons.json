@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "_": "V220 (M-2b-1b・UI §3-5・docs/handoff/V220_icons/README.md): モバイルの画面のアイコンの一覧。new はこのフォルダの SVG（素材を 1 字も変えずに置いた）、pc は PC の src/icons/ の SVG を束に写して使う（PC のファイルは変えない）。束は scripts/gen_mobile_icons.ts が _bundle.ts に作る",
+  "new": [
+    "layers", "onion", "stabilizer", "more", "add", "post", "heart", "tool-options", "restore", "wobble", "fold", "unfold", "sort", "sound-off", "tools-show",
+    "set-gesture", "set-confirm", "set-sync", "info", "hover-ring", "hover-cross", "g-pan-pinch", "g-tap2", "g-tap3", "g-twist", "g-tap4", "g-long-press", "undo-badge"
+  ],
+  "pc": [
+    "pen", "brush", "eraser", "shape", "eyedrop", "move", "select", "transform", "warp", "text", "hand",
+    "undo", "redo", "copyprev", "line-thicken", "line-thin", "tex-spray", "tex-solid",
+    "save", "export", "camera", "audio", "import",
+    "prev", "next", "pause", "skip-first", "skip-last", "loop",
+    "eye", "eye-off", "folder", "pin", "merge-down", "trash",
+    "display", "project", "zoom", "listen", "folder-open", "close", "check",
+    "chev-left", "chev-right", "chev-up", "chev-down", "gear", "clear",
+    "fill", "play", "tex-sand", "focus", "warn"
+  ]
+}

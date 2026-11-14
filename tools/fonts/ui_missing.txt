@@ -1,0 +1,20 @@
+# V220: 画面用の書体（ui_charset.txt）の字のうち、原本に無かった字（tools/fonts/subset.py が書く）
+# 1 行に 1 字: <出力名> U+XXXX <字>。この字はモバイルの画面に出さない（U-12）
+ui-maru U+2139 ℹ
+ui-maru U+26A0 ⚠
+ui-maru U+27F3 ⟳
+ui-maru U+2921 ⤡
+ui-maru U+3030 〰
+ui-maru U+FE0F ️
+ui-maru-bold U+2139 ℹ
+ui-maru-bold U+26A0 ⚠
+ui-maru-bold U+27F3 ⟳
+ui-maru-bold U+2921 ⤡
+ui-maru-bold U+3030 〰
+ui-maru-bold U+FE0F ️
+ui-dot16 U+2139 ℹ
+ui-dot16 U+26A0 ⚠
+ui-dot16 U+27F3 ⟳
+ui-dot16 U+2921 ⤡
+ui-dot16 U+3030 〰
+ui-dot16 U+FE0F ️

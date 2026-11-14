@@ -1,5 +1,5 @@
 メモアニマ 同梱フォント MANIFEST
-生成: tools/fonts/write_manifest.py / 2026-09-22
+生成: tools/fonts/write_manifest.py / 2026-11-07（V221: 画面用の 3 本の行・ui_charset.txt の行・この日付を手で直した 2026-11-08／V225: 画面用の 3 本の size と sha256・ui_charset.txt の字の数を手で直した 2026-11-13）
 
 後から同一物を取り直せるようにするための記録。すべて一次配布元から取得している
 （ミラー・フォントまとめサイトは使わない）。取得は tools/fonts/fetch_fonts.ps1。
@@ -128,6 +128,33 @@ Reggae One Regular
     size    : 271,888 bytes
     sha256  : bb8a951f9fcc4629cab845615ff0e7af9f2deb05332e9657e05d1c38d365e965
 
+Zen Maru Gothic Regular（モバイルの画面用）
+  URL       : https://github.com/googlefonts/zen-marugothic/raw/main/fonts/ttf/ZenMaruGothic-Regular.ttf
+  原本      : download/ZenMaruGothic-Regular.ttf
+    size    : 3,832,756 bytes
+    sha256  : a0c0b53543e0993ae2225e629c833f3d51495ad31720694ff112ce4ce11111ef
+  サブセット: assets/fonts/ui-maru.woff2
+    size    : 112,460 bytes
+    sha256  : 22f9bf9a31aa16d6d23173e04fd0e0bb6641d180a9c65976d6f264aadc539406
+
+Zen Maru Gothic Bold（モバイルの画面用）
+  URL       : https://github.com/googlefonts/zen-marugothic/raw/main/fonts/ttf/ZenMaruGothic-Bold.ttf
+  原本      : download/ZenMaruGothic-Bold.ttf
+    size    : 3,779,008 bytes
+    sha256  : fe24426b9c8b5523a0146a8235c8674eccf0493af354a53ec895c3596d9eb745
+  サブセット: assets/fonts/ui-maru-bold.woff2
+    size    : 115,656 bytes
+    sha256  : b946c0de8340bca2b4f608713f0a148d435ab93d0ff9f958ce8327f3fa0268ec
+
+DotGothic16 Regular（モバイルの画面用）
+  URL       : https://github.com/fontworks-fonts/DotGothic16/raw/master/fonts/ttf/DotGothic16-Regular.ttf
+  原本      : download/DotGothic16-Regular.ttf
+    size    : 2,069,236 bytes
+    sha256  : 155da8f318553c11d9dffc2affbc7c2114c6a46f9740bcf639ed5568af92be71
+  サブセット: assets/fonts/ui-dot16.woff2
+    size    : 37,856 bytes
+    sha256  : fee1a20bc04ebea632bed5757ee092154d80931d101e2cb7b42337d7dee20830
+
 ==============================================================================
 ■ ライセンス条文（tools/fonts/licenses/）
 ==============================================================================
@@ -180,5 +207,7 @@ misaki_readme_ja.txt
 ==============================================================================
 文字集合 : tools/fonts/subset_charset.txt（2580 字・うち常用漢字 2,136 字）
   sha256 : 3aeef4ae84b8b7f64a68e20c57348bc4b52ce2937b87bc986521f7a7185032c8
+文字集合 : tools/fonts/ui_charset.txt（743 字・モバイルの画面用の 3 本・tools/fonts/make_ui_charset.ts が辞書から作る）
+  sha256 : 2ce85c9d661183da3984fa24360637d5791ce6d246d624ef00a2e12875e1564b
 コマンド : python tools/fonts/subset.py
            （pyftsubset --flavor=woff2 --layout-features= --no-hinting）

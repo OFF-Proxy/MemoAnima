@@ -9,8 +9,8 @@ import { newProject, type Project } from "../editor/model";
 import { projectFromBytes } from "../editor/serialize";
 import { frameToPngBlob } from "../editor/render";
 import { saveSnapshotAllowed, snapshotBytes } from "../editor/prefs";
-import { untitledTitle } from "../i18n/defaults";
-import { MobileWorkSession, type SessionOptions } from "../mobile/session";
+import { t } from "../i18n";
+import { MobileWorkSession, type AutosaveStart, type SessionOptions } from "../mobile/session";
 import type { MobilePort, SessionEntry } from "../mobile/port";
 
 /** 測った時間（ms） */
@@ -38,6 +38,15 @@ export interface OpsHooks {
   /** 時間を記録する */
   timing: (t: Timing) => void;
   log: (line: string) => void;
+  /** ★V221: 描く画面がつながったら入れる口（無ければ今どおり＝確かめ画面）。
+   *  prepare＝写す前の見積り（コアの prepareSnapshot＝眠らせて見積もる）・autosaveStart＝便の口（書く作品と「捨てる」） */
+  wire?: SessionWire;
+}
+
+/** ★V221: 描く画面とセッションのつなぎ（セッションを作ったあとに描く画面が中身を入れる） */
+export interface SessionWire {
+  prepare: (() => Promise<boolean>) | null;
+  autosaveStart: (() => AutosaveStart | null) | null;
 }
 
 /** MobileWorkSession に渡す口（写し・サムネ・いまのコマ・見積り・譲る口） */
@@ -54,8 +63,10 @@ export function sessionOptions(h: OpsHooks): SessionOptions {
       return blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array(0);
     },
     currentFrame: h.currentFrame,
-    // 写す前の見積り（PC の V168 と同じ上限）。超えたら断る（例外にしない）
-    prepare: async () => saveSnapshotAllowed(snapshotBytes(p0()).est),
+    // 写す前の見積り（PC の V168 と同じ上限）。超えたら断る（例外にしない）。★V221: 描く画面がつながっていれば、コアの prepareSnapshot
+    prepare: async () => (h.wire?.prepare ? h.wire.prepare() : saveSnapshotAllowed(snapshotBytes(p0()).est)),
+    // ★V221: 便の口（描く画面がつながっていれば、書き始めの印・裏に回るときの姿・捨てる条件）
+    autosaveStart: h.wire ? () => (h.wire?.autosaveStart ? h.wire.autosaveStart() : null) : undefined,
     yieldNow,
     log: h.log,
   };
@@ -88,9 +99,15 @@ export function openSession(port: MobilePort, project: Project, rw: { album: str
   return track(MobileWorkSession.openWork(port, project, { album: rw.album, name: rw.name, fingerprint: rw.fingerprint }, sessionOptions(h)));
 }
 
-/** 新規メモ */
+/** ★V221: 新規メモの名前（PC と同じ「新規メモ {stamp}」・stamp の形も PC の main.ts の newNote と同じ） */
+export function newMemoTitle(d = new Date()): string {
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}`;
+  return t("lib.newNote.name.label", { stamp });
+}
+
+/** 新規メモ（★V221: 名前は PC と同じ「新規メモ {stamp}」） */
 export function newSession(port: MobilePort, h: OpsHooks): MobileWorkSession {
-  return track(MobileWorkSession.newWork(port, newProject(untitledTitle()), sessionOptions(h)));
+  return track(MobileWorkSession.newWork(port, newProject(newMemoTitle()), sessionOptions(h)));
 }
 
 /** オートセーブから復元（同じ番号を使い続ける） */

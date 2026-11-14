@@ -77,6 +77,7 @@ npx tsx scripts/make_release.ts   # dist-release/MemoAnima_v<version>_win64.zip
 
 - Author: arcana (X: [@Arcana_Proxy](https://x.com/Arcana_Proxy))
 - **The source code of the application is published under the GNU General Public License v3 or later (GPL-3.0-or-later).** The full text is in [`LICENSE`](LICENSE) at the repository root. Source: https://github.com/OFF-Proxy/MemoAnima
+- **Additional permission for app stores.** In addition to the GPL, the copyright holders allow MemoAnima to be distributed through app stores such as the Apple App Store (including TestFlight), even if the store's terms are incompatible with the GPL, provided that the complete source of each distributed version remains available to everyone under the GPL from a public place that is not subject to those store terms. See [`LICENSE-APPSTORE.md`](LICENSE-APPSTORE.md).
 - **The bundled fonts are not covered by the application's licence.** They are distributed under the SIL Open Font License 1.1 / M+ FONT LICENSE and are merely aggregated into the same distribution. Each font's terms are listed in `LICENSES.txt` inside the distributable.
 - **The GPL does not extend to what you create with this software.** The drawings, animations and exported files are yours, and this licence places no restriction on them.
 - Dependencies (flipnote.js and others) are used under their own licences; `LICENSES.txt` ships with the distributable. The ffmpeg.wasm core used for video conversion (which includes FFmpeg and x264) is covered by the GPL.
@@ -167,6 +168,12 @@ npx tsx scripts/make_release.ts   # dist-release/MemoAnima_v<version>_win64.zip
 - **本体のソースコードは GNU General Public License v3 以降（GPL-3.0-or-later）で公開しています。**
   全文はリポジトリ直下の [`LICENSE`](LICENSE) を参照してください。
   ソースコードの入手先: https://github.com/OFF-Proxy/MemoAnima
+- **アプリストアで配るための追加の許可があります。** GPL に加えて、権利者は、
+  App Store（TestFlight を含む）のようなアプリストアを通してメモアニマを配ることを許可しています。
+  そのストアの決まりが GPL と合わなくても構いません。
+  条件は、配った版の完全なソースコードを、ストアの決まりが掛からない公開の場所で、
+  GPL のまま誰でも受け取れるようにしておくことです。
+  詳しくはリポジトリ直下の [`LICENSE-APPSTORE.md`](LICENSE-APPSTORE.md) を参照してください。
 - **同梱フォントは本体のライセンスの対象外です。** それぞれ SIL Open Font License 1.1 /
   M+ FONT LICENSE のもとで配布されており、本体と同じ配布物に収められているだけの「単なる集積」です。
   各フォントの条件は配布物の `LICENSES.txt` に記載しています。

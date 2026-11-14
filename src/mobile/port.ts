@@ -91,6 +91,38 @@ export interface SessionRead {
   data: Uint8Array;
 }
 
+/** V224 (M-2c): 一覧の作品 1 件（types.LibraryWork）。`name` は拡張子つき・`sortedAt` は秒・`thumb` はサムネがあるか。絶対パスは無い */
+export interface LibraryWork {
+  album: string;
+  name: string;
+  size: number;
+  sortedAt: number;
+  order: number;
+  thumb: boolean;
+}
+
+/** V224: アルバムと作品の一覧（types.LibraryList。作品は .memoanima・.animemo だけ） */
+export interface LibraryList {
+  albums: string[];
+  works: LibraryWork[];
+}
+
+/** V224: PV6 のヘッダだけを開いて読んだ値（types.WorkPeek。PV5 以前・読めないものは null） */
+export interface WorkPeek {
+  workId: string | null;
+  frames: number | null;
+  speedIndex: number | null;
+}
+
+/** V224: 復元の候補（types.RecoverableItem。一時ファイルは数だけ） */
+export interface RecoverableItem {
+  album: string;
+  name: string;
+  bakSize: number;
+  bakAt: number;
+  tmpCount: number;
+}
+
 /** 想定内の断り（contract.json の refusals と同じ並び） */
 export const REFUSALS = [
   "bad-request",
@@ -111,6 +143,11 @@ export const REFUSALS = [
   "outside",
   "unsupported",
   "io",
+  // V220 (M-2b-1b・決-17): 画面から書けない設定のキー（Rust が書く mobileLibraryReady・`__` で始まるもの）
+  "reserved-key",
+  // V224 (M-2c・L-4): アルバムを消すときの断り（作品が入っている／作品でないファイルかフォルダが入っている）
+  "album-not-empty",
+  "album-has-files",
 ] as const;
 export type RefusalCode = (typeof REFUSALS)[number];
 
@@ -139,6 +176,21 @@ async function call<T>(p: Promise<unknown>): Promise<T> {
   } catch (e) {
     throw asRefusal(e);
   }
+}
+
+/** V224: 生のバイト列の戻り（iOS は ArrayBuffer・Android は ArrayBuffer／Uint8Array／数の配列のどれか）を Uint8Array に揃える */
+export function asBytes(v: unknown): Uint8Array {
+  if (v instanceof Uint8Array) return v;
+  if (v instanceof ArrayBuffer) return new Uint8Array(v);
+  if (Array.isArray(v)) return Uint8Array.from(v as number[]);
+  throw new MobileRefusal("io");
+}
+
+/** V224: base64（標準の字・`=` の詰め。サムネを書く命令の引数） */
+export function bytesToBase64(b: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000) as unknown as number[]);
+  return btoa(s);
 }
 
 /** ★生のボディの封筒（PC の save_project_raw と同じ並び: [u32 LE 印の長さ][印の JSON]（[u32 LE 長さ][中身]）× n）。
@@ -184,6 +236,39 @@ export interface MobilePort {
   autosaveDelete(session: string, gen: number): Promise<void>;
   autosaveClaim(session: string, gen: number): Promise<void>;
   libraryInit(album: string): Promise<LibraryInit>;
+  /**
+   * V220 (M-2b-1b・決-17): 設定を読む（PC と同じ段で戻した表・壊れて既定に戻ったときは `__recovered: true` が入る＝画面の案内に使う）。
+   * 置き場は Rust が決める（試験用のライブラリを開いている間は試験用の側）
+   */
+  settingsRead(): Promise<Record<string, unknown>>;
+  /**
+   * V220: 渡したキーだけを直す（Rust が読んで足して書く・渡していないキーは変えない・キーを消す口は無い）。
+   * ★キーの決まり（M-2b-3 の設定の画面）: キーは足すだけ・意味を変えない／PC のキーは PC の値の形／モバイルだけは `mobile` で始める／
+   *  PC が保存しないもの（ピクセル格子・筆圧で太さ・手ブレ補正）は保存しない／`hiddenConfirms` は画面の側で今の値と混ぜてから渡す。
+   * 断り: `mobileLibraryReady`・`__` で始まるキー → `reserved-key`、null の値・空のキー・表でない → `bad-request`（どれもファイルに触らない）
+   */
+  settingsMerge(values: Record<string, unknown>): Promise<void>;
+  /** V220: ログに 1 行（Rust が改行と制御文字を落とし、置き場のパスを伏せ、長さを切る）。★作品名・パス・作品の中身を渡さない（W-10） */
+  logAppend(line: string): Promise<void>;
+  // ---- V224 (M-2c・V211b の F2): ライブラリの命令。場所は Rust が決める（試験用のライブラリを開いている間は試験用の側）。パスを渡さない・受けない ----
+  /** アルバムと作品の一覧（PC の list_albums と scan_library を Rust が決めた場所で。並べ替えは画面がする） */
+  libraryList(): Promise<LibraryList>;
+  /** 外（ファイル App など）で変わったかを見る印（PC の library_stamp） */
+  libraryStamp(): Promise<string>;
+  /** 作品の隣のサムネ（PNG の生のバイト列）。無ければ `target-missing`・4MiB を超えれば `too-large` */
+  thumbRead(album: string, name: string): Promise<Uint8Array>;
+  /** サムネを書く（作品があるときだけ・PNG の頭・1MiB まで） */
+  thumbWrite(album: string, name: string, png: Uint8Array): Promise<void>;
+  /** PV6 のヘッダだけを開いて、作品の ID・コマの数・速さ（PV5 以前は全部 null） */
+  workPeek(album: string, name: string): Promise<WorkPeek>;
+  /** 作品を消す（退避の記録の保全が先・片付かなければ `pending-record`。オートセーブは消さない） */
+  deleteWork(album: string, name: string): Promise<void>;
+  /** アルバムを消す（作品があれば `album-not-empty`・作品でないファイルかフォルダがあれば `album-has-files`） */
+  deleteAlbum(album: string): Promise<void>;
+  /** 復元の候補（本体が無いのに控えがある作品） */
+  recoverableList(): Promise<RecoverableItem[]>;
+  /** 控えから戻す（本体があれば `name-taken`・置き換えない置き方） */
+  recover(album: string, name: string): Promise<WorkPlace>;
 }
 
 /** ★薄い口。`invoke` は Tauri の本物（tauriPort.ts）か、検査が本物の Rust へつなぐもの */
@@ -226,5 +311,27 @@ export function makeMobilePort(invoke: InvokeLike): MobilePort {
       await call<null>(invoke("mobile_autosave_claim", { args: { session, gen } }));
     },
     libraryInit: (album) => call<LibraryInit>(invoke("mobile_library_init", { args: { album } })),
+    settingsRead: () => call<Record<string, unknown>>(invoke("mobile_settings_read")),
+    settingsMerge: async (values) => {
+      await call<null>(invoke("mobile_settings_merge", { args: { values } }));
+    },
+    logAppend: async (line) => {
+      await call<null>(invoke("mobile_log_append", { args: { line } }));
+    },
+    libraryList: () => call<LibraryList>(invoke("mobile_library_list")),
+    libraryStamp: () => call<string>(invoke("mobile_library_stamp")),
+    thumbRead: async (album, name) => asBytes(await call<unknown>(invoke("mobile_thumb_read", { args: { album, name } }))),
+    thumbWrite: async (album, name, png) => {
+      await call<null>(invoke("mobile_thumb_write", { args: { album, name, png: bytesToBase64(png) } }));
+    },
+    workPeek: (album, name) => call<WorkPeek>(invoke("mobile_work_peek", { args: { album, name } })),
+    deleteWork: async (album, name) => {
+      await call<null>(invoke("mobile_delete_work", { args: { album, name } }));
+    },
+    deleteAlbum: async (album) => {
+      await call<null>(invoke("mobile_delete_album", { args: { album } }));
+    },
+    recoverableList: () => call<RecoverableItem[]>(invoke("mobile_recoverable_list")),
+    recover: (album, name) => call<WorkPlace>(invoke("mobile_recover", { args: { album, name } })),
   };
 }

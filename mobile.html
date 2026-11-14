@@ -4,6 +4,73 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>メモアニマ</title>
+    <script>
+      /* V224 (D-M1-8・REQ_mobile_m2_editor.md §5-4): 古い Android System WebView では、画面の本体より先にここで止める。
+         ★古い書き方（ES5）だけ・束の書体と辞書を読まない・外へのリンクを置かない・色を書かない（端末の既定）。
+         Android で UA の Chrome の版が 111 未満なら、更新を頼む文を出して印（window.__MB_OLD_WEBVIEW__）を立てる。
+         entry.ts は最初にこの印を見て、立っていれば何もしない（作品の画面へ進まない・ライブラリを作らない）。
+         iOS では何もしない。Android で Chrome の版が読めないときも止めない。検査: scripts/v224_smoke.ts [W] */
+      (function (w) {
+        var MIN = 111;
+        var nav = w.navigator || {};
+        var ua = String(nav.userAgent || "");
+        if (!/Android/.test(ua)) return;
+        var m = /Chrome\/(\d+)\./.exec(ua);
+        if (!m) return;
+        var v = parseInt(m[1], 10);
+        if (!(v > 0) || v >= MIN) return;
+        w.__MB_OLD_WEBVIEW__ = v;
+        var T = {
+          ja: ["Android System WebViewの更新が必要です", "この端末のAndroid System WebViewが古いため、メモアニマを開けません。Google Playで『Android System WebView』を更新してから、もう一度開いてください。これまでの作品はそのまま残っています。"],
+          en: ["Android System WebView needs an update", "MemoAnima can't open because Android System WebView on this device is out of date. Update “Android System WebView” in Google Play, then open the app again. Your existing works are still here."],
+          es: ["Hay que actualizar Android System WebView", "MemoAnima no se puede abrir porque Android System WebView de este dispositivo está desactualizado. Actualiza «Android System WebView» en Google Play y vuelve a abrir la app. Tus obras siguen guardadas."],
+          "pt-BR": ["É preciso atualizar o Android System WebView", "Não é possível abrir o MemoAnima porque o Android System WebView deste aparelho está desatualizado. Atualize o “Android System WebView” no Google Play e abra o app de novo. Suas obras continuam salvas."],
+          ko: ["Android System WebView를 업데이트해야 해요", "이 기기의 Android System WebView가 오래되어 MemoAnima를 열 수 없어요. Google Play에서 ‘Android System WebView’를 업데이트한 뒤 다시 열어 주세요. 지금까지의 작품은 그대로 남아 있어요."],
+          "zh-Hans": ["需要更新 Android System WebView", "此设备上的 Android System WebView 版本过旧，无法打开 MemoAnima。请在 Google Play 中更新“Android System WebView”后重新打开。之前的作品仍然保留。"],
+          "zh-Hant": ["需要更新 Android System WebView", "此裝置上的 Android System WebView 版本過舊，無法開啟 MemoAnima。請在 Google Play 中更新「Android System WebView」後重新開啟。之前的作品仍然保留。"]
+        };
+        function pick(tag) {
+          var t = String(tag || "").toLowerCase();
+          if (t.indexOf("ja") === 0) return "ja";
+          if (t.indexOf("es") === 0) return "es";
+          if (t.indexOf("pt") === 0) return "pt-BR";
+          if (t.indexOf("ko") === 0) return "ko";
+          if (t.indexOf("zh") === 0) return /hant|-tw|-hk|-mo/.test(t) ? "zh-Hant" : "zh-Hans";
+          if (t.indexOf("en") === 0) return "en";
+          return null;
+        }
+        var list = nav.languages && nav.languages.length ? nav.languages : [nav.language];
+        var lang = "en";
+        for (var i = 0; i < list.length; i++) {
+          var p = pick(list[i]);
+          if (p) {
+            lang = p;
+            break;
+          }
+        }
+        w.__MB_OLD_WEBVIEW_LANG__ = lang;
+        function show() {
+          var d = w.document;
+          var host = d.getElementById("app") || d.body;
+          if (!host) return;
+          while (host.firstChild) host.removeChild(host.firstChild);
+          var box = d.createElement("div");
+          box.setAttribute("style", "padding:24px;font-family:sans-serif;line-height:1.6");
+          var h = d.createElement("h1");
+          h.setAttribute("style", "font-size:20px;margin:0 0 12px");
+          h.appendChild(d.createTextNode(T[lang][0]));
+          var p2 = d.createElement("p");
+          p2.setAttribute("style", "font-size:16px;margin:0");
+          p2.appendChild(d.createTextNode(T[lang][1]));
+          box.appendChild(h);
+          box.appendChild(p2);
+          host.appendChild(box);
+          if (d.documentElement) d.documentElement.setAttribute("lang", lang);
+        }
+        if (w.document.readyState === "loading") w.document.addEventListener("DOMContentLoaded", show);
+        else show();
+      })(window);
+    </script>
   </head>
   <body>
     <div id="app"></div>

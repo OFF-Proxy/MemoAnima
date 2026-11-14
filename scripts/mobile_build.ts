@@ -408,8 +408,62 @@ export function checkInfo(info: Record<string, unknown>, buildNumber: string, ve
   // 1 つの窓（決-7）: シーンを使う形なら 2 つ目の窓を開けない印・使わない形なら 2 つ目の窓は開けない（既定）
   const scene = info.UIApplicationSceneManifest as Record<string, unknown> | undefined;
   if (scene && scene.UIApplicationSupportsMultipleScenes !== false) bad.push("UIApplicationSupportsMultipleScenes が false でない");
+  // ★V221 (指示書 ■3 の D-6): iPad のステータスバーはずっと隠す（UI §4-1）
+  want("UIStatusBarHidden~ipad", true);
+  // ★V222 (M-2b-3a・決-19 を外した・指示書 ■3 の E-7): 他のアプリと並べられる形（M-1 の断りに戻す）。iPad の向きは縦横の 4 つ全部（順は問わない）
   if ("UIRequiresFullScreen" in info) bad.push("UIRequiresFullScreen がある（他のアプリと並べられなくなる）");
+  const ori = info["UISupportedInterfaceOrientations~ipad"];
+  const oriOk = Array.isArray(ori) && ori.length === IPAD_ORIENTATIONS.length && new Set(ori).size === ori.length && IPAD_ORIENTATIONS.every((o) => ori.includes(o));
+  if (!oriOk) bad.push(`UISupportedInterfaceOrientations~ipad が ${JSON.stringify(ori)}（期待は縦横の 4 つ: ${IPAD_ORIENTATIONS.join("・")}）`);
   return bad;
+}
+
+/** ★V222 (E-7): iPad の向き（縦横の 4 つ。Info.ios.plist に 4 つを書く＝混ぜるたびに必ず 4 つになる） */
+export const IPAD_ORIENTATIONS = ["UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown", "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"];
+
+/** ★V225 (P・C17): gen/apple（コミットしない・作り直される）へ当てる iOS のネイティブのファイル（src-tauri/ios-extra/）。
+ *  Sources へ写し、Xcode のプロジェクトに入っていなければ XcodeGen で作り直して入れる（project.yml の Sources の中は全部入る）。
+ *  入れられなければ止める（ペンのダブルタップの受け口が無いビルドを、あるつもりで配らない） */
+export const IOS_EXTRA_FILES = ["MAPencilTap.m"];
+export function iosExtraNeedsRegen(pbxproj: string, files: readonly string[] = IOS_EXTRA_FILES): boolean {
+  return files.some((f) => !pbxproj.includes(f));
+}
+function iosApplyExtra(gen: string, team: string): string {
+  const srcDir = path.join(root, "src-tauri", "ios-extra");
+  const dstDir = path.join(gen, "Sources", "animemo");
+  if (!existsSync(dstDir)) {
+    console.error("gen/apple の Sources/animemo が無い（ひな形が変わった？ ios-extra を当てられない）");
+    process.exit(1);
+  }
+  let copied = 0;
+  for (const f of IOS_EXTRA_FILES) {
+    const src = readFileSync(path.join(srcDir, f));
+    const dst = path.join(dstDir, f);
+    if (!existsSync(dst) || !readFileSync(dst).equals(src)) {
+      writeFileSync(dst, src);
+      copied++;
+    }
+  }
+  const pbx = path.join(gen, "animemo.xcodeproj", "project.pbxproj");
+  let regen = false;
+  if (!existsSync(pbx) || iosExtraNeedsRegen(readFileSync(pbx, "utf8"))) {
+    regen = true;
+    // XcodeGen は PATH から。無ければ、Mac の作業用ユーザーの置き場（ホームの下の tools/xcodegen/bin＝HANDOFF §2-1）を見る
+    const local = path.join(os.homedir(), "tools", "xcodegen", "bin", "xcodegen");
+    const onPath = spawnSync("xcodegen", ["--version"], { encoding: "utf8" }).status === 0;
+    const r = spawnSync(onPath ? "xcodegen" : local, ["generate"], { cwd: gen, encoding: "utf8" });
+    if (r.status !== 0) {
+      const mask = (s: string) => s.split(team).join("<TEAM>").split(os.homedir()).join("~");
+      console.error(mask(`${r.stdout ?? ""}${r.stderr ?? ""}`).split("\n").slice(-12).join("\n"));
+      console.error("XcodeGen でプロジェクトを作り直せない（XcodeGen を PATH に・ios-extra を当てられない）");
+      process.exit(1);
+    }
+  }
+  if (iosExtraNeedsRegen(readFileSync(pbx, "utf8"))) {
+    console.error("ios-extra のファイルが Xcode のプロジェクトに入っていない（当てられない＝止める）");
+    process.exit(1);
+  }
+  return `写した ${copied}・プロジェクト ${regen ? "作り直した" : "そのまま"}`;
 }
 
 function buildIos(buildNumber: string, devcheck: boolean, sim: boolean): void {
@@ -431,6 +485,7 @@ function buildIos(buildNumber: string, devcheck: boolean, sim: boolean): void {
   const icons = readdirSync(iconSrc).filter((n) => n.endsWith(".png"));
   for (const n of icons) copyFileSync(path.join(iconSrc, n), path.join(iconDst, n));
   console.log(`アイコン: src-tauri/icons/ios の ${icons.length} 枚を Assets.xcassets に入れた`);
+  console.log(`ios-extra（ペンのダブルタップの受け口）: ${iosApplyExtra(gen, team)}`);
   const env: NodeJS.ProcessEnv = { ...process.env, APPLE_DEVELOPMENT_TEAM: team, CARGO_ENCODED_RUSTFLAGS: `--remap-path-prefix=${os.homedir()}=~` };
   delete env.RUSTFLAGS;
   if (devcheck) env.MEMOANIMA_MOBILE_DEVCHECK = "1";
@@ -489,7 +544,75 @@ export const ANDROID_EXPECT = {
   targetSdkAtLeast: 36,
   /** 1 つの作業（決-7）: android:launchMode の値（standard=0・singleTop=1・singleTask=2・singleInstance=3） */
   launchMode: 2,
+  /** V224 (A-3): MainActivity の android:configChanges に入っていなければならない印（ひな形の 8 つ）。値は Android の ActivityInfo の CONFIG_* の数
+   *  （aapt2 の xmltree は 16 進の数で出す）。★density・fontScale は入れない（入っていたら赤）＝android-extra.json の注 */
+  configChanges: { orientation: 0x80, keyboardHidden: 0x20, keyboard: 0x10, screenSize: 0x400, locale: 0x4, smallestScreenSize: 0x800, screenLayout: 0x100, uiMode: 0x200 } as Record<string, number>,
+  configChangesAbsent: { density: 0x1000, fontScale: 0x40000000 } as Record<string, number>,
 };
+
+/** V224 (A-3): gen/android に当てるもの（src-tauri/android-extra/android-extra.json） */
+export function androidExtra(): { mainActivityConfigChangesAdd: string[] } {
+  return JSON.parse(readFileSync(path.join(root, "src-tauri", "android-extra", "android-extra.json"), "utf8"));
+}
+
+/** ★V224 (A-3): AndroidManifest.xml の MainActivity の android:configChanges に、足りない値を足した字を返す（今ある値は残す・並びも保つ）。
+ *  純関数（検査が見本で叩く）。MainActivity の activity が 1 つでない・configChanges が無いときは null（当てない＝断る） */
+export function patchConfigChanges(manifest: string, add: string[]): string | null {
+  const acts = [...manifest.matchAll(/<activity\b[^>]*>/g)].filter((m) => /android:name="\.MainActivity"/.test(m[0]));
+  if (acts.length !== 1) return null;
+  const tag = acts[0][0];
+  const cc = /android:configChanges="([^"]*)"/.exec(tag);
+  if (!cc) return null;
+  const have = cc[1].split("|").filter(Boolean);
+  const next = [...have, ...add.filter((x) => !have.includes(x))];
+  if (next.length === have.length) return manifest;
+  const tag2 = tag.replace(cc[0], `android:configChanges="${next.join("|")}"`);
+  const at = acts[0].index ?? 0;
+  return manifest.slice(0, at) + tag2 + manifest.slice(at + tag.length);
+}
+
+/** ★V224 (A-4): ひな形（tauri android init・CLI 2.12.4）の MainActivity.kt の中身（空白と改行を詰めた形）。これのときだけ置き換える */
+export const TEMPLATE_MAIN_ACTIVITY = "package com.arcana.memoanima import android.os.Bundle import androidx.activity.enableEdgeToEdge class MainActivity : TauriActivity() { override fun onCreate(savedInstanceState: Bundle?) { enableEdgeToEdge() super.onCreate(savedInstanceState) } }";
+
+/** ★V226 (T-1): 前の回（V224）の android-extra の MainActivity.kt の中身（空白と改行を詰めた形）。今ある gen/android がこれなら置き換えてよい */
+export const PREVIOUS_MAIN_ACTIVITIES: readonly string[] = [
+  "package com.arcana.memoanima import android.os.Bundle import androidx.activity.OnBackPressedCallback import androidx.activity.enableEdgeToEdge class MainActivity : TauriActivity() { override fun onCreate(savedInstanceState: Bundle?) { enableEdgeToEdge() onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) { override fun handleOnBackPressed() { moveTaskToBack(true) } }) super.onCreate(savedInstanceState) } }",
+];
+
+/** 空白と改行を詰める（比べる用） */
+export function squash(s: string): string {
+  return s.replace(/\/\/.*$/gm, "").replace(/\s+/g, " ").trim();
+}
+
+/** ★V224 (A-4): MainActivity.kt を android-extra のものにする。ひな形のまま（か、前の回に当てた中身）→ 置き換える・もう同じ → 何もしない・ほか → null（当てない＝止める） */
+export function patchMainActivity(current: string, ours: string): string | null {
+  if (current === ours) return current;
+  if (squash(current) === TEMPLATE_MAIN_ACTIVITY) return ours;
+  if (PREVIOUS_MAIN_ACTIVITIES.includes(squash(current))) return ours; // ★V226: 前の回に当てた中身 → 今の中身へ
+  return null;
+}
+
+/** ★V224 (A-3): gen/android の MainActivity に android-extra の configChanges を当てる（当たっていれば何もしない）。当てられなければ止める */
+export function androidApplyExtra(gen = path.join(root, "src-tauri", "gen", "android")): "applied" | "already" {
+  const ktPath = path.join(gen, "app", "src", "main", "java", "com", "arcana", "memoanima", "MainActivity.kt");
+  const kt = readFileSync(ktPath, "utf8");
+  const ktNext = patchMainActivity(kt, readFileSync(path.join(root, "src-tauri", "android-extra", "MainActivity.kt"), "utf8"));
+  if (ktNext === null) {
+    console.error("gen/android の MainActivity.kt がひな形の形でない（android-extra の MainActivity.kt を当てられない）");
+    process.exit(1);
+  }
+  if (ktNext !== kt) writeFileSync(ktPath, ktNext);
+  const f = path.join(gen, "app", "src", "main", "AndroidManifest.xml");
+  const before = readFileSync(f, "utf8");
+  const after = patchConfigChanges(before, androidExtra().mainActivityConfigChangesAdd);
+  if (after === null) {
+    console.error("gen/android の AndroidManifest.xml に MainActivity の configChanges が見つからない（ひな形が変わった？ android-extra を当てられない）");
+    process.exit(1);
+  }
+  if (after === before && ktNext === kt) return "already";
+  if (after !== before) writeFileSync(f, after);
+  return "applied";
+}
 
 /** ★Tauri の CLI（cargo-mobile2 0.22.5）が CARGO_TARGET_<triple>_RUSTFLAGS で渡す Android のリンクの指定（CLI 2.12.4 の実行ファイルの中の字で
  *  確かめた）。CARGO_ENCODED_RUSTFLAGS はそれより優先されるので、一緒に入れないと落ちる（M-0 §13-3 の ⚠） */
@@ -614,6 +737,7 @@ function androidInit(): void {
   if (st !== 0) process.exit(st);
   const icons = androidPostInit();
   console.log(`\nアイコン: src-tauri/icons/android の ${icons.length} 個を res/ に入れた`);
+  console.log(`android-extra（configChanges・MainActivity）: ${androidApplyExtra()}`);
   console.log(`ひな形: ${JSON.stringify(androidTemplateFacts())}`);
 }
 
@@ -628,6 +752,8 @@ export interface ApkManifest {
   permissions: string[];
   allowBackup: string | null;
   nativeCode: string[];
+  /** V224 (A-3): MainActivity の android:configChanges の数（読めなければ null） */
+  configChanges: number | null;
 }
 
 /** aapt2 の出力を読む（純関数・検査が見本で叩く） */
@@ -643,6 +769,7 @@ export function parseApkManifest(badging: string, xmltree: string): ApkManifest 
   const ns = "A: (?:android|http://schemas\\.android\\.com/apk/res/android):";
   const lm = act >= 0 ? new RegExp(`${ns}launchMode\\([^)]*\\)=(\\d+)`).exec(xmltree.slice(act)) : null;
   const ab = new RegExp(`${ns}allowBackup\\([^)]*\\)=(?:\\(type 0x12\\))?0x(\\w+)`).exec(xmltree);
+  const cc = act >= 0 ? new RegExp(`${ns}configChanges\\([^)]*\\)=(?:\\(type 0x11\\))?0x([0-9a-fA-F]+)`).exec(xmltree.slice(act)) : null;
   return {
     packageName: pk?.[1] ?? null,
     versionCode: pk?.[2] ?? null,
@@ -653,6 +780,7 @@ export function parseApkManifest(badging: string, xmltree: string): ApkManifest 
     permissions: [...badging.matchAll(/^uses-permission: name='([^']+)'/gm)].map((m) => m[1]),
     allowBackup: ab ? (/^0+$/.test(ab[1]) ? "false" : "true") : null,
     nativeCode: (/^native-code: (.*)$/m.exec(badging)?.[1] ?? "").split(/\s+/).map((x) => x.replace(/'/g, "")).filter(Boolean),
+    configChanges: cc ? parseInt(cc[1], 16) : null,
   };
 }
 
@@ -667,6 +795,13 @@ export function checkApkManifest(m: ApkManifest, versionCode: string, version: s
   if (m.launchMode !== ANDROID_EXPECT.launchMode) bad.push(`launchMode が ${m.launchMode}（期待 ${ANDROID_EXPECT.launchMode}＝singleTask）`);
   if (!m.nativeCode.includes("x86_64")) bad.push(`native-code に x86_64 が無い（${m.nativeCode.join(" ")}）`);
   if (!m.nativeCode.includes("arm64-v8a")) bad.push(`native-code に arm64-v8a が無い（${m.nativeCode.join(" ")}）`);
+  // V224 (A-3): ひな形の 8 つが残っている・画面の密度と文字の大きさは入れない（入れると WebView が組み直さず、ANR が出た）
+  for (const [k, v] of Object.entries(ANDROID_EXPECT.configChanges)) {
+    if (m.configChanges === null || (m.configChanges & v) !== v) bad.push(`configChanges に ${k} が無い（${m.configChanges === null ? "読めない" : `0x${m.configChanges.toString(16)}`}）`);
+  }
+  for (const [k, v] of Object.entries(ANDROID_EXPECT.configChangesAbsent)) {
+    if (m.configChanges !== null && (m.configChanges & v) !== 0) bad.push(`configChanges に ${k} が入っている（0x${m.configChanges.toString(16)}・入れない＝android-extra.json の注）`);
+  }
   return bad;
 }
 
@@ -719,6 +854,8 @@ function buildAndroid(versionCode: string, devcheck: boolean, debug: boolean): v
   }
   const icons = androidPostInit(gen);
   console.log(`アイコン: src-tauri/icons/android の ${icons.length} 個を res/ に入れた`);
+  // ★V224 (A-3): 今ある gen/android にも当てる（当たっていなければ当てる・当てられなければ止める）
+  console.log(`android-extra（configChanges・MainActivity）: ${androidApplyExtra(gen)}`);
   const env: NodeJS.ProcessEnv = { ...t.env, CARGO_ENCODED_RUSTFLAGS: androidRustflags() };
   delete env.RUSTFLAGS;
   if (devcheck) env.MEMOANIMA_MOBILE_DEVCHECK = "1";

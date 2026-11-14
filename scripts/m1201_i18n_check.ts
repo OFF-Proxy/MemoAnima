@@ -9,7 +9,7 @@
 //   3. 文字数の上限 × 言語別係数        … **ja で有効**。超過は警告一覧。`.modal` 系だけエラー
 //   4. 未使用キーの検出                 … **有効**（削除はしない・一覧のみ）
 //   5. ハードコード残りの検出           … **有効**（対象は index.html と src/main.ts のみ）
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import ts from "typescript";
 // L-2: 言語コードは `LANGS` が正。**型だけ**取る（値を import すると辞書を読み込むので、
 // esbuild が消せる `import type` にしてある）。綴りを間違えた言語はここで気づける
@@ -97,13 +97,42 @@ const KEYED_FILES: readonly (readonly [string, string])[] = [
   ["src/mobile/port.ts", read("src/mobile/port.ts")],
   ["src/mobile/session.ts", read("src/mobile/session.ts")],
   ["src/mobile/tauriPort.ts", read("src/mobile/tauriPort.ts")],
+  // ★V220 (M-2b-1b): この回の新しいモバイルのファイル（設定とログの口は port.ts に足した・置き場の表・アイコンの器と束・振り分け層・倍率・
+  //  開発用のアイコンの頁）。画面文言は持たない（日本語は注釈だけ）。検査 4・5・6・7・9 の全部を掛ける
+  ["src/mobile/commandPlaces.ts", read("src/mobile/commandPlaces.ts")],
+  ["src/mobile/icons/index.ts", read("src/mobile/icons/index.ts")],
+  ["src/mobile/icons/_bundle.ts", read("src/mobile/icons/_bundle.ts")],
+  ["src/mobileApp/input/router.ts", read("src/mobileApp/input/router.ts")],
+  ["src/mobileApp/view/zoom.ts", read("src/mobileApp/view/zoom.ts")],
+  ["src/mobileApp/devpages/icons.ts", read("src/mobileApp/devpages/icons.ts")],
 ];
+
+/** ★V220 (M-2b-1b): モバイルの残りの全部（`src/mobile/`・`src/mobileApp/` の .ts で、上の一覧に無いもの＝`androidPort.ts`〔V212 で漏れていた〕と
+ *  `src/mobileApp/` の今のファイル〔確かめ画面・起動・作品の操作〕）。**検査 4・6・7・9 だけ**を掛ける（検査 5＝日本語の直書きは掛けない:
+ *  今の `src/mobileApp/` の日本語は確かめ画面と起動の文で、辞書へ移すのは画面の回＝M-2b-2）。フォルダを歩いて集める＝新しいファイルを
+ *  足し忘れても沈黙しない（検査 5 を掛けたい新しいファイルは、上の KEYED_FILES に名指しで足す） */
+const MOBILE_REST: readonly (readonly [string, string])[] = (() => {
+  const keyed = new Set(KEYED_FILES.map(([n]) => n));
+  const out: [string, string][] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(`${REPO}/${dir}`, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const rel = `${dir}/${e.name}`;
+      if (e.isDirectory()) walk(rel);
+      else if (/\.ts$/.test(e.name) && !/\.d\.ts$/.test(e.name) && !keyed.has(rel)) out.push([rel, read(rel)]);
+    }
+  };
+  walk("src/mobile");
+  walk("src/mobileApp");
+  return out;
+})();
+check("V220: モバイルの残り（検査 4・6・7・9 の対象）に androidPort.ts と src/mobileApp/ の確かめ画面が入っている", MOBILE_REST.some(([n]) => n === "src/mobile/androidPort.ts") && MOBILE_REST.some(([n]) => n === "src/mobileApp/devcheck/screen.ts"), MOBILE_REST.map(([n]) => n).join(" "));
 
 /** 検査4・6・7 が舐めるソース一式（main / editor ＋ キー化済みファイル） */
 const SCANNED: readonly (readonly [string, string])[] = [
   ["src/main.ts", mainSrc],
   ...EDITOR_FILES,
   ...KEYED_FILES,
+  ...MOBILE_REST, // ★V220
 ];
 
 /** ja.ts の "キー": "値" を読む（辞書は素直な1行1エントリで書く決まり） */
@@ -653,7 +682,7 @@ const OVER_BASELINE = new Set<string>([
   const used = new Set<string>();
   // M12-1b-2（R-2）: **AST で集める**。正規表現だと**コメントの中の文字列まで拾ってしまう**
   //（この検査の説明コメント自身が `Key: "…"` を含んでいて、`…` を参照キーとして誤検出した）。
-  // 拾う形は2つだけ:
+  // 拾う形は2つだけ（★V221b で (c) を足して 3 つ）:
   //   (a) `t("キー")`      … 直書き
   //   (b) `*Key: "キー"`   … **動的キーの規約**。`t(tx.labelKey)` のように変数で引くキーは
   //       呼び出し側からは見えないので、**`*Key: "…"` という名前のプロパティ**で持つ
@@ -669,6 +698,17 @@ const OVER_BASELINE = new Set<string>([
         ts.isCallExpression(node) &&
         ts.isIdentifier(node.expression) &&
         node.expression.text === "t" &&
+        node.arguments.length > 0 &&
+        ts.isStringLiteral(node.arguments[0])
+      ) {
+        used.add((node.arguments[0] as ts.StringLiteral).text);
+      }
+      // (c) ★V221b (■3): `this.coreText("キー", …)`＝コアの文の口（既定の中身は t(key, vars)。PC は上書きしない）
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
+        node.expression.name.text === "coreText" &&
         node.arguments.length > 0 &&
         ts.isStringLiteral(node.arguments[0])
       ) {
@@ -690,7 +730,8 @@ const OVER_BASELINE = new Set<string>([
   for (const m of htmlSrc.matchAll(/data-i18n(?:-title|-placeholder)?="([^"]+)"/g)) used.add(m[1]);
   used.add("app.title"); // applyI18n が document.title に使う
   const unused = [...ja.keys()].filter((k) => !used.has(k));
-  const missing = [...used].filter((k) => !ja.has(k));
+  // ★V221: `mb.` で始まるキーはモバイルだけの辞書（src/mobileApp/i18n/）にある＝下の V221 の節が、その辞書と突き合わせる
+  const missing = [...used].filter((k) => !ja.has(k) && !k.startsWith("mb."));
   warnings.push(...unused.map((k) => `未使用キー: ${k}`));
   check("検査4: 参照しているキーがすべて辞書にある", missing.length === 0, missing.join(" "));
   check("検査4: 未使用キーを数えた（一覧は警告へ）", true, `未使用 ${unused.length} / 使用 ${used.size}`);
@@ -1212,7 +1253,123 @@ function jaLiterals(
   );
 }
 
+// ---------------- ★V221 (M-2b-2・指示書 ■2(2)): モバイルだけの辞書と src/mobileApp/ の全部 ----------------
+// - モバイルの辞書（src/mobileApp/i18n/ の 7 つ）に検査 1・2・3・9（7 言語のキーの揃い・差し込み語・字数・禁止語）
+// - src/mobileApp/ の**全部**の .ts に検査 4・5（使うキーが辞書にある・日本語の直書きが無い）。V220 までは歩いて集めた分に検査 5 が
+//   掛からなかった＝向きを逆にして、名指しの開発用だけを外す
+{
+  const MB_LANGS: readonly (readonly [string, string])[] = [
+    ["ja", "src/mobileApp/i18n/ja.ts"],
+    ["en", "src/mobileApp/i18n/en.ts"],
+    ["es", "src/mobileApp/i18n/es.ts"],
+    ["pt-BR", "src/mobileApp/i18n/pt-BR.ts"],
+    ["ko", "src/mobileApp/i18n/ko.ts"],
+    ["zh-Hans", "src/mobileApp/i18n/zh-Hans.ts"],
+    ["zh-Hant", "src/mobileApp/i18n/zh-Hant.ts"],
+  ];
+  const mb = new Map(MB_LANGS.map(([l, f]) => [l, parseDict(read(f))] as const));
+  const mbJa = mb.get("ja")!;
+  check("V221: モバイルの辞書（ja）が読める（1 行 1 項目）", mbJa.size > 50, `${mbJa.size} キー`);
+  check("V221: モバイルの辞書のキーは全部 mb. で始まる", [...mbJa.keys()].every((k) => k.startsWith("mb.")), [...mbJa.keys()].filter((k) => !k.startsWith("mb.")).join(" "));
+  // 検査 1・2
+  const ph = (v: string) => [...v.matchAll(/\{(\w+)\}/g)].map((x) => x[1]).sort().join(",");
+  const keyBad: string[] = [];
+  const phBad: string[] = [];
+  for (const [lang] of MB_LANGS) {
+    const d = mb.get(lang)!;
+    const miss = [...mbJa.keys()].filter((k) => !d.has(k));
+    const extra = [...d.keys()].filter((k) => !mbJa.has(k));
+    if (miss.length || extra.length) keyBad.push(`${lang}(不足${miss.length}/余分${extra.length})`);
+    for (const [k, v] of d) if (mbJa.has(k) && ph(v) !== ph(mbJa.get(k)!)) phBad.push(`${lang}:${k}`);
+    for (const [k, v] of d) if (!v.trim()) phBad.push(`${lang}:${k}(空)`);
+  }
+  check("V221 検査1: モバイルの辞書の 7 言語のキーが ja と一致", keyBad.length === 0, keyBad.join(" "));
+  check("V221 検査2: モバイルの辞書の差し込み語が ja と一致（空の値も無い）", phBad.length === 0, phBad.join(" "));
+  // 検査 3（字数）: PC と同じ上限と言語の係数。■5 の文そのまま（作者が読む前の下書き）で上限を超える長い文は、名指しの上限で持つ
+  const MB_LIMIT: Record<string, number> = { btn: 12, label: 16, hint: 30, title: 60, msg: 120, toast: 60, placeholder: 16 };
+  const MB_FACTOR: Record<string, number> = { ja: 1, en: 1.8, es: 2.1, "pt-BR": 2.0, ko: 1.1, "zh-Hans": 1.0, "zh-Hant": 1.0 };
+  /** 指示書 ■5 の文そのまま（ja の実測ちょうど・これ以上増やさない） */
+  const MB_LIMIT_OVERRIDE: Record<string, number> = {
+    // （名指しの上限は無い＝どの文も PC と同じ上限の中。足すときは ja の実測ちょうどで・理由を書く）
+  };
+  const over: string[] = [];
+  for (const [lang] of MB_LANGS) {
+    for (const [k, v] of mb.get(lang)!) {
+      const kind = k.split(".").pop()!;
+      const base = MB_LIMIT_OVERRIDE[k] ?? MB_LIMIT[kind];
+      if (!base) continue;
+      const lim = Math.floor(base * MB_FACTOR[lang]);
+      const len = [...v].length;
+      if (len > lim) over.push(`${lang}:${k} ${len}>${lim}`);
+    }
+  }
+  check("V221 検査3: モバイルの辞書の字数（PC と同じ上限×言語の係数・■5 の長い文は名指しの上限）", over.length === 0, over.join(" "));
+  // 検査 9（禁止語）
+  const BANNED_MB = /うごメモ|うごくメモ帳|Flipnote|フリップノート/i;
+  const banned: string[] = [];
+  for (const [lang] of MB_LANGS) for (const [k, v] of mb.get(lang)!) if (BANNED_MB.test(v)) banned.push(`${lang}:${k}`);
+  check("V221 検査9: モバイルの辞書に禁止ブランド語が無い", banned.length === 0, banned.join(" "));
+
+  // src/mobileApp/ の全部の .ts
+  const files: [string, string][] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(`${REPO}/${dir}`, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const rel = `${dir}/${e.name}`;
+      if (e.isDirectory()) walk(rel);
+      else if (/\.ts$/.test(e.name) && !/\.d\.ts$/.test(e.name)) files.push([rel, read(rel)]);
+    }
+  };
+  walk("src/mobileApp");
+  // 検査 4: mt("…") は モバイルの辞書・t("…") は PC の辞書・名前が Key で終わるプロパティの "mb.…" はモバイルの辞書
+  const usedMb = new Set<string>();
+  const usedPc = new Set<string>();
+  for (const [name, src] of files) {
+    const sf = ts.createSourceFile(name, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0])) {
+        const k = (node.arguments[0] as ts.StringLiteral).text;
+        if (node.expression.text === "mt") usedMb.add(k);
+        if (node.expression.text === "t") usedPc.add(k);
+      }
+      if (ts.isStringLiteral(node) && /^mb\.[a-zA-Z0-9.]+$/.test(node.text)) usedMb.add(node.text);
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  const missMb = [...usedMb].filter((k) => !mbJa.has(k));
+  const missPc = [...usedPc].filter((k) => !ja.has(k));
+  check("V221 検査4: src/mobileApp/ が mt() で引くキー（と mb. の字のキー）がモバイルの辞書にある", missMb.length === 0, missMb.join(" "));
+  check("V221 検査4: src/mobileApp/ が t() で引くキーが PC の辞書にある", missPc.length === 0, missPc.join(" "));
+  const unusedMb = [...mbJa.keys()].filter((k) => !usedMb.has(k));
+  warnings.push(...unusedMb.map((k) => `V221 未使用のモバイルのキー: ${k}`));
+  // 検査 5: 日本語の直書き。名指しで外すのは: モバイルの辞書・entry.ts の固定の文（1 か所・i18n-exempt の行）・確かめ画面・仮の一覧・
+  //  開発用の頁・workOps.ts の時間の札（開発用）だけ
+  const MB_EXEMPT_DIRS = ["src/mobileApp/i18n/", "src/mobileApp/devcheck/", "src/mobileApp/devlist/", "src/mobileApp/devpages/"];
+  /** workOps.ts の時間の札（確かめ画面に出す開発用の名前） */
+  const WORKOPS_LABELS = ["写す（PV6）", "読む（Rust→JS）", "組み立て", "読む（オートセーブ）", "書く（新しく保存・Rust）", "書く（上書き・Rust）", "読む（確かめ・Rust）", "オートセーブを書く（Rust）"];
+  /** ★V225: 設定の画面の言語の名前（その言語の字で出す・訳さない＝PC の設定の画面の言語の名前と同じ扱い。ハングルは検査が拾わない） */
+  const SETTINGS_LANG_NAMES = ["日本語", "简体中文", "繁體中文"];
+  const hard: string[] = [];
+  for (const [name, src] of files) {
+    if (MB_EXEMPT_DIRS.some((d) => name.startsWith(d))) continue;
+    const ex = exemptLines(src);
+    for (const hh of jaLiterals(name, src)) {
+      if (hh.internal) continue;
+      if (name === "src/mobileApp/entry.ts" && ex.has(hh.line)) continue;
+      if (name === "src/mobileApp/workOps.ts" && WORKOPS_LABELS.includes(hh.text)) continue;
+      if (name === "src/mobileApp/settings/settingsScreen.ts" && SETTINGS_LANG_NAMES.includes(hh.text)) continue;
+      hard.push(`${name}:${hh.line} ${JSON.stringify(hh.text.slice(0, 60))}`);
+    }
+  }
+  for (const x of hard) console.log(`  ハードコード ${x}`);
+  check("V221 検査5: src/mobileApp/ の全部に日本語の直書きが無い（名指しの開発用・辞書・entry.ts の固定の文 1 か所・workOps.ts の時間の札を除く）", hard.length === 0, `${hard.length} 件`);
+  const entryExempt = [...exemptLines(read("src/mobileApp/entry.ts"))].length;
+  check("V221 検査5: entry.ts の固定の文（i18n-exempt）はちょうど 1 か所", entryExempt === 1, String(entryExempt));
+}
+
 console.log(`\n--- 警告 ${warnings.length} 件（この回では直さない・報告書に載せる）---`);
 for (const w of warnings) console.log(`  ${w}`);
 console.log(`\nm1201 i18n check: pass=${pass} fail=${fail} warn=${warnings.length}`);
-process.exit(fail === 0 ? 0 : 1);
+// V221b (■4): すぐ process.exit すると、別の検査が spawnSync で回して pass= を読むとき、重い中で出力の最後（pipe に書き残した分）が
+//  切れて赤になる（クラウドで 12 回中 3 回）。終わりの印だけ立て、出力を書き切ってから自然に終わる（開いたままのタイマーや口は無い）
+process.exitCode = fail === 0 ? 0 : 1;

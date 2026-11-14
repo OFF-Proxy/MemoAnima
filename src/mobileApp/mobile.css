@@ -1,0 +1,123 @@
+/* V220 (M-2b-1b・要件 docs/REQ_mobile_m2_editor.md §5-1 の 3・決-18・UI docs/REQ_mobile_ui_v1.md §3): モバイルの画面の土台。
+   ★読み込むのは src/mobileApp/app.ts だけ（entry.ts からは読まない＝v211 [E]）。PC の src/styles.css は変えない・読まない。
+   ★色は**全部ここの変数**に集める（PC と同じ作法・scripts/v158_color_check.ts のモバイルの節が見る）。変数の外に色を直書きしない
+     （例外は市松だけ。いまは市松も無い）。PC と同じ名前の変数は PC と同じ値（違うのは明るい紙の --ink-soft と --ink-soft-rgb だけ＝UI §3-1）。
+   ★書体: 文字のツールの 12 本は PC と同じ名前と太さ（`MA Maru` の 400 と 700 ほか）で、PC と同じファイルを指す（1 バイトも変えない）。
+     画面用の 3 本は**別の名前**（`MA UI Maru`・`MA UI Dot16`）。同じ名前と太さの @font-face が 2 つあると後ろが勝ち、
+     文字のツールが画面用のサブセットで描いて PC と絵が変わる（UI §3-4・親G-5）。
+   ★ネットワークの URL は書かない（U-7）。相対の道だけ＝Vite が dist-mobile/assets/ へ写す。 */
+
+/* 文字のツールの書体（PC の src/styles.css の 10〜24 行と同じ名前・太さ・ファイル。src/editor/fonts.ts の FONTS と対） */
+@font-face { font-family: "MA Misaki";  src: url("../../assets/fonts/misaki.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Pixel12"; src: url("../../assets/fonts/pixel12.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Pixel12"; src: url("../../assets/fonts/pixel12-bold.woff2") format("woff2"); font-weight: 700; font-display: block; }
+@font-face { font-family: "MA Maru";    src: url("../../assets/fonts/maru.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Maru";    src: url("../../assets/fonts/maru-bold.woff2") format("woff2"); font-weight: 700; font-display: block; }
+@font-face { font-family: "MA Pop";     src: url("../../assets/fonts/pop.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Mincho";  src: url("../../assets/fonts/mincho.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Kaku";     src: url("../../assets/fonts/kaku.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Dot16";    src: url("../../assets/fonts/dot16.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Tegaki";   src: url("../../assets/fonts/tegaki.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Shippori"; src: url("../../assets/fonts/shippori.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "MA Reggae";   src: url("../../assets/fonts/reggae.woff2") format("woff2"); font-weight: 400; font-display: block; }
+
+/* 画面用の書体（UI §3-4。字の集合は tools/fonts/ui_charset.txt＝ja・en・es・pt-BR の辞書の字と ASCII ほか。
+   ko・zh-Hans・zh-Hant は OS の書体に任せる＝下の font-family の後ろの段） */
+@font-face { font-family: "MA UI Maru";  src: url("../../assets/fonts/ui-maru.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "MA UI Maru";  src: url("../../assets/fonts/ui-maru-bold.woff2") format("woff2"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "MA UI Dot16"; src: url("../../assets/fonts/ui-dot16.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+
+/* 色（UI §3-1・§3-2・§3-3）。明るい紙 */
+:root {
+  /* 色で塗ったボタンの上の文字とアイコン（UI §3-2・PC と同じ値） */
+  --ink-on-accent: #2c2621;
+  --paper: #fbefd6;
+  --paper2: #f3e3c2;
+  --paper3: #efe4c8;
+  --paper4: #f3e9d2;
+  --panel: #ffffff;
+  --surface-2: #f6f1e4;
+  --ink: #2c2621;
+  /* ★PC から変えたのはここだけ（PC は #7a6f60＝小さい文字の 4.5:1 に届かない・UI §3-1） */
+  --ink-soft: #6f6456;
+  --line: #2c2621;
+  --film-bg: #2c2621;
+  --yellow: #ffd23f;
+  --green: #22b573;
+  --blue: #1fa2ff;
+  --red: #ff4b4b;
+  --orange: #f07a1a;
+  --orange-l: #fff0e2;
+  --tangerine: #ff9f1c;
+  --warn-bg: #ffecec;
+  /* 新（UI §3-1）: 広げたタイムラインのフィルムの穴・全画面で見るの地 */
+  --film-hole: #fbefd6;
+  --theater-bg: #1b1613;
+  /* rgba() を組むための成分（PC と同じ名前。--ink-soft-rgb だけ明るい紙で PC と違う＝--ink-soft と対） */
+  --ink-rgb: 44, 38, 33;
+  --shadow-rgb: 44, 38, 33;
+  --scrim-rgb: 44, 38, 33;
+  --ink-soft-rgb: 111, 100, 86;
+  --blue-rgb: 31, 162, 255;
+  /* 影（置いてあるもの・浮いているもの。PC と同じ値） */
+  --shadow: 0 3px 0 rgba(var(--shadow-rgb), 0.18);
+  --shadow-float: 0 6px 20px rgba(0, 0, 0, 0.28);
+  /* v1.6 のボードの 7 つ（UI §3-1。PC の成分から組めるものは組む） */
+  --dotC: rgba(var(--ink-rgb), 0.05);
+  --emptyB: rgba(var(--ink-rgb), 0.25);
+  --sep: rgba(var(--ink-rgb), 0.15);
+  --delC: #c42b2b;
+  --scrim: rgba(var(--scrim-rgb), 0.42);
+  --ring: rgba(var(--blue-rgb), 0.3);
+  --selBg: rgba(var(--blue-rgb), 0.25);
+  /* 書体（画面の文字・数字） */
+  --font-ui: "MA UI Maru", system-ui, sans-serif;
+  --font-num: "MA UI Dot16", "MA UI Maru", system-ui, sans-serif;
+  font-family: var(--font-ui);
+  color: var(--ink);
+  background: var(--paper);
+}
+
+/* 夜の紙（PC と同じ書き方＝変数だけを上書きする） */
+:root[data-theme="dark"] {
+  --ink-on-accent: #2c2621;
+  --paper: #2a2320;
+  --paper2: #221c1a;
+  --paper3: #241e1b;
+  --paper4: #2e2724;
+  --panel: #352d29;
+  --surface-2: #2b2421;
+  --ink: #f2e6d2;
+  --ink-soft: #a89684;
+  --line: #8a7466;
+  --film-bg: #1b1613;
+  --yellow: #ffd66b;
+  --green: #3ecf90;
+  --blue: #4db8ff;
+  --red: #ff6b6b;
+  --orange: #ff9f4a;
+  --orange-l: #4a382c;
+  --tangerine: #ffb35c;
+  --warn-bg: #3d2626;
+  --film-hole: #4a3e37;
+  --theater-bg: #1b1613;
+  --ink-rgb: 242, 230, 210;
+  --shadow-rgb: 0, 0, 0;
+  --scrim-rgb: 0, 0, 0;
+  --ink-soft-rgb: 168, 150, 132;
+  --blue-rgb: 77, 184, 255;
+  --shadow: 0 3px 0 rgba(var(--shadow-rgb), 0.45);
+  --shadow-float: 0 6px 22px rgba(0, 0, 0, 0.6);
+  --dotC: rgba(var(--ink-rgb), 0.05);
+  --emptyB: rgba(var(--ink-rgb), 0.25);
+  --sep: rgba(var(--ink-rgb), 0.14);
+  --delC: #ff8a8a;
+  --scrim: rgba(var(--scrim-rgb), 0.55);
+  --ring: rgba(var(--blue-rgb), 0.35);
+  --selBg: rgba(var(--blue-rgb), 0.3);
+}
+
+/* 数字（コマ番号・件数・速さ・倍率・色の値）は DotGothic16（UI §3-4） */
+.mb-num {
+  font-family: var(--font-num);
+}

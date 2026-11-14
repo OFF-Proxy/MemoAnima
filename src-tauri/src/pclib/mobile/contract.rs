@@ -13,11 +13,15 @@ mod tests {
     use crate::pclib::mobile::find::{self, FindArgs, FoundWork};
     use crate::pclib::mobile::fingerprint::Fingerprint;
     use crate::pclib::mobile::init::{self as init_mod, LibraryInit, LibraryInitArgs};
+    use crate::pclib::mobile::applog::LogAppendArgs;
+    use crate::pclib::mobile::settings::SettingsMergeArgs;
     use crate::pclib::mobile::names;
     use crate::pclib::mobile::ops::{self, AlbumPlace, FreeSpace, WorkPlace};
     use crate::pclib::mobile::save::{NewMeta, OverwriteMeta, SaveResult};
     use crate::pclib::mobile::sessions::{self, SessionEntry};
     use crate::pclib::mobile::{code, EVAC_DIR};
+    // V224: ライブラリの命令の引数と戻り
+    use crate::pclib::mobile::library::{AlbumArgs, LibraryList, LibraryWork, RecoverableItem, ThumbWriteArgs, WorkPeek};
     use serde::de::DeserializeOwned;
     use serde::Serialize;
     use serde_json::Value;
@@ -108,6 +112,12 @@ mod tests {
                     "SessionArgs" => rt::<SessionArgs>(sample),
                     "SessionGenArgs" => rt::<SessionGenArgs>(sample),
                     "LibraryInitArgs" => rt::<LibraryInitArgs>(sample),
+                    // V220: 設定とログの口
+                    "SettingsMergeArgs" => rt::<SettingsMergeArgs>(sample),
+                    "LogAppendArgs" => rt::<LogAppendArgs>(sample),
+                    // V224: ライブラリの命令
+                    "AlbumArgs" => rt::<AlbumArgs>(sample),
+                    "ThumbWriteArgs" => rt::<ThumbWriteArgs>(sample),
                     t => panic!("知らない型 {t}"),
                 };
                 assert_eq!(got.unwrap_or_else(|e| panic!("{name} の見本が型に通らない: {e}")), keys(sample), "{name} の引数の欄");
@@ -137,7 +147,11 @@ mod tests {
             let want = match r {
                 "string" => "Result<String, String>".to_string(),
                 "number" => "u64".to_string(),
+                // V220: 設定を読む（形の決まりの無い JSON の表）
+                "object" => "Result<serde_json::Value, String>".to_string(),
                 "null" => "Result<(), String>".to_string(),
+                // V224: 生のバイト列（サムネ）
+                "raw" => "Result<tauri::ipc::Response, String>".to_string(),
                 x if x.starts_with("envelope:") => "Result<tauri::ipc::Response, String>".to_string(),
                 x if x.ends_with("[]") => format!("Result<Vec<{}>, String>", if x == "ResumeItem[]" { "evac::ResumeItem" } else { &x[..x.len() - 2] }),
                 x => format!("Result<{x}, String>"),
@@ -156,6 +170,10 @@ mod tests {
                     "RenameAlbumArgs" => rt::<RenameAlbumArgs>(&bad).is_ok(),
                     "SessionArgs" => rt::<SessionArgs>(&bad).is_ok(),
                     "LibraryInitArgs" => rt::<LibraryInitArgs>(&bad).is_ok(),
+                    "SettingsMergeArgs" => rt::<SettingsMergeArgs>(&bad).is_ok(),
+                    "LogAppendArgs" => rt::<LogAppendArgs>(&bad).is_ok(),
+                    "AlbumArgs" => rt::<AlbumArgs>(&bad).is_ok(),
+                    "ThumbWriteArgs" => rt::<ThumbWriteArgs>(&bad).is_ok(),
                     _ => rt::<SessionGenArgs>(&bad).is_ok(),
                 };
                 assert!(!ok, "{name} が知らない欄を受けた");
@@ -180,6 +198,11 @@ mod tests {
             ("Fingerprint", ser_keys(&fp)),
             ("LibraryInit", ser_keys(&LibraryInit { steps: vec![], ready: true })),
             ("EvacRecord", ser_keys(&RecordFile { v: 1, album: "a".into(), name: "n".into(), source_fingerprint: fp.clone(), new_fingerprint: fp.clone() })),
+            // V224
+            ("LibraryList", ser_keys(&LibraryList { albums: vec![], works: vec![] })),
+            ("LibraryWork", ser_keys(&LibraryWork { album: "a".into(), name: "n".into(), size: 1, sorted_at: 2, order: 3, thumb: true })),
+            ("WorkPeek", ser_keys(&WorkPeek { work_id: None, frames: None, speed_index: None })),
+            ("RecoverableItem", ser_keys(&RecoverableItem { album: "a".into(), name: "n".into(), bak_size: 1, bak_at: 2, tmp_count: 3 })),
         ];
         for (name, got) in cases {
             let mut want = strs(&t[name]);

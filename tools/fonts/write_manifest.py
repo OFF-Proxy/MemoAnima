@@ -52,6 +52,16 @@ ENTRIES = [
     ("Reggae One Regular",
      "https://github.com/fontworks-fonts/Reggae/raw/master/fonts/ttf/ReggaeOne-Regular.ttf",
      "ReggaeOne-Regular.ttf", "reggae.woff2"),
+    # V220 で追加した 3 本（モバイルの画面用・字の集合は ui_charset.txt・原本は上の 2 書体と同じファイル）
+    ("Zen Maru Gothic Regular（モバイルの画面用）",
+     "https://github.com/googlefonts/zen-marugothic/raw/main/fonts/ttf/ZenMaruGothic-Regular.ttf",
+     "ZenMaruGothic-Regular.ttf", "ui-maru.woff2"),
+    ("Zen Maru Gothic Bold（モバイルの画面用）",
+     "https://github.com/googlefonts/zen-marugothic/raw/main/fonts/ttf/ZenMaruGothic-Bold.ttf",
+     "ZenMaruGothic-Bold.ttf", "ui-maru-bold.woff2"),
+    ("DotGothic16 Regular（モバイルの画面用）",
+     "https://github.com/fontworks-fonts/DotGothic16/raw/master/fonts/ttf/DotGothic16-Regular.ttf",
+     "DotGothic16-Regular.ttf", "ui-dot16.woff2"),
 ]
 
 ARCHIVES = [
@@ -141,6 +151,12 @@ def main() -> int:
         text = open(cs, encoding="utf-8").read().replace("\n", "")
         w("文字集合 : tools/fonts/subset_charset.txt（{} 字・うち常用漢字 2,136 字）".format(len(text)))
         w("  sha256 : " + sha256(cs))
+    # V220: モバイルの画面用の 3 本の字の集合
+    ucs = os.path.join(HERE, "ui_charset.txt")
+    if os.path.exists(ucs):
+        text = open(ucs, encoding="utf-8").read().replace("\n", "")
+        w("文字集合 : tools/fonts/ui_charset.txt（{} 字・モバイルの画面用の 3 本・tools/fonts/make_ui_charset.ts が辞書から作る）".format(len(text)))
+        w("  sha256 : " + sha256(ucs))
     w("コマンド : python tools/fonts/subset.py")
     w("           （pyftsubset --flavor=woff2 --layout-features= --no-hinting）")
 

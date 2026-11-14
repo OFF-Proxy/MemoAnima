@@ -18,7 +18,11 @@ use super::ops::{AlbumPlace, FreeSpace, WorkPlace};
 use super::save::{Hooks, NewMeta, NoHooks, OverwriteMeta, SaveResult};
 use super::sessions::SessionEntry;
 use super::init::{LibraryInit, LibraryInitArgs};
-use super::{chunks, code, evac, find, init, ops, save, sessions, Dirs, Refusal};
+use super::applog::LogAppendArgs;
+use super::settings::SettingsMergeArgs;
+use super::{applog, chunks, code, evac, find, init, ops, save, sessions, settings, Dirs, Refusal};
+// V224 (M-2c): ライブラリの命令（中身は library.rs）
+use super::library::{self, AlbumArgs, LibraryList, RecoverableItem, ThumbWriteArgs, WorkPeek};
 use crate::pclib::lock_lib;
 
 // ---------------- 引数のまとまり（JS から見た欄の名前＝contract.json の commands[].args） ----------------
@@ -222,6 +226,56 @@ pub fn args_autosave_claim(a: &SessionGenArgs) -> Result<(), Refusal> {
 
 pub fn args_library_init(d: &Dirs, a: &LibraryInitArgs) -> Result<LibraryInit, Refusal> {
     init::init_library(d, &a.album, None)
+}
+
+// V220 (M-2b-1b・決-17): 設定とログの口（中身は settings.rs・applog.rs。置き場は Dirs の config・logs）
+pub fn none_settings_read(d: &Dirs) -> serde_json::Value {
+    settings::read(d)
+}
+
+pub fn args_settings_merge(d: &Dirs, a: &SettingsMergeArgs) -> Result<(), Refusal> {
+    settings::merge(d, &a.values)
+}
+
+pub fn args_log_append(d: &Dirs, a: &LogAppendArgs) -> Result<(), Refusal> {
+    applog::append(d, &a.line)
+}
+
+// V224 (M-2c・V211b の F2): ライブラリの命令の 1 段（場所は Dirs＝Rust が決める。JS から場所を受けない）
+pub fn none_library_list(d: &Dirs) -> Result<LibraryList, Refusal> {
+    library::library_list(d)
+}
+
+pub fn none_library_stamp(d: &Dirs) -> Result<String, Refusal> {
+    library::library_stamp_of(d)
+}
+
+pub fn args_thumb_read(d: &Dirs, a: &WorkArgs) -> Result<Vec<u8>, Refusal> {
+    library::thumb_read(d, &a.album, &a.name)
+}
+
+pub fn args_thumb_write(d: &Dirs, a: &ThumbWriteArgs) -> Result<(), Refusal> {
+    library::thumb_write(d, &a.album, &a.name, &a.png)
+}
+
+pub fn args_work_peek(d: &Dirs, a: &WorkArgs) -> Result<WorkPeek, Refusal> {
+    library::work_peek(d, &a.album, &a.name)
+}
+
+pub fn args_delete_work(d: &Dirs, a: &WorkArgs) -> Result<(), Refusal> {
+    library::delete_work(d, &a.album, &a.name)
+}
+
+pub fn args_delete_album(d: &Dirs, a: &AlbumArgs) -> Result<(), Refusal> {
+    library::delete_album_work(d, &a.album)
+}
+
+pub fn none_recoverable_list(d: &Dirs) -> Result<Vec<RecoverableItem>, Refusal> {
+    library::recoverable_list(d)
+}
+
+pub fn args_recover(d: &Dirs, a: &WorkArgs) -> Result<WorkPlace, Refusal> {
+    library::recover(d, &a.album, &a.name)
 }
 
 // ---------------- V212 (M-1c・D-M1-3): Android の分けて送る・受け取る道の 1 段 ----------------
@@ -448,6 +502,92 @@ pub fn mobile_library_init(app: tauri::AppHandle, args: LibraryInitArgs) -> Resu
     args_library_init(&d, &args).map_err(String::from)
 }
 
+/// V220 (M-2b-1b・決-17): 設定を読む（PC の load_settings_impl と同じ段で戻す・`__recovered` はそのまま返す）。場所は OS から
+#[tauri::command]
+pub fn mobile_settings_read(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let d = dirs_from_app(&app)?;
+    Ok(none_settings_read(&d))
+}
+
+/// V220: 渡したキーだけを直す（Rust のキー・`__` のキー・null・表でないは断る＝ファイルに触らない）
+#[tauri::command]
+pub fn mobile_settings_merge(app: tauri::AppHandle, args: SettingsMergeArgs) -> Result<(), String> {
+    let d = dirs_from_app(&app)?;
+    args_settings_merge(&d, &args).map_err(String::from)
+}
+
+/// V220: ログに 1 行（制御文字を落とす → 置き場を伏せる → 長さを切る。作品名は呼ぶ側が渡さない＝W-10）
+#[tauri::command]
+pub fn mobile_log_append(app: tauri::AppHandle, args: LogAppendArgs) -> Result<(), String> {
+    let d = dirs_from_app(&app)?;
+    args_log_append(&d, &args).map_err(String::from)
+}
+
+// ---------------- V224 (M-2c): ライブラリの命令（iOS と Android の両方の登録の表・場所は dirs_from_app） ----------------
+
+/// V224: アルバムと作品の一覧（作品だけ・絶対パスを返さない）
+#[tauri::command]
+pub fn mobile_library_list(app: tauri::AppHandle) -> Result<LibraryList, String> {
+    let d = dirs_from_app(&app)?;
+    none_library_list(&d).map_err(String::from)
+}
+
+/// V224: 外で変わったかを見る印（PC の library_stamp）
+#[tauri::command]
+pub fn mobile_library_stamp(app: tauri::AppHandle) -> Result<String, String> {
+    let d = dirs_from_app(&app)?;
+    none_library_stamp(&d).map_err(String::from)
+}
+
+/// V224: 作品の隣のサムネを読む（生のバイト列・4MiB まで）
+#[tauri::command]
+pub fn mobile_thumb_read(app: tauri::AppHandle, args: WorkArgs) -> Result<tauri::ipc::Response, String> {
+    let d = dirs_from_app(&app)?;
+    args_thumb_read(&d, &args).map(tauri::ipc::Response::new).map_err(String::from)
+}
+
+/// V224: サムネを書く（base64・復号して 1MiB まで・PNG の頭）
+#[tauri::command]
+pub fn mobile_thumb_write(app: tauri::AppHandle, args: ThumbWriteArgs) -> Result<(), String> {
+    let d = dirs_from_app(&app)?;
+    args_thumb_write(&d, &args).map_err(String::from)
+}
+
+/// V224: PV6 のヘッダだけを開いて ID・コマの数・速さ
+#[tauri::command]
+pub fn mobile_work_peek(app: tauri::AppHandle, args: WorkArgs) -> Result<WorkPeek, String> {
+    let d = dirs_from_app(&app)?;
+    args_work_peek(&d, &args).map_err(String::from)
+}
+
+/// V224 (L-3): 作品を消す（退避の記録の保全が先・PC と同じ順・オートセーブは消さない）
+#[tauri::command]
+pub fn mobile_delete_work(app: tauri::AppHandle, args: WorkArgs) -> Result<(), String> {
+    let d = dirs_from_app(&app)?;
+    args_delete_work(&d, &args).map_err(String::from)
+}
+
+/// V224 (L-4): アルバムを消す（作品があれば album-not-empty・ほかのファイルがあれば album-has-files）
+#[tauri::command]
+pub fn mobile_delete_album(app: tauri::AppHandle, args: AlbumArgs) -> Result<(), String> {
+    let d = dirs_from_app(&app)?;
+    args_delete_album(&d, &args).map_err(String::from)
+}
+
+/// V224: 復元の候補（読むだけ・一時ファイルは数だけ）
+#[tauri::command]
+pub fn mobile_recoverable_list(app: tauri::AppHandle) -> Result<Vec<RecoverableItem>, String> {
+    let d = dirs_from_app(&app)?;
+    none_recoverable_list(&d).map_err(String::from)
+}
+
+/// V224 (L-5): 控えから戻す（置き換えない置き方）
+#[tauri::command]
+pub fn mobile_recover(app: tauri::AppHandle, args: WorkArgs) -> Result<WorkPlace, String> {
+    let d = dirs_from_app(&app)?;
+    args_recover(&d, &args).map_err(String::from)
+}
+
 // ---------------- V212 (M-1c): Android だけで登録する命令（mobile_app.rs の #[cfg(target_os = "android")] の中）----------------
 
 #[tauri::command]
@@ -501,6 +641,29 @@ pub fn mobile_read_end(args: DownloadArgs) -> Result<(), String> {
     args_read_end(&args).map_err(String::from)
 }
 
+/// V224 (A-4・D-M1-7): Android だけ。Activity を壊さずに裏へ回す（JNI で `moveTaskToBack(true)`＝ホームへ出たときと同じ。戻ると同じ画面）。
+/// 戻るボタンで Activity を閉じると、壊れたあとネイティブで落ちていた（V212）。JS は登録の無い画面で戻るボタンが押されたときに呼ぶ。
+/// ★Activity の口を呼ぶのは WebView の主スレッド（`JniHandle::exec` が送る）。作品・ライブラリには触らない
+#[tauri::command]
+pub fn mobile_move_task_to_back(webview: tauri::Webview) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        webview
+            .with_webview(|w| {
+                w.jni_handle().exec(|env, activity, _webview| {
+                    use tauri::wry::prelude::jni::objects::JValue;
+                    let _ = env.call_method(activity, "moveTaskToBack", "(Z)Z", &[JValue::from(true)]);
+                });
+            })
+            .map_err(|_| code::IO.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = webview;
+        Err(code::UNSUPPORTED.to_string())
+    }
+}
+
 /// V212: 前の起動の塊を片付ける（Android の setup が起動のたびに呼ぶ。試験用のライブラリは起動のたびに閉じるので、ここは本物の置き場。
 /// 試験用の置き場は、次に始めるときに `chunks::begin` が片付ける）
 pub fn sweep_chunks(app: &tauri::AppHandle) {
@@ -520,6 +683,8 @@ pub const ANDROID_COMMANDS: &[&str] = &[
     "mobile_read_begin",
     "mobile_read_slice",
     "mobile_read_end",
+    // V224 (A-4): 戻るボタンで裏へ回す
+    "mobile_move_task_to_back",
 ];
 
 /// ★モバイルの命令の名前（contract.json の commands と同じ並び・contract.rs が [`handler`] の字と突き合わせる）
@@ -542,6 +707,19 @@ pub const COMMANDS: &[&str] = &[
     "mobile_autosave_delete",
     "mobile_autosave_claim",
     "mobile_library_init",
+    "mobile_settings_read",
+    "mobile_settings_merge",
+    "mobile_log_append",
+    // V224 (M-2c): ライブラリの命令
+    "mobile_library_list",
+    "mobile_library_stamp",
+    "mobile_thumb_read",
+    "mobile_thumb_write",
+    "mobile_work_peek",
+    "mobile_delete_work",
+    "mobile_delete_album",
+    "mobile_recoverable_list",
+    "mobile_recover",
 ];
 
 /// ★モバイルの登録の表。run() へつなぐのは M-1b（`.invoke_handler(pclib::mobile::commands::handler())`）。
@@ -566,7 +744,19 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         mobile_autosave_read,
         mobile_autosave_delete,
         mobile_autosave_claim,
-        mobile_library_init
+        mobile_library_init,
+        mobile_settings_read,
+        mobile_settings_merge,
+        mobile_log_append,
+        mobile_library_list,
+        mobile_library_stamp,
+        mobile_thumb_read,
+        mobile_thumb_write,
+        mobile_work_peek,
+        mobile_delete_work,
+        mobile_delete_album,
+        mobile_recoverable_list,
+        mobile_recover
     ]
 }
 
@@ -609,6 +799,19 @@ pub fn dispatch(d: &Dirs, cmd: &str, payload: &serde_json::Value, body: &[u8], h
         "mobile_autosave_delete" => json(args_autosave_delete(d, &args::<SessionGenArgs>(payload)?)),
         "mobile_autosave_claim" => json(args_autosave_claim(&args::<SessionGenArgs>(payload)?)),
         "mobile_library_init" => json(args_library_init(d, &args::<LibraryInitArgs>(payload)?)),
+        "mobile_settings_read" => Ok(Reply::Json(none_settings_read(d))),
+        "mobile_settings_merge" => json(args_settings_merge(d, &args::<SettingsMergeArgs>(payload)?)),
+        "mobile_log_append" => json(args_log_append(d, &args::<LogAppendArgs>(payload)?)),
+        // V224: ライブラリの命令
+        "mobile_library_list" => json(none_library_list(d)),
+        "mobile_library_stamp" => json(none_library_stamp(d)),
+        "mobile_thumb_read" => args_thumb_read(d, &args::<WorkArgs>(payload)?).map(Reply::Raw).map_err(String::from),
+        "mobile_thumb_write" => json(args_thumb_write(d, &args::<ThumbWriteArgs>(payload)?)),
+        "mobile_work_peek" => json(args_work_peek(d, &args::<WorkArgs>(payload)?)),
+        "mobile_delete_work" => json(args_delete_work(d, &args::<WorkArgs>(payload)?)),
+        "mobile_delete_album" => json(args_delete_album(d, &args::<AlbumArgs>(payload)?)),
+        "mobile_recoverable_list" => json(none_recoverable_list(d)),
+        "mobile_recover" => json(args_recover(d, &args::<WorkArgs>(payload)?)),
         // V212: Android の分けて送る・受け取る道（検査は命令と同じ 1 段を呼ぶ）
         "mobile_chunk_begin" => json(args_chunk_begin(d, &args::<ChunkBeginArgs>(payload)?)),
         "mobile_chunk_put" => json(args_chunk_put(d, &args::<ChunkPutArgs>(payload)?)),
@@ -619,6 +822,8 @@ pub fn dispatch(d: &Dirs, cmd: &str, payload: &serde_json::Value, body: &[u8], h
         "mobile_read_begin" => json(args_read_begin(d, &args::<ReadBeginArgs>(payload)?)),
         "mobile_read_slice" => args_read_slice(&args::<ReadSliceArgs>(payload)?).map(Reply::Raw).map_err(String::from),
         "mobile_read_end" => json(args_read_end(&args::<DownloadArgs>(payload)?)),
+        // V224: Activity が無い（検査）＝使えない
+        "mobile_move_task_to_back" => Err(code::UNSUPPORTED.to_string()),
         _ => Err("unknown-command".to_string()),
     }
 }

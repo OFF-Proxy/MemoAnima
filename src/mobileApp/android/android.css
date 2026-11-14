@@ -1,0 +1,172 @@
+/* V226 (H-1・DU-3 は A): Android だけの当たり（48dp）。androidLook.ts が読む（Android のときだけ）。
+   見た目の大きさと位置は変えない。広げるのは当たりだけ（隣の押せるものとの間は半分まで・島の余白は全部まで＝UI §3-7）。
+   やり方: 押せるものに透明の ::before を置き、見た目の外へ広げる（iOS の 44 と同じやり方＝editor.css の .mb-tl-btn::before）。
+   ::before を置くために position: relative を足す所があるが、置き場と大きさは変わらない。
+   押せるもの（button）にだけ当てる（同じクラスの飾りの span には置かない＝隣の当たりを覆わない）。
+   例外（48 に届かない）は報告の一覧: 太さの 6 つ（DU-2）・トーンの札の横・「フルカラー」のスイッチの行・OS の選ぶ部品（select）。 */
+
+/* ---- 描く画面 ---- */
+
+/* 置き場（::before の基準）。もう relative・absolute のものは書かない */
+html.mb-android button.mb-album,
+html.mb-android button.mb-bb,
+html.mb-android button.mb-chip,
+html.mb-android button.mb-eye,
+html.mb-android button.mb-op,
+html.mb-android button.mb-seg-item,
+html.mb-android button.mb-size,
+html.mb-android button.mb-sq,
+html.mb-android button.mb-swatch,
+html.mb-android button.mb-switch-row,
+html.mb-android button.mb-tone,
+html.mb-android button.mb-wide {
+  position: relative;
+}
+html.mb-android button.mb-album::before,
+html.mb-android button.mb-bb::before,
+html.mb-android button.mb-chip::before,
+html.mb-android button.mb-eye::before,
+html.mb-android button.mb-op::before,
+html.mb-android button.mb-seg-item::before,
+html.mb-android button.mb-size::before,
+html.mb-android button.mb-sq::before,
+html.mb-android button.mb-swatch::before,
+html.mb-android button.mb-switch-row::before,
+html.mb-android button.mb-tone::before,
+html.mb-android button.mb-tool::before,
+html.mb-android button.mb-wide::before,
+html.mb-android .mb-fr::before {
+  content: "";
+  position: absolute;
+}
+/* ★inset は枠の内側（padding box）から数える。押せるものの枠は 3px なので、「枠 3 ＋ 外へ広げる分」を書く */
+
+/* 44×44 → 48×48（外へ 2 ずつ。下の帯の間 7・パネルの四角いボタンの間 6〜8・目のボタン） */
+html.mb-android button.mb-sq::before,
+html.mb-android button.mb-eye::before {
+  inset: -5px;
+}
+/* 下の帯のボタン（44×44・間 7）→ 上と左右に 2・下に 4（帯の下の余白へ。上は絵の場所の縁が 1px 重なる所がある） */
+html.mb-android button.mb-bb::before {
+  inset: -5px -5px -7px;
+}
+/* 高さ 44（幅は 48 以上）→ 上下に 2 ずつ（ツールの札の間 5・保存先のアルバムの札・操作の札の間 6・スイッチの行の間 8） */
+html.mb-android button.mb-tool::before,
+html.mb-android button.mb-album::before,
+html.mb-android button.mb-op::before,
+html.mb-android button.mb-switch-row::before,
+html.mb-android button.mb-wide::before {
+  inset: -5px -3px;
+}
+/* 切り替え（高さ 38・枠なし・入れ物の余白 3 と枠 3 の中）→ 上下に 5 ずつ。札は横だけ切る形にする（縦は当たりを出す。字は 1 行で縦にはみ出さない） */
+html.mb-android button.mb-seg-item {
+  overflow-x: clip;
+  overflow-y: visible;
+}
+html.mb-android button.mb-seg-item::before {
+  inset: -5px 0;
+}
+/* 札（高さ 32）→ 上に 6・下に 10（上の色見本との間は 8 で、色見本も 2 広げる＝半分ずつ。下は島の余白） */
+html.mb-android button.mb-chip::before {
+  inset: -9px -3px -13px;
+}
+/* 「フルカラー」のスイッチの行（見た目の高さ 32。iOS は ::before で上下 3）→ 上に 6・下に 4（上の［×］との間 8・下の色の四角との間 8 の半分）。高さは 42 で例外 */
+html.mb-android button.mb-cp-switch::before {
+  inset: -9px -3px -7px;
+}
+/* 色見本（43×44・間 6）→ 上下 2・左右 3 */
+html.mb-android button.mb-swatch::before {
+  inset: -5px -6px;
+}
+/* トーンの札（41×44・間 5）→ 間の半分まで（上下 2・左右 2.5）。横は 46 で例外 */
+html.mb-android button.mb-tone::before {
+  inset: -5px -5.5px;
+}
+/* 太さの 6 つ（56×38・間 3）→ 間の半分まで（上下 1.5）。高さは 41（詰めた端末は 35）で例外＝DU-2 */
+html.mb-android button.mb-size::before {
+  inset: -4.5px -3px;
+}
+/* 下の帯のコマ（46×36・帯の高さ 48 の中）→ 上下 6（帯の端まで）・左右 1 */
+html.mb-android .mb-fr::before {
+  inset: -9px -4px;
+}
+/* 広げたタイムラインの頭のボタン（高さ 40・間 8）→ 上下左右 4 ずつ（iOS の ::before を上書き） */
+html.mb-android button.mb-tl-btn::before {
+  inset: -7px;
+}
+
+/* つまみ（不透明度など）: OS の部品なので、行の高さを 48 にする（UI §3-7: Android では 48・パネルが高くなる） */
+html.mb-android input.mb-range {
+  height: 48px;
+}
+
+/* ---- ライブラリ・設定 ---- */
+
+html.mb-android button.mb-lib-act,
+html.mb-android button.mb-lib-aop,
+html.mb-android button.mb-lib-foldbtn,
+html.mb-android button.mb-lib-gear,
+html.mb-android button.mb-lib-new,
+html.mb-android button.mb-lib-import,
+html.mb-android button.mb-lib-round,
+html.mb-android button.mb-lib-sortbtn,
+html.mb-android button.mb-lib-tab,
+html.mb-android .mb-lib-searchbox,
+html.mb-android button.mb-set-back {
+  position: relative;
+}
+html.mb-android button.mb-lib-act::before,
+html.mb-android button.mb-lib-aop::before,
+html.mb-android button.mb-lib-foldbtn::before,
+html.mb-android button.mb-lib-gear::before,
+html.mb-android button.mb-lib-new::before,
+html.mb-android button.mb-lib-import::before,
+html.mb-android button.mb-lib-round::before,
+html.mb-android button.mb-lib-sortbtn::before,
+html.mb-android button.mb-lib-tab::before,
+html.mb-android .mb-lib-seek::before,
+html.mb-android .mb-lib-searchbox::before,
+html.mb-android button.mb-set-back::before {
+  content: "";
+  position: absolute;
+}
+/* 44×44 の丸・四角（間 8〜12）→ 外へ 2 ずつ */
+html.mb-android button.mb-lib-round::before,
+html.mb-android button.mb-lib-gear::before,
+html.mb-android button.mb-lib-sortbtn::before,
+html.mb-android button.mb-lib-act::before {
+  inset: -5px;
+}
+/* 高さ 44 の横長（アルバムの操作・新規メモ・取り込む・検索の丸い箱〔label〕・設定の［戻る］）→ 上下に 2 ずつ */
+html.mb-android button.mb-lib-aop::before,
+html.mb-android button.mb-lib-new::before,
+html.mb-android button.mb-lib-import::before,
+html.mb-android .mb-lib-searchbox::before {
+  inset: -5px -3px;
+}
+/* 設定の［戻る］（高さ 44・上の帯の中）→ 上に 2・下に 4（帯の中の余白へ） */
+html.mb-android button.mb-set-back::before {
+  inset: -5px -3px -7px;
+}
+/* たたむ／出す（高さ 40）→ 上下に 4 ずつ */
+html.mb-android button.mb-lib-foldbtn::before {
+  inset: -7px -3px;
+}
+/* 上の帯の切り替え（高さ 36・枠なし）→ 上下に 6 ずつ */
+html.mb-android button.mb-lib-tab::before {
+  inset: -6px 0;
+}
+/* 再生のつまみの帯（高さ 44・枠なし）→ 上下に 2 ずつ */
+html.mb-android .mb-lib-seek::before {
+  inset: -2px 0;
+}
+/* 設定のスイッチ（見た目 56×32。iOS は ::before で上下 6）→ 上下に 8 ずつ */
+html.mb-android button.mb-set-switch::before {
+  inset: -11px -3px;
+}
+
+/* ---- 縦（中）----
+   上の段の太さ（40×50・間 5）→ 左右に間の半分（2.5）まで。幅は 45 で例外＝DU-2 と同じ太さの札 */
+html.mb-android .mb-top button.mb-size::before {
+  inset: -3px -5.5px;
+}

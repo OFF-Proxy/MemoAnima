@@ -316,6 +316,27 @@ pub fn resume_for_target(d: &Dirs, album: &str, name: &str, h: &mut dyn Hooks) -
     }
 }
 
+/// ★V224 (L-4): そのアルバム（大小・NFC を無視）を指す記録だけ続ける（アルバムを消す前）。片付かない記録が残れば PENDING_RECORD
+/// （上書きの途中で止まって本体が退避先にあるアルバムを消すと、その作品が取り残される）
+pub fn resume_for_album(d: &Dirs, album: &str, h: &mut dyn Hooks) -> Result<(), Refusal> {
+    let ka = fold_key(album);
+    let mut pending = false;
+    for rdir in record_dirs(d) {
+        if !targets_of(&rdir).iter().any(|(a, _)| fold_key(a) == ka) {
+            continue;
+        }
+        let mut out = Vec::new();
+        if !process(d, &rdir, h, &mut out)? {
+            pending = true;
+        }
+    }
+    if pending {
+        Err(Refusal(code::PENDING_RECORD))
+    } else {
+        Ok(())
+    }
+}
+
 /// 片付いていない記録の数（検査とログ用）
 pub fn pending_count(d: &Dirs) -> usize {
     record_dirs(d).len()

@@ -50,6 +50,8 @@
 //   showWaitBadge(on)        眠ったコマを起こすのが 150ms を超えた・起こし終えた  待ちの札
 //   xformHitSizes()          変形の当たりを測る                 当たりの大きさ（キャンバスのドット）を返す（PC は 6・12・8）
 //   workEdited()             dirty = true のたび（すでに立っていても）  ★PC は上書きしない（モバイルだけ・セッションと時計の noteEdit）
+//   ★V221b で足したフック（既定の中身がある口）:
+//   coreText(key, vars)      コアがお知らせ・確認に出す文を作る     ★PC は上書きしない（既定の中身＝t(key, vars)）。モバイルはキーの表記が入る 10 キーを自分の文に替える
 //
 // ■ ★V214 (M-2b-1a) で PC から分けた口（モバイルの描く画面も同じものを呼ぶ。PC は前と同じ順で呼ぶ）
 //   開く・閉じる: openWorkStart → openWorkReset → openWorkPlayAndFloat → openWorkSelection → openWorkPointer → openWorkNotice →
@@ -61,6 +63,7 @@
 //   履歴が動いた: bindHistory()・historyChanged()／大きさ: sizeVerdict(proj)・noticeSizeLevel(…)
 //   オートセーブ: autosaveBlocked()・autosaveMark()・autosaveChangedSince(mark)（PC の便の印・書き出し中・時計の世代は入れない）
 //   裏に回ったときの姿: workForBackground()（★PC は呼ばない）／保存と戻る前の関所: saveBlocked()・leaveBlocked()
+//   ★V221b: 裏に回る便の印と捨てる条件: backgroundMark()・backgroundChangedSince(mark)（★PC は呼ばない。ふだんの便の条件とは別）
 //   パネルとタイムライン: toggleFolderCollapsed・toggleFolderVisible・renameFolder・setFolderOpacityLive・commitFolderOpacity・
 //     toggleLayerVisible・renameLayer・setLayerOpacityLive・selectLayerRow・grabRowForDrag・openFolderForDrop・setFillMode ほか形式・
 //     setTextFamily ほか文字・deselect・setXformAngleInput・setXformScaleInput・cancelTransformAndReturn・toggleFullcolor・selectColor・
@@ -213,6 +216,14 @@ export interface StrokeSample {
 /** ★V214 (§5-1 の 1): オートセーブの書き始めの印（autosaveMark）。中は履歴の変更カウンタ */
 export interface AutosaveMark {
   readonly hist0: number;
+}
+
+/** ★V221b (§5-0・決-13): 裏に回る便の印（backgroundMark）。履歴の変更カウンタと、印を取った時点の「履歴に入る前に作品の絵を
+ *  書き換えうる状態」の実体（どれも始めるたびに新しく作る・終えると外す＝実体が同じなら「始まっても終わってもいない」）。
+ *  中は比べるためだけのもの（画面の側は中を見ない） */
+export interface BackgroundMark {
+  readonly hist0: number;
+  readonly sig: readonly unknown[];
 }
 
 /** ★V214 (§5-1 の 1): 変形の取っ手の当たり（キャンバスのドット）。hit＝四隅・辺・つまみの□の半径／ring＝枠の外側の回転の輪の幅／
@@ -1667,14 +1678,14 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
       return;
     }
     if (verdict === "history") {
-      this.cb.toast(t("ed.color.usedHistory.toast"));
+      this.cb.toast(this.coreText("ed.color.usedHistory.toast"));
       return;
     }
     if (verdict === "clip") {
       this.cb.toast(t("ed.color.usedClip.toast"));
       return;
     }
-    const ok = await this.cb.confirm(t("ed.color.delete.msg", { hex }));
+    const ok = await this.cb.confirm(this.coreText("ed.color.delete.msg", { hex }));
     if (!ok) return;
     // 調べてから確認を閉じるまでに作品が変わっていたら、調べた結果は古い＝消さない（確認の間は操作できないので保険）
     if (this.project !== project || this.history.mutations !== gen || !this.mounted) return;
@@ -1692,7 +1703,7 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
       redo: () => set(true),
     });
     set(true);
-    this.cb.toast(t("ed.color.deleted.toast"));
+    this.cb.toast(this.coreText("ed.color.deleted.toast"));
   }
 
   /** ★V215 (A-125・REQ_color_section §2-2): 使っていない色を**まとめて**帯から消す（［整理］）。
@@ -1750,12 +1761,12 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
     const removable = candidates.filter((c) => c.ok);
     const m = candidates.length - removable.length; // 申告の無い記録があるときは allColorVerdict が全部 "history"＝候補を全部残す
     if (removable.length === 0) {
-      this.cb.toast(t("ed.color.tidy.keptOnly.toast", { m }));
+      this.cb.toast(this.coreText("ed.color.tidy.keptOnly.toast", { m }));
       return;
     }
     const n = removable.length;
-    let msg = t("ed.color.tidy.confirm.msg", { n });
-    if (m > 0) msg += "\n" + t("ed.color.tidy.confirmKeep.msg", { m });
+    let msg = this.coreText("ed.color.tidy.confirm.msg", { n });
+    if (m > 0) msg += "\n" + this.coreText("ed.color.tidy.confirmKeep.msg", { m });
     const ok = await this.cb.confirm(msg);
     if (!ok) return;
     // 調べてから確認を閉じるまでに作品・記録が変わっていたら、調べた結果は古い＝消さない（A-99 と同じ）
@@ -1782,7 +1793,7 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
       redo: () => set(true),
     });
     set(true);
-    this.cb.toast(t("ed.color.tidy.done.toast", { n }));
+    this.cb.toast(this.coreText("ed.color.tidy.done.toast", { n }));
   }
 
   /** 棚に入れられる色か（透明＝`""` は色ではないので入れられない） */
@@ -3584,7 +3595,7 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
       return;
     }
     if (this.xformActive) {
-      this.cb.toast(t("ed.img.place.xformBusy.toast"));
+      this.cb.toast(this.coreText("ed.img.place.xformBusy.toast"));
       return;
     }
     const srcBuf = src.frames[0].layers["L1"];
@@ -3626,7 +3637,7 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
     this.buildToolOptions();
     this.redrawOverlay();
     this.paintUiOverlay();
-    this.cb.toast(t("ed.img.place.done.toast"));
+    this.cb.toast(this.coreText("ed.img.place.done.toast"));
   }
 
   /** V151 (M8-3): 変換済み複数コマ（imageConvert の出力 Project）を**今のコマの後ろへ挿入**する（連番一括）。
@@ -3648,7 +3659,7 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
       return;
     }
     if (this.xformActive) {
-      this.cb.toast(t("ed.img.place.xformBusy.toast"));
+      this.cb.toast(this.coreText("ed.img.place.xformBusy.toast"));
       return;
     }
     const ld = this.project.layerDefs.find((l) => l.id === this.activeLayerId);
@@ -4227,7 +4238,7 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
   protected xformGuard(): boolean {
     if (this.textDraft) this.commitTextDraft();
     if (this.xformActive || this.floatBuf || this.cornerActive) {
-      this.cb.toast(t("ed.xform.guard.toast"));
+      this.cb.toast(this.coreText("ed.xform.guard.toast"));
       return true;
     }
     return false;
@@ -8077,6 +8088,53 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
     );
   }
 
+  /** ★V221b (§5-0・決-13): 裏に回る便の「始まった／終わった」を比べる控え。**順と中身は backgroundChangedSince と対**。
+   *  - 変形（xformActive・切り出したか xformCutDone・切り出した N 枚の表 xformLayers・幾何の基準 floatBuf）・浮いた絵（貼り付け・画像の配置＝floatBuf）
+   *  - 選択の移動（dragMode・選択の移動の控え selMoveBefore）・四隅（cornerActive・四隅の控え cornerBefore・射影の場 warpField）
+   *  - 1 ドット動かす（arrowKind・レイヤーの移動 layerDrag・選択の枠の移動 selMaskDrag）
+   *  - 履歴に入る前に絵を書き換えるほかのもの: 全レイヤーの束（eraseAllStroke）・1px の線の仮（line1px）・歪みの場（warpField）・
+   *    重い処理（busyKind。重い処理は譲りながら作品を書き換え、最後に 1 つ積む）
+   *  文字の下書き（textDraft）は入れない（確定するまで絵を書き換えない・確定は履歴に積む＝hist0 で捨てる） */
+  private backgroundSig(): unknown[] {
+    return [
+      this.xformActive,
+      this.xformCutDone,
+      this.xformLayers,
+      this.floatBuf,
+      this.dragMode,
+      this.selMoveBefore,
+      this.cornerActive,
+      this.cornerBefore,
+      this.warpField,
+      this.arrowKind,
+      this.layerDrag,
+      this.selMaskDrag,
+      this.eraseAllStroke,
+      this.line1px,
+      this.busyKind,
+    ];
+  }
+
+  /** ★V221b (§5-0・決-13): 裏に回る便の書き始めの印（★PC は呼ばない）。モバイルの裏に回る便が、書く姿（workForBackground）を取るのと
+   *  同じ時に取る。捨てるかは backgroundChangedSince で見る */
+  protected backgroundMark(): BackgroundMark {
+    return { hist0: this.history.mutations, sig: this.backgroundSig() };
+  }
+
+  /** ★V221b (§5-0・決-13): 裏に回る便の「捨てる」（★PC は呼ばない・ふだんの便の autosaveChangedSince は変えない）。true＝その便は捨てる。
+   *  閉じた・印から履歴が変わった・押している・印のあとに変形／浮いた絵／四隅／選択の移動／1 ドット動かす（と、履歴に入る前に絵を
+   *  書き換えるほかのもの＝backgroundSig）が始まったか終わった（印のときの実体と今が 1 つでも違う）。
+   *  ★捨てないもの: 印のときから続いているだけの変形・浮いた絵・四隅・選択の移動（その間に書く姿は workForBackground が浮かせる前の
+   *  控えに差し替える＝今のバッファを読まない）。
+   *  ★続いているだけでも捨てるもの: レイヤーの移動（layerDrag・今のバッファをその場で書き換え、workForBackground は差し替えない）・
+   *  全レイヤーの束・1px の線の仮・重い処理（busyKind が "heavy"）。どれも今のバッファを書きかけのまま持つ */
+  protected backgroundChangedSince(mark: BackgroundMark): boolean {
+    if (!this.mounted || this.history.mutations !== mark.hist0 || this.pointerDown) return true;
+    const now = this.backgroundSig();
+    if (now.length !== mark.sig.length || now.some((v, i) => v !== mark.sig[i])) return true;
+    return !!this.layerDrag || !!this.eraseAllStroke || !!this.line1px || this.busyKind === "heavy";
+  }
+
   /** ★V214 (M-2b-1a): 保存しない判断（前は PC の save の入口・順は同じ）。重い処理の最中は弾く → 変形の途中は関所（xformGuard）が先 */
   protected saveBlocked(): boolean {
     if (this.busyKind) return true; // 音声読み込み・書き出しの最中は従来どおり弾く
@@ -8501,6 +8559,12 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
   }
   /** ★V214: 編集の印（dirty = true のたび・すでに立っていても）。PC は上書きしない（モバイルのセッションと時計の noteEdit） */
   protected workEdited(): void {}
+  /** ★V221b: コアがお知らせ（cb.toast）と確認（cb.confirm）に出す文のうち、7 言語のどれかにキーの表記（Ctrl+Z・Enter・Esc）が入るもの
+   *  （10 キー・11 か所）を作る口。**既定の中身は今の t(key, vars) そのもの**＝PC は上書きしない（PC の文・回数・順番は前と同じ）。
+   *  モバイルの描く画面は上書きして、その 10 キーだけモバイルの辞書の文（「元に戻す」・「確定」・「キャンセル」）に替える */
+  protected coreText(key: string, vars?: Record<string, unknown>): string {
+    return t(key, vars);
+  }
   /** ★V214: 変形の取っ手・回転の輪・歪みの四隅を掴む当たりの大きさ（キャンバスのドット）。既定は PC と同じ値 */
   protected xformHitSizes(): XformHitSizes {
     return { hit: 6, ring: 12, corner: 8 };

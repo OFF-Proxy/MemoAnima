@@ -360,6 +360,8 @@ fn android_commands_match_contract_and_registration() {
             "ReadBeginArgs" => serde_json::from_value::<ReadBeginArgs>(a).is_ok(),
             "ReadSliceArgs" => serde_json::from_value::<ReadSliceArgs>(a).is_ok(),
             "DownloadArgs" => serde_json::from_value::<DownloadArgs>(a).is_ok(),
+            // V224: 引数の無い命令（mobile_move_task_to_back）
+            "None" => a.is_null(),
             other => panic!("知らない型 {other}"),
         };
         assert!(ok, "{}", x["name"]);

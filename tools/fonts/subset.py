@@ -9,6 +9,11 @@
 # 出力名は FontKey（M10-1c で使う）に対応させる:
 #   misaki / pixel12 / pixel12-bold / maru / maru-bold / pop / mincho
 #   kaku / dot16 / tegaki / shippori / reggae         （A-71・V176 で追加）
+#   ui-maru / ui-maru-bold / ui-dot16                  （V220 で追加＝モバイルの**画面用**。字の集合は ui_charset.txt）
+#
+# ★V220: 字の集合を仕事ごとに持てる形にした（CHARSET_OF）。画面用の 3 本は `ui_charset.txt`（tools/fonts/make_ui_charset.ts が
+#   辞書から作る）、文字のツールの 12 本は今までどおり `subset_charset.txt`。画面用の 3 本だけを作るときは
+#   `--only ui-maru,ui-maru-bold,ui-dot16`（12 本を作り直さない）。原本に無い字は `ui_missing.txt` に書き出す
 #
 # ★--only が要る理由（A-71 でここを踏んだ）:
 #   このスクリプトは JOBS を**全部作り直す**。書体を1本足したいだけのときに素で走らせると、
@@ -29,6 +34,9 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 DL = os.path.join(HERE, "download")
 OUT_DIR = os.path.join(ROOT, "assets", "fonts")
 CHARSET = os.path.join(HERE, "subset_charset.txt")
+# V220: モバイルの画面用の字の集合と、原本に無かった字の一覧（作るときに書き出す）
+UI_CHARSET = os.path.join(HERE, "ui_charset.txt")
+UI_MISSING = os.path.join(HERE, "ui_missing.txt")
 
 # (出力名, 入力パス, ドット系か)
 JOBS = [
@@ -45,14 +53,43 @@ JOBS = [
     ("tegaki", os.path.join(DL, "Yomogi-Regular.ttf"), False),
     ("shippori", os.path.join(DL, "ShipporiMincho-Regular.ttf"), False),
     ("reggae", os.path.join(DL, "ReggaeOne-Regular.ttf"), False),
+    # V220: モバイルの画面用（文字のツールと同じ原本・別の字の集合・別の名前）。ui-dot16 はドット系なので verify_outlines を通す
+    ("ui-maru", os.path.join(DL, "ZenMaruGothic-Regular.ttf"), False),
+    ("ui-maru-bold", os.path.join(DL, "ZenMaruGothic-Bold.ttf"), False),
+    ("ui-dot16", os.path.join(DL, "DotGothic16-Regular.ttf"), True),
 ]
+
+# V220: 仕事ごとの字の集合（書いていない仕事は subset_charset.txt）
+CHARSET_OF = {
+    "ui-maru": UI_CHARSET,
+    "ui-maru-bold": UI_CHARSET,
+    "ui-dot16": UI_CHARSET,
+}
+
+
+def missing_chars(src: str, charset: str) -> list:
+    """V220: 字の集合のうち、原本の cmap に無い字（制御文字は除く）"""
+    from fontTools.ttLib import TTFont
+
+    f = TTFont(src)
+    cmap = f.getBestCmap()
+    f.close()
+    text = open(charset, encoding="utf-8").read()
+    out = []
+    for ch in sorted(set(text), key=ord):
+        cp = ord(ch)
+        if cp < 0x20 or 0x7F <= cp < 0xA0:
+            continue
+        if cp not in cmap:
+            out.append(ch)
+    return out
 
 
 def subset_one(name: str, src: str) -> str:
     dst = os.path.join(OUT_DIR, f"{name}.woff2")
     cmd = [
         sys.executable, "-m", "fontTools.subset", src,
-        f"--text-file={CHARSET}",
+        f"--text-file={CHARSET_OF.get(name, CHARSET)}",
         f"--output-file={dst}",
         "--flavor=woff2",
         "--layout-features=",
@@ -148,6 +185,7 @@ def main() -> int:
     else:
         print("== サブセット化（全部作り直します） ==")
     rows = []
+    missing_rows = []
     for name, src, is_dot in JOBS:
         if only and name not in only:
             continue
@@ -166,6 +204,20 @@ def main() -> int:
                 return 1
         rows.append((name, os.path.getsize(src), size, note))
         print(f"  {name:<14} {size/1024:8.1f} KB  {note}")
+        if name in CHARSET_OF:
+            miss = missing_chars(src, CHARSET_OF[name])
+            missing_rows.append((name, miss))
+            print(f"  {'':<14} 原本に無い字 {len(miss)}")
+
+    # V220: 画面用の書体の原本に無かった字（この字はモバイルの画面に出さない＝U-12）。作った仕事の分だけ書く
+    if missing_rows:
+        with open(UI_MISSING, "w", encoding="utf-8", newline="\n") as f:
+            f.write("# V220: 画面用の書体（ui_charset.txt）の字のうち、原本に無かった字（tools/fonts/subset.py が書く）\n")
+            f.write("# 1 行に 1 字: <出力名> U+XXXX <字>。この字はモバイルの画面に出さない（U-12）\n")
+            for name, miss in missing_rows:
+                for ch in miss:
+                    shown = ch if ch.isprintable() else ""
+                    f.write(f"{name} U+{ord(ch):04X} {shown}\n")
 
     # ★上限は「この回で作った分」ではなく **assets/fonts に実際に置かれている全部**で測る。
     #  --only のときに作った分だけ足すと、同梱量の見張りが**黙って無効になる**

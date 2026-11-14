@@ -15,12 +15,13 @@ import { allocIndexBuf, ensureColor, makeEmptyFrame, newLayerId, PIXELS, UGO_COL
 import { strokeSegment, type PenOptions } from "../../editor/raster";
 import { readWorkId } from "../../editor/saveCore";
 import { candidatesFor, proposals, readStamp, type MobileWorkSession, type SaveOutcome } from "../../mobile/session";
-import type { MobilePort, SessionEntry } from "../../mobile/port";
-import { AutosaveClock } from "../autosaveClock";
+import type { LibraryWork, MobilePort, RecoverableItem, SessionEntry } from "../../mobile/port";
+import { AutosaveClock, autosaveTiming, setAutosaveTiming } from "../autosaveClock";
 import { watchLifecycle } from "../lifecycle";
 import { newSession, openSession, readProject, restoreSession, timedPort, type OpsHooks, type Timing } from "../workOps";
 import { prepareLibrary, refusalText, type BootResult } from "../app";
-import { dev, pc, type DevState, type LibraryView, type RecoverableView } from "./devPort";
+import { dev, type DevState } from "./devPort";
+import { LANGS, getLang, setLang } from "../../i18n";
 
 // ---------------- 小さな部品 ----------------
 
@@ -66,10 +67,26 @@ let boot: BootResult;
 let port: MobilePort;
 let root: HTMLElement;
 let devState: DevState = { testLibrary: false, faults: { noSpace: false, stopAt: "" } };
-let libRoot = "";
+/** ★V222 (E-9): 次のオートセーブを消す操作を 1 回だけ断る（試験用のライブラリを開いているときだけ入れられる）。
+ *  本物の画面へ渡す口（MobilePort）をここで包む（保存のつなぎの 4 つと app.ts は変えない＝Rust も変えない） */
+let failNextAutosaveDelete = false;
+function deleteFaultPort(p: MobilePort): MobilePort {
+  return {
+    ...p,
+    autosaveDelete: async (...a: Parameters<MobilePort["autosaveDelete"]>) => {
+      if (failNextAutosaveDelete && devState.testLibrary) {
+        failNextAutosaveDelete = false;
+        lc("fault fired autosave-delete");
+        throw new Error("V222 dev fault: autosave-delete");
+      }
+      return p.autosaveDelete(...a);
+    },
+  };
+}
+// ★V224: ライブラリの場所（パス）を JS で持たない（一覧・サムネ・削除・控えから戻すは Rust が場所を決める命令）
 let albums: string[] = [];
-let works: LibraryView[] = [];
-let recoverable: RecoverableView[] = [];
+let works: LibraryWork[] = [];
+let recoverable: RecoverableItem[] = [];
 let entries: SessionEntry[] = [];
 const thumbUrls = new Map<string, string>();
 
@@ -123,18 +140,19 @@ function opsHooks(): OpsHooks {
 // ---------------- 読み直し ----------------
 
 async function refresh(): Promise<void> {
+  // ★試験用か本物かは、そのたびに Rust の状態から（覚えない＝T4）
   devState = await dev.state();
-  libRoot = await port.libraryRoot();
-  albums = await pc.listAlbums(libRoot).catch(() => []);
-  works = (await pc.scanLibrary(libRoot).catch(() => [])).filter((w) => w.kind === "project");
-  recoverable = await pc.listRecoverable(libRoot).catch(() => []);
+  const listing = await port.libraryList().catch(() => ({ albums: [] as string[], works: [] as LibraryWork[] }));
+  albums = listing.albums;
+  works = listing.works;
+  recoverable = await port.recoverableList().catch(() => []);
   entries = await port.autosaveList().catch(() => []);
   for (const u of thumbUrls.values()) URL.revokeObjectURL(u);
   thumbUrls.clear();
   for (const w of works) {
-    if (!w.thumb_path) continue;
+    if (!w.thumb) continue;
     try {
-      const buf = await pc.readThumb(w.thumb_path);
+      const buf = await port.thumbRead(w.album, w.name);
       thumbUrls.set(`${w.album}/${w.name}`, URL.createObjectURL(new Blob([buf], { type: "image/png" })));
     } catch {
       /* サムネが無い・読めない */
@@ -152,6 +170,10 @@ async function openLibrary(): Promise<void> {
 }
 
 let bootLines: string[] = [];
+/** ★V224: 仮の一覧へ移っている（確かめ画面の戻ったときの組み直しをしない） */
+let inDevList = false;
+/** ★V224 (A-3): この画面を始めた時刻（読み込み直すと変わる） */
+let startedAt = "";
 function describeBoot(init: BootResult["init"], resumed: BootResult["resumed"]): string[] {
   return [
     `ライブラリ: ${"error" in init ? `できなかった（${init.error}）` : `${init.ready ? "作り終えている" : "まだ"}・この回にしたこと: ${init.steps.join("・") || "なし"}`}`,
@@ -457,11 +479,16 @@ function render(): void {
   const s = session;
   const t = devState.testLibrary;
   root.replaceChildren(
-    h("div", { style: "padding:calc(8px + env(safe-area-inset-top)) calc(8px + env(safe-area-inset-right)) calc(40px + env(safe-area-inset-bottom)) calc(8px + env(safe-area-inset-left));font:14px -apple-system,sans-serif" },
+    // ★V224: 描く画面の CSS（editor.css）が html と body の送りを止めるので、確かめ画面が出ている間だけ送れるように戻す（下の style の :has）
+    h("div", { "data-id": "devcheck-root", style: "padding:calc(8px + env(safe-area-inset-top)) calc(8px + env(safe-area-inset-right)) calc(40px + env(safe-area-inset-bottom)) calc(8px + env(safe-area-inset-left));font:14px -apple-system,sans-serif" },
       h("h2", { style: "margin:4px 0;font-size:17px" }, "メモアニマ 確かめ画面（開発用）"),
       h("div", {}, `OS: ${boot.info.os}・版: ${boot.info.version}`),
+      // ★V224 (A-3): 画面の密度と文字の大きさを変えたときに、読み込み直さず（起動の時刻が同じ）新しい大きさに付いて来るかを見る
+      h("div", { "data-id": "screen-info" }, `画面: ${innerWidth}×${innerHeight}・dpr ${devicePixelRatio}・起動 ${startedAt}`),
       h("div", { style: t ? "color:#b00;font-weight:bold" : "" }, `ライブラリ: ${t ? "試験用（作者の作品は入っていない）" : "本物"}`),
       h("div", {}, ...bootLines.map((l) => h("div", { style: "font-size:12px;color:#555" }, l))),
+      // ★V221: 確かめ画面の印のビルドから本物の画面（仮の一覧 → 描く画面）へ・言語を切り替える・F2 の頁
+      section("V221 本物の画面へ（仮の一覧と描く画面）", v221View()),
       noticeText ? h("div", { style: "background:#ffd;padding:4px", "data-id": "notice" }, noticeText, " ", btn("消す", () => notice(""))) : null,
       // 提案（起動したとき・読み込み直したとき）
       proposalAt !== null && proposalList[proposalAt]
@@ -500,8 +527,8 @@ function render(): void {
           return h("div", { style: "font-size:12px" }, `${st.savedAt}・${st.target ? `${st.target.album}/${st.target.name}` : "まだ保存していない"}・版 ${st.baseRev}・${e.from}${s && s.session === e.session ? "（開いている）" : ""}`);
         })),
       section("復元の候補（控え）",
-        ...recoverable.map((r) => h("div", { style: "font-size:12px" }, `${r.album}/${r.name}・控え ${r.bak_size} B・一時ファイル ${r.tmp_files.length}`, " ", btn("控えから戻す", async () => {
-          await pc.recoverProject(libRoot, r.rel_path);
+        ...recoverable.map((r) => h("div", { style: "font-size:12px" }, `${r.album}/${r.name}・控え ${r.bakSize} B・一時ファイル ${r.tmpCount}`, " ", btn("控えから戻す", async () => {
+          await port.recover(r.album, r.name);
           await refresh();
         })))),
       section("故障を起こす（試験用のライブラリだけ）",
@@ -521,7 +548,21 @@ function render(): void {
           await refresh();
         }, { disabled: !t, id: "fault-stop-evac" }),
         twoStep("memory", "メモリを使い切る", fillMemory, !t),
+        btn(`次のオートセーブを消すのを失敗させる: ${failNextAutosaveDelete ? "入" : "切"}`, () => {
+          failNextAutosaveDelete = !!t && !failNextAutosaveDelete;
+          lc(`fault-armed autosave-delete ${failNextAutosaveDelete}`);
+          render();
+        }, { disabled: !t, id: "fault-autosave-delete" }),
         h("div", { style: "font-size:12px" }, `止める: ${devState.faults.stopAt || "なし"}`)),
+      // ★V224 (A-5): 時計の数をこの起動の間だけ替える（Android で裏に回ったときの書き込みを測る用・保存しない）
+      section("時計の数（この起動だけ）",
+        h("div", { "data-id": "timing" }, `手が止まってから ${autosaveTiming().idleMs} ms・前に書いてから ${autosaveTiming().gapMs} ms`),
+        ...[[2000, 5000], [1000, 5000], [500, 5000], [2000, 3000], [1000, 3000], [500, 3000]].map(([i, g]) =>
+          btn(`${i}/${g}`, () => {
+            setAutosaveTiming({ idleMs: i, gapMs: g });
+            lc(`timing idle=${i} gap=${g}`);
+            render();
+          }, { id: `timing-${i}-${g}` }))),
       section("時間", h("div", {}, lastSave), ...timings.slice(0, 20).map((x) => h("div", { style: "font-size:12px" }, x))),
       section("記録（送らない）",
         btn("記録を読み直す", async () => {
@@ -556,13 +597,13 @@ function albumView(a: string): HTMLElement {
       await port.renameAlbum(a, val(`ren-${key}`));
       await refresh();
     }, { aria: `アルバムの名前を変える:${a}` }), twoStep(key, "アルバムを削除", async () => {
-      await pc.deleteAlbum(libRoot, a);
+      await port.deleteAlbum(a);
       await refresh();
     }, false, `アルバムを削除:${a}`)),
     ...inAlbum.map((w) => workView(w)));
 }
 
-function workView(w: LibraryView): HTMLElement {
+function workView(w: LibraryWork): HTMLElement {
   const key = `${w.album}/${w.name}`;
   const url = thumbUrls.get(key);
   return h("div", { style: "display:flex;gap:6px;align-items:center;margin:4px 0" },
@@ -582,7 +623,7 @@ function workView(w: LibraryView): HTMLElement {
           await refresh();
         }, { aria: `移す:${key}→${a}` })),
       twoStep(`work:${key}`, "削除", async () => {
-        await pc.deleteNote(libRoot, w.album, w.name);
+        await port.deleteWork(w.album, w.name);
         await refresh();
       }, false, `削除:${key}`)));
 }
@@ -693,15 +734,68 @@ function openAskView(): HTMLElement {
     }));
 }
 
+// ---------------- ★V221: 本物の画面へ・言語・F2（印のビルドの中だけ） ----------------
+
+function v221View(): HTMLElement {
+  const sel = document.createElement("select");
+  sel.setAttribute("data-id", "lang");
+  sel.setAttribute("aria-label", "言語");
+  for (const l of LANGS) {
+    const o = document.createElement("option");
+    o.value = l;
+    o.textContent = l;
+    o.selected = l === getLang();
+    sel.append(o);
+  }
+  sel.addEventListener("change", () => {
+    setLang(sel.value as (typeof LANGS)[number]);
+    lc(`lang ${sel.value}`);
+    render();
+  });
+  return h("div", {},
+    btn("ライブラリへ（本物の画面）", async () => {
+      if (session) return notice("先に作品を閉じる");
+      clock?.stop();
+      const settings = await port.settingsRead().catch(() => ({}) as Record<string, unknown>);
+      // ★V225 (M-2c): 本物のライブラリ（library/libraryScreen.ts）へ。確かめ画面の道具（数え・記録）は口で渡す＝印の無いビルドには入らない
+      const { startLibrary } = await import("../library/libraryScreen");
+      const { attachDevTools, logLibrary, attachLibraryDev } = await import("./devTools");
+      const log = (l: string) => lc(`log ${l}`);
+      inDevList = true;
+      root.replaceChildren();
+      root.className = "";
+      await startLibrary({ port: deleteFaultPort(port), root, settings, version: boot.info.version, log, editorOpened: (sc) => attachDevTools(sc, { log }), exit: () => {
+        inDevList = false;
+        document.getElementById("v225-libdev")?.remove();
+        root.className = "";
+        render();
+      } });
+      logLibrary({ log });
+      attachLibraryDev({ log });
+    }, { id: "v221-devlist" }),
+    sel,
+    btn("F2（WebKit で台本を走らせる）", () => {
+      location.href = "/src/mobileApp/devcheck/f2/f2.html";
+    }, { id: "v221-f2" }));
+}
+
 // ---------------- 入口 ----------------
 
 export async function startDevcheck(el: HTMLElement, b: BootResult): Promise<void> {
   boot = b;
+  startedAt = new Date().toISOString().slice(11, 23);
+  // ★V224 (A-3): 大きさ・密度が変わったら組み直す（画面の大きさの行）
+  //  ★独立レビューの指摘 高③: 仮の一覧と描く画面へ移っている間は組み直さない（root を置き換えて、描く画面を保存・閉じる手続きなしで消していた）
+  window.addEventListener("resize", () => {
+    if (!drawing && !inDevList) render();
+  });
   root = el;
   port = timedPort(b.port, timing);
   // 長押しのメニュー・文字の選択・ダブルタップの拡大を止める（キャンバスは touch-action:none）
   const st = document.createElement("style");
-  st.textContent = "body{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;touch-action:manipulation}button,select,input{font-size:15px;margin:2px;touch-action:manipulation}";
+  st.textContent = "body{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;touch-action:manipulation}button,select,input{font-size:15px;margin:2px;touch-action:manipulation}" +
+    // ★V224: 確かめ画面が出ている間だけ、html と body を送れるように（描く画面へ移ると元の editor.css のまま）
+    'html:has([data-id="devcheck-root"]),html:has([data-id="devcheck-root"]) body{overflow:auto;height:auto}';
   document.head.append(st);
   bootLines = describeBoot(b.init, b.resumed);
   lc(`start os=${b.info.os}`);
@@ -712,6 +806,8 @@ export async function startDevcheck(el: HTMLElement, b: BootResult): Promise<voi
     },
     resume: (from) => {
       lc(`resumed from=${from}`);
+      // ★V224: 仮の一覧（と描く画面）へ移っている間は、確かめ画面を組み直さない（戻ったときに確かめ画面が上書きしていた＝戻るボタンの確かめで見つけた）
+      if (inDevList) return;
       // 戻ったら、ライブラリを開き直す（止まっていた保全を続け・ファイル App での変更を読み直す）
       void openLibrary().catch(() => {});
     },

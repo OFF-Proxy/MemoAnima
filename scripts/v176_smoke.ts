@@ -63,6 +63,10 @@ const editorRaw = readEditorSource(root);
 const fontsRaw = readIf("src/editor/fonts.ts");
 const cssRaw = readIf("src/styles.css");
 const manifestRaw = readIf("tools/fonts/MANIFEST.txt");
+// ★V220 (M-2b-1b・UI §3-4・§12 の 2): モバイルの画面用の 3 本（ui-*.woff2）は PC の CSS から参照しない＝モバイルのスタイルからだけ
+const mobileCssRaw = readIf("src/mobileApp/mobile.css");
+/** V220 で足したモバイルの画面用の 3 本（PC の CSS は参照しない・文字のツールの 12 本とは別） */
+const UI_FONT_FILES = ["ui-maru.woff2", "ui-maru-bold.woff2", "ui-dot16.woff2"];
 const licRaw = readIf("scripts/make_licenses.ts");
 
 // ⚠ 切り出しが空振りしたら**赤**にする（窓が壊れると検査は黙る＝いちばん損な壊れ方）
@@ -396,21 +400,32 @@ const checkS7 = (fsrc: string, csrc: string): V => {
 }
 
 // ================= [S-8] 孤児の woff2 が無い =================
-const checkS8 = (csrc: string): V => {
+// ★V220: 文字のツールの 12 本は PC の CSS から、モバイルの画面用の 3 本（UI_FONT_FILES）はモバイルのスタイル（mobile.css）からだけ
+//  参照される（PC の CSS が ui-* を指すと PC の出力に入る＝親X3）。どちらからも参照されない woff2 は今までどおり赤
+const checkS8 = (csrc: string, mcss: string = mobileCssRaw): V => {
   const dir = path.join(root, "assets", "fonts");
   if (!fs.existsSync(dir)) return ng("assets/fonts が無い");
   const onDisk = fs.readdirSync(dir).filter((n) => n.endsWith(".woff2"));
   if (onDisk.length === 0) return ng("woff2 が 1 本も無い（検査が黙る）");
   const used = new Set(parseFaces(csrc).map((x) => x.file));
-  const orphan = onDisk.filter((n) => !used.has(n));
+  const mobileUsed = new Set(parseFaces(mcss).map((x) => x.file));
+  const pcUi = [...used].filter((n) => UI_FONT_FILES.includes(n));
+  if (pcUi.length) return ng(`★PC の CSS がモバイルの画面用の書体を参照している: ${pcUi.join(", ")}`);
+  const uiMissing = UI_FONT_FILES.filter((n) => !mobileUsed.has(n));
+  if (onDisk.some((n) => UI_FONT_FILES.includes(n)) && uiMissing.length) return ng(`★モバイルのスタイルが画面用の書体を参照していない: ${uiMissing.join(", ")}`);
+  const orphan = onDisk.filter((n) => (UI_FONT_FILES.includes(n) ? !mobileUsed.has(n) : !used.has(n)));
   if (orphan.length) return ng(`★どこからも参照されていない woff2: ${orphan.join(", ")}`);
-  const missing = [...used].filter((n) => !onDisk.includes(n));
+  const missing = [...used, ...mobileUsed].filter((n) => !onDisk.includes(n));
   if (missing.length) return ng(`★@font-face が指す実体が無い: ${missing.join(", ")}`);
   return ok();
 };
 {
   const v = checkS8(cssRaw);
-  check("[S-8] assets/fonts の woff2 が全部参照されている（孤児なし・実体の欠けなし）", v.ok, v.why);
+  check("[S-8] assets/fonts の woff2 が全部参照されている（孤児なし・実体の欠けなし・V220: 画面用の 3 本はモバイルのスタイルからだけ）", v.ok, v.why);
+  // ★V220 の反証: PC の CSS が画面用の書体を指す・モバイルのスタイルが 1 本落とす
+  const pcWithUi = cssRaw + '\n@font-face { font-family: "MA UI Maru"; src: url("../assets/fonts/ui-maru.woff2") format("woff2"); font-weight: 400; }\n';
+  check("[S-8] 反証（V220）: PC の CSS に画面用の書体の @font-face を足すと赤", !checkS8(pcWithUi).ok);
+  check("[S-8] 反証（V220）: モバイルのスタイルから画面用の 1 本を落とすと赤", mobileCssRaw !== "" && !checkS8(cssRaw, mobileCssRaw.replace(/@font-face \{ font-family: "MA UI Dot16";[^\n]*\n/, "")).ok);
 }
 
 // ================= [S-9] MANIFEST に新しい 5 本 =================
@@ -499,7 +514,10 @@ const checkS11 = (actual: Record<string, string>): V => {
   const v = checkS11(actual);
   check("[S-11] ★既存 7 本の woff2 が 1 バイトも変わっていない（黙った作り直しの検知）", v.ok, v.why);
   const rec = manifestSubsetSha(manifestRaw);
-  check("[S-11b] MANIFEST の記録が 12 本そろっている（検査が黙らない）", Object.keys(rec).length === 12, `${Object.keys(rec).length} 件`);
+  // ★V220: 文字のツールの 12 本と、モバイルの画面用の 3 本を分けて数える（12 本の固定は弱めない）
+  const recTool = Object.keys(rec).filter((f) => !UI_FONT_FILES.includes(f));
+  const recUi = Object.keys(rec).filter((f) => UI_FONT_FILES.includes(f));
+  check("[S-11b] MANIFEST の記録が 12 本そろっている（検査が黙らない・V220: 文字のツールの 12 本と画面用の 3 本を分けて数える）", recTool.length === 12 && recUi.length === 3 && Object.keys(rec).length === 15, `文字のツール ${recTool.length} 件・画面用 ${recUi.length} 件`);
   const mism = Object.entries(rec).filter(([f, h]) => sha256(`assets/fonts/${f}`) !== h).map(([f]) => f);
   check("[S-11c] MANIFEST の記録と実ファイルの SHA-256 が全部一致", mism.length === 0, mism.join(", "));
 }

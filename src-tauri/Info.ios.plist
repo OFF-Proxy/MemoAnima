@@ -11,5 +11,19 @@
   <!-- 暗号の申告（独自の暗号なし）: TestFlight のたびに聞かれないように -->
   <key>ITSAppUsesNonExemptEncryption</key>
   <false/>
+  <!-- V221 (M-2b-2・UI §4-1・指示書 ■3 の D-6): iPad だけステータスバーを隠す（ずっと）。iPhone は隠さない（~ipad の鍵だけ） -->
+  <key>UIStatusBarHidden~ipad</key>
+  <true/>
+  <key>UIViewControllerBasedStatusBarAppearance</key>
+  <false/>
+  <!-- V222 (M-2b-3a・決-19 を外した・指示書 ■3 の E-7): iPad は縦横の 4 つ（消すのでなく 4 つを書く＝Tauri は鍵を混ぜるだけで消せないので、
+       混ぜるたびに必ず 4 つになる）。UIRequiresFullScreen は書かない（false も書かない＝他のアプリと並べられる・scripts/mobile_build.ts の checkInfo が「ある」を断る） -->
+  <key>UISupportedInterfaceOrientations~ipad</key>
+  <array>
+    <string>UIInterfaceOrientationPortrait</string>
+    <string>UIInterfaceOrientationPortraitUpsideDown</string>
+    <string>UIInterfaceOrientationLandscapeLeft</string>
+    <string>UIInterfaceOrientationLandscapeRight</string>
+  </array>
 </dict>
 </plist>

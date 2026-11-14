@@ -12,6 +12,25 @@ export const AUTOSAVE_INTERVAL_MS = 15_000;
 export const AUTOSAVE_IDLE_MS = 2_000;
 export const AUTOSAVE_GAP_MS = 5_000;
 
+/** ★V224 (A-5・D-M1-6): 手が止まってから書くまで（idle）と、前に書いてから空ける時間（gap）の数。起動のときに OS で替える
+ *  （app.ts が Android のときだけ setAutosaveTiming を呼ぶ。iOS は上の定数のまま）。時計の決まり（列と条件）は変えない */
+export interface AutosaveTiming {
+  idleMs: number;
+  gapMs: number;
+}
+let timing: AutosaveTiming = { idleMs: AUTOSAVE_IDLE_MS, gapMs: AUTOSAVE_GAP_MS };
+
+/** 数を替える（起動のとき。0 以上の有限の数だけ受ける） */
+export function setAutosaveTiming(t: AutosaveTiming): void {
+  if (!(Number.isFinite(t.idleMs) && t.idleMs >= 0 && Number.isFinite(t.gapMs) && t.gapMs >= 0)) return;
+  timing = { idleMs: t.idleMs, gapMs: t.gapMs };
+}
+
+/** いまの数 */
+export function autosaveTiming(): AutosaveTiming {
+  return { ...timing };
+}
+
 export type ClockWriteResult = "written" | "aborted" | "stale" | "bad" | "skipped";
 
 export interface AutosaveClockDeps {
@@ -79,8 +98,8 @@ export class AutosaveClock {
   /** 線を引き終えた（手が止まって 2 秒・前に書いてから 5 秒） */
   strokeEnded(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    const wait = this.owed ? 0 : AUTOSAVE_IDLE_MS;
-    const at = Math.max(this.now() + wait, this.lastWriteAt + AUTOSAVE_GAP_MS);
+    const wait = this.owed ? 0 : timing.idleMs;
+    const at = Math.max(this.now() + wait, this.lastWriteAt + timing.gapMs);
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
       void this.tryWrite("idle", false);
@@ -123,7 +142,8 @@ export class AutosaveClock {
     if (this.inflight) {
       if (!force) return "skipped";
       await this.inflight.catch(() => "bad" as const);
-      if (!this.pending()) return "skipped";
+      // ★V221（第三者レビューの指摘 3）: 待っている間に閉じた（保存しないで戻る＝stop のあと discard）なら書かない（消したオートセーブを戻さない）
+      if (this.closed || !this.pending()) return "skipped";
     }
     const e0 = this.epoch;
     this.owed = false;
