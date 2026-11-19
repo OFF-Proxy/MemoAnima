@@ -32,6 +32,8 @@ pub mod evac;
 pub mod find;
 pub mod fingerprint;
 pub mod init;
+// V229 (M-4): 出し入れの一時の場所・中身で見分ける・ライブラリへ写す・D-18
+pub mod iotmp;
 // V224 (M-2c): ライブラリの命令（一覧・サムネ・ヘッダ・作品とアルバムを消す・控えから戻す。場所は Rust が決める）
 pub mod library;
 pub mod names;
@@ -41,6 +43,8 @@ pub mod save;
 pub mod sessions;
 // V220 (M-2b-1b・決-17): モバイルの設定の口（読む・渡したキーだけを直す）
 pub mod settings;
+// V229 (M-4): zip の取り込みと全部書き出す
+pub mod zipio;
 
 #[cfg(test)]
 mod tests;
@@ -50,6 +54,9 @@ mod chunk_tests;
 // V224: ライブラリの命令の単体テスト
 #[cfg(test)]
 mod library_tests;
+// V229: 出し入れの単体テスト
+#[cfg(test)]
+mod io_tests;
 
 use std::fs;
 use std::io;
@@ -130,6 +137,16 @@ pub mod code {
     pub const ALBUM_NOT_EMPTY: &str = "album-not-empty";
     /// V224 (L-4): 消そうとしたアルバムに、作品でもアプリの付属物でもないファイルかフォルダが入っている
     pub const ALBUM_HAS_FILES: &str = "album-has-files";
+    /// V229 (M-4): 取り込めない形式（作品でも .kwz・.ppm・zip でもない）
+    pub const UNSUPPORTED_KIND: &str = "unsupported-kind";
+    /// V229: zip に危ない名前・リンク・暗号化・大きすぎる中身・多すぎる件数がある（何も入れない）
+    pub const ZIP_UNSAFE: &str = "zip-unsafe";
+    /// V229: zip の形が壊れている（目録・CRC・大きさ）
+    pub const ZIP_BROKEN: &str = "zip-broken";
+    /// V229: やめた（全部書き出す）
+    pub const CANCELLED: &str = "cancelled";
+    /// V229: 全部書き出すがもう動いている
+    pub const BUSY: &str = "busy";
 
     /// 全部（contract.rs が表と突き合わせる）
     pub const ALL: &[&str] = &[
@@ -154,6 +171,11 @@ pub mod code {
         RESERVED_KEY,
         ALBUM_NOT_EMPTY,
         ALBUM_HAS_FILES,
+        UNSUPPORTED_KIND,
+        ZIP_UNSAFE,
+        ZIP_BROKEN,
+        CANCELLED,
+        BUSY,
     ];
 }
 

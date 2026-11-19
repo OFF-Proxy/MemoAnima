@@ -39,7 +39,7 @@ import type { MobileIconId } from "../../mobile/icons";
 import { InputRouter, defaultInputSettings, type InputSettings, type RouterSink, type RouterView, type GestureUpdate, type HitKind } from "../input/router";
 import type { StrokeSample } from "../../editor/core/editorCore";
 import { categoryOf, openView, fitScale, liveScale, settle, clampToEdges, visibleArea, carryView, type View, type ViewCtx, type Category, PIC_BORDER } from "../view/zoom";
-import { h, btn, disabledBtn, icon, txt, bindAct } from "../ui/dom";
+import { h, btn, disabledBtn, icon, txt, bindAct, actOf } from "../ui/dom";
 import { narrowStep } from "./narrow";
 import { shapeOf, viewInMoreAt, mediumGeometry, popLeft, keyboardOnly, isGroupTool, wideTier, textStripPlace, TEXT_STRIP_HIGH_TOP, GROUP_TOOLS, GROUP_FIRST, type Shape, type OpenState, type PanelId, type Box } from "./arrange";
 import { ISLAND, openIsland, closeIsland, openPanelOver, hideTools, showTools, carryOpenIsland, RangeMode, inRange, type IslandOpen, type HiddenMemo, type RangeOps } from "./timeline";
@@ -49,12 +49,13 @@ import { askAddFrames, askWobble } from "./timelineDialogs";
 import { askName } from "../ui/nameDialog";
 import { pasteRange } from "../../editor/layerClip";
 import { layerDisplayRows, type LayerListRow, type RowDropHit } from "../../editor/layerTree";
-import { RowDrag } from "./layerRows";
+import { RowDrag, rowIndent, gapRowAt } from "./layerRows";
 import { TapManager, bindHold, bindScroll, scrollBoxOf } from "../ui/tap";
 import type { ScrollBox } from "../ui/press";
 import { toast as showToast } from "../ui/dialogs";
 import { setGlobalRouteHook, cancelGlobalTap } from "../ui/globalInput";
 import { editorCloseTarget, type EditorClose } from "../android/backRules";
+import { holdBackground, type InertNode } from "../ui/modalInert";
 
 /** ★ピクセル格子の色（UI §4-1 が値を決めた・PC の updateGridOverlay と同じ） */
 const GRID_RGBA = "rgba(128, 128, 128, 0.28)";
@@ -1949,7 +1950,8 @@ export class MobileEditor extends EditorCore<CoreCallbacks, null> {
     input.value = String(value);
     input.className = "mb-range";
     input.ariaLabel = label;
-    const num = txt("mb-range-num mb-num", String(value));
+    // ★V231 (A-158): 横の数字は、つまみが実際にいる値（範囲の外の値で開いても、つまみと数字が食い違わない）
+    const num = txt("mb-range-num mb-num", input.value);
     input.addEventListener("input", () => {
       num.textContent = input.value;
       live(Number(input.value));
@@ -2178,18 +2180,31 @@ export class MobileEditor extends EditorCore<CoreCallbacks, null> {
       const row = r.kind === "folder" ? this.mbFolderRow(r, order) : this.mbLayerRow(r, order);
       if (!row) return;
       row.dataset.idx = String(idx);
-      row.style.paddingLeft = `${8 + r.depth * 18}px`;
+      // ★V227 (R-1): フォルダの中の行は、行の箱ごと右へずらす（箱の左端が親より下がる・右端は揃う）。中の余白と並びはどの段も同じ
+      row.style.paddingLeft = "8px";
+      row.style.marginLeft = `${rowIndent(r.depth)}px`;
       if (this.mbRowDrag && this.mbRowDrag.ids.includes(r.id)) row.classList.add("mb-dragging");
       if (plan?.view.kind === "into" && plan.view.rowIdx === idx) row.classList.add("mb-drop-into");
       if (plan?.view.kind === "line" && plan.view.gap === idx) row.classList.add("mb-drop-above");
       list.append(row);
     });
     if (plan?.view.kind === "line" && plan.view.gap >= rows.length) list.classList.add("mb-drop-end");
+    // ★V227 (R-3): 行の左の空いた所（ずらした分）を押したら、その行を押したのと同じ（落とす所は縦の位置だけで決まる＝mbRowDragMove）
+    let down: { x: number; y: number } | null = null;
+    list.addEventListener("pointerdown", (e) => (down = { x: e.clientX, y: e.clientY }), { passive: true });
+    bindAct(list, () => {
+      if (!down) return;
+      const els = [...list.querySelectorAll(":scope > .mb-lrow")] as HTMLElement[];
+      const i = gapRowAt(els.map((e) => ({ idx: Number(e.dataset.idx), left: e.getBoundingClientRect().left, top: e.getBoundingClientRect().top, bottom: e.getBoundingClientRect().bottom })), down.x, down.y);
+      const body = i === null ? null : els.find((e) => Number(e.dataset.idx) === i)?.querySelector(".mb-lbody");
+      if (body) actOf(body)?.act();
+    });
     el.append(list);
     const cur = defs.find((l) => l.id === this.activeLayerId);
     if (cur) {
       el.append(
-        this.mbSlider(mt("mb.layer.opacity.label"), 0, 100, Math.round((cur.opacity ?? 1) * 100), (v) => this.setLayerOpacityLive(cur, v / 100), () => this.mbRerender())
+        // ★V231 (A-158): レイヤーは 10〜100（PC と同じ）・コアへは 0〜100 の値をそのまま渡す（コアの setLayerOpacityLive が 100 で割る）
+        this.mbSlider(mt("mb.layer.opacity.label"), 10, 100, Math.round((cur.opacity ?? 1) * 100), (v) => this.setLayerOpacityLive(cur, v), () => this.mbRerender())
       );
     }
     el.append(
@@ -3686,10 +3701,13 @@ export class MobileEditor extends EditorCore<CoreCallbacks, null> {
       if (!layer) return;
       box = h("div", "mb-scrim mb-ui", h("div", "mb-dialog mb-busybox", txt("mb-dialog-title", msg), h("div", "mb-progress", h("span", "mb-progress-bar"))));
       layer.append(box);
+      release = holdBackground(box as unknown as InertNode); // ★V227 (X-1): 「◯◯しています」の間も後ろは inert
     }, delayMs);
+    let release: () => void = () => undefined;
     return fn().finally(() => {
       clearTimeout(timer);
       box?.remove();
+      release();
     });
   }
   /** 編集の印（dirty = true のたび）→ セッションと時計の noteEdit */

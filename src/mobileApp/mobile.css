@@ -1,3 +1,4 @@
+/* ★V227 (B-3・A-143): 形の置き換え（scripts/v227_shape.py）を当てた。線 2px・硬い影なし・押すと scale(0.97)・角は UI §3-3 */
 /* V220 (M-2b-1b・要件 docs/REQ_mobile_m2_editor.md §5-1 の 3・決-18・UI docs/REQ_mobile_ui_v1.md §3): モバイルの画面の土台。
    ★読み込むのは src/mobileApp/app.ts だけ（entry.ts からは読まない＝v211 [E]）。PC の src/styles.css は変えない・読まない。
    ★色は**全部ここの変数**に集める（PC と同じ作法・scripts/v158_color_check.ts のモバイルの節が見る）。変数の外に色を直書きしない
@@ -60,7 +61,7 @@
   --ink-soft-rgb: 111, 100, 86;
   --blue-rgb: 31, 162, 255;
   /* 影（置いてあるもの・浮いているもの。PC と同じ値） */
-  --shadow: 0 3px 0 rgba(var(--shadow-rgb), 0.18);
+  --shadow: none;
   --shadow-float: 0 6px 20px rgba(0, 0, 0, 0.28);
   /* v1.6 のボードの 7 つ（UI §3-1。PC の成分から組めるものは組む） */
   --dotC: rgba(var(--ink-rgb), 0.05);
@@ -106,7 +107,7 @@
   --scrim-rgb: 0, 0, 0;
   --ink-soft-rgb: 168, 150, 132;
   --blue-rgb: 77, 184, 255;
-  --shadow: 0 3px 0 rgba(var(--shadow-rgb), 0.45);
+  --shadow: none;
   --shadow-float: 0 6px 22px rgba(0, 0, 0, 0.6);
   --dotC: rgba(var(--ink-rgb), 0.05);
   --emptyB: rgba(var(--ink-rgb), 0.25);

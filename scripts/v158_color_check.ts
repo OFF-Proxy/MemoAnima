@@ -189,6 +189,9 @@ function stripRootBlocks(text: string): string {
   const mL = block(mcss, false);
   const mD = block(mcss, true);
   const EXCEPT_LIGHT = new Set(["--ink-soft", "--ink-soft-rgb"]);
+  // ★V227 (A-143・REQ_look_shape.md §3): モバイルの --shadow は先に none にした（PC は別の Windows の作業で同じ形に）。両方の紙で比べから外す
+  const EXCEPT_V227 = new Set(["--shadow"]);
+  let skippedV227 = 0;
   const diffs: string[] = [];
   let compared = 0;
   for (const [dark, mm, pp] of [
@@ -200,13 +203,17 @@ function stripRootBlocks(text: string): string {
     for (const [k, v] of mm) {
       if (!pp.has(k)) continue;
       if (!dark && EXCEPT_LIGHT.has(k)) continue;
+      if (EXCEPT_V227.has(k)) {
+        skippedV227++;
+        continue;
+      }
       compared++;
       if (rm(v) !== rp(pp.get(k)!)) diffs.push(`${dark ? "dark" : "light"} ${k}: ${rm(v)} ≠ PC ${rp(pp.get(k)!)}`);
     }
   }
   check(
     "mobile: PC と同じ名前の変数は PC と同じ値（例外は明るい紙の --ink-soft・--ink-soft-rgb だけ）",
-    diffs.length === 0 && compared >= 50,
+    diffs.length === 0 && compared + skippedV227 >= 50 && skippedV227 <= 2,
     `${compared} 個を比べた ${diffs.join(" | ")}`
   );
   check("mobile: 明るい紙の --ink-soft は #6f6456・--ink-soft-rgb は 111, 100, 86（UI §3-1）", mL.get("--ink-soft") === "#6f6456" && mL.get("--ink-soft-rgb") === "111, 100, 86");

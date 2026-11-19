@@ -52,6 +52,26 @@ fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 
         mobile_delete_album,
         mobile_recoverable_list,
         mobile_recover,
+        // V229 (M-4): 出し入れ（iOS と Android の両方。ネイティブの画面は Android だけ・iOS は unsupported）
+        mobile_io_cleanup,
+        mobile_out_begin,
+        mobile_out_write,
+        mobile_out_write_raw,
+        mobile_out_finish,
+        mobile_out_abort,
+        mobile_out_work,
+        mobile_out_share,
+        mobile_out_save,
+        mobile_in_pick,
+        mobile_in_received,
+        mobile_in_sniff,
+        mobile_in_import,
+        mobile_in_read,
+        mobile_in_discard,
+        mobile_export_all_begin,
+        mobile_export_all_status,
+        mobile_export_all_cancel,
+        mobile_library_notes,
         // V212 (M-1c・D-M1-3): Android だけ。invoke はいつも postMessage で、生のボディ・生のバイト列の大きい渡しが使えないので、
         //  分けて送る（base64 の塊・4MiB 以下）・分けて受け取る（4MiB 以下の切れ端）。iOS の表は変えない（commands::ANDROID_COMMANDS と同じ並び）
         #[cfg(target_os = "android")]
@@ -109,9 +129,17 @@ pub fn run() {
         let _ = webview.reload();
     });
     // V212 (M-1c): Android は起動のたびに、前の起動で止まった塊（分けて送る道の置き場）を片付ける
+    // ★V229 (M-4): iOS も起動のとき一時の場所を片付ける（Android は下の setup の中）
+    #[cfg(target_os = "ios")]
+    let builder = builder.setup(|app| {
+        sweep_io(app.handle());
+        Ok(())
+    });
     #[cfg(target_os = "android")]
     let builder = builder.setup(|app| {
         sweep_chunks(app.handle());
+        // ★V229 (M-4): 出し入れの一時の場所の書きかけ（止められた書き出し・取り込み）と 24 時間より古いものを片付ける
+        sweep_io(app.handle());
         Ok(())
     });
     builder

@@ -1,3 +1,4 @@
+/* ★V227 (B-3・A-143): 形の置き換え（scripts/v227_shape.py）を当てた。線 2px・硬い影なし・押すと scale(0.97)・角は UI §3-3 */
 /* V225 (M-2b-3b-2／M-2c・UI docs/REQ_mobile_ui_v1.md §6): 描く画面の外の画面（設定・ライブラリ）の見た目。
    ★色は mobile.css の変数だけ（U-9・scripts/v158_color_check.ts のモバイルの節が見る）。
    ★位置と大きさは UI §6 の 11 型（1194×834）の実寸と、docs/handoff/V225_boards/README.md の測った位置。
@@ -10,6 +11,13 @@
 }
 #mb-screens > * {
   pointer-events: auto;
+}
+/* ★V231 (A-155): 設定はライブラリより上に描く（置いた順に頼らない）。#mb-screens は fixed＝重なりの順の囲みなので、外の確認とお知らせの層には効かない */
+#mb-screens > .mb-app.mb-lib {
+  z-index: 0;
+}
+#mb-screens > .mb-app.mb-set {
+  z-index: 1;
 }
 .mb-app,
 .mb-app * {
@@ -53,7 +61,7 @@
   align-items: center;
   gap: 16px;
   background: var(--tangerine);
-  border-bottom: 4px solid var(--line);
+  border-bottom: 2px solid var(--line);
   color: var(--ink-on-accent);
 }
 .mb-topbar-title {
@@ -63,8 +71,8 @@
 }
 .mb-card {
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 16px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow);
 }
 .mb-soon {
@@ -82,7 +90,7 @@
   font-size: 15px;
   font-weight: 700;
   color: var(--ink);
-  box-shadow: 0 4px 0 var(--ink);
+  box-shadow: none;
   white-space: nowrap;
   margin-top: -4px;
 }
@@ -121,7 +129,7 @@
 .mb-set-navrow.mb-on {
   border-color: var(--line);
   background: var(--panel);
-  box-shadow: 0 3px 0 var(--ink);
+  box-shadow: none;
 }
 .mb-set-navname {
   flex: 1;
@@ -164,7 +172,7 @@
   padding-bottom: 9px;
   margin: 0 -4px 4px;
   padding-left: 4px;
-  border-bottom: 3px solid var(--line);
+  border-bottom: 2px solid var(--line);
 }
 .mb-set-title {
   font-size: 22px;
@@ -249,7 +257,7 @@
   gap: 10px;
   font-size: 15px;
   font-weight: 700;
-  box-shadow: 0 4px 0 var(--ink);
+  box-shadow: none;
 }
 .mb-set-lang.mb-on {
   background: var(--yellow);
@@ -260,7 +268,7 @@
   width: 20px;
   height: 20px;
   border-radius: 999px;
-  border: 3px solid currentColor;
+  border: 2px solid currentColor;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -276,7 +284,7 @@
   flex: none;
   padding: 4px;
   gap: 4px;
-  border-radius: 14px;
+  border-radius: 12px;
 }
 .mb-set-seg .mb-seg-item {
   flex: 1 0 auto;
@@ -297,7 +305,7 @@
   height: 32px;
   padding: 0;
   border-radius: 999px;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   background: var(--surface-2);
   box-shadow: none;
 }
@@ -311,7 +319,7 @@
   width: 22px;
   height: 22px;
   border-radius: 999px;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   background: var(--panel);
   transition: transform 0.12s;
 }
@@ -322,7 +330,7 @@
 .mb-set-switch::before {
   content: "";
   position: absolute;
-  inset: -9px 0;
+  inset: -11px 0; /* ★V227 (H-5): 枠 2 ＋ 上下に 9（32 → 50）・左右は広げない（幅 56） */
 }
 .mb-set-handctl {
   flex: none;
@@ -335,8 +343,8 @@
   flex: none;
   width: 130px;
   height: 84px;
-  border: 3px solid var(--line);
-  border-radius: 10px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--paper2);
   overflow: hidden;
 }
@@ -386,8 +394,8 @@
   position: relative;
   height: 76px;
   padding: 6px 12px;
-  border: 3px solid var(--line);
-  border-radius: 12px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--panel);
   color: var(--ink);
   overflow: hidden;
@@ -408,8 +416,8 @@
   flex: none;
   width: 50px;
   height: 50px;
-  border: 3px solid var(--line);
-  border-radius: 12px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--surface-2);
   display: inline-flex;
   align-items: center;
@@ -420,7 +428,7 @@
   height: 30px;
   padding: 0 14px;
   border: 2px solid var(--line);
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--surface-2);
   display: inline-flex;
   align-items: center;
@@ -443,8 +451,8 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  border: 3px solid var(--line);
-  border-radius: 12px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--surface-2);
   font-size: 14px;
   font-weight: 700;
@@ -470,7 +478,7 @@
   font-weight: 700;
   background: var(--green);
   color: var(--ink-on-accent);
-  box-shadow: 0 4px 0 var(--ink);
+  box-shadow: none;
   white-space: nowrap;
 }
 .mb-set-app {
@@ -484,8 +492,8 @@
   flex: none;
   width: 64px;
   height: 64px;
-  border: 3px solid var(--line);
-  border-radius: 16px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   background: var(--tangerine) url("../../src-tauri/icons/ios/AppIcon-60x60@2x.png") center / cover no-repeat;
 }
 .mb-set-link {
@@ -578,20 +586,16 @@
   width: 40px;
   height: 40px;
   margin-top: -4px;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--panel) url("../../src-tauri/icons/ios/AppIcon-60x60@2x.png") center / cover no-repeat;
 }
-/* ロゴの場所（ボードは幅 37・高さ 28 のロゴの絵。絵の素材が無いので、アプリの名前を小さく 2 行で置く） */
-.mb-lib-word {
+/* ★V227 (Y-1): ロゴの絵（ボードの 37×28 の箱・docs/design/logo/memoanima-logo-stack-1.svg の写し・外の書体や画像を読まない） */
+.mb-lib-logo {
   flex: none;
   width: 37px;
-  max-height: 28px;
+  height: 28px;
   margin-top: -4px;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1.3;
-  overflow-wrap: anywhere;
-  overflow: hidden;
+  background: url("./brand/memoanima-logo-stack.svg") center / contain no-repeat;
 }
 .mb-lib-tabs {
   flex: none;
@@ -600,8 +604,8 @@
   padding: 3px;
   display: flex;
   gap: 3px;
-  border: 3px solid var(--line);
-  border-radius: 14px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   background: var(--surface-2);
   color: var(--ink);
 }
@@ -614,7 +618,7 @@
   justify-content: center;
   gap: 8px;
   border: none;
-  border-radius: 9px;
+  border-radius: 8px;
   background: transparent;
   box-shadow: none;
   font-size: 15px;
@@ -623,7 +627,7 @@
 }
 .mb-lib-tab.mb-on {
   background: var(--panel);
-  box-shadow: 0 2px 0 var(--ink);
+  box-shadow: none;
 }
 .mb-lib-searchbox {
   flex: 0 1 200px;
@@ -635,8 +639,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  border: 3px solid var(--line);
-  border-radius: 999px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--panel);
   color: var(--ink-soft);
 }
@@ -675,7 +679,7 @@
   font-size: 15px;
   font-weight: 700;
   color: var(--ink-on-accent);
-  box-shadow: 0 4px 0 var(--ink);
+  box-shadow: none;
   white-space: nowrap;
 }
 .mb-lib-import {
@@ -764,7 +768,7 @@
 .mb-lib-album.mb-on {
   border-color: var(--line);
   background: var(--panel);
-  box-shadow: 0 3px 0 var(--ink);
+  box-shadow: none;
 }
 .mb-lib-album.mb-drop {
   border-color: var(--green);
@@ -784,7 +788,7 @@
   min-width: 28px;
   height: 22px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--ink);
   color: var(--paper);
   display: inline-flex;
@@ -829,9 +833,10 @@
 
 /* ---- 再生 ---- */
 .mb-lib-preview {
-  border: 4px solid var(--line);
+  border: 2px solid transparent;
   border-radius: 4px;
-  background: var(--panel);
+  padding: 2px; /* ★V227 (H-4): 線 2px は絵にぴったり（padding の地）・外の 2px は透明 */
+  background: linear-gradient(var(--panel), var(--panel)) content-box, linear-gradient(var(--line), var(--line)) padding-box;
   overflow: hidden;
   line-height: 0;
 }
@@ -845,6 +850,7 @@
 .mb-lib-bigthumb {
   position: absolute;
   inset: 0;
+  padding: 2px; /* ★V227 (H-4): 枠の内側 2px の線（padding の地）にかぶせない＝絵は中の場所だけ（幅と高さは 100% のまま・地は透明） */
   object-fit: contain;
 }
 .mb-paper-clear {
@@ -858,10 +864,10 @@
   height: 84px;
   margin: -42px 0 0 -42px;
   border-radius: 999px;
-  border: 4px solid var(--line);
+  border: 2px solid var(--line);
   background: var(--green);
   color: var(--ink-on-accent);
-  box-shadow: 0 5px 0 var(--ink);
+  box-shadow: none;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -873,8 +879,8 @@
   right: 12px;
   bottom: 12px;
   padding: 8px 12px;
-  border: 3px solid var(--line);
-  border-radius: 12px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--surface-2);
   font-size: 14px;
   font-weight: 700;
@@ -934,7 +940,7 @@
   top: 50%;
   height: 12px;
   margin-top: -6px;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   border-radius: 999px;
   background: var(--paper2);
   overflow: hidden;
@@ -950,7 +956,7 @@
   width: 24px;
   height: 24px;
   margin: -12px 0 0 -12px;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   border-radius: 999px;
   background: var(--panel);
   pointer-events: none;
@@ -1004,7 +1010,7 @@
   height: 28px;
   padding: 0 12px;
   border: 2px solid var(--line);
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--surface-2);
   display: inline-flex;
   align-items: center;
@@ -1029,7 +1035,7 @@
   gap: 6px;
   font-size: 15px;
   font-weight: 700;
-  box-shadow: 0 4px 0 var(--ink);
+  box-shadow: none;
   white-space: nowrap;
 }
 .mb-lib-edit {
@@ -1103,8 +1109,8 @@
   padding: 0 14px;
   justify-content: flex-start;
   gap: 8px;
-  border-radius: 14px;
-  box-shadow: 0 4px 0 var(--ink);
+  border-radius: 12px;
+  box-shadow: none;
 }
 .mb-lib-albumbtn .mb-lib-albumname {
   flex: 0 1 auto;
@@ -1141,7 +1147,7 @@
 }
 .mb-lib-card.mb-on {
   border-color: var(--red);
-  box-shadow: 0 0 0 1px var(--red), 0 3px 0 var(--ink);
+  box-shadow: 0 0 0 1px var(--red);
 }
 .mb-lib-card.mb-held {
   opacity: 0.5;
@@ -1150,7 +1156,7 @@
   position: relative;
   display: block;
   aspect-ratio: 4 / 3;
-  border-bottom: 3px solid var(--line);
+  border-bottom: 2px solid var(--line);
   background: var(--paper);
   overflow: hidden;
 }
@@ -1214,8 +1220,8 @@
   gap: 8px;
   align-items: center;
   text-align: center;
-  border: 3px dashed var(--emptyB);
-  border-radius: 12px;
+  border: 2px dashed var(--emptyB);
+  border-radius: 8px;
 }
 .mb-lib-emptytitle {
   font-size: 14px;
@@ -1237,8 +1243,8 @@
   flex-direction: column;
   gap: 4px;
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 18px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow-float);
   overflow: hidden;
 }
@@ -1303,8 +1309,8 @@
   max-width: 220px;
   padding: 8px 12px;
   transform: translate(-50%, -130%);
-  border: 3px solid var(--line);
-  border-radius: 12px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--panel);
   box-shadow: var(--shadow-float);
   font-size: 13px;
@@ -1324,9 +1330,10 @@
 }
 .mb-lib-theaterpic {
   position: absolute;
-  border: 4px solid var(--line);
+  border: 2px solid transparent;
   border-radius: 4px;
-  background: var(--panel);
+  padding: 2px; /* ★V227 (H-4): 線 2px は絵にぴったり（padding の地）・外の 2px は透明 */
+  background: linear-gradient(var(--panel), var(--panel)) content-box, linear-gradient(var(--line), var(--line)) padding-box;
   overflow: hidden;
   line-height: 0;
 }
@@ -1337,7 +1344,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  border-radius: 999px;
+  border-radius: 12px;
   background: var(--panel);
   color: var(--ink);
   transition: opacity 0.26s, transform 0.26s;
@@ -1360,7 +1367,7 @@
   width: 50px;
   height: 50px;
   border-radius: 999px;
-  box-shadow: 0 4px 0 var(--ink);
+  box-shadow: none;
 }
 
 /* ---- 「開いています」（UI §6-10: サムネ・文・進み具合の帯） ---- */
@@ -1374,7 +1381,7 @@
   width: 160px;
   height: 120px;
   margin: 0 auto 4px;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   border-radius: 8px;
   background: var(--paper);
   overflow: hidden;
@@ -1416,7 +1423,7 @@
 }
 
 /* ---- 縦（中）: 上の帯は、検索を縮め、札を詰める（UI §6-8） ---- */
-.mb-lib[data-shape="medium"] .mb-lib-word {
+.mb-lib[data-shape="medium"] .mb-lib-logo {
   display: none;
 }
 .mb-lib[data-shape="medium"] .mb-lib-tab {
@@ -1496,4 +1503,23 @@
 .mb-lib.mb-top-narrow .mb-lib-searchbox {
   min-width: 60px;
   padding: 0 10px;
+}
+
+/* ★V227 (H-5・UI §3-7): 上の帯の「ライブラリ／ギャラリー」の切り替え（高さ 36・枠なし・入れ物の余白の中）→ 上下に 4（44） */
+.mb-lib-tab {
+  position: relative;
+}
+.mb-lib-tab::before {
+  content: "";
+  position: absolute;
+  inset: -4px 0;
+}
+/* ★V227 (H-5): たたむ／左に広げる（高さ 40・枠 2）→ 上下に 2（44）。左右は広げない（幅 88 以上） */
+.mb-lib-foldbtn {
+  position: relative;
+}
+.mb-lib-foldbtn::before {
+  content: "";
+  position: absolute;
+  inset: -4px 0;
 }

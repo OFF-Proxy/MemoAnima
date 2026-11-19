@@ -36,6 +36,8 @@ import { mergeFor, readMobileSettings, type SettingChange } from "../settings/mo
 import { openSettings, screensHost, soonBtn, type SettingsHandle } from "../settings/settingsScreen";
 import { listLibrary, type LibraryListing } from "./libraryList";
 import { LibraryPreview } from "./preview";
+import { holdBackground, type InertNode } from "../ui/modalInert";
+import { queueSettingsWrites } from "../settings/writeQueue";
 import {
   albumCounts,
   albumNameTaken,
@@ -240,7 +242,8 @@ const iconBtn = (cls: string, name: string, ic: MobileIconId, act: () => void, s
 
 function build(): void {
   const r = h("div", "mb-app mb-lib mb-ui");
-  root?.remove();
+  // ★V231 (A-155): 組み直した根は、古い根の場所に置く（一番後ろに置くと、上に出ている設定の画面を覆う）
+  const old = root;
   root = r;
   E = {};
   // 上の帯
@@ -264,17 +267,21 @@ function build(): void {
   const tabs = h("div", "mb-lib-tabs", h("span", "mb-lib-tab mb-on", icon("project", 20), txt("", mt("mb.lib.tab.library.btn"))), soonBtn("mb-lib-tab", mt("mb.lib.tab.gallery.btn"), icon("heart", 20), txt("", mt("mb.lib.tab.gallery.btn"))));
   const mark = h("span", "mb-lib-mark");
   mark.setAttribute("aria-hidden", "true");
+  // ★V227 (Y-1・UI §0 の 18 の①): ロゴの絵（brand/memoanima-logo-stack.svg・CSS の背景）。読み上げはアプリの名前
+  const logo = h("span", "mb-lib-logo");
+  logo.setAttribute("role", "img");
+  logo.ariaLabel = t("app.name.label");
   E.top = h(
     "div",
     "mb-topbar mb-lib-top",
     deps.exit ? btn("mb-lib-devexit", "dev", () => leaveToDev(), txt("", "dev")) : null,
     mark,
-    txt("mb-lib-word", t("app.name.label")),
+    logo,
     tabs,
     h("label", "mb-lib-searchbox", icon("zoom", 20), si),
     h("span", "mb-lib-spacer"),
     soonBtn("mb-lib-import", mt("mb.lib.import.btn"), icon("import", 22), txt("", mt("mb.lib.import.btn"))),
-    btn("mb-lib-new", t("lib.newNote.btn"), () => void openNew(), icon("pen", 22), txt("", t("lib.newNote.btn"))),
+    btn("mb-lib-new", t("lib.newNote.btn"), () => void openNew(), icon("pen", 22), (E.newLabel = txt("", t("lib.newNote.btn")))),
     iconBtn("mb-lib-gear", t("lib.settings.title"), "gear", () => openLibrarySettings(), 24)
   );
   // アルバムの列（出しているとき）
@@ -324,7 +331,11 @@ function build(): void {
     if (tg?.closest(".mb-lib-pop, [data-pop-anchor]")) return;
     closePop();
   });
-  screensHost().append(r);
+  if (old?.isConnected) old.replaceWith(r);
+  else {
+    old?.remove();
+    screensHost().append(r);
+  }
 }
 
 function albumOps(): HTMLElement {
@@ -361,6 +372,12 @@ function place(): void {
   root.classList.toggle("mb-ops-2", L.opsRows === 2);
   root.classList.toggle("mb-ops-narrow", L.ops.w < 560);
   root.classList.toggle("mb-top-narrow", w < 800);
+  // ★V227 (Y-5・UI §6-8): 縦（中）の検索欄は短い文（「作品を検索…」が切れる）。横は今のまま
+  const sp = L.kind === "medium" ? mt("mb.lib.search.short.placeholder") : t("lib.search.placeholder");
+  (E.search as HTMLInputElement).placeholder = sp;
+  E.search.ariaLabel = sp;
+  // ★V227 (Y-5): 縦では［新規メモ］の見える字を短い名前に（読み上げの名前は今のまま）＝検索欄の幅を取る（es・pt-BR は「検索」でも切れた）
+  E.newLabel.textContent = L.kind === "medium" ? mt("mb.lib.new.short.btn") : t("lib.newNote.btn");
   root.style.setProperty("--lib-topbar", `${L.spacing.topBar}px`);
   const put = (el: HTMLElement, r: { x: number; y: number; w: number; h: number } | null) => {
     el.hidden = !r;
@@ -378,7 +395,16 @@ function place(): void {
   if (theater) placeTheater();
 }
 
+/** ★V227 (X-2・V226 の独立レビュー A1-3): 運んでいる途中に棚やアルバムの列が組み直されたら、運ぶのをやめる（moveWork を呼ばない・お知らせは出さない・
+ *  見た目を元に戻す）。前に重ねていたアルバムの名前を持ったまま、組み直した列の上で離して、そこへ動く、を起こさない */
+function abortDrag(): void {
+  if (!dragging) return;
+  deps.log("[V227] drag cancelled: rebuilt");
+  dragEnd(0, 0, true);
+}
+
 function render(): void {
+  abortDrag();
   if (!root) build();
   place();
   renderAlbums();
@@ -1027,7 +1053,7 @@ async function renameWork(ref: WorkRef | null): Promise<void> {
         current = name;
         continue;
       }
-      toast(isRefusal(e, "bad-name") || isRefusal(e, "name-too-long") ? mt("mb.save.reason.name.msg") : mt("mb.lib.failed.toast"));
+      toast(isRefusal(e, "bad-name") || isRefusal(e, "name-too-long") ? mt("mb.save.reason.name.msg") : mt("mb.lib.rename.failed.toast"));
       return;
     } finally {
       busy = false;
@@ -1082,7 +1108,7 @@ async function addAlbum(): Promise<void> {
     sel = { album: made.album, work: sel.work };
   } catch (e) {
     deps.log(`[V225] create-album refused ${refusalCode(e)}`);
-    toast(isRefusal(e, "name-taken") ? mt("mb.lib.album.taken.msg") : isRefusal(e, "bad-name") || isRefusal(e, "name-too-long") ? mt("mb.save.reason.name.msg") : mt("mb.lib.failed.toast"));
+    toast(isRefusal(e, "name-taken") ? mt("mb.lib.album.taken.msg") : isRefusal(e, "bad-name") || isRefusal(e, "name-too-long") ? mt("mb.save.reason.name.msg") : mt("mb.lib.albumCreate.failed.toast"));
   } finally {
     busy = false;
   }
@@ -1116,7 +1142,7 @@ async function renameAlbum(): Promise<void> {
     }
   } catch (e) {
     deps.log(`[V225] rename-album refused ${refusalCode(e)}`);
-    toast(isRefusal(e, "name-taken") ? mt("mb.lib.album.taken.msg") : isRefusal(e, "bad-name") || isRefusal(e, "name-too-long") ? mt("mb.save.reason.name.msg") : mt("mb.lib.failed.toast"));
+    toast(isRefusal(e, "name-taken") ? mt("mb.lib.album.taken.msg") : isRefusal(e, "bad-name") || isRefusal(e, "name-too-long") ? mt("mb.save.reason.name.msg") : mt("mb.lib.rename.failed.toast"));
   } finally {
     busy = false;
   }
@@ -1175,10 +1201,13 @@ function openingBox(ref: WorkRef | null): () => void {
     box = h("div", "mb-scrim mb-ui", h("div", "mb-dialog mb-busybox mb-opening", pic, txt("mb-dialog-title", label), h("div", "mb-progress", h("span", "mb-progress-bar"))));
     box.setAttribute("role", "status");
     document.getElementById("mb-layer")?.append(box);
+    release = holdBackground(box as unknown as InertNode); // ★V227 (X-1): 「開いています」の間も後ろは inert
   }, 1000);
+  let release: () => void = () => undefined;
   return () => {
     clearTimeout(timer);
     box?.remove();
+    release();
   };
 }
 
@@ -1527,7 +1556,8 @@ let lifeOn = false;
 
 /** ★起動するとライブラリ（PC と同じ）。提案 → ライブラリ */
 export async function startLibrary(d: LibraryDeps): Promise<void> {
-  deps = d;
+  // ★V227 (X-4): 設定を書く命令は 1 つずつ順に送る（描く画面へも同じポートを渡す＝描く画面の設定の画面も同じ並び）
+  deps = { ...d, port: queueSettingsWrites(d.port) };
   ensureLayer();
   readPrefs();
   d.root.replaceChildren();
@@ -1545,6 +1575,7 @@ export async function startLibrary(d: LibraryDeps): Promise<void> {
     });
     window.addEventListener("resize", () => {
       if (!root || screen) return;
+      abortDrag(); // ★V227 (X-2): 回転・大きさの変化
       closePop();
       place();
       renderOps();

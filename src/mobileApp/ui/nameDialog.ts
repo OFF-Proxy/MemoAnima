@@ -36,6 +36,15 @@ export function nameResult(value: string, refuse?: (name: string) => string | nu
   return refuse?.(v) ? null : v;
 }
 
+/** ★V228 (C-2): 開いてから欄へフォーカスを戻してよい時間（Android の互換のマウスの出来事は指を離してすぐ届く） */
+export const NAME_REFOCUS_MS = 600;
+
+/** ★V228 (C-2・v228 [C]): 欄からフォーカスが外れたとき、欄へ戻すか。開いてすぐ・箱の中のほかの部品へ移ったのではない・
+ *  欄がまだ置かれている・いまフォーカスが何も無い所（body）にある、のときだけ戻す */
+export function nameRefocus(elapsedMs: number, movedInsideBox: boolean, inputConnected: boolean, focusOnNothing: boolean): boolean {
+  return elapsedMs <= NAME_REFOCUS_MS && !movedInsideBox && inputConnected && focusOnNothing;
+}
+
 /** ソフトウェアキーボードが出たら、島をキーボードの上に残った所の真ん中へ（欄のある島で使う）。返り値は片付け */
 export function keepAboveKeyboard(inside: HTMLElement): () => void {
   const vv = window.visualViewport;
@@ -90,8 +99,26 @@ export function askName(ask: NameAsk): Promise<string | null> {
         if (!invalid()) close(true);
       });
       // 今の名前が入り、末尾にカーソル
-      input.focus({ preventScroll: true });
-      input.setSelectionRange(input.value.length, input.value.length);
+      const focusName = () => {
+        input.focus({ preventScroll: true });
+        input.setSelectionRange(input.value.length, input.value.length);
+      };
+      focusName();
+      // ★V228 (C-2・V226 §0 の 4): Android の WebView では、箱を開いた指を離したあとに届く互換のマウスの出来事で、フォーカスが
+      //  頁（body）へ落ちる（押した所は箱の後ろ＝inert で、フォーカスを受けられない）。開いてから NAME_REFOCUS_MS の間に、欄から
+      //  何も無い所へ落ちたときだけ、1 回だけ欄へ戻す。箱の中のほかの部品（［やめる］など）へ移ったとき・落ちない端末（iPad）では何もしない
+      const opened = Date.now();
+      const onBlur = (e: FocusEvent) => {
+        input.removeEventListener("blur", onBlur);
+        const to = e.relatedTarget as Node | null;
+        setTimeout(() => {
+          const now = document.activeElement;
+          if (!nameRefocus(Date.now() - opened, !!to && box.contains(to), input.isConnected, now === null || now === document.body)) return;
+          focusName();
+          if (__MOBILE_DEVCHECK__) (window as unknown as { __mbNameRefocus?: number }).__mbNameRefocus = ((window as unknown as { __mbNameRefocus?: number }).__mbNameRefocus ?? 0) + 1;
+        }, 0);
+      };
+      input.addEventListener("blur", onBlur);
     },
   }).then((r) => {
     off();

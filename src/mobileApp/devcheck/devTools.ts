@@ -9,6 +9,13 @@ import { mbDevSetScreen } from "../editor/mobileEditor";
 import { currentScreen, libraryDebug, libraryDev } from "../library/libraryScreen";
 import { setScreenOverride } from "../view/screen";
 import { hitLines, measureHits } from "./hitSize";
+import { keepLive } from "../ui/modalInert";
+
+/** ★V227 (X-1): 開発用の札は、箱が出ている間も押せるまま（箱の写しと当たりを数えるため） */
+function devAppend(el: HTMLElement): void {
+  keepLive(el);
+  document.body.append(el);
+}
 
 export interface DevToolsDeps {
   log(line: string): void;
@@ -53,10 +60,11 @@ export function attachLibraryDev(d: DevToolsDeps): void {
     box.append(b);
   };
   // ★V226 (H-1): 押せるものの当たりを数える（今の画面に見えているもの全部・48dp に足りないものを記録へ）
-  add("hits", () => devHits(d));
+  // ★V227 (H-5): iOS は 44・Android は 48（UI §3-7）
+  add("hits", () => devHits(d, document.documentElement.classList.contains("mb-android") ? 48 : 44));
   add("liblangs", () => void devLibrarySweep(d));
   add("libsizes", () => void devLibrarySizes(d));
-  document.body.append(box);
+  devAppend(box);
 }
 
 /** ★V226 (H-1): 今の画面の押せるものの当たりを数えて記録へ（種類と大きさだけ・名前は書かない）。外（CDP）からも呼べるように口を置く */
@@ -93,6 +101,21 @@ function countOverflow(sel: string): string[] {
   return items;
 }
 
+/** ★V227 (Y-5): 検索欄の文（placeholder）が欄に入り切るか（入れ物の数えは INPUT を外すので、ここで字の幅を測る） */
+function searchCut(): string[] {
+  const el = document.querySelector(".mb-lib-search") as HTMLInputElement | null;
+  if (!el || !el.placeholder || el.clientWidth === 0) return [];
+  const st = getComputedStyle(el);
+  const ctx = document.createElement("canvas").getContext("2d");
+  if (!ctx) return [];
+  ctx.font = `${st.fontWeight} ${st.fontSize} ${st.fontFamily}`;
+  const room = el.clientWidth - parseFloat(st.paddingLeft) - parseFloat(st.paddingRight);
+  const need = Math.ceil(ctx.measureText(el.placeholder).width);
+  d0?.log(`[V227 dev] search room=${Math.floor(room)} need=${need}`);
+  return need > room ? [`mb-lib-search:cut+${need - Math.floor(room)}`] : [];
+}
+let d0: DevToolsDeps | null = null;
+
 function doneTag(name: string, text: string): void {
   document.getElementById(name)?.remove();
   const done = document.createElement("div");
@@ -100,7 +123,7 @@ function doneTag(name: string, text: string): void {
   done.ariaLabel = `${name} ${text}`;
   done.textContent = text;
   done.setAttribute("style", "position:fixed;left:200px;top:2px;font:10px monospace;z-index:60;opacity:.6;pointer-events:none");
-  document.body.append(done);
+  devAppend(done);
 }
 
 /** 7 言語の数え（ライブラリ: 出した形・たたんだ形・浮かぶもの 3 つ／設定: ライブラリから開いた区分の全部） */
@@ -108,6 +131,7 @@ async function devLibrarySweep(d: DevToolsDeps): Promise<void> {
   const { LANGS, setLang, getLang } = await import("../../i18n");
   const { sectionsFor, sectionEnabled } = await import("../settings/model");
   const lib = libraryDev();
+  d0 = d;
   const lang0 = getLang();
   const lines: string[] = [];
   for (const l of LANGS) {
@@ -117,7 +141,7 @@ async function devLibrarySweep(d: DevToolsDeps): Promise<void> {
     for (const f of [false, true]) {
       lib.fold(f);
       await settled();
-      res.push([f ? "folded" : "open", countOverflow(".mb-lib *")]);
+      res.push([f ? "folded" : "open", [...countOverflow(".mb-lib *"), ...searchCut()]]);
       for (const p of f ? (["albums", "sort"] as const) : (["move", "more", "sort"] as const)) {
         lib.pop(p);
         await nextFrame();
@@ -149,6 +173,7 @@ async function devLibrarySweep(d: DevToolsDeps): Promise<void> {
 /** 端末の大きさの表（■4 の表）: 大きさを差し替えて、倍率・段・部品の矩形を記録へ */
 async function devLibrarySizes(d: DevToolsDeps): Promise<void> {
   const lib = libraryDev();
+  d0 = d;
   const SIZES: [string, number, number][] = [
     ["pro11", 1194, 834], ["pro11p", 834, 1194], ["air11", 1180, 820], ["air11p", 820, 1180], ["gen9", 1080, 810], ["gen9p", 810, 1080],
     ["mini", 1133, 744], ["minip", 744, 1133], ["pro13", 1366, 1024], ["pro13p", 1024, 1366],
@@ -162,7 +187,7 @@ async function devLibrarySizes(d: DevToolsDeps): Promise<void> {
       lib.fold(f);
       window.dispatchEvent(new Event("resize"));
       await settled();
-      const over = countOverflow(".mb-lib *");
+      const over = [...countOverflow(".mb-lib *"), ...searchCut()];
       const dbg = libraryDebug().split(" ").filter((p) => /^(shape|folded|tight|scale|rows|albums|preview|ops|shelf)=/.test(p)).join(" ");
       d.log(`[V225 dev] libsizes ${name} ${dbg} over=${over.length}`.slice(0, 240));
       for (const it of over) d.log(`[V225 dev] libsizes ${name} f=${f ? 1 : 0} ${it}`.slice(0, 160));
@@ -248,7 +273,7 @@ async function devLangSweep(sc: WorkScreen): Promise<void> {
   done.ariaLabel = `v221-langs-done ${lines.join(" ")}`;
   done.textContent = lines.join(" ");
   done.setAttribute("style", "position:fixed;left:4px;top:2px;font:10px monospace;z-index:60;opacity:.6");
-  document.body.append(done);
+  devAppend(done);
 }
 
 /** 確かめ画面の印のビルドだけ: 描き直しの数（絵・重ねる層）。UI テストが読む（aria-label） */
@@ -256,7 +281,7 @@ function devRepaintMeter(sc: WorkScreen): void {
   const el = document.createElement("div");
   el.id = "v221-repaints";
   el.setAttribute("style", "position:fixed;right:4px;top:2px;font:10px monospace;opacity:.6;pointer-events:none;z-index:60");
-  document.body.append(el);
+  devAppend(el);
   // 倍率の写し（■6）: ×8・×12.5・×32・90°・元へ（小さな開発用のボタン・印のビルドだけ）
   const zb = document.createElement("div");
   zb.id = "v221-devbar"; // ★V226: 当たりを数える間は隠す（下の帯の上に重なる）
@@ -364,11 +389,11 @@ function devRepaintMeter(sc: WorkScreen): void {
       done.ariaLabel = "v225-keys-done";
       done.setAttribute("style", "position:fixed;left:4px;top:14px;font:10px monospace;z-index:60;opacity:.6");
       done.textContent = "keys-done";
-      document.body.append(done);
+      devAppend(done);
     })();
   });
   zb.append(synth);
-  document.body.append(zb);
+  devAppend(zb);
   // ★V223 (■6): 本物のタッチの記録（1 回の接触ごとに、出来事の数と列・取り上げられたか・入れ物の送りを記録へ 1 行。作品の中身は書かない）
   const ptr = new Map<number, { seq: string; n: Record<string, number>; x0: number; y0: number }>();
   const onPtr = (e: PointerEvent) => {

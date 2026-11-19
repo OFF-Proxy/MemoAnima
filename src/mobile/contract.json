@@ -31,7 +31,26 @@
     { "name": "mobile_delete_work", "body": "args", "args": { "album": "A", "name": "作品.memoanima" }, "argsType": "WorkArgs", "returns": "null" },
     { "name": "mobile_delete_album", "body": "args", "args": { "album": "A" }, "argsType": "AlbumArgs", "returns": "null" },
     { "name": "mobile_recoverable_list", "body": "none", "returns": "RecoverableItem[]" },
-    { "name": "mobile_recover", "body": "args", "args": { "album": "A", "name": "作品.memoanima" }, "argsType": "WorkArgs", "returns": "WorkPlace" }
+    { "name": "mobile_recover", "body": "args", "args": { "album": "A", "name": "作品.memoanima" }, "argsType": "WorkArgs", "returns": "WorkPlace" },
+    { "name": "mobile_io_cleanup", "body": "args", "args": { "startup": true }, "argsType": "IoCleanupArgs", "returns": "iotmp::Cleaned" },
+    { "name": "mobile_out_begin", "body": "args", "args": { "ext": "mp4" }, "argsType": "OutBeginArgs", "returns": "string" },
+    { "name": "mobile_out_write", "body": "args", "args": { "tag": "0123456789abcdef", "position": 0, "data": "AAAA" }, "argsType": "OutWriteArgs", "returns": "null" },
+    { "name": "mobile_out_write_raw", "body": "raw", "meta": { "tag": "0123456789abcdef", "position": 0 }, "parts": ["data"], "returns": "null", "metaType": "OutWriteMeta" },
+    { "name": "mobile_out_finish", "body": "args", "args": { "tag": "0123456789abcdef", "name": "作品" }, "argsType": "OutFinishArgs", "returns": "count" },
+    { "name": "mobile_out_abort", "body": "args", "args": { "tag": "0123456789abcdef" }, "argsType": "TagArgs", "returns": "null" },
+    { "name": "mobile_out_work", "body": "args", "args": { "album": "A", "name": "作品.memoanima" }, "argsType": "WorkArgs", "returns": "string" },
+    { "name": "mobile_out_share", "body": "args", "args": { "tag": "0123456789abcdef", "req": "r1" }, "argsType": "OutNativeArgs", "returns": "null" },
+    { "name": "mobile_out_save", "body": "args", "args": { "tag": "0123456789abcdef", "req": "r1" }, "argsType": "OutNativeArgs", "returns": "null" },
+    { "name": "mobile_in_pick", "body": "args", "args": { "kind": "works", "multiple": true, "req": "r1" }, "argsType": "InPickArgs", "returns": "null" },
+    { "name": "mobile_in_received", "body": "none", "returns": "iotmp::InItem[]" },
+    { "name": "mobile_in_sniff", "body": "args", "args": { "tag": "0123456789abcdef" }, "argsType": "TagArgs", "returns": "iotmp::Sniffed" },
+    { "name": "mobile_in_import", "body": "args", "args": { "tag": "0123456789abcdef", "album": "A", "fallback": "取り込んだ作品" }, "argsType": "InImportArgs", "returns": "iotmp::ImportOutcome" },
+    { "name": "mobile_in_read", "body": "args", "args": { "tag": "0123456789abcdef", "offset": 0, "len": 4}, "argsType": "InReadArgs", "returns": "raw" },
+    { "name": "mobile_in_discard", "body": "args", "args": { "tag": "0123456789abcdef" }, "argsType": "TagArgs", "returns": "null" },
+    { "name": "mobile_export_all_begin", "body": "args", "args": { "name": "メモアニマ_全作品_2026-11-17" }, "argsType": "ExportAllArgs", "returns": "string" },
+    { "name": "mobile_export_all_status", "body": "args", "args": { "job": "0123456789abcdef" }, "argsType": "JobArgs", "returns": "zipio::ExportAllStatus" },
+    { "name": "mobile_export_all_cancel", "body": "args", "args": { "job": "0123456789abcdef" }, "argsType": "JobArgs", "returns": "null" },
+    { "name": "mobile_library_notes", "body": "none", "returns": "iotmp::LibraryNote[]" }
   ],
   "androidCommands": [
     { "name": "mobile_chunk_begin", "args": { "kind": "saveNew", "total": 9 }, "argsType": "ChunkBeginArgs", "returns": "string" },
@@ -61,7 +80,15 @@
     "LibraryList": ["albums", "works"],
     "LibraryWork": ["album", "name", "size", "sortedAt", "order", "thumb"],
     "WorkPeek": ["workId", "frames", "speedIndex"],
-    "RecoverableItem": ["album", "name", "bakSize", "bakAt", "tmpCount"]
+    "RecoverableItem": ["album", "name", "bakSize", "bakAt", "tmpCount"],
+    "Cleaned": ["removed"],
+    "InItem": ["tag", "name", "size"],
+    "Sniffed": ["tag", "kind", "size", "name"],
+    "SniffedKinds": ["workPv6", "workPv5", "kwz", "ppm", "zip", "png", "jpeg", "heic", "mp3", "wav", "ogg", "isom", "matroska", "unknown"],
+    "ImportOutcome": ["placed", "skipped", "albumsCreated"],
+    "Placed": ["album", "name", "kind"],
+    "ExportAllStatus": ["state", "done", "total", "bytes", "totalBytes", "skipped", "tag", "refusal"],
+    "LibraryNote": ["album", "name", "size", "sortedAt"]
   },
   "initSteps": ["library", "album", "index", "mark"],
   "settingsKey": "mobileLibraryReady",
@@ -88,7 +115,12 @@
     "io",
     "reserved-key",
     "album-not-empty",
-    "album-has-files"
+    "album-has-files",
+    "unsupported-kind",
+    "zip-unsafe",
+    "zip-broken",
+    "cancelled",
+    "busy"
   ],
   "envelope": {
     "_": "読む命令（mobile_read_work・mobile_autosave_read）の封筒＝P-3 の pack_autosave_payload と同じ並び: [u32 LE 頭の長さ][{meta, path} の JSON（空白で埋めて作品が 8 の倍数の位置から）][作品]",

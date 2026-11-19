@@ -1,3 +1,4 @@
+/* ★V227 (B-3・A-143): 形の置き換え（scripts/v227_shape.py）を当てた。線 2px・硬い影なし・押すと scale(0.97)・角は UI §3-3 */
 /* V221 (M-2b-2・UI docs/REQ_mobile_ui_v1.md §3・§5-1〜§5-9・§5-16・§5-17・§6-12): 描く画面（横＝広）と確認・お知らせの見た目。
    ★色は mobile.css の変数だけ（U-9・v158_color_check のモバイルの節が見る）。
    ★位置と大きさは UI §5-1 の 11 型（1194×834）の実寸。13 型は「列は四隅に寄せたまま」（指示書 ■3 の D-5）:
@@ -50,7 +51,8 @@ body {
   position: absolute;
   left: 0;
   top: 0;
-  border: 4px solid var(--line);
+  border: 2px solid var(--line);
+  margin: 2px; /* ★V227 (H-4): 線の外の 2px は透明（倍率と位置の計算の縁は PIC_BORDER＝4 のまま） */
   border-radius: 4px;
   background: var(--panel);
   transform-origin: center center;
@@ -79,10 +81,10 @@ body {
   margin: 0; /* WebKit の button の既定の余白（2px）を消す（位置と間が UI §5-1 の実寸どおりになる） */
   font: inherit;
   color: inherit;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   background: var(--panel);
-  border-radius: 12px;
-  box-shadow: 0 3px 0 var(--ink);
+  border-radius: 8px;
+  box-shadow: none;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -91,7 +93,7 @@ body {
   cursor: pointer;
 }
 .mb-btn:active {
-  transform: translateY(3px);
+  transform: scale(0.97);
   box-shadow: none;
 }
 .mb-btn[aria-disabled="true"],
@@ -116,7 +118,7 @@ body {
   width: 50px;
   height: 50px;
   border-radius: 999px;
-  box-shadow: 0 4px 0 var(--ink);
+  box-shadow: none;
 }
 .mb-col {
   position: absolute;
@@ -127,8 +129,8 @@ body {
   align-items: center;
   gap: 5px;
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 16px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow);
   transition: opacity 0.22s, transform 0.26s;
 }
@@ -197,7 +199,7 @@ body {
 .mb-save {
   background: var(--green);
   color: var(--ink-on-accent);
-  box-shadow: 0 4px 0 var(--ink);
+  box-shadow: none;
 }
 .mb-save.mb-saving .mb-ic {
   animation: mb-spin 1s linear infinite;
@@ -222,7 +224,7 @@ body {
 .mb-size.mb-on {
   border-color: var(--line);
   background: var(--yellow);
-  box-shadow: 0 3px 0 var(--ink);
+  box-shadow: none;
 }
 .mb-size-dot {
   display: block;
@@ -233,7 +235,7 @@ body {
   width: 24px;
   height: 24px;
   border-radius: 999px;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   background: var(--sw, var(--panel));
 }
 
@@ -245,7 +247,7 @@ body {
   bottom: 0;
   height: 72px;
   padding: 4px 14px 20px;
-  border-top: 3px solid var(--line);
+  border-top: 2px solid var(--line);
   background: var(--panel);
   display: flex;
   align-items: center;
@@ -278,7 +280,7 @@ body {
   flex: 1;
   min-width: 0;
   height: 48px;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--film-bg);
   display: flex;
   align-items: center;
@@ -297,7 +299,7 @@ body {
   flex: none;
   width: 46px;
   height: 36px;
-  border: 3px solid var(--panel);
+  border: 2px solid var(--panel);
   border-radius: 4px;
   background: var(--panel);
 }
@@ -356,8 +358,8 @@ body {
   overflow-y: auto;
   padding: 12px;
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 18px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow-float);
   display: flex;
   flex-direction: column;
@@ -375,8 +377,8 @@ body {
   overflow-y: auto;
   padding: 12px;
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 18px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow-float);
   display: flex;
   flex-direction: column;
@@ -428,8 +430,8 @@ body {
   display: flex;
   padding: 3px;
   gap: 3px;
-  border: 3px solid var(--line);
-  border-radius: 12px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--surface-2);
 }
 .mb-seg-item {
@@ -441,13 +443,13 @@ body {
   background: transparent;
   font-size: 13px;
   font-weight: 700;
-  border-radius: 9px;
+  border-radius: 8px;
   white-space: nowrap;
   overflow: hidden;
 }
 .mb-seg-item.mb-on {
   background: var(--yellow);
-  box-shadow: 0 2px 0 var(--ink);
+  box-shadow: none;
 }
 .mb-switch-row {
   width: 100%;
@@ -470,7 +472,7 @@ body {
   height: 32px;
   flex: none;
   border-radius: 999px;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   background: var(--surface-2);
 }
 .mb-switch.mb-on {
@@ -572,8 +574,8 @@ body {
   font-size: 16px;
   min-width: 0;
   min-height: 44px;
-  border: 3px solid var(--line);
-  border-radius: 10px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--surface-2);
   color: var(--ink);
   padding: 4px 8px;
@@ -608,8 +610,8 @@ body {
 }
 .mb-tone {
   height: 44px;
-  border-radius: 10px;
-  box-shadow: 0 2px 0 var(--ink);
+  border-radius: 8px;
+  box-shadow: none;
 }
 .mb-tone canvas {
   width: 24px;
@@ -623,18 +625,18 @@ body {
 }
 .mb-swatch {
   height: 44px;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--sw, var(--panel));
-  box-shadow: 0 2px 0 rgba(var(--ink-rgb), 0.25);
+  box-shadow: none;
 }
 .mb-swatch.mb-on {
-  outline: 3px solid var(--orange);
+  outline: 2px solid var(--orange);
   outline-offset: 2px;
 }
 .mb-swatch-sm {
   width: 28px;
   height: 28px;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   border-radius: 8px;
   display: inline-block;
   flex: none;
@@ -651,13 +653,13 @@ body {
   height: 32px;
   padding: 0 10px;
   font-size: 12px;
-  box-shadow: 0 2px 0 var(--ink);
+  box-shadow: none;
 }
 .mb-colorpick {
   width: 100%;
   height: 140px;
-  border: 3px solid var(--line);
-  border-radius: 12px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--panel);
 }
 .mb-row,
@@ -687,8 +689,8 @@ body {
   align-items: center;
   gap: 6px;
   height: 58px;
-  border: 3px solid var(--line);
-  border-radius: 12px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   padding-right: 6px;
   background: var(--panel);
   overflow: hidden;
@@ -756,7 +758,7 @@ body {
 }
 .mb-mini {
   width: 100%;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   border-radius: 8px;
   image-rendering: pixelated;
 }
@@ -767,8 +769,8 @@ body {
   width: 270px;
   padding: 8px;
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 18px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow-float);
 }
 .mb-menu-head {
@@ -798,8 +800,8 @@ body {
   gap: 4px;
   padding: 6px;
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 14px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow-float);
 }
 .mb-fb {
@@ -807,7 +809,7 @@ body {
   padding: 0 10px;
   font-size: 13px;
   font-weight: 700;
-  box-shadow: 0 2px 0 var(--ink);
+  box-shadow: none;
 }
 
 /* ---------------- 札・案内 ---------------- */
@@ -817,7 +819,7 @@ body {
   transform: translateX(-50%);
   height: 40px;
   padding: 0 16px;
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--ink);
   color: var(--paper);
   display: flex;
@@ -843,7 +845,7 @@ body {
   transform: translateX(-50%);
   height: 36px;
   padding: 0 12px;
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--ink);
   color: var(--paper);
   display: flex;
@@ -869,8 +871,8 @@ body {
   width: min(440px, calc(100% - 32px));
   padding: 20px;
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 18px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow-float);
   display: flex;
   flex-direction: column;
@@ -900,7 +902,7 @@ body {
   min-height: 44px;
   max-width: min(720px, calc(100% - 40px));
   padding: 6px 8px 6px 20px;
-  border-radius: 999px;
+  border-radius: 8px;
   background: var(--ink);
   color: var(--paper);
   display: flex;
@@ -915,7 +917,7 @@ body {
 .mb-toast-undo {
   height: 34px;
   padding: 0 12px;
-  border-radius: 999px;
+  border-radius: 8px;
   border-color: var(--paper);
   background: var(--ink);
   color: var(--paper);
@@ -940,8 +942,8 @@ body {
   overflow-y: auto;
   padding: 20px;
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 18px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow-float);
   display: flex;
   flex-direction: column;
@@ -991,8 +993,8 @@ body {
 }
 .mb-progress {
   height: 14px;
-  border: 3px solid var(--line);
-  border-radius: 999px;
+  border: 2px solid var(--line);
+  border-radius: 4px;
   overflow: hidden;
   background: var(--surface-2);
 }
@@ -1014,14 +1016,14 @@ body {
   font-size: 17px;
   height: 54px;
   width: 100%;
-  border: 3px solid var(--line);
-  border-radius: 12px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--surface-2);
   color: var(--ink);
   padding: 0 14px;
 }
 .mb-name:focus {
-  outline: 4px solid var(--ring);
+  outline: 2px solid var(--ring);
 }
 .mb-name::selection {
   background: var(--selBg);
@@ -1180,8 +1182,8 @@ body {
   font-size: 15px;
   min-height: 44px;
   padding: 0 14px;
-  border: 3px solid var(--line);
-  border-radius: 12px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--panel);
   color: var(--ink);
   text-align: left;
@@ -1193,8 +1195,8 @@ body {
 .mb-chipname {
   display: inline-block;
   padding: 6px 12px;
-  border: 3px solid var(--line);
-  border-radius: 999px;
+  border: 2px solid var(--line);
+  border-radius: 6px;
   background: var(--surface-2);
   font-weight: 700;
   align-self: flex-start;
@@ -1212,8 +1214,8 @@ body {
   height: 68px;
   padding: 6px;
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 16px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow);
   transition: opacity 0.22s, transform 0.26s;
 }
@@ -1285,7 +1287,7 @@ body {
   position: absolute;
   left: 0;
   top: 0;
-  box-shadow: 5px -5px 0 -3px var(--surface-2), 5px -5px 0 0 var(--line), 0 3px 0 var(--ink);
+  box-shadow: 5px -5px 0 -2px var(--surface-2), 5px -5px 0 0 var(--line); /* ★V227: 重ねの絵の線も 2px */
 }
 .mb-group:not(.mb-on) {
   background: var(--panel);
@@ -1324,7 +1326,7 @@ body {
   grid-template-columns: repeat(7, 1fr);
 }
 .mb-swatch-empty {
-  border: 3px dashed var(--sep);
+  border: 2px dashed var(--sep);
   background: transparent;
   box-shadow: none;
 }
@@ -1343,8 +1345,8 @@ body {
   overflow-y: auto;
   padding: 12px;
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 18px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow-float);
   display: flex;
   flex-direction: column;
@@ -1402,8 +1404,8 @@ body {
   opacity: 0.5;
 }
 .mb-lrow.mb-drop-into {
-  outline: 3px solid var(--blue);
-  outline-offset: -3px;
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
 }
 .mb-lrow.mb-drop-above {
   box-shadow: 0 -5px 0 var(--blue);
@@ -1475,8 +1477,8 @@ body {
   bottom: 84px;
   padding: 12px;
   background: var(--panel);
-  border: 3px solid var(--line);
-  border-radius: 16px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
   box-shadow: var(--shadow-float);
   display: flex;
   flex-direction: column;
@@ -1527,7 +1529,7 @@ body {
 .mb-tl-btn::before {
   content: "";
   position: absolute;
-  inset: -5px -4px;
+  inset: -7px -6px; /* ★V227 (H-5): 枠 2 ＋ 外へ下 5・右 4（枠 3 のときは外へ 2・1 しか出ていなかった＝幅 42） */
 }
 .mb-tl-btn.mb-warn {
   background: var(--warn-bg);
@@ -1556,7 +1558,7 @@ body {
 }
 .mb-tl-filmbox {
   height: 92px;
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--film-bg);
   display: flex;
   flex-direction: column;
@@ -1591,7 +1593,7 @@ body {
   flex: none;
   width: 62px;
   height: 48px;
-  border: 3px dashed var(--film-hole);
+  border: 2px dashed var(--film-hole);
   border-radius: 6px;
   background: transparent;
   color: var(--film-hole);
@@ -1632,7 +1634,7 @@ body {
 .mb-cp-sv,
 .mb-cp-hue {
   display: block;
-  border-radius: 12px;
+  border-radius: 8px;
 }
 .mb-cp-hue {
   border-radius: 999px;
@@ -1642,8 +1644,8 @@ body {
   content: "";
   position: absolute;
   inset: 0;
-  border: 3px solid var(--line);
-  border-radius: 12px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   pointer-events: none;
 }
 .mb-cp-huebox::after {
@@ -1655,7 +1657,7 @@ body {
   height: 24px;
   margin: -12px 0 0 -12px;
   border-radius: 999px;
-  border: 3px solid var(--panel);
+  border: 2px solid var(--panel);
   outline: 2px solid var(--line);
   background: var(--sw);
   pointer-events: none;
@@ -1671,7 +1673,7 @@ body {
   height: 14px;
   margin: -7px 0 0 -17px;
   border-radius: 999px;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   background: var(--panel);
   pointer-events: none;
   z-index: 1;
@@ -1698,7 +1700,7 @@ body {
 .mb-cp-switch::before {
   content: "";
   position: absolute;
-  inset: -6px 0;
+  inset: -8px 0; /* ★V227 (H-5): 枠 2 ＋ 上下に 6（32 → 44）・左右は広げない（幅は 44 より広い・数えに出る当たりのはみ出しを作らない） */
 }
 .mb-cp-switch {
   position: relative;
@@ -1720,8 +1722,8 @@ body {
   width: 34px;
   height: 34px;
   flex: none;
-  border: 3px solid var(--line);
-  border-radius: 9px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background-color: var(--sw);
 }
 .mb-hexin {
@@ -1732,14 +1734,14 @@ body {
   margin: 0;
   font: inherit;
   font-size: 15px;
-  border: 3px solid var(--line);
-  border-radius: 10px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
   background: var(--surface-2);
   color: var(--ink);
   padding: 0 12px;
 }
 .mb-hexin:focus {
-  outline: 4px solid var(--ring);
+  outline: 2px solid var(--ring);
 }
 
 /* ---- F-9: 横の詰め方（UI §5-13。段は arrange.ts の wideTier）
@@ -1798,7 +1800,7 @@ body {
   width: 320px;
   height: 240px;
   image-rendering: pixelated;
-  border: 3px solid var(--line);
+  border: 2px solid var(--line);
   border-radius: 8px;
   background-color: var(--panel);
 }
@@ -1855,4 +1857,40 @@ body {
 }
 .mb-tools-hidden.mb-hand-left .mb-right {
   transform: translateX(-24px);
+}
+
+/* =====================================================================================
+   ★V227 (H-5・UI §3-7): iOS の当たりを 44 以上に（枠 2 になったので数え直し・確かめ画面の［hits］で測った）。
+   inset は枠の内側（padding box）から数える。Android は android/android.css が上書きする（48dp）
+   ===================================================================================== */
+/* 下の帯のコマ（46×36・枠 2・帯の高さ 48 の中）→ 上下に 4（44）。左右は枠まで */
+.mb-fr::before {
+  content: "";
+  position: absolute;
+  inset: -6px -2px;
+}
+/* 切り替えの札（高さ 38・枠なし・入れ物の余白 3 の中）→ 上下に 3（44）。札は横だけ切る形にする（縦は当たりを出す・字は 1 行） */
+.mb-seg-item {
+  position: relative;
+  overflow-x: clip;
+  overflow-y: visible;
+}
+.mb-seg-item::before {
+  content: "";
+  position: absolute;
+  inset: -3px 0;
+}
+/* 不透明度などのつまみ（OS の部品・行は 44）→ 部品の高さを行と同じ 44 に（当たりを行いっぱいに。パネルの高さは変わらない）。Android は 48。
+   ★input に絞る（.mb-range は範囲を選んだコマ〔.mb-fr.mb-range〕にも付く＝コマの高さを変えない・第三者レビューの指摘 1） */
+input.mb-range {
+  height: 44px;
+}
+/* 色のパネルの札（「いまの色を登録」・高さ 32・枠 2）→ 上に 4（上の色見本との間 8 の半分）・下に 8（島の余白）＝ 44 */
+.mb-chip {
+  position: relative;
+}
+.mb-chip::before {
+  content: "";
+  position: absolute;
+  inset: -6px -2px -10px;
 }

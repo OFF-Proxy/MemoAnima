@@ -16,6 +16,8 @@ mod tests {
     use crate::pclib::mobile::applog::LogAppendArgs;
     use crate::pclib::mobile::settings::SettingsMergeArgs;
     use crate::pclib::mobile::names;
+    // V229
+    use crate::pclib::mobile::{iotmp, zipio};
     use crate::pclib::mobile::ops::{self, AlbumPlace, FreeSpace, WorkPlace};
     use crate::pclib::mobile::save::{NewMeta, OverwriteMeta, SaveResult};
     use crate::pclib::mobile::sessions::{self, SessionEntry};
@@ -118,6 +120,18 @@ mod tests {
                     // V224: ライブラリの命令
                     "AlbumArgs" => rt::<AlbumArgs>(sample),
                     "ThumbWriteArgs" => rt::<ThumbWriteArgs>(sample),
+                    // V229: 出し入れ
+                    "IoCleanupArgs" => rt::<IoCleanupArgs>(sample),
+                    "OutBeginArgs" => rt::<OutBeginArgs>(sample),
+                    "OutWriteArgs" => rt::<OutWriteArgs>(sample),
+                    "OutFinishArgs" => rt::<OutFinishArgs>(sample),
+                    "TagArgs" => rt::<TagArgs>(sample),
+                    "OutNativeArgs" => rt::<OutNativeArgs>(sample),
+                    "InPickArgs" => rt::<InPickArgs>(sample),
+                    "InImportArgs" => rt::<InImportArgs>(sample),
+                    "InReadArgs" => rt::<InReadArgs>(sample),
+                    "ExportAllArgs" => rt::<ExportAllArgs>(sample),
+                    "JobArgs" => rt::<JobArgs>(sample),
                     t => panic!("知らない型 {t}"),
                 };
                 assert_eq!(got.unwrap_or_else(|e| panic!("{name} の見本が型に通らない: {e}")), keys(sample), "{name} の引数の欄");
@@ -128,6 +142,7 @@ mod tests {
                     "NewMeta" => rt::<NewMeta>(sample),
                     "OverwriteMeta" => rt::<OverwriteMeta>(sample),
                     "AutosaveWriteMeta" => rt::<AutosaveWriteMeta>(sample),
+                    "OutWriteMeta" => rt::<OutWriteMeta>(sample),
                     t => panic!("知らない型 {t}"),
                 };
                 assert_eq!(got.unwrap_or_else(|e| panic!("{name} の見本が型に通らない: {e}")), keys(sample), "{name} の封筒の印の欄");
@@ -136,6 +151,7 @@ mod tests {
                 let f = match name {
                     "mobile_save_new" => "body_save_new",
                     "mobile_save_overwrite" => "body_save_overwrite",
+                    "mobile_out_write_raw" => "body_out_write",
                     _ => "body_autosave_write",
                 };
                 let src = COMMANDS_RS.replace("\r\n", "\n");
@@ -147,6 +163,8 @@ mod tests {
             let want = match r {
                 "string" => "Result<String, String>".to_string(),
                 "number" => "u64".to_string(),
+                // V229: 失敗しうる数（書き出したファイルの大きさ）
+                "count" => "Result<u64, String>".to_string(),
                 // V220: 設定を読む（形の決まりの無い JSON の表）
                 "object" => "Result<serde_json::Value, String>".to_string(),
                 "null" => "Result<(), String>".to_string(),
@@ -174,6 +192,17 @@ mod tests {
                     "LogAppendArgs" => rt::<LogAppendArgs>(&bad).is_ok(),
                     "AlbumArgs" => rt::<AlbumArgs>(&bad).is_ok(),
                     "ThumbWriteArgs" => rt::<ThumbWriteArgs>(&bad).is_ok(),
+                    "IoCleanupArgs" => rt::<IoCleanupArgs>(&bad).is_ok(),
+                    "OutBeginArgs" => rt::<OutBeginArgs>(&bad).is_ok(),
+                    "OutWriteArgs" => rt::<OutWriteArgs>(&bad).is_ok(),
+                    "OutFinishArgs" => rt::<OutFinishArgs>(&bad).is_ok(),
+                    "TagArgs" => rt::<TagArgs>(&bad).is_ok(),
+                    "OutNativeArgs" => rt::<OutNativeArgs>(&bad).is_ok(),
+                    "InPickArgs" => rt::<InPickArgs>(&bad).is_ok(),
+                    "InImportArgs" => rt::<InImportArgs>(&bad).is_ok(),
+                    "InReadArgs" => rt::<InReadArgs>(&bad).is_ok(),
+                    "ExportAllArgs" => rt::<ExportAllArgs>(&bad).is_ok(),
+                    "JobArgs" => rt::<JobArgs>(&bad).is_ok(),
                     _ => rt::<SessionGenArgs>(&bad).is_ok(),
                 };
                 assert!(!ok, "{name} が知らない欄を受けた");
@@ -203,6 +232,14 @@ mod tests {
             ("LibraryWork", ser_keys(&LibraryWork { album: "a".into(), name: "n".into(), size: 1, sorted_at: 2, order: 3, thumb: true })),
             ("WorkPeek", ser_keys(&WorkPeek { work_id: None, frames: None, speed_index: None })),
             ("RecoverableItem", ser_keys(&RecoverableItem { album: "a".into(), name: "n".into(), bak_size: 1, bak_at: 2, tmp_count: 3 })),
+            // V229
+            ("Cleaned", ser_keys(&iotmp::Cleaned { removed: 1 })),
+            ("InItem", ser_keys(&iotmp::InItem { tag: "t".into(), name: "n".into(), size: 1 })),
+            ("Sniffed", ser_keys(&iotmp::Sniffed { tag: "t".into(), kind: iotmp::Kind::Zip, size: 1, name: "n".into() })),
+            ("ImportOutcome", ser_keys(&iotmp::ImportOutcome { placed: vec![], skipped: 0, albums_created: vec![] })),
+            ("Placed", ser_keys(&iotmp::Placed { album: "a".into(), name: "n".into(), kind: iotmp::Kind::Kwz })),
+            ("ExportAllStatus", ser_keys(&zipio::ExportAllStatus::default())),
+            ("LibraryNote", ser_keys(&iotmp::LibraryNote { album: "a".into(), name: "n".into(), size: 1, sorted_at: 2 })),
         ];
         for (name, got) in cases {
             let mut want = strs(&t[name]);

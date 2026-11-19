@@ -30,8 +30,10 @@ export const INPUT_TUNING = {
   fingerHoldMs: 150,
   /** ペンを離してから指を使わない時間（親§6-2） */
   penQuietMs: 300,
-  /** タップ: 置いてから全部の指が離れるまで（親§6-3） */
+  /** タップ: 最後の指が触れてから全部の指が離れるまで（親§6-3・★V231 A-156 で「最初の指から」を改めた） */
   tapMs: 250,
+  /** ★V231 (A-156): タップ: 最初の指から最後の指が触れるまで */
+  tapSpreadMs: 150,
   /** タップ: どの指の動きもこの中（pt＝画面の座標） */
   tapSlopPt: 10,
   /** 長押しのスポイト: 動きがこの中のまま設定の時間がたつ（pt） */
@@ -47,6 +49,10 @@ export const INPUT_TUNING = {
   pressurePivotIn: 0.35,
   pressurePivotOut: 0.5,
   pressureFullIn: 0.7,
+  /** ★V231 (A-159): ペンの線は、筆圧の判定が付くまで描く口へ送らずに控える。控えがこの点の数か… */
+  pressureHoldPoints: 3,
+  /** …この時間（触れてから・ms）に届いても割れなければ、控えた点を「筆圧なし」で送る */
+  pressureHoldMs: 30,
 } as const;
 
 /** 長押しのスポイトが効くツール（§5-5 の 8。移動・範囲選択・変形・歪み・文字・スポイトは、押して止まるのがふつうの操作なので効かない） */
@@ -244,16 +250,25 @@ interface Contact {
   /** 描く口に回した最後のサンプル */
   last: StrokeSample | null;
   judge: PressureJudge;
+  /** ★V231 (A-159): ペンの線の、筆圧の判定を待つ控え（null＝控えていない）。raw は点ごとの素の筆圧 */
+  hold: { samples: StrokeSample[]; raw: number[] } | null;
   /** 長押しのスポイトが効く接触か（押した時点のツールで決める） */
   longPressArmed: boolean;
 }
 
 interface Gesture {
+  /** そのジェスチャーの指の番号（同じ番号は 1 つ＝離して置き直した指は同じ番号で来ることがある） */
   ids: number[];
-  maxFingers: number;
+  /** ★V231 (A-156): そのジェスチャーに加わった指の数（同時に触れていなくてよい・置き直した指も 1 本と数える）。何本指かはこの数 */
+  joined: number;
+  /** 最初の指が触れた時刻 */
   t0: number;
-  /** 動き・拡大がタップの外へ出た */
+  /** ★V231 (A-156): 最後の指が触れた時刻 */
+  lastDownT: number;
+  /** どれかの指がタップの外へ動いた（タップにしない） */
   moved: boolean;
+  /** ★V231 (A-156): 絵を動かし始めた（どれかの指が 10pt を超えて動いた）。それまでは絵も倍率の札も変えない */
+  engaged: boolean;
   startCenter: { x: number; y: number };
   startDist: number;
   startAngle: number;
@@ -288,6 +303,8 @@ export class InputRouter {
   private drawing = false;
   /** 予測の仮の線を出している */
   private predictedShown = false;
+  /** ★V231 (A-159): 筆圧の控えの間に変わった修飾キー（描き始めたあとで渡す） */
+  private heldMods: { shift: boolean; alt: boolean; ctrl: boolean; meta: boolean } | null = null;
   /** 待ちの数（検査が idle() で待つ） */
   private waits: Promise<void>[] = [];
 
@@ -346,11 +363,6 @@ export class InputRouter {
     }
   }
 
-  /** ジェスチャーの動きがタップの外へ出たか（指の動き・指の間の長さの変化） */
-  private gestureMovedBy(c: Contact, g: Gesture, u: GestureUpdate) {
-    if (c.moved > INPUT_TUNING.tapSlopPt || Math.abs(u.scale - 1) * g.startDist > INPUT_TUNING.tapSlopPt) g.moved = true;
-  }
-
   /** 画面の座標の点 → サンプル（筆圧は線ごとの判定と曲線） */
   private sampleOf(c: Contact, pt: RawPoint, e: RawPointerEvent, judgeIt: boolean): StrokeSample {
     const s = this.env.settings();
@@ -398,6 +410,11 @@ export class InputRouter {
 
   /** ハードウェアキーボードの修飾キーが変わった（§5-5 の 12）。描いている間だけコアへ */
   keyboardModifiers(m: { shift: boolean; alt: boolean; ctrl: boolean; meta: boolean }): void {
+    if (this.strokeId !== null && this.contacts.get(this.strokeId)?.hold) {
+      // ★V231 (A-159): 筆圧の控えの間に変わった修飾キーは、描き始めたあとで渡す
+      this.heldMods = m;
+      return;
+    }
     if (this.strokeId !== null && !this.penWait) this.sink.modifiersChanged(m);
   }
 
@@ -430,6 +447,7 @@ export class InputRouter {
       held: [],
       last: null,
       judge: new PressureJudge(),
+      hold: null,
       longPressArmed: false,
     };
     this.contacts.set(c.id, c);
@@ -490,14 +508,22 @@ export class InputRouter {
       this.setDrawing(true);
       const first = this.sampleOf(c, e, e, true);
       c.last = first;
+      // ★V231 (A-159): 筆圧で太さがオンなら、判定が付くまで描く口へ送らずに控える（判定の前の点を選んだ太さで描かない）
+      const holding = s.pressure;
+      if (holding) {
+        c.hold = { samples: [first], raw: [e.pressure] };
+        this.heldMods = null;
+      }
       if (undo) {
         // 取り消しが終わるまで描き始めを待たせる（逆の順だと、押した瞬間に積むバケツ・自動選択のほうを取り消す）
-        this.penWait = { id: c.id, samples: [first], end: null };
+        this.penWait = { id: c.id, samples: holding ? [] : [first], end: null };
         const w = Promise.resolve(undo).then(() => this.flushPenWait());
         this.waits.push(w);
+        if (holding) this.resolveHold(c, e.timeStamp, false);
         return "consumed";
       }
-      this.sink.strokeBegin(first);
+      if (holding) this.resolveHold(c, e.timeStamp, false);
+      else this.sink.strokeBegin(first);
       return "consumed";
     }
 
@@ -532,8 +558,9 @@ export class InputRouter {
     if (g) {
       // ジェスチャーの途中に足された指
       c.role = "gesture";
-      g.ids.push(c.id);
-      g.maxFingers = Math.max(g.maxFingers, this.liveGestureCount());
+      if (!g.ids.includes(c.id)) g.ids.push(c.id);
+      g.joined++;
+      g.lastDownT = e.timeStamp;
       return "consumed";
     }
     const others = [...this.contacts.values()].filter((o) => o.id !== c.id && (o.role === "pending" || o.role === "idle"));
@@ -588,7 +615,8 @@ export class InputRouter {
     if (this.gestureState) {
       const g = this.gestureState;
       this.gestureState = null;
-      this.view.gesture({ ...(g.last ?? this.gestureAt(g)), phase: "revert" });
+      // ★V231 (A-156): 絵を動かし始めていなければ、戻すものが無い（知らせない）
+      if (g.engaged) this.view.gesture({ ...(g.last ?? this.gestureAt(g)), phase: "revert" });
     }
     return undo;
   }
@@ -604,10 +632,8 @@ export class InputRouter {
     this.view.gesture({ ...this.panAt(c), phase: "end" });
   }
 
-  private liveGestureCount(): number {
-    const g = this.gestureState;
-    if (!g) return 0;
-    return g.ids.filter((id) => this.contacts.get(id)?.role === "gesture").length;
+  private liveGestureContacts(g: Gesture): Contact[] {
+    return g.ids.map((id) => this.contacts.get(id)).filter((c): c is Contact => !!c && c.role === "gesture");
   }
 
   private startGesture(cs: Contact[], t0: number) {
@@ -615,20 +641,38 @@ export class InputRouter {
       c.role = "gesture";
       c.held = [];
     }
-    const [a, b] = cs;
     const g: Gesture = {
       ids: cs.map((c) => c.id),
-      maxFingers: cs.length,
+      joined: cs.length,
       t0,
-      moved: cs.some((c) => c.moved > INPUT_TUNING.tapSlopPt),
-      startCenter: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
-      startDist: Math.max(1, dist(a.x, a.y, b.x, b.y)),
-      startAngle: Math.atan2(b.y - a.y, b.x - a.x),
+      lastDownT: Math.max(...cs.map((c) => c.t0)),
+      moved: false,
+      engaged: false,
+      startCenter: { x: 0, y: 0 },
+      startDist: 1,
+      startAngle: 0,
       twistOffset: 0,
       twisting: false,
       last: null,
     };
     this.gestureState = g;
+    // ★V231 (A-156): 加わった指がもう 10pt を超えて動いていれば（1 本で絵を動かしていた指など）、その場から動かし始める
+    this.engageIfMoved(g);
+  }
+
+  /** ★V231 (A-156): どれかの指が 10pt を超えて動いたら、タップにしない。触れている指が 2 本以上なら、その時の指の位置を始まりにして
+   *  絵を動かし始める（絵が飛ばない）。それまでは絵も倍率の札も変えない */
+  private engageIfMoved(g: Gesture): void {
+    if (g.engaged) return;
+    const live = this.liveGestureContacts(g);
+    if (!live.some((c) => c.moved > INPUT_TUNING.tapSlopPt)) return;
+    g.moved = true;
+    if (live.length < 2) return;
+    const [a, b] = live;
+    g.engaged = true;
+    g.startCenter = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    g.startDist = Math.max(1, dist(a.x, a.y, b.x, b.y));
+    g.startAngle = Math.atan2(b.y - a.y, b.x - a.x);
     const u = this.gestureAt(g);
     g.last = u;
     this.view.gesture({ ...u, phase: "start" });
@@ -636,7 +680,7 @@ export class InputRouter {
 
   /** いまの 2 本（最初の 2 本のうち触れているもの）の形 */
   private gestureAt(g: Gesture): GestureUpdate {
-    const live = g.ids.map((id) => this.contacts.get(id)).filter((c): c is Contact => !!c && c.role === "gesture");
+    const live = this.liveGestureContacts(g);
     if (live.length < 2) return g.last ?? { phase: "move", center: g.startCenter, pan: { dx: 0, dy: 0 }, scale: 1, rotationDeg: 0 };
     const [a, b] = live;
     const center = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
@@ -694,13 +738,29 @@ export class InputRouter {
       case "gesture": {
         const g = this.gestureState;
         if (!g) return "consumed";
+        // ★V231 (A-156): 動かし始めるまでは何も知らせない
+        if (!g.engaged) {
+          this.engageIfMoved(g);
+          return "consumed";
+        }
         const u = this.gestureAt(g);
-        this.gestureMovedBy(c, g, u);
         g.last = u;
         this.view.gesture(u);
         return "consumed";
       }
       case "stroke": {
+        if (c.hold) {
+          // ★V231 (A-159): 判定を待って控えている
+          for (const p of pts) {
+            const smp = this.sampleOf(c, p, e, true);
+            c.hold.samples.push(smp);
+            c.hold.raw.push(p.pressure);
+            c.last = smp;
+          }
+          this.resolveHold(c, e.timeStamp, false);
+          if (!c.hold && !(this.penWait && this.penWait.id === c.id)) this.showPredicted(c, e);
+          return "consumed";
+        }
         if (this.penWait && this.penWait.id === c.id) {
           for (const p of pts) this.penWait.samples.push(this.sampleOf(c, p, e, true));
           c.last = this.penWait.samples[this.penWait.samples.length - 1];
@@ -709,15 +769,19 @@ export class InputRouter {
         const samples = pts.map((p) => this.sampleOf(c, p, e, true));
         c.last = samples[samples.length - 1];
         this.sink.strokeMove(samples);
-        // §5-5 の 10: 予測の点は仮の線だけ（確定の線に使わない）
-        const pr = e.getPredictedEvents?.() ?? [];
-        if (pr.length) {
-          this.predictedShown = true;
-          this.view.predicted(pr.map((p) => this.sampleOf(c, p, e, false)));
-        } else this.clearPredicted();
+        this.showPredicted(c, e);
         return "consumed";
       }
     }
+  }
+
+  /** §5-5 の 10: 予測の点は仮の線だけ（確定の線に使わない） */
+  private showPredicted(c: Contact, e: RawPointerEvent) {
+    const pr = e.getPredictedEvents?.() ?? [];
+    if (pr.length) {
+      this.predictedShown = true;
+      this.view.predicted(pr.map((p) => this.sampleOf(c, p, e, false)));
+    } else this.clearPredicted();
   }
 
   /** 指で描く: 控えた点から描き始める */
@@ -769,11 +833,15 @@ export class InputRouter {
       }
       case "gesture": {
         const g = this.gestureState;
-        if (g && !takenAway) this.gestureMovedBy(c, g, this.gestureAt(g));
+        // 離す出来事だけに来た動きもタップの外（絵は離す前の形のまま）
+        if (g && !takenAway && c.moved > INPUT_TUNING.tapSlopPt) g.moved = true;
+        if (g && g.engaged && !takenAway) g.last = this.gestureAt(g);
         this.gestureFingerUp(c, takenAway, e.timeStamp);
         break;
       }
       case "stroke": {
+        // ★V231 (A-159): 控えている間に線が終わった（点を打つ・すぐ離す）・取り上げられた＝控えた点を「筆圧なし」で送ってから終える
+        if (c.hold) this.resolveHold(c, e.timeStamp, true);
         if (this.penWait && this.penWait.id === c.id) {
           this.penWait.end = c.last;
           break;
@@ -806,23 +874,28 @@ export class InputRouter {
     if (g.ids.some((id) => id !== c.id && this.contacts.get(id)?.role === "gesture")) return;
     // 全部の指が離れた
     this.gestureState = null;
-    this.view.gesture({ ...(g.last ?? this.gestureAt(g)), phase: "end" });
-    if (g.moved || t - g.t0 > INPUT_TUNING.tapMs) return;
+    // ★V231 (A-156): 動かし始めていたときだけ、そこまでの表示で止めて寄る（動かしていなければ絵は前のまま＝寄せない・吸い付かない）
+    if (g.engaged) this.view.gesture({ ...(g.last ?? this.gestureAt(g)), phase: "end" });
+    // タップ: どの指も 10pt 以内・最後の指から 250ms 以内・最初の指から最後の指まで 150ms 以内
+    if (g.moved || t - g.lastDownT > INPUT_TUNING.tapMs || g.lastDownT - g.t0 > INPUT_TUNING.tapSpreadMs) return;
     const s = this.env.settings();
     if (s.noFinger) return;
-    if (g.maxFingers === 2 && s.gestures.undoTap) {
+    const fingers = g.joined;
+    if (fingers === 2 && s.gestures.undoTap) {
       void this.sink.undo();
       if (s.undoBadge) this.view.undoBadge("undo");
-    } else if (g.maxFingers === 3 && s.gestures.redoTap) {
+    } else if (fingers === 3 && s.gestures.redoTap) {
       void this.sink.redo();
       if (s.undoBadge) this.view.undoBadge("redo");
-    } else if (g.maxFingers === 4 && s.gestures.toolsTap) this.view.toggleTools();
+    } else if (fingers === 4 && s.gestures.toolsTap) this.view.toggleTools();
   }
 
   /** 取り上げる（§5-5 の 14）: 線はそこまでで確定・ジェスチャーはそこまでで止める・ボタンは押したことにしない・残りは捨てる */
   private takeAway(c: Contact) {
     switch (c.role) {
       case "stroke":
+        // ★V231 (A-159): 控えた点は捨てない（§5-5 の 14＝そこまでで確定）
+        if (c.hold) this.resolveHold(c, Infinity, true);
         if (this.penWait && this.penWait.id === c.id) this.penWait.end = c.last;
         else if (c.last) this.endStroke(c, c.last);
         break;
@@ -850,6 +923,8 @@ export class InputRouter {
     const w = this.penWait;
     if (!w) return;
     this.penWait = null;
+    // ★V231 (A-159): まだ筆圧の判定を待って控えている（何も送っていない）＝控えを放すときに描き始める
+    if (!w.samples.length) return;
     const [first, ...rest] = w.samples;
     this.sink.strokeBegin(first);
     if (rest.length) this.sink.strokeMove(rest);
@@ -870,11 +945,42 @@ export class InputRouter {
     }
   }
 
+  // ---------------- ★V231 (A-159): 筆圧の判定を待つ控え ----------------
+
+  /** 控えを放すか決める。割れた＝控えた点をそれぞれの筆圧（曲線）で送る／割れないまま 3 点か 30ms に届いた・force＝「筆圧なし」（0.5）で送る。
+   *  放したあとも、最初の 30 点までは判定を続ける（sampleOf がそのまま見る） */
+  private resolveHold(c: Contact, now: number, force: boolean): void {
+    const h = c.hold;
+    if (!h) return;
+    let samples: StrokeSample[];
+    if (c.judge.usable) {
+      const curve = this.env.settings().pressureCurve;
+      samples = h.samples.map((smp, i) => ({ ...smp, pressure: pressureCurve(h.raw[i], curve) }));
+    } else if (force || h.samples.length >= INPUT_TUNING.pressureHoldPoints || now - c.t0 >= INPUT_TUNING.pressureHoldMs) {
+      samples = h.samples.map((smp) => ({ ...smp, pressure: 0.5 }));
+    } else return;
+    c.hold = null;
+    c.last = samples[samples.length - 1];
+    if (this.penWait && this.penWait.id === c.id) {
+      // 手のひらの取り消しを待っている間は、待ちの控えへ（取り消しが終わってから描き始める）
+      this.penWait.samples.push(...samples);
+      return;
+    }
+    const [first, ...rest] = samples;
+    this.sink.strokeBegin(first);
+    if (rest.length) this.sink.strokeMove(rest);
+    const m = this.heldMods;
+    this.heldMods = null;
+    if (m) this.sink.modifiersChanged(m);
+  }
+
   // ---------------- 時計 ----------------
 
   private runTimers(now: number) {
     const s = this.env.settings();
     for (const c of [...this.contacts.values()]) {
+      // ★V231 (A-159): ペンの筆圧の控えの時間を過ぎた
+      if (c.role === "stroke" && c.hold) this.resolveHold(c, now, false);
       // 指で描く: 控えの時間を過ぎた
       if (c.role === "pending" && now - c.t0 >= INPUT_TUNING.fingerHoldMs) this.startFingerStroke(c);
       // 長押しのスポイト（ペン・指で描くときの指。マウスは数えない＝§5-5 の 15）
@@ -884,6 +990,7 @@ export class InputRouter {
         c.kind !== "mouse" &&
         this.strokeId === c.id &&
         !this.penWait &&
+        !c.hold &&
         s.gestures.longPress &&
         now - c.t0 >= s.longPressMs &&
         c.moved <= INPUT_TUNING.longPressSlopPt

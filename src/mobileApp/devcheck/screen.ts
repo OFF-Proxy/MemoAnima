@@ -22,6 +22,8 @@ import { newSession, openSession, readProject, restoreSession, timedPort, type O
 import { prepareLibrary, refusalText, type BootResult } from "../app";
 import { dev, type DevState } from "./devPort";
 import { LANGS, getLang, setLang } from "../../i18n";
+// ★V229 (M-4・§3-10): 出し入れの入口（確かめ画面の印のビルドだけ）
+import { ioCheckView } from "./ioCheck";
 
 // ---------------- 小さな部品 ----------------
 
@@ -489,6 +491,7 @@ function render(): void {
       h("div", {}, ...bootLines.map((l) => h("div", { style: "font-size:12px;color:#555" }, l))),
       // ★V221: 確かめ画面の印のビルドから本物の画面（仮の一覧 → 描く画面）へ・言語を切り替える・F2 の頁
       section("V221 本物の画面へ（仮の一覧と描く画面）", v221View()),
+      section("V229 出し入れ（M-4）", ioCheckView()),
       noticeText ? h("div", { style: "background:#ffd;padding:4px", "data-id": "notice" }, noticeText, " ", btn("消す", () => notice(""))) : null,
       // 提案（起動したとき・読み込み直したとき）
       proposalAt !== null && proposalList[proposalAt]

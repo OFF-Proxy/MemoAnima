@@ -8,7 +8,7 @@
 // ★並び順と検索は、PC の src/library.ts の shelfItems の一時的な写し（§5-0。次の Windows の作業で共通へ）:
 //    元: src/library.ts の shelfItems（746〜765）／写した所: このファイルの shelfItems／比べ方: v225 [L]（PC の関数の本文を取り出して、
 //    同じ入力で同じ順）
-import { categoryOf, PIC_W, PIC_H, PIC_BORDER } from "../view/zoom";
+import { categoryOf, PIC_W, PIC_H, PIC_BORDER, alignToDevice } from "../view/zoom";
 import { guideNeeded } from "../editor/arrange";
 import type { LibraryWork } from "../../mobile/port";
 import { foldName } from "../../mobile/names";
@@ -50,11 +50,19 @@ export function previewBox(scale: number): { w: number; h: number } {
   return { w: PIC_W * scale + PIC_BORDER * 2, h: PIC_H * scale + PIC_BORDER * 2 };
 }
 
-/** 箱が (maxW, maxH) に入る一番大きい「物理画素の整数倍」（n ÷ dpr）。×0.5 にも入らなければ null */
+/** 箱が (maxW, maxH) に入る一番大きい「物理画素の整数倍」（n ÷ dpr）。1 ÷ dpr にも入らなければ null。
+ *  ★V227 (Z-1・UI §6-7 の最後の★): 密度を丸めない（描く画面の fitScale と同じ考え）。密度 2 の iPad は今までどおり 0.5 刻み、
+ *  密度 1.5 は 2/3 刻み・2.25 は 4/9 刻み・3 は 1/3 刻み＝どれも「倍率×密度」が整数（ドットが揃う） */
 export function fitPreviewScale(maxW: number, maxH: number, dpr: number): number | null {
-  const d = Math.max(1, Math.round(dpr));
+  const d = dpr > 0 ? dpr : 1;
   const n = Math.floor(Math.min((maxW - PIC_BORDER * 2) / PIC_W, (maxH - PIC_BORDER * 2) / PIC_H) * d + 1e-9);
   return n >= 1 ? n / d : null;
+}
+
+/** ★V227 (Z-2): 箱の位置を物理画素に揃える（CSS の整数に丸めてから、物理画素の格子へ）。整数の密度では今までと同じ値。
+ *  絵は箱の左上から 4（縁 2＋内側の線 2）の所＝4 × 密度も整数なので、絵の左上も物理画素に乗る */
+export function alignBox(v: number, dpr: number): number {
+  return alignToDevice(Math.round(v), dpr > 0 ? dpr : 1);
 }
 
 export interface Spacing {
@@ -106,7 +114,7 @@ function wideWith(w: number, h: number, dpr: number, folded: boolean, sp: Spacin
     scale,
     opsRows,
     albums: folded ? null : { x: LIB.edge, y: sp.top, w: LIB.albums, h: areaH },
-    preview: { x: left, y: sp.top, w: box.w, h: box.h },
+    preview: { x: alignBox(left, dpr), y: alignBox(sp.top, dpr), w: box.w, h: box.h },
     ops: { x: left, y: sp.top + box.h + gap, w: box.w, h: areaH - box.h - gap },
     shelf: { x: shelfX, y: sp.top, w: w - shelfX - LIB.edge, h: areaH },
   };
@@ -147,7 +155,7 @@ export function mediumLayout(w: number, h: number, dpr: number): MediumLayout | 
   const scale = fitPreviewScale(w - 12, areaH - LIB.opsGap2 - LIB.mediumOps - LIB.topGap - LIB.mediumShelfMin, dpr);
   if (scale === null) return null;
   const box = previewBox(scale);
-  const x = Math.round((w - box.w) / 2);
+  const x = alignBox((w - box.w) / 2, dpr);
   const opsY = sp.top + box.h + LIB.opsGap2;
   const shelfY = opsY + LIB.mediumOps + LIB.topGap;
   const shelfW = w - LIB.edge * 2;
@@ -159,7 +167,7 @@ export function mediumLayout(w: number, h: number, dpr: number): MediumLayout | 
     scale,
     opsRows: 2,
     albums: null,
-    preview: { x, y: sp.top, w: box.w, h: box.h },
+    preview: { x, y: alignBox(sp.top, dpr), w: box.w, h: box.h },
     ops: { x: LIB.edge, y: opsY, w: shelfW, h: LIB.mediumOps },
     shelf: { x: LIB.edge, y: shelfY, w: shelfW, h: h - sp.bottom - shelfY },
     columns,
@@ -189,8 +197,8 @@ export function theaterLayout(w: number, h: number, dpr: number): TheaterLayout 
   const box = previewBox(scale);
   const need = LIB.theaterEdge + box.h + LIB.theaterGap + LIB.theaterBar + LIB.theaterBottom;
   const overlay = need > h;
-  const x = Math.round((w - box.w) / 2);
-  const y = overlay ? Math.round((h - box.h) / 2) : Math.round((h - box.h - LIB.theaterGap - LIB.theaterBar) / 2);
+  const x = alignBox((w - box.w) / 2, dpr);
+  const y = alignBox(overlay ? (h - box.h) / 2 : (h - box.h - LIB.theaterGap - LIB.theaterBar) / 2, dpr);
   const barY = overlay ? h - LIB.theaterBottom - LIB.theaterBar : y + box.h + LIB.theaterGap;
   return { scale, pic: { x, y, w: box.w, h: box.h }, overlay, bar: { x, y: barY, w: box.w, h: LIB.theaterBar } };
 }

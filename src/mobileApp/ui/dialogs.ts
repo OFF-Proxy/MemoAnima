@@ -9,6 +9,7 @@ import { isMobileIconId, mobileIconSvg } from "../../mobile/icons";
 import { t } from "../../i18n";
 import { mt } from "../i18n";
 import { h, btn, icon, txt } from "./dom";
+import { holdBackground, type InertNode } from "./modalInert";
 
 export const TOAST_MS = 1700;
 
@@ -171,6 +172,8 @@ export function openDialog<T>(spec: DialogSpec<T>): Promise<{ value: T; skip: bo
       box.append(row);
     }
     let closed = false;
+    // ★V227 (X-1): 出ている間は後ろ（描く画面・ライブラリ・下の箱）を inert に。閉じたら開く前の状態へ戻す
+    let release: () => void = () => undefined;
     const close = (value: T) => {
       if (closed) return;
       closed = true;
@@ -180,6 +183,7 @@ export function openDialog<T>(spec: DialogSpec<T>): Promise<{ value: T; skip: bo
       if (ci >= 0) cancelStack.splice(ci, 1);
       openCount--;
       scrim.remove();
+      release();
       resolve({ value, skip });
     };
     const row = h("div", `mb-dialog-btns${spec.vertical ? " mb-vertical" : ""}`);
@@ -236,6 +240,7 @@ export function openDialog<T>(spec: DialogSpec<T>): Promise<{ value: T; skip: bo
       });
     }
     layer.append(scrim);
+    release = holdBackground(scrim as unknown as InertNode);
     spec.onReady?.(close, box);
   });
 }

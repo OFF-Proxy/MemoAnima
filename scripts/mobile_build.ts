@@ -577,6 +577,8 @@ export const TEMPLATE_MAIN_ACTIVITY = "package com.arcana.memoanima import andro
 /** ★V226 (T-1): 前の回（V224）の android-extra の MainActivity.kt の中身（空白と改行を詰めた形）。今ある gen/android がこれなら置き換えてよい */
 export const PREVIOUS_MAIN_ACTIVITIES: readonly string[] = [
   "package com.arcana.memoanima import android.os.Bundle import androidx.activity.OnBackPressedCallback import androidx.activity.enableEdgeToEdge class MainActivity : TauriActivity() { override fun onCreate(savedInstanceState: Bundle?) { enableEdgeToEdge() onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) { override fun handleOnBackPressed() { moveTaskToBack(true) } }) super.onCreate(savedInstanceState) } }",
+  // ★V229: V226 の中身（帯と端まで描く・最後の受け手）
+  "package com.arcana.memoanima import android.graphics.Color import android.os.Bundle import android.util.DisplayMetrics import android.view.View import android.webkit.WebView import androidx.activity.OnBackPressedCallback import androidx.activity.enableEdgeToEdge import androidx.core.graphics.Insets import androidx.core.view.ViewCompat import androidx.core.view.WindowCompat import androidx.core.view.WindowInsetsCompat import androidx.core.view.WindowInsetsControllerCompat class MainActivity : TauriActivity() { companion object { /** タブレットとして扱う、端末の一番短い辺（dp） */ const val TABLET_MIN_DP = 600 } override fun onCreate(savedInstanceState: Bundle?) { enableEdgeToEdge() onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) { override fun handleOnBackPressed() { backFromFallback() } }) super.onCreate(savedInstanceState) window.decorView.setBackgroundColor(Color.BLACK) val content = findViewById<View>(android.R.id.content) ViewCompat.setOnApplyWindowInsetsListener(content) { v, insets -> val bars = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime() val i = insets.getInsets(bars) v.setPadding(i.left, i.top, i.right, i.bottom) WindowInsetsCompat.Builder(insets).setInsets(bars, Insets.NONE).build() } applyBars() } private var web: WebView? = null override fun onWebViewCreate(webView: WebView) { web = webView } /** 最後の受け手。Activity が作り直されたあと（密度・文字の大きさ・ナビゲーションの形を変えたあと）は、Tauri の受け口（AppPlugin）が * 新しい Activity に付かないので、戻るボタンはいつもここに来る。画面が受け手を置いていれば渡し（開いているものを先に閉じる順は画面の側）、 * 置いていなければ（古い WebView の画面・起動の途中）今までどおり Activity を閉じずに裏へ回す */ private fun backFromFallback() { val w = web if (w == null) { moveTaskToBack(true) return } w.evaluateJavascript(\"(function(){try{if(typeof window.__mbAndroidBack==='function'){window.__mbAndroidBack();return 1}}catch(e){}return 0})()\") { r -> if (r != \"1\") moveTaskToBack(true) } } /** 端末の一番短い辺（dp）。窓ではなく画面そのものの大きさ */ private fun deviceSmallestDp(): Float { val m = DisplayMetrics() @Suppress(\"DEPRECATION\") windowManager.defaultDisplay.getRealMetrics(m) return minOf(m.widthPixels, m.heightPixels) / m.density } /** タブレットなら時計と電池の帯を隠す。ナビゲーションの帯には触らない（statusBars だけ） */ private fun applyBars() { val c = WindowCompat.getInsetsController(window, window.decorView) c.isAppearanceLightStatusBars = false c.isAppearanceLightNavigationBars = false if (deviceSmallestDp() >= TABLET_MIN_DP) { c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE c.hide(WindowInsetsCompat.Type.statusBars()) } else { c.show(WindowInsetsCompat.Type.statusBars()) } } override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus) if (hasFocus) applyBars() } override fun onResume() { super.onResume() applyBars() } }",
 ];
 
 /** 空白と改行を詰める（比べる用） */
@@ -592,6 +594,50 @@ export function patchMainActivity(current: string, ours: string): string | null 
   return null;
 }
 
+/** ★V229 (M-4・REQ_mobile_m4_io.md §4-5): 書き出しの一時の場所だけを指す FileProvider の置き場の表（res/xml/memoanima_io_paths.xml） */
+export const IO_PATHS_XML = `<?xml version="1.0" encoding="utf-8"?>
+<!-- V229 (M-4): 書き出しの一時の場所（cacheDir/memoanima-io/out）だけ。scripts/mobile_build.ts が当てる -->
+<paths>
+  <cache-path name="io_out" path="memoanima-io/out/" />
+</paths>
+`;
+/** ★V229: 受け取る種類（D-M4-2・T-6 で決める。.memoanima は application/octet-stream で来る見込み） */
+export const IO_RECEIVE_MIMES = ["application/octet-stream", "application/zip", "application/x-zip-compressed", "application/gzip", "application/x-gzip"];
+/** ★V229: マニフェストに足す印（2 回当てない） */
+export const IO_MANIFEST_MARK = "<!-- V229 io -->";
+
+/** ★V229 (M-4): AndroidManifest.xml に、受け取りの intent-filter（VIEW・SEND・SEND_MULTIPLE）と、書き出しの一時の場所だけを指す
+ *  FileProvider（公開しない）を足した字を返す。純関数（検査が見本で叩く）。もう足してあれば同じ字・MainActivity が 1 つでなければ null */
+export function patchIoManifest(manifest: string): string | null {
+  if (manifest.includes(IO_MANIFEST_MARK)) return manifest;
+  const acts = [...manifest.matchAll(/<activity\b[^>]*android:name="\.MainActivity"[^>]*>/g)];
+  if (acts.length !== 1) return null;
+  const close = manifest.indexOf("</activity>", acts[0].index ?? 0);
+  const appClose = manifest.lastIndexOf("</application>");
+  if (close < 0 || appClose < 0 || appClose < close) return null;
+  const types = IO_RECEIVE_MIMES.map((m) => `                <data android:mimeType="${m}" />`).join("\n");
+  const filters = [
+    `            ${IO_MANIFEST_MARK}`,
+    ...["android.intent.action.VIEW", "android.intent.action.SEND", "android.intent.action.SEND_MULTIPLE"].map(
+      (a) => `            <intent-filter>\n                <action android:name="${a}" />\n                <category android:name="android.intent.category.DEFAULT" />\n${a.endsWith("VIEW") ? '                <category android:name="android.intent.category.BROWSABLE" />\n                <data android:scheme="content" />\n' : ""}${types}\n            </intent-filter>`
+    ),
+  ].join("\n");
+  const provider = [
+    `        ${IO_MANIFEST_MARK}`,
+    `        <provider`,
+    `          android:name=".MemoAnimaIoProvider"`,
+    `          android:authorities="\${applicationId}.memoanimaio"`,
+    `          android:exported="false"`,
+    `          android:grantUriPermissions="true">`,
+    `          <meta-data`,
+    `            android:name="android.support.FILE_PROVIDER_PATHS"`,
+    `            android:resource="@xml/memoanima_io_paths" />`,
+    `        </provider>`,
+  ].join("\n");
+  const withProvider = manifest.slice(0, appClose) + provider + "\n    " + manifest.slice(appClose);
+  return withProvider.slice(0, close) + filters + "\n        " + withProvider.slice(close);
+}
+
 /** ★V224 (A-3): gen/android の MainActivity に android-extra の configChanges を当てる（当たっていれば何もしない）。当てられなければ止める */
 export function androidApplyExtra(gen = path.join(root, "src-tauri", "gen", "android")): "applied" | "already" {
   const ktPath = path.join(gen, "app", "src", "main", "java", "com", "arcana", "memoanima", "MainActivity.kt");
@@ -604,7 +650,14 @@ export function androidApplyExtra(gen = path.join(root, "src-tauri", "gen", "and
   if (ktNext !== kt) writeFileSync(ktPath, ktNext);
   const f = path.join(gen, "app", "src", "main", "AndroidManifest.xml");
   const before = readFileSync(f, "utf8");
-  const after = patchConfigChanges(before, androidExtra().mainActivityConfigChangesAdd);
+  const after0 = patchConfigChanges(before, androidExtra().mainActivityConfigChangesAdd);
+  // ★V229: 受け取りの intent-filter と、書き出しの一時の場所だけを指す FileProvider
+  const after = after0 === null ? null : patchIoManifest(after0);
+  const xml = path.join(gen, "app", "src", "main", "res", "xml", "memoanima_io_paths.xml");
+  if (!existsSync(xml) || readFileSync(xml, "utf8") !== IO_PATHS_XML) {
+    mkdirSync(path.dirname(xml), { recursive: true });
+    writeFileSync(xml, IO_PATHS_XML);
+  }
   if (after === null) {
     console.error("gen/android の AndroidManifest.xml に MainActivity の configChanges が見つからない（ひな形が変わった？ android-extra を当てられない）");
     process.exit(1);

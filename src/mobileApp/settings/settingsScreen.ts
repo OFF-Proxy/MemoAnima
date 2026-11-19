@@ -15,6 +15,7 @@ import { mt, type MbKey } from "../i18n";
 import { pressureCurve } from "../input/router";
 import { dialogOpen, toast } from "../ui/dialogs";
 import { btn, h, icon, txt } from "../ui/dom";
+import { holdBackground, type InertNode } from "../ui/modalInert";
 import {
   fingerDrawShown,
   keyPresetChoices,
@@ -242,7 +243,14 @@ export function openSettings(deps: SettingsDeps): SettingsHandle {
       );
       out.push(row(mt("mb.set.undoBadge.label"), mt("mb.set.undoBadge.msg"), sw(mt("mb.set.undoBadge.label"), s.undoBadge, (v) => change({ id: "undoBadge", value: v })), gicon("undo-badge")));
     } else if (cur === "confirm") {
-      const c = (id: string, label: string) => row(label, null, sw(label, !s.hiddenConfirms.includes(id), (v) => change({ id: "confirm", confirm: id, value: v })));
+      // ★V227 (Y-3・ボード s04): 「このコマの絵を消す」のとき（いつも）・オフの行には「次回から表示しない」でオフになることを添える
+      const c = (id: string, label: string) => {
+        const on = !s.hiddenConfirms.includes(id);
+        const hints = [id === "clearFrame" ? mt("mb.set.confirm.clearFrame.msg") : "", on ? "" : mt("mb.set.confirm.skipped.msg")].filter(Boolean);
+        const r = row(label, hints[0] ?? null, sw(label, on, (v) => change({ id: "confirm", confirm: id, value: v })));
+        if (hints[1]) r.querySelector(".mb-set-rowtext")?.append(txt("mb-set-hint", hints[1]));
+        return r;
+      };
       out.push(c("clearFrame", t("set.confirms.clearFrame.label")), c("layerDelete", t("set.confirms.layerDelete.label")), c("folderDelete", t("set.confirms.folderDelete.label")));
       out.push(row(t("set.frameDeleteConfirm.label"), mt("mb.set.frameDelete.msg"), sw(t("set.frameDeleteConfirm.label"), s.frameDeleteConfirm, (v) => change({ id: "frameDeleteConfirm", value: v }))));
     } else if (cur === "library") {
@@ -323,6 +331,7 @@ export function openSettings(deps: SettingsDeps): SettingsHandle {
       closed = true;
       window.removeEventListener("keydown", onKey);
       root.remove();
+      release();
       deps.closed();
     },
     rebuild: () => {
@@ -342,6 +351,8 @@ export function openSettings(deps: SettingsDeps): SettingsHandle {
   };
   build();
   screensHost().append(root);
+  // ★V227 (X-1): 設定が出ている間は、後ろ（描く画面・ライブラリ）を inert に（上に確認が出たら、確認が一番上）
+  const release = holdBackground(root as unknown as InertNode);
   return handle;
 }
 

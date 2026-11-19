@@ -53,3 +53,20 @@ export class RowDrag {
     return true;
   }
 }
+
+// ---------------- ★V227 (R・UI §5-5・REQ_layer_panel.md §9): 段の見せ方 ----------------
+
+/** 1 段ぶんのずらし（px） */
+export const ROW_INDENT = 18;
+/** ずらす上限の段（4 段より深い行は 4 段と同じ所に置く＝パネルの幅 300 でも名前の幅を残す。3 段の入れ子は見分けられる） */
+export const ROW_INDENT_MAX_DEPTH = 4;
+/** 行の箱を右へずらす量（箱の左端が親より下がって見える。箱の右端は揃える＝幅が縮む）。中の余白と並びはどの段も同じ */
+export function rowIndent(depth: number): number {
+  return ROW_INDENT * Math.max(0, Math.min(Math.floor(depth), ROW_INDENT_MAX_DEPTH));
+}
+
+/** 行の左の空いた所（ずらした分）を押したか: 押した所が、その行の縦の範囲の中で、箱の左端より左なら、その行を返す */
+export function gapRowAt(rows: readonly { idx: number; left: number; top: number; bottom: number }[], x: number, y: number): number | null {
+  for (const r of rows) if (y >= r.top && y < r.bottom) return x < r.left ? r.idx : null;
+  return null;
+}
