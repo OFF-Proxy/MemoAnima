@@ -3,7 +3,8 @@
 // M0レガシーのフォルダ閲覧はM3で撤去（REQ v1.7 D-22）。
 
 import { invoke } from "@tauri-apps/api/core";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event"; // ★V230 (A-148): 開いている間に届いたファイルの知らせ
+import { open as openNativeDialog, save as saveNativeDialog } from "@tauri-apps/plugin-dialog";
 // U-1: 更新履歴を既定ブラウザで開く（tauri-plugin-opener は M0 から導入済み・権限もある）
 import { openUrl } from "@tauri-apps/plugin-opener";
 // U-1: 型だけ。**実体は使うときに遅延 import する**（`runUpdateCheck`）
@@ -11,7 +12,7 @@ import type { Update } from "@tauri-apps/plugin-updater";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { runGuide, GuideStep } from "./guide";
-import { LibraryScreen, LibraryView, readProjectRaw } from "./library"; // V169 (B-2): .memoanima を読む唯一の道
+import { LibraryScreen, LibraryView, readProjectRaw, samePath } from "./library"; // V169 (B-2): .memoanima を読む唯一の道
 import { Editor, EditorSaveContext, sanitizeMiniDock, type SaveTargetStatus, type WorkFileRef } from "./editor/editor";
 // V199 (A-106): オートセーブの復元の知らせの名前（保存先が分かればファイルの名前）
 import { autosaveNoticeTitle, baseFromSavedPath } from "./editor/workTitle";
@@ -28,7 +29,10 @@ import { iconHtml, iconLabelHtml, setIconLabel, iconizeText, tHtml, applyIcons, 
 import { applyTheme, sanitizeTheme } from "./ui/theme";
 // V159 (G-1/G-3): 性能ログと「長い処理の共通入口」。**ログには操作名と数値しか書かない**
 import { setPerfSink, startLongTaskWatch, flush as perfFlush, perfNow, perfDone } from "./perf";
-import { runWithBusy, setBusyImpl, withBusyHidden, yieldToPaint } from "./ui/busy";
+import { busyActive, nativeDialogOpen, trackNativeDialog, runWithBusy, setBusyImpl, withBusyHidden, yieldToPaint } from "./ui/busy";
+// ★V230 (A-148・独立レビューの指摘 4): OS のファイルの窓は数えて開く（窓の間に外から開いたファイルを乗せない）
+const open = trackNativeDialog(openNativeDialog);
+const save = trackNativeDialog(saveNativeDialog);
 import { frameToPngBlob, frameToImageBlob } from "./editor/render";
 import {
   DEFAULT_CONVERT,
@@ -614,38 +618,31 @@ function toast(msg: string, extra?: { text: string; actions: ToastAction[] }) {
   });
 }
 
-/** V198 (A-104 E-2): 書き出しのあとの「保存先を開く」が指す作品。保存と同じ組み立て（Rust の
- *  `pclib::existing_project_file`）に渡す 3 つ＝**フルパスは持たない**。`name` は保存に渡すのと同じ名前
- *  （エディタは baseName・ライブラリはファイル名そのもの） */
-type GalleryWorkRef = { libRoot: string; album: string; name: string };
-
 /** V198 (E-1・E-2): ギャラリーを既定のブラウザで開く。開けなくても画面には何も出さない（ログに理由を 1 行・URL は書かない） */
 function openGalleryUrl(url: string) {
   void openUrl(url).catch((e) => logError("gallery", `open browser failed: ${scrubUrls(errText(e))}`));
 }
 
-/** V198 (E-2): 作品の .memoanima を OS のファイラーで選んだ状態で開く。開けなければログに 1 行（パスは書かない） */
-function revealWork(w: GalleryWorkRef) {
-  invoke("reveal_project_file", { libRoot: w.libRoot, album: w.album, name: w.name }).catch((e) =>
-    logError("gallery", `reveal failed: ${importLogSafe(scrubUrls(errText(e)), [w.libRoot])}`)
+/** ★V230 (A-150): 書き出したファイル（動画・画像）を OS のファイラーで選んだ状態で開く。開いてよいかは Rust が決める
+ *  （この起動のあいだに export_write が作って書けた置き場だけ）。開けなければログに 1 行（パスは書かない）・画面には何も出さない */
+function revealExported(path: string) {
+  invoke("reveal_exported_file", { path }).catch((e) =>
+    logError("gallery", `reveal failed: ${importLogSafe(scrubUrls(errText(e)), [path])}`)
   );
 }
 
 /** V198 (A-104 E-2): 書き出し（と 1 コマの画像の保存）の完了のトースト。
  *  案内を出すとき（S-1 がオン・「次回から表示しない」を押していない）だけ、1 行とボタンを足す。
- *  出さないときは今までどおりの 1 行。「保存先を開く」は作品の .memoanima がいま在るときだけ */
-async function exportDoneToast(msg: string, work: GalleryWorkRef | null) {
+ *  出さないときは今までどおりの 1 行。★V230 (A-150): 「保存先を開く」は書き出したファイル（`path`）を開く・案内を出すときはいつも出す */
+function exportDoneToast(msg: string, path: string) {
   if (!galleryGuideShown(settings)) {
     toast(msg);
     return;
   }
-  const canReveal =
-    !!work &&
-    (await invoke<boolean>("project_file_exists", { libRoot: work.libRoot, album: work.album, name: work.name }).catch(
-      () => false
-    )) === true;
-  const actions: ToastAction[] = [{ label: t("export.gallery.post.btn"), run: () => openGalleryUrl(GALLERY_POST_URL) }];
-  if (canReveal && work) actions.push({ label: t("export.gallery.reveal.btn"), run: () => revealWork(work) });
+  const actions: ToastAction[] = [
+    { label: t("export.gallery.post.btn"), run: () => openGalleryUrl(GALLERY_POST_URL) },
+    { label: t("export.gallery.reveal.btn"), run: () => revealExported(path) },
+  ];
   actions.push({
     label: t("common.dontShowAgain.label"),
     run: () => {
@@ -654,14 +651,6 @@ async function exportDoneToast(msg: string, work: GalleryWorkRef | null) {
     },
   });
   toast(msg, { text: t("export.gallery.msg"), actions });
-}
-
-/** V198 (E-2): エディタで開いている作品の「保存先」。まだ保存先が決まっていない（新規・保存先を聞く状態）なら null。
- *  ファイルが本当に在るかは書き出しのあとに Rust が見る（.kwz を開いて一度も保存していない作品は、そこで無いと分かる） */
-function editorWorkRef(): GalleryWorkRef | null {
-  const c = editor.saveCtx;
-  if (!c || editor.askSaveTarget) return null;
-  return { libRoot: c.libRoot || settings.libraryDir || "", album: c.album, name: c.baseName };
 }
 
 /** M11-10: `build` の第2引数 `onClose` に後始末を登録できる（window に張ったリスナー等）。
@@ -1151,8 +1140,7 @@ function openExportDialog(
   baseName: string,
   defaultRange?: { a: number; b: number } | null,
   audioSrc?: ExportAudioSource | null,
-  onSyncModeChange?: (m: "audioToAnim" | "animToAudio") => void,
-  work: GalleryWorkRef | null = null // V198 (E-2): 書き出しのあとの「保存先を開く」が指す作品（無ければ出さない）
+  onSyncModeChange?: (m: "audioToAnim" | "animToAudio") => void
 ) {
   let running = false;
   return modal((close) => {
@@ -1510,7 +1498,7 @@ function openExportDialog(
         }
         phaseEl.textContent = t("export.progress.writeFile.hint");
         await saveBlobToPath(path, blob);
-        void exportDoneToast(t("export.done.toast", { path }), work); // V198 (E-2): 案内の 1 行はこの中だけ
+        exportDoneToast(t("export.done.toast", { path }), path); // V198 (E-2): 案内の 1 行はこの中だけ・★V230 (A-150): 開くのは書き出したファイル
         close(true);
       } catch (e) {
         toast(t("err.export.failed.toast", { err: errText(e) }));
@@ -1533,7 +1521,7 @@ function openExportDialog(
  *  **アニメの書き出し（openExportDialog）とは別のダイアログ**にしている。あちらは
  *  範囲・音声・長さ合わせ・進捗という「動画/連番のための UI」で構成されていて、
  *  1枚書き出しには要らないものばかり。同じ箱に入れると半分を隠すことになり分かりにくい。 */
-function openImageExportDialog(p: Project, frameIndex: number, baseName: string, work: GalleryWorkRef | null = null) {
+function openImageExportDialog(p: Project, frameIndex: number, baseName: string) {
   return modal((close) => {
     const box = document.createElement("div");
     // M11-22: 既定は前回選んだ値（settings.imageSaveScale・アニメ書き出しとは別に記憶）・無ければ ×4。×4 に「おすすめ」
@@ -1634,7 +1622,7 @@ function openImageExportDialog(p: Project, frameIndex: number, baseName: string,
         });
         if (!blob) throw new Error(t("err.image.render.msg"));
         await saveBlobToPath(path, blob);
-        void exportDoneToast(t("export.image.saved.toast", { path }), work); // V198 (E-2): アニメの書き出しと同じ 1 行
+        exportDoneToast(t("export.image.saved.toast", { path }), path); // V198 (E-2): アニメの書き出しと同じ 1 行
         close(true);
       } catch (e) {
         toast(t("err.image.save.toast", { err: errText(e) }));
@@ -1649,14 +1637,22 @@ function openImageExportDialog(p: Project, frameIndex: number, baseName: string,
 
 // ---------------- 画面切替 ----------------
 
+/** ★V230 (A-147): 描く画面を開いたときの「その作品のファイル」（editor.workFile）。保存すると新しい物に替わる＝戻るときに見比べて、保存したかを知る */
+let workFileAtMount: WorkFileRef | null = null;
+
 function showLibrary() {
+  // ★V230 (A-147): 描く画面の間に保存したファイル（初めての保存・別名で保存・ドロップで開いた作品の保存も同じ）。保存していなければ null
+  let savedPath: string | null = null;
   if (editorOpen) {
+    const wf = editor.workFile;
+    if (wf && wf !== workFileAtMount) savedPath = wf.path;
     editor.unmount();
     editorOpen = false;
   }
   $("#screen-editor").hidden = true;
   $("#screen-library").hidden = false;
-  library.refresh();
+  // ★V230 (A-147): 一覧を取り直したあと、保存した作品（無ければ大きさか更新時刻の変わった、選んでいる作品）を選び直す
+  void library.refreshAfterEdit(savedPath);
 }
 
 /** M11-3: 移動先アルバムのピッカー（「📁 移動」用）。保存先ピッカーの簡易版で、
@@ -2613,12 +2609,11 @@ function showEditor(
       clearAutosave: async () => {
         await invoke("clear_autosave");
       },
-      // V198 (E-2): 書き出しのあとの「保存先を開く」は、いま開いている作品の保存先（editorWorkRef）を指す
+      // ★V230 (A-150): 書き出しのあとの「保存先を開く」は書き出したファイル（作品を渡さない）
       openExport: (source, baseName, defaultRange, audio, onSyncModeChange) =>
-        void openExportDialog(source, baseName, defaultRange, audio, onSyncModeChange, editorWorkRef()),
+        void openExportDialog(source, baseName, defaultRange, audio, onSyncModeChange),
       // M11-11: 1コマだけの画像書き出し（アニメの書き出しとは別ダイアログ）
-      openImageExport: (proj, frameIndex, baseName) =>
-        void openImageExportDialog(proj, frameIndex, baseName, editorWorkRef()),
+      openImageExport: (proj, frameIndex, baseName) => void openImageExportDialog(proj, frameIndex, baseName),
       pickAudioFile,
       readAudioFile, // V172: ダイアログと読みを分けた（読みは呼び出し元の「読み込み中」の中）
       confirm: confirmDialog,
@@ -2643,6 +2638,7 @@ function showEditor(
     },
     opts
   );
+  workFileAtMount = editor.workFile; // ★V230 (A-147)
 }
 
 // ---------------- エディタ入口 ----------------
@@ -3038,6 +3034,8 @@ async function presentUpdate(up: Update): Promise<void> {
       let total = 0;
       let got = 0;
       try {
+        // ★V230 (A-148): Windows のインストーラーは起動のときの引数のまま開き直す＝起動のときに開いたファイルを、もう一度開かないための印
+        if (!isMacPlatform()) await invoke("prepare_update_relaunch").catch(() => {});
         await up.downloadAndInstall((ev) => {
           if (ev.event === "Started") total = ev.data.contentLength ?? 0;
           else if (ev.event === "Progress") got += ev.data.chunkLength;
@@ -3068,6 +3066,7 @@ async function presentUpdate(up: Update): Promise<void> {
           }
         }
       } catch (e) {
+        if (!isMacPlatform()) await invoke("cancel_update_relaunch").catch(() => {}); // ★V230 (A-148): 印を残さない
         logError("update", `install failed: ${e}`);
         toast(t("set.update.failed.toast"));
         close(null);
@@ -4573,7 +4572,117 @@ async function setupFileDrop() {
   }
 }
 
+// ---------------- ★V230 (A-148): 作品のファイルから開く（ダブルクリック・2 つ目の起動・Finder） ----------------
+// Rust が受けたパスを覚えている（take_opened_files）。ここでは受け取って待たせ、起動の手続きのあと・ダイアログや重い処理が終わってから、
+// 短い間（0.5 秒）に続けて届いたものをまとめて 1 回、ドロップと同じ道（handleDroppedPaths）に乗せる。
+// ライブラリの中の作品が 1 つだけなら、聞かずに描く画面で開く（ライブラリの［編集］と同じ）。記録は Rust が数と種類だけ
+/** 起動の手続き（初めての起動の門・ライブラリ・初回ガイド・オートセーブの復元の提案）が済んで、道に乗せてよいか */
+let openedReady = false;
+/** 受け取って、まだ道に乗せていないパス（同じものは 1 回） */
+const openedQueue: string[] = [];
+let openedTimer: number | null = null;
+let openedRunning = false;
+/** 最後に届いた時刻（まとめる 0.5 秒は、起動の手続きが済んだとき・前の分を乗せ終えたときも、ここから数える＝独立レビューの指摘 1） */
+let openedLastAt = 0;
+/** まとめる間 */
+const OPENED_GATHER_MS = 500;
+/** 待たせている間に見直す間 */
+const OPENED_RETRY_MS = 300;
+
+/** Rust から受け取って並べる（受け取ったら Rust の側は空になる＝2 回乗せない） */
+async function pullOpenedFiles(): Promise<void> {
+  const raw = await invoke<unknown>("take_opened_files").catch(() => null);
+  // 配列でない返事（命令が無い・壊れた返事）は「何も届いていない」（起動の道で例外を出さない）
+  const got = Array.isArray(raw) ? raw.filter((p): p is string => typeof p === "string") : [];
+  let added = false;
+  for (const p of got) {
+    if (!openedQueue.some((q) => samePath(q, p))) {
+      openedQueue.push(p);
+      added = true;
+    }
+  }
+  if (added) {
+    openedLastAt = Date.now();
+    scheduleOpened(OPENED_GATHER_MS);
+  }
+}
+
+function scheduleOpened(ms: number) {
+  if (openedTimer != null) window.clearTimeout(openedTimer);
+  openedTimer = window.setTimeout(() => {
+    openedTimer = null;
+    void drainOpened();
+  }, ms);
+}
+
+/** 今は道に乗せない（ダイアログ・保存・書き出し・取り込み・重い処理の間）。終わってから 1 回だけ乗せる */
+function openedBusy(): boolean {
+  return (
+    importRunning ||
+    kwzBatchRunning ||
+    busyActive() ||
+    nativeDialogOpen() ||
+    !!document.querySelector(".modal-back") ||
+    (editorOpen && editor.isBusyForOpen())
+  );
+}
+
+async function drainOpened(): Promise<void> {
+  if (!openedReady || openedRunning || openedQueue.length === 0) return;
+  // 最後に届いてから 0.5 秒たつまでは乗せない（続けて届くものを 1 回にまとめる）
+  const gather = OPENED_GATHER_MS - (Date.now() - openedLastAt);
+  if (gather > 0) {
+    scheduleOpened(gather);
+    return;
+  }
+  if (openedBusy()) {
+    scheduleOpened(OPENED_RETRY_MS);
+    return;
+  }
+  const paths = openedQueue.splice(0);
+  openedRunning = true;
+  try {
+    await routeOpenedPaths(paths);
+  } catch (e) {
+    logError("import", `opened: ${importLogSafe(errText(e), paths)}`);
+  } finally {
+    openedRunning = false;
+    if (openedQueue.length > 0) scheduleOpened(OPENED_RETRY_MS);
+  }
+}
+
+/** 受けたファイルの道。ライブラリの中の作品が 1 つだけなら描く画面で開く・それ以外はドロップと同じ */
+async function routeOpenedPaths(paths: string[]): Promise<void> {
+  if (paths.length === 1 && settings.libraryDir) {
+    const hit = await invoke<[string, string] | null>("opened_library_work", {
+      libRoot: settings.libraryDir,
+      path: paths[0],
+    }).catch(() => null);
+    if (hit) {
+      const [album, name] = hit;
+      // もう描く画面で開いている作品なら開き直さない（ウィンドウは Rust が前に出した）
+      if (editorOpen && editor.workFile && samePath(editor.workFile.path, paths[0])) return;
+      await library.refresh();
+      const item = library.items.find((i) => i.kind === "project" && i.album === album && i.name === name);
+      if (item) {
+        if (editorOpen && !(await editor.confirmLeave(t("ed.leave.dropOpen.msg")))) return;
+        await openEditorWithProject(item);
+        return;
+      }
+    }
+  }
+  await handleDroppedPaths(paths);
+}
+
+/** 起動の手続きが済んだ（ライブラリが見つからなかったときは、選び直したあと） */
+function openedStartupDone() {
+  openedReady = true;
+  void pullOpenedFiles().then(() => scheduleOpened(0));
+}
+
 window.addEventListener("DOMContentLoaded", async () => {
+  // ★V230 (A-148): 開いている間に届いた知らせ（2 つ目の起動・Finder）。受け取って待たせる（乗せるのは準備ができてから）
+  void listen("opened-files", () => void pullOpenedFiles()).catch(() => {});
   // M5-4: トーンパターン検証ページ（devフック ?tones）
   // 320×240等倍相当（1canvas画素=1CSSpx）のスウォッチを全柄ぶん並べ、3DS実機写真と見比べる
   if (import.meta.env.DEV && new URLSearchParams(location.search).has("tones")) {
@@ -6042,6 +6151,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   // M7-2: 初回ガイド（画面が揃ってから。完了/スキップで guideDone 保存・以後は出ない）
   if (!settings.guideDone) await startGuideFlow(false);
   await checkAutosave();
+  openedStartupDone(); // ★V230 (A-148): 起動のときに受けたファイルは、ここから道に乗せる
   // U-1: 確認の**結果**を出す。通信は起動の早い段階から走っているので、ここは待ち合わせるだけ。
   // **await しない**＝この先どれだけ待たされても起動処理は完了している
   //（ネットワークが無い / 遅い環境で体感が変わらないこと・REQ §4 非機能要件）
@@ -6072,8 +6182,11 @@ function showMissingLibraryState() {
         await library.mount(settings.libraryDir!, libraryCallbacks);
         library.bindTransport();
         await setupFileDrop();
+        // ★V230 (A-148・独立レビューの指摘 2): 起動の手続きと同じ順（初回ガイド → 復元の提案）を通してから、受けたファイルを乗せる
+        if (!settings.guideDone) await startGuideFlow(false);
         await checkAutosave();
         toast(t("lib.dirChanged.toast", { dir: settings.libraryDir }));
+        openedStartupDone(); // ★V230 (A-148): 選び直して開けるようになってから
       }
     });
   }
@@ -6086,21 +6199,9 @@ const libraryCallbacks = {
   // V200 (A-100): アルバムの「まとめて .memoanima にする」。走っているあいだ（確認の前の数えも）はフォルダ・1 件の取り込みを始めない
   convertAlbumNotes: (album: string) => void convertAlbumNotes(album),
   kwzBatchBusy: () => kwzBatchRunning,
-  // V198 (E-2): ライブラリから書き出したときの「保存先を開く」は、選んでいる作品（.memoanima/.animemo のときだけ library が渡す）
-  openExport: (
-    source: FrameSource,
-    baseName: string,
-    audio?: ExportAudioSource | null,
-    work?: { album: string; name: string } | null
-  ) =>
-    void openExportDialog(
-      source,
-      baseName,
-      null,
-      audio,
-      undefined,
-      work && settings.libraryDir ? { libRoot: settings.libraryDir, album: work.album, name: work.name } : null
-    ),
+  // ★V230 (A-150): ライブラリから書き出したときの「保存先を開く」も書き出したファイル（作品を渡さない）
+  openExport: (source: FrameSource, baseName: string, audio?: ExportAudioSource | null) =>
+    void openExportDialog(source, baseName, null, audio, undefined),
   confirm: confirmDialog,
   prompt: promptDialog,
   toast,

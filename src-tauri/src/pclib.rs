@@ -321,6 +321,35 @@ fn validate_album(name: &str) -> Result<String, String> {
 /// V216b (A-131): アルバムのフォルダがリンクで、ライブラリの外（か辿れない先）を指すときの断り（パスを入れない＝W-10）
 pub const ALBUM_LINK_OUTSIDE: &str = "アルバムのフォルダがライブラリの外を指しています（リンク）。書き込み・移動はできません";
 
+/// ★V230 (A-144・要件 §2-1・§5): 消す・控えから戻す・作品を移すで、アルバムのフォルダ・本体・控えがリンク（シンボリックリンク・ジャンクション）のときの断り（パスを入れない）
+pub const LINK_REFUSED: &str = "リンク（ショートカット）になっている作品とアルバムは、メモアニマから消したり移したり、元に戻したりできません。";
+
+/// その名前そのものがリンク（シンボリックリンク・Windows のジャンクション）か（辿らずに見る）
+fn is_link(p: &Path) -> bool {
+    fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+}
+
+/// ★V230 (A-144): リンクなら `LINK_REFUSED` で断る（無い名前・普通のファイルとフォルダは通す）。モバイルの `refuse_link`（V224）と同じ考え
+fn refuse_link(p: &Path) -> Result<(), String> {
+    if is_link(p) {
+        Err(LINK_REFUSED.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// ★V230 (A-144): ライブラリから `target` までの間の名前（アルバムのフォルダと本体）のどれかがリンクなら断る。
+/// ライブラリの下に無い形（`strip_prefix` できない）は見ない＝あとの封じ込め（`canonicalize`）が今のまま断る
+fn refuse_link_below(lib: &Path, target: &Path) -> Result<(), String> {
+    let Ok(rel) = target.strip_prefix(lib) else { return Ok(()) };
+    let mut cur = lib.to_path_buf();
+    for c in rel.components() {
+        cur.push(c);
+        refuse_link(&cur)?;
+    }
+    Ok(())
+}
+
 /// ★V216b (A-131・要件 §2-3): 書く・動かす前に、アルバムのフォルダがリンク（シンボリックリンク・Windows のジャンクション）かを見て、
 /// **リンクのときだけ**辿った先がライブラリの辿った先の下かを確かめる。外・辿れない・ライブラリそのものなら断る。
 /// リンクでない（普通のフォルダ・まだ無いフォルダ）は辿らない＝`canonicalize` に失敗するドライブでも今と同じに動く。
@@ -737,6 +766,10 @@ pub fn recover_project(lib_root: &str, rel_path: &str) -> Result<String, String>
     let dir = lib.join(&album_s);
     let dest = dir.join(&name_s);
     let bak = dir.join(format!("{name_s}.bak"));
+    // ★V230 (A-144): アルバムのフォルダ・控え・本体の名前がリンクなら断る（辿った先を動かさない）
+    refuse_link(&dir)?;
+    refuse_link(&bak)?;
+    refuse_link(&dest)?;
     if !bak.is_file() {
         return Err("復元のもとになる控えが見つかりません".into());
     }
@@ -749,7 +782,8 @@ pub fn recover_project(lib_root: &str, rel_path: &str) -> Result<String, String>
         // 本体が在るなら触らない（上書きは絶対にしない）
         return Err("同じ名前の作品が既にあります（控えは残したままにしました）".into());
     }
-    fs::rename(&bak_c, &dest).map_err(|e| format!("復元に失敗: {e}"))?;
+    // ★V230 (A-144): 動かすのは辿らない置き場（`bak_c` は封じ込めの確かめだけに使う）
+    fs::rename(&bak, &dest).map_err(|e| format!("復元に失敗: {e}"))?;
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -1508,9 +1542,12 @@ fn move_project_with(
         return Err("プロジェクト（.memoanima / .animemo）以外は移動できません".into());
     }
     // 対象パスはフロントの path を信用せず album/name から組み立てる（delete_item と同じ）
-    let src_c = lib
-        .join(&album_s)
-        .join(&name_s)
+    // ★V230 (A-144): 元のアルバムのフォルダ・本体・行き先のアルバムのフォルダがリンクなら断る。動かすのは辿らない置き場（`src`）
+    let src = lib.join(&album_s).join(&name_s);
+    refuse_link(&lib.join(&album_s))?;
+    refuse_link(&src)?;
+    refuse_link(&lib.join(&dest_s))?;
+    let src_c = src
         .canonicalize()
         .map_err(|e| format!("対象確認失敗: {e}"))?;
     if !src_c.starts_with(&lib_c) {
@@ -1537,7 +1574,7 @@ fn move_project_with(
     let dest = unique_project_dest(&dest_dir_c, &name_s);
 
     // 1) 本体を移動
-    rename(&src_c, &dest).map_err(|e| format!("移動失敗: {e}"))?;
+    rename(&src, &dest).map_err(|e| format!("移動失敗: {e}"))?;
     let dest_name = dest
         .file_name()
         .and_then(|n| n.to_str())
@@ -1545,13 +1582,14 @@ fn move_project_with(
         .to_string();
 
     // 2) サイドカーPNG（無ければ何もしない。失敗したら本体を戻して「何も起きていない」状態へ）
-    let src_png = with_suffix(&src_c, ".png");
+    //    ★V230 (A-144): 付属のファイルは辿らない本体の置き場から組む。リンクならリンクそのものを移す
+    let src_png = with_suffix(&src, ".png");
     let dest_png = with_suffix(&dest, ".png");
-    let moved_png = src_png.is_file();
+    let moved_png = src_png.is_file() || is_link(&src_png);
     if moved_png {
         if let Err(e) = rename(&src_png, &dest_png) {
             // 戻しにも失敗したら「取り消しました」と嘘をつかない（実際の在り処を伝える）
-            return Err(match rename(&dest, &src_c) {
+            return Err(match rename(&dest, &src) {
                 Ok(_) => format!("サムネイルの移動に失敗（移動を取り消しました）: {e}"),
                 Err(e2) => format!(
                     "サムネイルの移動に失敗し、取り消しにも失敗しました。作品は「{dest_s}」にあります（{e} / {e2}）"
@@ -1562,12 +1600,12 @@ fn move_project_with(
 
     // 2b) V201 (P-2): 控え（.bak）も一緒に（無ければ何もしない）。移した先の名前は本体に合わせる（unique_project_dest が
     //     その名前の控えも無いことを確かめてある＝移した先の控えを置き換えない）。失敗したら PNG と本体を戻す
-    let src_bak = with_suffix(&src_c, ".bak");
-    if src_bak.is_file() {
+    let src_bak = with_suffix(&src, ".bak");
+    if src_bak.is_file() || is_link(&src_bak) {
         let dest_bak = with_suffix(&dest, ".bak");
         if let Err(e) = rename(&src_bak, &dest_bak) {
             let png_back = if moved_png { rename(&dest_png, &src_png) } else { Ok(()) };
-            let body_back = rename(&dest, &src_c);
+            let body_back = rename(&dest, &src);
             // 作品（本体）の在り処は、本体を戻せたかで決める（サムネだけ戻せなかったときに「移動先にある」と言わない・独立レビューの指摘 R2）
             return Err(match (png_back, body_back) {
                 (Ok(_), Ok(_)) => format!("控え（.bak）の移動に失敗（移動を取り消しました）: {e}"),
@@ -1856,7 +1894,8 @@ fn save_project_core(
         return Err(format!("ライブラリフォルダが見つかりません: {lib_root}"));
     }
     let album_s = validate_album(album)?;
-    // V198: 名前の組み立ては project_file_name と同じ（V216b で 1 つに寄せた。v198_tests::same_path_as_save が見張る）
+    // V198: 名前の組み立ては project_file_name と同じ（V216b で 1 つに寄せた。★V230 (A-150) で「保存先を開く」が作品ファイルを開かなくなり、
+    //   existing_project_file と v198_tests を消した。save_target_status が同じ project_file_name を使う）
     let mut file = project_file_name(name);
     let dir = lib.join(&album_s);
     ensure_album_inside(lib, &dir)?; // V216b (A-131): 保存と .memoanima の取り込み
@@ -2194,7 +2233,7 @@ fn write_project_tmp(tmp: &Path, src: &ProjectSource) -> std::io::Result<()> {
 /// V198 (A-104 E-2): 保存の書き先と**同じ決め方**のファイル名（`save_project_impl` の名前の組み立てと同じ規則）。
 /// 旧拡張子 `.animemo` の名前は `.memoanima` に付け替え、拡張子が無ければ `.memoanima` を足す。
 /// ★`save_project_impl` そのものは触らない（保存の道を変えない）。ずれていないことは下の単体テスト
-/// `v198_tests::same_path_as_save` が、本物の `save_project` が返したパスと突き合わせて見張る
+/// `v230_tests::save_name_is_project_file_name` が、本物の `save_project` が返したパスと突き合わせて見張る（V198 の試験を V230 で写した）
 fn project_file_name(name: &str) -> String {
     let file = sanitize_component(name);
     let lower = file.to_ascii_lowercase();
@@ -2208,28 +2247,6 @@ fn project_file_name(name: &str) -> String {
     } else {
         file
     }
-}
-
-/// V198 (A-104 E-2): 作品の `.memoanima`（保存すると書かれる場所）が**いまライブラリの中に在れば**そのパス。
-/// 書き出しのあとの「保存先を開く」を出すか・開くかに使う。**読むだけ**（フォルダも作らない）。
-/// 封じ込め: canonicalize して lib_root の配下のときだけ（`delete_item` と同じ作法）。
-/// 返すのは canonicalize 前の形（Windows の `\\?\` を付けない）。パスはフロントへ返さない（lib.rs の命令が使うだけ）
-pub fn existing_project_file(lib_root: &str, album: &str, name: &str) -> Option<PathBuf> {
-    let lib = Path::new(lib_root);
-    if lib_root.is_empty() || !lib.is_dir() {
-        return None;
-    }
-    let album_s = validate_album(album).ok()?;
-    let dest = lib.join(&album_s).join(project_file_name(name));
-    if !dest.is_file() {
-        return None;
-    }
-    let lib_c = lib.canonicalize().ok()?;
-    let dest_c = dest.canonicalize().ok()?;
-    if !dest_c.starts_with(&lib_c) {
-        return None;
-    }
-    Some(dest)
 }
 
 /// V200 (A-100): まとめ変換（アルバムの .kwz／.ppm → .memoanima）で 1 件を作った結果。
@@ -2442,6 +2459,8 @@ pub fn save_project_thumb(lib_root: &str, project_path: &str, png: &[u8]) -> Res
 /// - 順序: 索引を先に更新・保存 → 実ファイル削除（削除失敗時は索引をロールバック）。
 ///   逆順だと「ファイルだけ消えて索引に hash が残り、再取り込みも skip される」復旧不能状態になり得る
 /// - サイドカーサムネは canonicalize 済みターゲット起点で導出（ライブラリ外を消さない）
+/// - ★V230 (A-144): アルバムのフォルダ・本体がリンクなら断る（`LINK_REFUSED`）。消すのも付属のファイルを組むのも辿らない置き場から
+///   （封じ込めは canonicalize のまま。リンクを断ったので、辿らない置き場は辿った置き場と同じファイル）
 pub fn delete_item(lib_root: &str, hash: &str, album: &str, name: &str) -> Result<(), String> {
     let _guard = lock_lib();
     let lib = Path::new(lib_root);
@@ -2476,6 +2495,9 @@ pub fn delete_item(lib_root: &str, hash: &str, album: &str, name: &str) -> Resul
         (lib.join(&album_s).join(&name_s), None)
     };
 
+    // ★V230 (A-144): アルバムのフォルダと本体（取り込んだメモは索引の rel_path の途中も）がリンクなら断る。
+    //   消すのは辿らない置き場（`target`）。`tgt_c` は封じ込めと種類の確かめだけに使う
+    refuse_link_below(lib, &target)?;
     // 封じ込めガード: canonicalize して必ず lib_root 配下のファイルのみ削除する
     let tgt_c = target
         .canonicalize()
@@ -2508,7 +2530,7 @@ pub fn delete_item(lib_root: &str, hash: &str, album: &str, name: &str) -> Resul
     save_index(lib, &index)?;
 
     // 2) 実ファイル削除（失敗したら索引をロールバック）
-    if let Err(e) = fs::remove_file(&tgt_c) {
+    if let Err(e) = fs::remove_file(&target) {
         if let Some(item) = removed_item {
             index.items.push(item);
         }
@@ -2525,8 +2547,8 @@ pub fn delete_item(lib_root: &str, hash: &str, album: &str, name: &str) -> Resul
             let _ = fs::remove_file(t);
         }
     } else {
-        // canonical 済みターゲット起点でサイドカーを導出（ライブラリ内が保証される）
-        let mut side = tgt_c.clone().into_os_string();
+        // ★V230 (A-144): 辿らない本体の置き場から導出（リンクの付属のファイルは、リンクそのものだけを消す）
+        let mut side = target.clone().into_os_string();
         side.push(".png");
         let _ = fs::remove_file(PathBuf::from(side));
     }
@@ -2536,10 +2558,10 @@ pub fn delete_item(lib_root: &str, hash: &str, album: &str, name: &str) -> Resul
     //    **本体削除が成功した後**に、サムネと同じ「失敗してもエラーにしない」扱いで行う
     //    （索引ロールバックの順序＝索引先行・本体・ロールバックには触れない）。
     {
-        let mut bak = tgt_c.clone().into_os_string();
+        let mut bak = target.clone().into_os_string();
         bak.push(".bak");
         let _ = fs::remove_file(PathBuf::from(bak));
-        if let (Some(parent), Some(fname)) = (tgt_c.parent(), tgt_c.file_name().and_then(|n| n.to_str())) {
+        if let (Some(parent), Some(fname)) = (target.parent(), target.file_name().and_then(|n| n.to_str())) {
             if let Ok(entries) = fs::read_dir(parent) {
                 for ent in entries.flatten() {
                     let p = ent.path();
@@ -2587,108 +2609,6 @@ pub fn save_thumb(lib_root: &str, hash: &str, png: &[u8]) -> Result<(), String> 
     fs::write(&p, png).map_err(|e| format!("サムネイル保存失敗: {e}"))
 }
 
-#[cfg(test)]
-mod v198_tests {
-    use super::*;
-
-    /// 使い捨ての場所（%TEMP% の下）。ライブラリはその中の `lib`、「ライブラリの外」もこの中に作る＝
-    /// テストが途中で落ちても、消すのはこのフォルダ 1 つで済む（%TEMP% の直下に何も残さない）
-    struct TmpLib {
-        base: PathBuf,
-        lib: PathBuf,
-    }
-    impl TmpLib {
-        fn new(tag: &str) -> Self {
-            let base = std::env::temp_dir().join(format!(
-                "v198-pclib-{tag}-{}-{}",
-                std::process::id(),
-                TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
-            ));
-            let _ = fs::remove_dir_all(&base);
-            let lib = base.join("lib");
-            fs::create_dir_all(&lib).unwrap();
-            TmpLib { base, lib }
-        }
-        fn root(&self) -> &str {
-            self.lib.to_str().unwrap()
-        }
-    }
-    impl Drop for TmpLib {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.base);
-        }
-    }
-
-    /// ★「保存先を開く」が指すファイル＝本物の save_project が書いたファイル（名前の決め方がずれていない）
-    #[test]
-    fn same_path_as_save() {
-        let lib = TmpLib::new("same");
-        let names = [
-            "memo-20261012-1200",
-            "作品 A",
-            "done.memoanima",
-            "Old.animemo",
-            "LOUD.ANIMEMO",
-            "Mixed.MemoAnima",
-            "a:b?c*d",
-            "trailing. ",
-            "dots.v2",
-        ];
-        for (i, name) in names.iter().enumerate() {
-            let album = if i % 2 == 0 { "アルバム" } else { "a<b" };
-            assert!(
-                existing_project_file(lib.root(), album, name).is_none(),
-                "保存する前から在ることになっている: {name}"
-            );
-            let saved = save_project(lib.root(), album, name, b"v198", &[]).unwrap();
-            let found = existing_project_file(lib.root(), album, name)
-                .unwrap_or_else(|| panic!("保存したのに見つからない: {name}"));
-            assert_eq!(found, PathBuf::from(&saved), "保存したパスと違う: {name}");
-        }
-    }
-
-    /// 無いもの・ライブラリの外・フォルダ・空のライブラリは None
-    #[test]
-    fn none_when_missing_or_outside() {
-        let lib = TmpLib::new("none");
-        save_project(lib.root(), "al", "x", b"v198", &[]).unwrap();
-        assert!(existing_project_file(lib.root(), "al", "x").is_some());
-        assert!(existing_project_file(lib.root(), "al", "y").is_none(), "無い作品");
-        assert!(existing_project_file(lib.root(), "other", "x").is_none(), "別のアルバム");
-        assert!(existing_project_file("", "al", "x").is_none(), "ライブラリ未設定");
-        assert!(existing_project_file(lib.root(), ".hidden", "x").is_none(), "隠しフォルダは断る");
-        // `..` やパス区切りで外へ出ようとしても、1 つの名前に潰れる（validate_album / sanitize_component）
-        // ライブラリのすぐ外（base の直下）に同じ名前の作品を置いておく。返したら外へ出られている
-        fs::write(lib.base.join("x.memoanima"), b"outside").unwrap();
-        fs::create_dir_all(lib.base.join("al")).unwrap();
-        fs::write(lib.base.join("al").join("x.memoanima"), b"outside").unwrap();
-        assert!(existing_project_file(lib.root(), "..", "x").is_none(), "`..` で外へ出られる");
-        assert!(existing_project_file(lib.root(), "al", "../x").is_none(), "名前の `..` で外へ出られる");
-        assert!(existing_project_file(lib.root(), "al", r"..\..\x").is_none(), r"名前の `\` で外へ出られる");
-        assert!(existing_project_file(lib.root(), "../al", "x").is_none(), "アルバムの `../` で外へ出られる");
-        // 同じ名前のフォルダはファイルではない
-        fs::create_dir_all(lib.lib.join("al").join("dir.memoanima")).unwrap();
-        assert!(existing_project_file(lib.root(), "al", "dir").is_none(), "フォルダを作品として返す");
-        // 消したら None
-        fs::remove_file(lib.lib.join("al").join("x.memoanima")).unwrap();
-        assert!(existing_project_file(lib.root(), "al", "x").is_none(), "消した作品");
-    }
-
-    /// .kwz の名前を渡しても .kwz は返さない（`.memoanima` だけを探す）
-    #[test]
-    fn never_returns_non_project() {
-        let lib = TmpLib::new("kwz");
-        fs::create_dir_all(lib.lib.join("al")).unwrap();
-        fs::write(lib.lib.join("al").join("note.kwz"), b"kwz").unwrap();
-        assert!(existing_project_file(lib.root(), "al", "note.kwz").is_none());
-        assert!(existing_project_file(lib.root(), "al", "note").is_none());
-    }
-}
-
-/// V199 (A-106): 保存の書き先の名前の決め方の表。フロントの `src/editor/workTitle.ts` の `savedFileBase`
-/// （保存するときに作品の中の題名 `meta.title` をファイルの名前にそろえる）は、この決め方を写している。
-/// ★`scripts/v199_smoke.ts` [T-1] がこの表を**そのまま読んで** `savedFileBase` にも当てる＝両側がずれたら赤。
-/// 表に足すときは `("入れた名前", "書かれるファイル名")` の形で（Rust の文字列のエスケープは \ \" \t だけ使う）
 #[cfg(test)]
 const V199_NAME_CASES: &[(&str, &str)] = &[
     ("あと3日", "あと3日.memoanima"),
@@ -3650,5 +3570,301 @@ mod v216b_tests {
         } else {
             panic!("linkin がリンクではない");
         }
+    }
+}
+
+#[cfg(test)]
+mod v230_tests {
+    //! ★V230 (A-144・要件 §2-1・L-1〜L-7): 消す・控えから戻す・移すが、リンク（ファイルのリンク・ジャンクション）の先を消さない・動かさない。
+    //! リンクはテストの中で作れない（Windows・V224 と同じ）ので、`scripts/v230_smoke.ts` の FILELINK_PS1（PowerShell）が外で作って `V230_LINKS` で渡す。
+    //! 無ければ「V230-LINKS not-checked」と出して戻る（v230_smoke [R] が渡して回し、not-checked が出たら赤）。
+    use super::*;
+
+    struct TmpLib {
+        base: PathBuf,
+        lib: PathBuf,
+        /// v230_smoke の FILELINK_PS1 が作った置き場（消すのは v230_smoke）
+        external: bool,
+    }
+    impl TmpLib {
+        fn new(tag: &str) -> Self {
+            let base = std::env::temp_dir().join(format!(
+                "v230-pclib-{tag}-{}-{}",
+                std::process::id(),
+                TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ));
+            let _ = fs::remove_dir_all(&base);
+            let lib = base.join("lib");
+            fs::create_dir_all(&lib).unwrap();
+            TmpLib { base, lib, external: false }
+        }
+        /// v230_smoke の FILELINK_PS1 が作った置き場（`V230_LINKS/<tag>/lib`）。無ければ None
+        fn linked(tag: &str) -> Option<Self> {
+            let Ok(b) = std::env::var("V230_LINKS") else {
+                println!("V230-LINKS not-checked {tag}");
+                return None;
+            };
+            let base = PathBuf::from(b).join(tag);
+            let lib = base.join("lib");
+            assert!(lib.is_dir(), "V230_LINKS に {tag} が無い");
+            Some(TmpLib { base, lib, external: true })
+        }
+        fn root(&self) -> &str {
+            self.lib.to_str().unwrap()
+        }
+        fn album(&self, a: &str) -> PathBuf {
+            let d = self.lib.join(a);
+            fs::create_dir_all(&d).unwrap();
+            d
+        }
+    }
+    impl Drop for TmpLib {
+        fn drop(&mut self) {
+            if self.external {
+                return;
+            }
+            // フォルダのリンクは先に外す（remove_dir_all が先を辿らないように）
+            if let Ok(rd) = fs::read_dir(&self.lib) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                        let _ = fs::remove_dir(&p).or_else(|_| fs::remove_file(&p));
+                    }
+                }
+            }
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    /// 外で作ったリンクが在る（リンクでなければ赤）
+    fn expect_link(link: &Path) {
+        assert!(
+            fs::symlink_metadata(link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            "リンクではない: {}",
+            link.display()
+        );
+    }
+
+    fn work(dir: &Path, name: &str, body: &[u8]) {
+        fs::write(dir.join(name), body).unwrap();
+        fs::write(dir.join(format!("{name}.png")), b"PNG").unwrap();
+        fs::write(dir.join(format!("{name}.bak")), b"BAK").unwrap();
+    }
+
+    fn files(d: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut v: Vec<(String, Vec<u8>)> = fs::read_dir(d)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| (e.file_name().to_string_lossy().to_string(), fs::read(e.path()).unwrap_or_default()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    fn note(h: &str, al: &str, nm: &str) -> LibraryItem {
+        LibraryItem {
+            hash: h.into(),
+            album: al.into(),
+            name: nm.into(),
+            ext: "kwz".into(),
+            size: 6,
+            rel_path: format!("{al}/{nm}"),
+            imported_at: 0,
+            order: 0,
+        }
+    }
+
+    /// ★L-1: B の Y が A の X を指すファイルのリンク → Y を消すのを断る。A の X と .png・.bak が残る
+    #[test]
+    fn l1_delete_file_link_refused() {
+        let Some(t) = TmpLib::linked("l1") else { return };
+        let a = t.album("A");
+        let b = t.album("B");
+        work(&a, "X.memoanima", b"XBODY");
+        expect_link(&b.join("Y.memoanima"));
+        let before = files(&a);
+        let r = delete_item(t.root(), "", "B", "Y.memoanima");
+        println!("V230-L1 r={r:?}");
+        assert_eq!(files(&a), before, "A の X が変わった");
+        assert_eq!(r, Err(LINK_REFUSED.to_string()));
+        assert!(fs::symlink_metadata(b.join("Y.memoanima")).is_ok(), "リンクも消していない");
+    }
+
+    /// ★L-2: B の Y.bak が A の X を指すリンク（B に Y は無い）→ 戻すのを断る。A の X は動かない
+    #[test]
+    fn l2_recover_bak_link_refused() {
+        let Some(t) = TmpLib::linked("l2") else { return };
+        let a = t.album("A");
+        let b = t.album("B");
+        work(&a, "X.memoanima", b"XBODY");
+        expect_link(&b.join("Y.memoanima.bak"));
+        let before = files(&a);
+        let r = recover_project(t.root(), "B/Y.memoanima");
+        println!("V230-L2 r={r:?}");
+        assert_eq!(files(&a), before);
+        assert_eq!(r, Err(LINK_REFUSED.to_string()));
+        assert!(fs::symlink_metadata(b.join("Y.memoanima")).is_err());
+    }
+
+    /// ★L-2b: 戻す先の本体の名前がリンク（壊れたリンク）でも断る
+    #[test]
+    fn l2b_recover_body_link_refused() {
+        let Some(t) = TmpLib::linked("l2b") else { return };
+        t.album("A");
+        let b = t.album("B");
+        fs::write(b.join("Y.memoanima.bak"), b"BAK").unwrap();
+        expect_link(&b.join("Y.memoanima"));
+        let r = recover_project(t.root(), "B/Y.memoanima");
+        println!("V230-L2b r={r:?}");
+        assert_eq!(fs::read(b.join("Y.memoanima.bak")).unwrap(), b"BAK");
+        assert!(fs::symlink_metadata(b.join("Y.memoanima")).unwrap().file_type().is_symlink());
+        assert_eq!(r, Err(LINK_REFUSED.to_string()));
+    }
+
+    /// ★L-3: L-1 の形で Y を C へ移す → 断る。A の X は動かない
+    #[test]
+    fn l3_move_file_link_refused() {
+        let Some(t) = TmpLib::linked("l3") else { return };
+        let a = t.album("A");
+        let b = t.album("B");
+        let c = t.album("C");
+        work(&a, "X.memoanima", b"XBODY");
+        expect_link(&b.join("Y.memoanima"));
+        let before = files(&a);
+        let r = move_project(t.root(), "B", "Y.memoanima", "C");
+        println!("V230-L3 r={r:?}");
+        assert_eq!(files(&a), before);
+        assert!(files(&c).is_empty());
+        assert_eq!(r, Err(LINK_REFUSED.to_string()));
+    }
+
+    /// ★L-4: アルバム B が A を指すジャンクション → B の中の作品を消す・移す・戻すはどれも断る。A は変わらない
+    #[test]
+    fn l4_junction_album_refused() {
+        let Some(t) = TmpLib::linked("l4") else { return };
+        let a = t.album("A");
+        t.album("C");
+        work(&a, "X.memoanima", b"XBODY");
+        fs::write(a.join("Z.memoanima.bak"), b"ZBAK").unwrap();
+        expect_link(&t.lib.join("B"));
+        let before = files(&a);
+        let rd = delete_item(t.root(), "", "B", "X.memoanima");
+        let rm = move_project(t.root(), "B", "X.memoanima", "C");
+        let rr = recover_project(t.root(), "B/Z.memoanima");
+        println!("V230-L4 del={rd:?} move={rm:?} rec={rr:?}");
+        assert_eq!(files(&a), before);
+        assert!(files(&t.lib.join("C")).is_empty());
+        assert_eq!(rd, Err(LINK_REFUSED.to_string()));
+        assert_eq!(rm, Err(LINK_REFUSED.to_string()));
+        assert_eq!(rr, Err(LINK_REFUSED.to_string()));
+    }
+
+    /// ★L-4b: 行き先のアルバムがリンクなら移さない
+    #[test]
+    fn l4b_move_into_junction_refused() {
+        let Some(t) = TmpLib::linked("l4b") else { return };
+        let a = t.album("A");
+        let d = t.album("D");
+        work(&a, "X.memoanima", b"XBODY");
+        expect_link(&t.lib.join("L"));
+        let r = move_project(t.root(), "A", "X.memoanima", "L");
+        println!("V230-L4b r={r:?}");
+        assert!(a.join("X.memoanima").is_file());
+        assert!(files(&d).is_empty());
+        assert_eq!(r, Err(LINK_REFUSED.to_string()));
+    }
+
+    /// ★L-5: 普通の作品の .png と .bak が別の作品を指すリンク → 消すと本体は消え、リンクそのものだけが消える。移すとリンクそのものが移る
+    #[test]
+    fn l5_sidecar_links_only_link_itself() {
+        let Some(t) = TmpLib::linked("l5") else { return };
+        let a = t.album("A");
+        let c = t.album("C");
+        work(&a, "X.memoanima", b"XBODY");
+        fs::write(a.join("W.memoanima"), b"W").unwrap();
+        expect_link(&a.join("W.memoanima.png"));
+        expect_link(&a.join("W.memoanima.bak"));
+        assert_eq!(delete_item(t.root(), "", "A", "W.memoanima"), Ok(()));
+        assert!(fs::symlink_metadata(a.join("W.memoanima")).is_err());
+        assert!(fs::symlink_metadata(a.join("W.memoanima.png")).is_err());
+        assert!(fs::symlink_metadata(a.join("W.memoanima.bak")).is_err());
+        assert_eq!(fs::read(a.join("X.memoanima")).unwrap(), b"XBODY");
+        assert_eq!(fs::read(a.join("X.memoanima.bak")).unwrap(), b"BAK");
+        // 移す
+        fs::write(a.join("V.memoanima"), b"V").unwrap();
+        expect_link(&a.join("V.memoanima.png"));
+        let r = move_project(t.root(), "A", "V.memoanima", "C");
+        println!("V230-L5 move={r:?}");
+        assert!(r.is_ok());
+        assert!(fs::symlink_metadata(c.join("V.memoanima.png")).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(c.join("V.memoanima")).unwrap(), b"V");
+        assert_eq!(fs::read(a.join("X.memoanima")).unwrap(), b"XBODY");
+        assert!(a.join("X.memoanima.png").is_file());
+    }
+
+    /// ★L-6: 取り込んだメモのファイルが別のメモを指すリンク → 消すのを断る。指していたメモは残る・索引も変わらない。
+    /// アルバムがジャンクションのメモも断る
+    #[test]
+    fn l6_note_link_refused() {
+        let Some(t) = TmpLib::linked("l6") else { return };
+        let a = t.album("A");
+        let b = t.album("B");
+        fs::write(a.join("m.kwz"), b"NOTE-M").unwrap();
+        expect_link(&b.join("n.kwz"));
+        let h_m = "a".repeat(64);
+        let h_n = "b".repeat(64);
+        let mut idx = load_index(&t.lib).unwrap();
+        idx.items.push(note(&h_m, "A", "m.kwz"));
+        idx.items.push(note(&h_n, "B", "n.kwz"));
+        save_index(&t.lib, &idx).unwrap();
+        let r = delete_item(t.root(), &h_n, "", "");
+        println!("V230-L6 r={r:?}");
+        assert_eq!(fs::read(a.join("m.kwz")).unwrap(), b"NOTE-M");
+        assert_eq!(load_index(&t.lib).unwrap().items.len(), 2);
+        assert_eq!(r, Err(LINK_REFUSED.to_string()));
+        expect_link(&t.lib.join("J"));
+        let h_j = "c".repeat(64);
+        let mut idx = load_index(&t.lib).unwrap();
+        idx.items.push(note(&h_j, "J", "m.kwz"));
+        save_index(&t.lib, &idx).unwrap();
+        let rj = delete_item(t.root(), &h_j, "", "");
+        println!("V230-L6j r={rj:?}");
+        assert_eq!(fs::read(a.join("m.kwz")).unwrap(), b"NOTE-M");
+        assert_eq!(rj, Err(LINK_REFUSED.to_string()));
+    }
+
+    /// ★V230 (A-150): existing_project_file と v198_tests を消したので、保存の名前＝project_file_name の見張りをここへ写した
+    /// （save_target_status・保存の名前の組み立てが同じ決め方であること）
+    #[test]
+    fn save_name_is_project_file_name() {
+        let t = TmpLib::new("name");
+        let names = ["memo-20261012-1200", "作品 A", "done.memoanima", "Old.animemo", "LOUD.ANIMEMO", "Mixed.MemoAnima", "a:b?c*d", "trailing. ", "dots.v2"];
+        for (i, name) in names.iter().enumerate() {
+            let album = if i % 2 == 0 { "アルバム" } else { "a<b" };
+            let saved = save_project(t.root(), album, name, b"v230", &[]).unwrap();
+            let want = t.lib.join(validate_album(album).unwrap()).join(project_file_name(name));
+            assert_eq!(PathBuf::from(&saved), want, "保存したパスと違う: {name}");
+        }
+    }
+
+    /// ★L-7: リンクの無いライブラリでは、消す・戻す・移すの結果が今と同じ
+    #[test]
+    fn l7_plain_library_unchanged() {
+        let t = TmpLib::new("l7");
+        let a = t.album("A");
+        let c = t.album("C");
+        work(&a, "X.memoanima", b"X");
+        work(&a, "M.memoanima", b"M");
+        fs::write(a.join("R.memoanima.bak"), b"R").unwrap();
+        assert_eq!(delete_item(t.root(), "", "A", "X.memoanima"), Ok(()));
+        assert!(!a.join("X.memoanima").exists() && !a.join("X.memoanima.png").exists() && !a.join("X.memoanima.bak").exists());
+        let moved = move_project(t.root(), "A", "M.memoanima", "C").unwrap();
+        assert_eq!(moved, t.lib.join("C").join("M.memoanima").to_string_lossy());
+        assert!(c.join("M.memoanima.png").is_file() && c.join("M.memoanima.bak").is_file());
+        let rec = recover_project(t.root(), "A/R.memoanima").unwrap();
+        assert!(rec.ends_with("R.memoanima"));
+        assert_eq!(fs::read(a.join("R.memoanima")).unwrap(), b"R");
     }
 }

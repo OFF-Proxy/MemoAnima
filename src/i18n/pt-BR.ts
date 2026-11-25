@@ -255,6 +255,8 @@ const ptBR: Record<keyof typeof ja, string> = {
   "keys.cmd.toolPen.label": "Caneta",
   "keys.cmd.toolBrush.label": "Pincel",
   "keys.cmd.toolEraser.label": "Borracha",
+  "keys.cmd.toolEraserHold.label": "Borracha (enquanto segura)",
+  "keys.cmd.toolEraserHold.hint": "Defina o botão da caneta da mesa para esta tecla e ele apaga só enquanto você segura",
   "keys.cmd.toolFill.label": "Preencher (balde)",
   "keys.cmd.toolShape.label": "Forma",
   "keys.cmd.toolText.label": "Texto",

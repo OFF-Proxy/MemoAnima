@@ -274,7 +274,42 @@ fn export_write(path: String, data: Vec<u8>, first: bool) -> Result<(), String> 
     let mut f = opts
         .open(&path)
         .map_err(|e| format!("書き出し先を開けません: {e}"))?;
-    f.write_all(&data).map_err(|e| format!("書き出し失敗: {e}"))
+    f.write_all(&data).map_err(|e| format!("書き出し失敗: {e}"))?;
+    // ★V230 (A-150): `first: true` で作って書けた置き場だけを覚える（書き出しのあとの「保存先を開く」が開いてよい所）
+    if first {
+        exported::remember(&mut exported::list(), &path);
+    }
+    Ok(())
+}
+
+/// ★V230 (A-150): 書き出しのあとの「保存先を開く」が開いてよい置き場。アプリを起動してから `export_write` が `first: true` で作り、
+/// 書けた置き場だけ（**メモリの中だけ**・設定に書かない・新しい方から 20 件まで）。それ以外は断る＝画面から好きな置き場を開けない
+mod exported {
+    use std::collections::VecDeque;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    pub const MAX: usize = 20;
+
+    pub fn list() -> MutexGuard<'static, VecDeque<String>> {
+        static L: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+        L.get_or_init(|| Mutex::new(VecDeque::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 覚える（同じ置き場はいちばん新しくする・20 件を超えたら古い方から忘れる）
+    pub fn remember(l: &mut VecDeque<String>, path: &str) {
+        l.retain(|p| p != path);
+        l.push_back(path.to_string());
+        while l.len() > MAX {
+            l.pop_front();
+        }
+    }
+
+    /// 開いてよいか（書き出しで渡された字とそのまま同じ置き場だけ）
+    pub fn allowed(l: &VecDeque<String>, path: &str) -> bool {
+        l.iter().any(|p| p == path)
+    }
 }
 
 // ---- F-3: オートセーブ（アプリ設定領域 autosave/。クラッシュ復元用） ----
@@ -679,29 +714,20 @@ fn open_log_folder(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("フォルダを開けません: {e}"))
 }
 
-/// V198 (A-104 E-2): 作品の `.memoanima` がライブラリの中に在るか（書き出しのあとの「保存先を開く」を出すか）。
-/// 場所は**保存と同じ決め方**で組む（`pclib::existing_project_file`）。読むだけ・パスは返さない
+/// ★V230 (A-150): 書き出したファイル（動画・画像）を OS のファイラー（エクスプローラー・Finder）で**選んだ状態で**開く。
+/// 開いてよいのは、この起動のあいだに `export_write` が `first: true` で作って書けた置き場だけ（`exported`）。それ以外・無いファイルは断る。
+/// **断りの文にパスを入れない**（W-10。画面はログに 1 行だけ書く）。async＝メインスレッドで待たない。通信はしない（OS にパスを渡すだけ）
 #[tauri::command]
-fn project_file_exists(lib_root: String, album: String, name: String) -> bool {
-    pclib::existing_project_file(&lib_root, &album, &name).is_some()
-}
-
-/// V198 (A-104 E-2): 作品の `.memoanima` を OS のファイラー（エクスプローラー・Finder）で**選んだ状態で**開く。
-/// **パスをフロントに返さない・断りの文にも入れない**（W-10。`open_log_folder` と同じ考え方）。
-/// plugin-opener の断りの文はパスを含むものがある（NoParent 等）ので、種類の名前だけにして返す。
-/// async＝メインスレッドで待たない（plugin-opener 自身の命令も async）。通信はしない（OS にパスを渡すだけ）
-#[tauri::command]
-async fn reveal_project_file(
-    app: tauri::AppHandle,
-    lib_root: String,
-    album: String,
-    name: String,
-) -> Result<(), String> {
+async fn reveal_exported_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let p = pclib::existing_project_file(&lib_root, &album, &name)
-        .ok_or_else(|| "not found".to_string())?;
+    if !exported::allowed(&exported::list(), &path) {
+        return Err("not exported".to_string());
+    }
+    if !std::path::Path::new(&path).is_file() {
+        return Err("not found".to_string());
+    }
     app.opener()
-        .reveal_item_in_dir(p)
+        .reveal_item_in_dir(std::path::PathBuf::from(&path))
         .map_err(|e| format!("reveal failed ({})", opener_error_kind(&e)))
 }
 
@@ -830,12 +856,251 @@ fn migrate_old_config_dir(new_dir: &Path) {
     }
 }
 
+/// ★V230 (A-148): 作品のファイルから開く（ダブルクリック・「プログラムから開く」・Finder）。
+/// 受けたパスはここで覚え、画面の準備ができたら画面が `take_opened_files` で受け取る（受け取ったら空にする）。
+/// 開いている間に届いたものは `opened-files` の知らせを出す（中身は渡さない＝画面が受け取りに来る）。
+/// **記録は数と捨てた理由の種類だけ**（名前とパスは書かない・W-10）
+mod opened {
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// 引数を見た結果（受けたパス・捨てた数と理由）
+    #[derive(Debug, Default, PartialEq)]
+    pub struct Accepted {
+        pub paths: Vec<String>,
+        /// `-` で始まるもの
+        pub flag: usize,
+        /// 無いパス
+        pub missing: usize,
+        /// フォルダ
+        pub folder: usize,
+        /// 更新のあとの開き直しで来た（起動のときの引数と同じ）
+        pub update: usize,
+    }
+
+    /// 引数（実行ファイルの名前は除いたもの）のうち、在るファイルだけを受ける。相対パスは `cwd` で解く
+    pub fn accept_args<S: AsRef<std::ffi::OsStr>>(args: &[S], cwd: &Path) -> Accepted {
+        let mut a = Accepted::default();
+        for raw in args {
+            let raw = raw.as_ref();
+            let s = raw.to_string_lossy();
+            if s.is_empty() || s.starts_with('-') {
+                a.flag += 1;
+                continue;
+            }
+            let p = Path::new(raw);
+            let p = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+            if p.is_dir() {
+                a.folder += 1;
+            } else if p.is_file() {
+                let v = p.to_string_lossy().to_string();
+                if !a.paths.contains(&v) {
+                    a.paths.push(v);
+                }
+            } else {
+                a.missing += 1;
+            }
+        }
+        a
+    }
+
+    /// Mac の Finder から（`RunEvent::Opened` の file:// の URL）。ファイルでないもの・無いものは捨てる
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn accept_paths(paths: Vec<std::path::PathBuf>) -> Accepted {
+        let mut a = Accepted::default();
+        for p in paths {
+            if p.is_dir() {
+                a.folder += 1;
+            } else if p.is_file() {
+                let v = p.to_string_lossy().to_string();
+                if !a.paths.contains(&v) {
+                    a.paths.push(v);
+                }
+            } else {
+                a.missing += 1;
+            }
+        }
+        a
+    }
+
+    /// 記録の 1 行（数と種類だけ）
+    pub fn log_line(source: &str, a: &Accepted) -> String {
+        format!(
+            "[open] source={source} accepted={} dropped flag={} missing={} folder={} update={}",
+            a.paths.len(),
+            a.flag,
+            a.missing,
+            a.folder,
+            a.update
+        )
+    }
+
+    fn pending() -> MutexGuard<'static, Vec<String>> {
+        static P: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+        P.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// 起動のときに受けたもの（更新のあとの開き直しの印に使う）
+    pub fn startup() -> MutexGuard<'static, Vec<String>> {
+        static P: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+        P.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn push(paths: &[String]) {
+        let mut p = pending();
+        for v in paths {
+            if !p.contains(v) {
+                p.push(v.clone());
+            }
+        }
+    }
+    pub fn take() -> Vec<String> {
+        std::mem::take(&mut *pending())
+    }
+
+    /// 更新のあとの開き直しの印に書く値（受けたパスの並びの SHA-256。パスそのものは書かない）
+    pub fn marker_of(paths: &[String]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for p in paths {
+            h.update(p.to_lowercase().as_bytes());
+            h.update([0u8]);
+        }
+        hex::encode(h.finalize())
+    }
+    /// 印の中身: `<秒>\n<SHA-256>`。印は 30 分だけ効く（インストーラーが開き直すまで）
+    pub const MARKER_TTL_SECS: u64 = 30 * 60;
+    pub fn marker_text(now: u64, paths: &[String]) -> String {
+        format!("{now}\n{}", marker_of(paths))
+    }
+    /// 印と同じ並び・期限の内なら true（＝更新のあとの開き直しで来た）
+    pub fn marker_matches(text: &str, now: u64, paths: &[String]) -> bool {
+        let mut it = text.lines();
+        let (Some(t), Some(h)) = (it.next(), it.next()) else { return false };
+        let Ok(t) = t.trim().parse::<u64>() else { return false };
+        now >= t && now - t <= MARKER_TTL_SECS && !paths.is_empty() && h.trim() == marker_of(paths)
+    }
+}
+
+/// ★V230 (A-148): 更新のあとの開き直しの印の置き場（設定の場所・名前は固定）
+fn update_marker_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("update-relaunch.txt"))
+}
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// ★V230 (A-148): 受けたファイルを覚えて、画面へ知らせる（記録は数と種類だけ）
+fn deliver_opened(app: &tauri::AppHandle, source: &str, a: &opened::Accepted, notify: bool) {
+    if let Ok(dir) = log_dir(app) {
+        let _ = append_log_line(&dir, &opened::log_line(source, a));
+    }
+    if a.paths.is_empty() {
+        return;
+    }
+    opened::push(&a.paths);
+    if notify {
+        let _ = app.emit("opened-files", ());
+    }
+}
+
+/// ★V230 (A-148): 受けたファイルがライブラリの中の作品（ライブラリの直下の、リンクでないアルバムのフォルダの中の .memoanima／.animemo・
+/// 本体もリンクでない）なら、そのアルバムと名前。そうでなければ None（＝ドロップと同じ箱）。読むだけ
+#[tauri::command]
+fn opened_library_work(lib_root: String, path: String) -> Option<(String, String)> {
+    let p = std::path::Path::new(&path);
+    let name = p.file_name()?.to_str()?.to_string();
+    let lower = name.to_ascii_lowercase();
+    if !(lower.ends_with(".memoanima") || lower.ends_with(".animemo")) {
+        return None;
+    }
+    let dir = p.parent()?;
+    let album = dir.file_name()?.to_str()?.to_string();
+    let link = |q: &std::path::Path| fs::symlink_metadata(q).map(|m| m.file_type().is_symlink()).unwrap_or(true);
+    if lib_root.is_empty() || link(dir) || link(p) || !p.is_file() {
+        return None;
+    }
+    let lib_c = std::path::Path::new(&lib_root).canonicalize().ok()?;
+    if dir.parent()?.canonicalize().ok()? != lib_c {
+        return None;
+    }
+    if album.starts_with('.') {
+        return None; // サムネの置き場など（アルバムではない）
+    }
+    Some((album, name))
+}
+
+/// ★V230 (A-148): 画面が受け取る（受け取ったら空にする）。画面は起動の手続きのあとと、`opened-files` の知らせのときに呼ぶ
+#[tauri::command]
+fn take_opened_files() -> Vec<String> {
+    opened::take()
+}
+
+/// ★V230 (A-148): Windows の更新の前に画面が呼ぶ。インストーラーは起動のときの引数のままアプリを開き直すので、
+/// 起動のときに受けたファイルがあれば印を書く（次の起動で同じ並びが来たら開かない）。無ければ前の印を消す
+#[tauri::command]
+fn prepare_update_relaunch(app: tauri::AppHandle) {
+    let Some(p) = update_marker_path(&app) else { return };
+    let st = opened::startup().clone();
+    if st.is_empty() {
+        let _ = fs::remove_file(&p);
+    } else {
+        let _ = fs::write(&p, opened::marker_text(now_secs(), &st));
+    }
+}
+
+/// ★V230 (A-148): 更新に失敗したら印を消す（次の普通の起動で開けなくならないように）
+#[tauri::command]
+fn cancel_update_relaunch(app: tauri::AppHandle) {
+    if let Some(p) = update_marker_path(&app) {
+        let _ = fs::remove_file(&p);
+    }
+}
+
+/// ★V230 (A-148): 起動のときの引数を受ける（更新のあとの開き直しなら捨てる）。知らせは出さない（画面が起動の手続きのあとで受け取りに来る）
+fn accept_startup_args(app: &tauri::AppHandle) {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut a = opened::accept_args(&args, &cwd);
+    // ★V230 (独立レビューの指摘 3): 印に使うのは、開き直しで捨てる前の並び（このプロセスでもう一度更新したときも、同じファイルを開き直さない）
+    *opened::startup() = a.paths.clone();
+    if let Some(p) = update_marker_path(app) {
+        if let Ok(text) = fs::read_to_string(&p) {
+            let _ = fs::remove_file(&p);
+            if opened::marker_matches(&text, now_secs(), &a.paths) {
+                a.update = a.paths.len();
+                a.paths.clear();
+            }
+        }
+    }
+    if !args.is_empty() {
+        deliver_opened(app, "start", &a, false);
+    }
+}
+
 #[cfg(desktop)]
 pub fn run() {
     // V193 (A-95): 起動時刻を覚えるだけ（Discord の「経過時間」の起点。通信はしない）
     #[cfg(desktop)]
     discord::note_start();
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // ★V230 (A-148): アプリを 1 つにする（Windows だけ）。**いちばん先に**入れる＝2 つ目の起動はここで 1 つ目へ引数を渡して終わる
+    //  （下の setup〔設定のフォルダの移し・ログの書き先〕にもウィンドウにも届かない＝設定・オートセーブ・ログに書かない）
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        let args: Vec<String> = argv.into_iter().skip(1).collect();
+        let a = opened::accept_args(&args, std::path::Path::new(&cwd));
+        if !args.is_empty() {
+            deliver_opened(app, "second", &a, true);
+        }
+    }));
+    let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -858,6 +1123,8 @@ pub fn run() {
                     let _ = append_log_line(&logs, line);
                 });
             }
+            // ★V230 (A-148): 起動のときの引数（作品のファイル）を覚える。画面が起動の手続きのあとで受け取る
+            accept_startup_args(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -876,8 +1143,11 @@ pub fn run() {
             fix_renamed_projects,
             probe_project_file,
             open_log_folder,
-            project_file_exists,
-            reveal_project_file,
+            reveal_exported_file,
+            take_opened_files,
+            opened_library_work,
+            prepare_update_relaunch,
+            cancel_update_relaunch,
             list_albums,
             create_album,
             rename_album,
@@ -920,9 +1190,115 @@ pub fn run() {
         if let tauri::RunEvent::Exit = event {
             discord::shutdown();
         }
+        // ★V230 (A-148): Mac の Finder から開いた（起動のときと、開いている間）。file:// の URL だけを受ける
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Opened { urls } = &event {
+            let paths: Vec<std::path::PathBuf> = urls.iter().filter_map(|u| u.to_file_path().ok()).collect();
+            let a = opened::accept_paths(paths);
+            deliver_opened(_app, "finder", &a, true);
+        }
         #[cfg(not(desktop))]
         let _ = event;
     });
+}
+
+#[cfg(test)]
+mod v230_tests {
+    use super::exported;
+    use super::opened;
+    use std::collections::VecDeque;
+
+    /// ★O-7: `-` で始まるもの・フォルダ・無いパスは捨てる。相対パスは作業フォルダで解く・同じものは 1 回
+    #[test]
+    fn accept_args_filters() {
+        let dir = std::env::temp_dir().join(format!("v230-args-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.memoanima"), b"A").unwrap();
+        std::fs::write(dir.join("b.kwz"), b"B").unwrap();
+        let abs_a = dir.join("a.memoanima").to_string_lossy().to_string();
+        let args = vec![
+            "--flag".to_string(),
+            "-psn_0_123".to_string(),
+            abs_a.clone(),
+            "b.kwz".to_string(),
+            "sub".to_string(),
+            "nothing.memoanima".to_string(),
+            abs_a.clone(),
+            "".to_string(),
+        ];
+        let a = opened::accept_args(&args, &dir);
+        assert_eq!(a.paths, vec![abs_a.clone(), dir.join("b.kwz").to_string_lossy().to_string()]);
+        assert_eq!((a.flag, a.missing, a.folder, a.update), (3, 1, 1, 0));
+        let line = opened::log_line("start", &a);
+        assert!(!line.contains("memoanima\\") && !line.contains("a.memoanima") && !line.contains("b.kwz"), "記録に名前: {line}");
+        assert_eq!(line, "[open] source=start accepted=2 dropped flag=3 missing=1 folder=1 update=0");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★更新のあとの開き直し: 印と同じ並び・期限の内だけ「開き直し」。並びが違う・期限切れ・空は違う
+    #[test]
+    fn update_marker() {
+        let p = vec!["C:\\x\\A.memoanima".to_string()];
+        let t = opened::marker_text(1000, &p);
+        assert!(!t.contains("A.memoanima"), "印にパスを書いた");
+        assert!(opened::marker_matches(&t, 1000, &p));
+        assert!(opened::marker_matches(&t, 1000 + opened::MARKER_TTL_SECS, &p));
+        assert!(!opened::marker_matches(&t, 1001 + opened::MARKER_TTL_SECS, &p), "期限切れ");
+        assert!(opened::marker_matches(&t, 1010, &["c:\\X\\a.memoanima".to_string()]), "大文字小文字の違いは同じ");
+        assert!(!opened::marker_matches(&t, 1010, &["C:\\x\\B.memoanima".to_string()]), "別のファイル");
+        assert!(!opened::marker_matches(&t, 1010, &[]), "空");
+        assert!(!opened::marker_matches("garbage", 1010, &p));
+        assert!(!opened::marker_matches(&t, 999, &p), "未来の印");
+    }
+
+    /// ★受けたものは take で 1 回だけ（2 回乗せない）
+    #[test]
+    fn pending_take_once() {
+        opened::push(&["x1".to_string(), "x2".to_string()]);
+        opened::push(&["x2".to_string()]);
+        let got = opened::take();
+        assert!(got.contains(&"x1".to_string()) && got.iter().filter(|v| *v == "x2").count() == 1);
+        assert!(opened::take().is_empty());
+    }
+
+    /// ★E-4: 開いてよいのは覚えた置き場だけ。21 件書いたら 1 件目は断る・同じ置き場はいちばん新しくなる
+    #[test]
+    fn exported_list_is_bounded() {
+        let mut l = VecDeque::new();
+        assert!(!exported::allowed(&l, "C:/out/a.mp4"), "何も書いていないのに開ける");
+        for i in 1..=21 {
+            exported::remember(&mut l, &format!("C:/out/{i}.mp4"));
+        }
+        assert_eq!(l.len(), exported::MAX);
+        assert!(!exported::allowed(&l, "C:/out/1.mp4"), "21 件書いたあとの 1 件目が開ける");
+        assert!(exported::allowed(&l, "C:/out/2.mp4") && exported::allowed(&l, "C:/out/21.mp4"));
+        exported::remember(&mut l, "C:/out/2.mp4");
+        exported::remember(&mut l, "C:/out/22.mp4");
+        assert!(exported::allowed(&l, "C:/out/2.mp4"), "書き直した置き場がいちばん新しくならない");
+        assert!(!exported::allowed(&l, "C:/out/3.mp4"));
+        assert!(!exported::allowed(&l, "C:/out/2.mp4 "), "字が違うのに開ける");
+    }
+
+    /// ★E-4: export_write が first で作って書けた置き場を覚える・書けなかった置き場は覚えない・続きの塊（first: false）では覚えない
+    #[test]
+    fn export_write_remembers_only_first_success() {
+        let dir = std::env::temp_dir().join(format!("v230-exp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = dir.join("a.gif").to_string_lossy().to_string();
+        let tail = dir.join("b.gif").to_string_lossy().to_string();
+        let bad = dir.join("no").join("c.gif").to_string_lossy().to_string();
+        super::export_write(ok.clone(), vec![1, 2], true).unwrap();
+        super::export_write(tail.clone(), vec![3], false).unwrap();
+        assert!(super::export_write(bad.clone(), vec![4], true).is_err());
+        let l = exported::list();
+        assert!(exported::allowed(&l, &ok));
+        assert!(!exported::allowed(&l, &tail), "続きの塊で覚えた");
+        assert!(!exported::allowed(&l, &bad), "書けなかった置き場を覚えた");
+        drop(l);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]

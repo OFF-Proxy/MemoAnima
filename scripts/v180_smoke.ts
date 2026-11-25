@@ -42,6 +42,7 @@
 //   そのうえで [S-2] の表（ROWS）に行を足す（呼ぶ関数の名前を `site` に書く）。
 
 import crypto from "node:crypto";
+import { V230_PATCHED, V230_SRC_FILES, undoV230 } from "./v230_named.ts"; // ★V230（v2.0.1 の直し）: 写しは V230 の名指しの差分を外してから
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -176,6 +177,13 @@ function copySrc(dest: string): void {
     recursive: true,
     filter: (s) => fs.statSync(s).isDirectory() || s.endsWith(".ts"),
   });
+  // ★V230（v2.0.1 の直し・A-146 でコマの絵の描き直しが変わる＝固定値の筋書きの「描いたサムネ」が変わる）: 写しは V230 の名指しの差分を外した src
+  for (const f of V230_SRC_FILES) {
+    const p = path.join(dest, f);
+    if (!fs.existsSync(p)) continue;
+    if (!V230_PATCHED.includes(f)) fs.rmSync(p);
+    else fs.writeFileSync(p, undoV230(f, fs.readFileSync(p, "utf8")) ?? "\u0000V230 の差分を外せない");
+  }
 }
 interface Edit {
   file: string;

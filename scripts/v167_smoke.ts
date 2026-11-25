@@ -20,6 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { readEditorSource } from "./editorSource";
+import { V230_COMMANDS } from "./v230_named.ts"; // ★V230 (A-145): tool.eraserHold は道具の巡回に入れない（要件 §2-2 の 1）＝名指しで外す
 import {
   COMMANDS,
   BUILTIN_PRESETS,
@@ -127,7 +128,7 @@ function presetWith(bindings: Record<string, KeyBinding>): Preset {
 }
 
 // ================= 3. ★道具どうしの同キー巡回は壊れていない（基準4） =================
-const TOOLS = COMMANDS.filter((c) => c.id.startsWith("tool.")).map((c) => c.id as CommandId);
+const TOOLS = COMMANDS.filter((c) => c.id.startsWith("tool.")).map((c) => c.id as CommandId).filter((id) => !V230_COMMANDS.includes(id));
 /** 判定関数を差し替えられる形にして、3z が「壊した版」を同じ検査に掛けられるようにする */
 function toolCoexistOk(fc: typeof findConflict): boolean {
   if (TOOLS.length < 2) return false;

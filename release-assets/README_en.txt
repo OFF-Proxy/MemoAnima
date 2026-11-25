@@ -1,5 +1,5 @@
 =====================================================
- MemoAnima v2.0.0
+ MemoAnima v2.0.1
  A fan-made desktop tool for flipbook animations
 =====================================================
 
@@ -15,6 +15,17 @@ Windows and Mac. (This README covers the Windows version.)
 - Your source data (the SD card and so on) is only ever READ. Nothing is
   written to it and nothing is changed.
 - Editing happens on an independent copy inside your PC library.
+
+== CHANGED IN v2.0.1 ==
+- Double-clicking a project file (.memoanima) now opens it in MemoAnima (on Windows, when installed with the installer). A project already in your library opens straight in the editor; for any other file you choose "Import into this album" or "Open in the editor".
+- Only one MemoAnima runs at a time. Starting it again while it is open brings the open window to the front.
+- New command that switches to the eraser only while a key is held. Assign it to a key under "Keyboard shortcuts" in Settings, then set your pen button to that key in your pen tablet's settings.
+- "Show in folder" after an export now opens the folder of the exported video (or image).
+- Fixed the frames in the timeline not updating right away after hiding a layer or changing its opacity.
+- Fixed the library still playing the old version of a project after you saved it and went back.
+- Fixed "Erase this frame" and similar actions still applying to the folder you had selected, after you dragged another layer.
+- Fixed "Make wobble frames" and "Add several frames" building from a different frame than the one shown, when opened during playback. Opening them now stops playback.
+- The project file format is unchanged and remains compatible with v1.6.0 and later.
 
 == CHANGED IN v2.0.0 ==
 [Gallery]
@@ -469,7 +480,7 @@ opens as it is, and your settings and shortcuts carry over.
 3. Follow the first-run guide: choose a library folder -> import -> edit -> export
 Note: layers are shared across every frame (the standard way animation tools
 work). Adding a frame gives you a blank frame with the same layer structure.
-Note: there is also an installer (named like MemoAnima_2.0.0_x64-setup.exe,
+Note: there is also an installer (named like MemoAnima_2.0.1_x64-setup.exe,
 with the version number in it). Just
 double-click it; no administrator rights are needed. IMPORTANT: this portable
 (zip) version cannot update in place - accepting an update installs the

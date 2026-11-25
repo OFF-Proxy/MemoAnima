@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "fileAssociations": [
+      {
+        "ext": ["memoanima"],
+        "name": "MemoAnima Project",
+        "description": "MemoAnima Project",
+        "role": "Editor"
+      },
+      {
+        "ext": ["animemo"],
+        "name": "MemoAnima Project (old)",
+        "description": "MemoAnima Project",
+        "role": "Editor"
+      }
+    ]
+  }
+}

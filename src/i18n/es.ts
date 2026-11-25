@@ -255,6 +255,8 @@ const es: Record<keyof typeof ja, string> = {
   "keys.cmd.toolPen.label": "Pluma",
   "keys.cmd.toolBrush.label": "Pincel",
   "keys.cmd.toolEraser.label": "Borrador",
+  "keys.cmd.toolEraserHold.label": "Borrador (mientras se mantiene)",
+  "keys.cmd.toolEraserHold.hint": "Asigne esta tecla al botón del lápiz de la tableta para borrar solo mientras lo mantenga pulsado",
   "keys.cmd.toolFill.label": "Relleno (cubo)",
   "keys.cmd.toolShape.label": "Forma",
   "keys.cmd.toolText.label": "Texto",

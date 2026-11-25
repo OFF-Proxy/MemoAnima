@@ -4,7 +4,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
 import { Player, parse } from "flipnote.js";
 import { Project, FPS_TABLE } from "./editor/model";
 import { compositeFrame, frameToPngBlob } from "./editor/render";
@@ -28,8 +28,16 @@ import { errText, tooLargeBytes, isUnreadableSource } from "./ui/errText"; // V1
 import { importLogSafe, logSafeFileLabel, bulkImportErrorLogSafe } from "./gzname"; // V173b (W-10): ログへ書く前にパスと作品名を伏せる
 import { icon, setIconLabel } from "./icons"; // V171: 線画アイコン（絵文字は OS で絵が変わる）
 // V159 (G-3): 長くかかりうる処理の共通入口（読み込み中の表示・遅延・計測はここに1つ）
-import { runWithBusy } from "./ui/busy";
+import { runWithBusy, trackNativeDialog } from "./ui/busy";
+// ★V230 (A-148・独立レビューの指摘 4): OS のファイルの窓は数えて開く（main.ts と同じ）
+const open = trackNativeDialog(openNativeDialog);
 import { defaultAlbumName, newAlbumName } from "./i18n/defaults";
+
+/** ★V230 (A-147): 同じファイルを指すか（区切り・Windows の長いパスの頭・大文字小文字の違いを無視する。Rust が返す形が場所によって違う） */
+export function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => p.replace(/^\\\\\?\\/, "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return norm(a) === norm(b);
+}
 
 export type LibraryView = {
   kind: "note" | "project";
@@ -73,14 +81,8 @@ export interface LibraryCallbacks {
   /** V200 (A-100): まとめ変換が走っているか（確認の前の数えの間も）。そのあいだはフォルダ・1 件の取り込みを始めない */
   kwzBatchBusy?: () => boolean;
   /** M6-1/2: エクスポートダイアログを開く（M5-1: ミックス生成つき音声ソース）。
-   *  V198 (A-104 E-2): `work`＝書き出しのあとの「保存先を開く」が指す作品（アルバムとファイル名）。
-   *  作品ファイル（.memoanima/.animemo）のときだけ渡す。.kwz/.ppm は null＝ボタンを出さない */
-  openExport: (
-    source: FrameSource,
-    baseName: string,
-    audio?: ExportAudioSource | null,
-    work?: { album: string; name: string } | null
-  ) => void;
+   *  ★V230 (A-150): 書き出しのあとの「保存先を開く」は書き出したファイル（作品は渡さない） */
+  openExport: (source: FrameSource, baseName: string, audio?: ExportAudioSource | null) => void;
   /** V154: ボタンの語を指定できる（`main.ts` の `confirmDialog` は元から対応している）。
    *  復元の提案は「はい/いいえ」だと**押した結果が想像できない**（独立レビューの指摘・優先度 高） */
   confirm: (msg: string, labels?: { yes: string; no: string }) => Promise<boolean>;
@@ -412,6 +414,48 @@ export class LibraryScreen {
     }
   }
 
+  /** ★V230 (A-147): 描く画面から戻ったとき。一覧を取り直したあと、描く画面の間に保存したファイル（`savedPath`）が
+   *  ライブラリの中にあれば、そのアルバムに切り替えてその作品を選ぶ（棚はその作品が見える所まで送る）。
+   *  保存していなければ、選んでいる作品の大きさか更新時刻が変わっていたときだけ選び直す（変わっていなければ何もしない＝再生を始め直さない）。
+   *  選び直すのは今の select（世代の決まり・V159） */
+  async refreshAfterEdit(savedPath: string | null): Promise<void> {
+    const prev = this.selected;
+    if (!(await this.refresh())) return;
+    if (savedPath) {
+      const it = this.items.find((i) => samePath(i.path, savedPath));
+      if (it) {
+        if (this.currentAlbum !== it.album || this.search) {
+          this.currentAlbum = it.album;
+          this.search = "";
+          const box = document.querySelector("#lib-search") as HTMLInputElement | null;
+          if (box) box.value = "";
+          this.renderAlbums();
+          this.renderShelf();
+        }
+        const sel = this.select(it);
+        this.revealSelectedCard();
+        await sel;
+        return;
+      }
+    }
+    this.reselectIfChanged(prev);
+  }
+
+  /** ★V230 (A-147): 一覧を取り直したあと、選んでいた作品の大きさか更新時刻（scan_library の size・sorted_at）が変わっていれば選び直す。
+   *  無くなっていたら何もしない（今のまま）。変わっていなければ選んでいる物も再生もそのまま */
+  private reselectIfChanged(prev: LibraryView | null): void {
+    if (!prev) return;
+    const cur = this.items.find((i) => i.path === prev.path);
+    if (!cur) return;
+    if (cur.size !== prev.size || cur.sorted_at !== prev.sorted_at) void this.select(cur);
+  }
+
+  /** ★V230 (A-147): 選んだ作品のカードが見える所まで棚を送る */
+  private revealSelectedCard(): void {
+    const card = document.querySelector("#shelf-grid .thumb.active") as HTMLElement | null;
+    card?.scrollIntoView({ block: "nearest" });
+  }
+
   // ---------------- M11-4: 外部変更への追随 ----------------
 
   /** フォーカス復帰の検知を1回だけ張ったか */
@@ -451,7 +495,10 @@ export class LibraryScreen {
         return false;
       }
       if (stamp === this.lastStamp) return false;
+      const prevSel = this.selected;
       const okRefresh = await this.refresh(); // 成功時は refresh の中で lastStamp も更新される
+      // ★V230 (A-147): 外で選んでいる作品が変わっていれば選び直す（変わっていなければ再生を始め直さない）
+      if (okRefresh) this.reselectIfChanged(prevSel);
       // 読み込みに失敗したときも見た指紋は覚えておく（フォーカスのたびに同じエラーを
       // 出し続けないため。復帰したいときは 🔄 更新ボタンがある）
       if (!okRefresh) this.lastStamp = stamp;
@@ -1558,8 +1605,7 @@ export class LibraryScreen {
       this.cb.openExport(
         projectSource(pp),
         baseName,
-        this.audioSourceFor(pp.audio?.bgm ?? null, pp, pp.frames.length, FPS_TABLE[pp.speedIndex] || 8),
-        { album: it.album, name: it.name } // V198 (E-2): この作品の .memoanima（.animemo なら同じ名前の .memoanima）
+        this.audioSourceFor(pp.audio?.bgm ?? null, pp, pp.frames.length, FPS_TABLE[pp.speedIndex] || 8)
       );
     }
   }

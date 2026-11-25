@@ -970,6 +970,8 @@ const ja = {
   "keys.cmd.toolPen.label": "ペン",
   "keys.cmd.toolBrush.label": "ブラシ",
   "keys.cmd.toolEraser.label": "消しゴム",
+  "keys.cmd.toolEraserHold.label": "消しゴム（押している間だけ）",
+  "keys.cmd.toolEraserHold.hint": "ペンタブレットの設定でペンのボタンをこのキーにすると、ボタンを押している間だけ消しゴムになります",
   "keys.cmd.toolFill.label": "塗り（バケツ）",
   "keys.cmd.toolShape.label": "図形",
   "keys.cmd.toolText.label": "文字",

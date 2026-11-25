@@ -220,6 +220,15 @@ export const COMMANDS = [
   { id: "tool.pen", labelKey: "keys.cmd.toolPen.label", group: "tools" },
   { id: "tool.brush", labelKey: "keys.cmd.toolBrush.label", group: "tools" },
   { id: "tool.eraser", labelKey: "keys.cmd.toolEraser.label", group: "tools" },
+  // ★V230 (A-145): 押している間だけ消しゴム（ペンタブレットのボタンをこのキーにする）。既定のキーは無し・単体タップに割り当てない・
+  //  同じキーの道具の巡回（M11-15）には入れない（isToolCommand が holdOnly を外す）
+  {
+    id: "tool.eraserHold",
+    labelKey: "keys.cmd.toolEraserHold.label",
+    group: "tools",
+    noteKey: "keys.cmd.toolEraserHold.hint",
+    holdOnly: true,
+  },
   { id: "tool.fill", labelKey: "keys.cmd.toolFill.label", group: "tools" },
   { id: "tool.shape", labelKey: "keys.cmd.toolShape.label", group: "tools" },
   { id: "tool.text", labelKey: "keys.cmd.toolText.label", group: "tools" },
@@ -774,7 +783,8 @@ const MAC_LEGACY_BINDINGS: { id: CommandId; b: KeyBinding }[] = [
 /** 「道具」グループのコマンドか（M11-15: 同キー巡回の対象）。
  *  M12-1c-1: 比較先は**識別子** TOOL_GROUP（旧: 表示名の "道具" と同じ文字列だった） */
 export function isToolCommand(id: string): boolean {
-  return COMMANDS.some((c) => c.id === id && c.group === TOOL_GROUP);
+  // ★V230 (A-145): 押している間だけ効く道具（tool.eraserHold）は巡回に入れない
+  return COMMANDS.some((c) => c.id === id && c.group === TOOL_GROUP && (c as { holdOnly?: boolean }).holdOnly !== true);
 }
 
 /** コマンドの表示名（動的キーを引く唯一の口） */

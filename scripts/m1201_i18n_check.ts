@@ -222,6 +222,9 @@ const LIMIT_OVERRIDE: Record<string, number> = {
   // ほかの言語はこの値×係数に収めた（ko 20／23・zh 19／20）
   "ed.layerclip.pasteOverTo.btn": 19,
   "ed.layerclip.pasteOverToFrames.btn": 21,
+  // ★V230 (A-145・REQ_release_v2_0_1.md §5): 押している間だけ消しゴムの説明（設定の行の小さい字）は**要件の文そのまま**
+  //（何をどこで設定するかの 2 つを落とすと使えない）。ja の実測ちょうど＝これ以上は増やさない。ほかの言語はこの値×係数に収めた
+  "keys.cmd.toolEraserHold.hint": 48,
 };
 
 /**

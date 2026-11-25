@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "animemo"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "flate2",
  "hex",
@@ -56,6 +56,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
  "tauri-plugin-updater",
 ]
 
@@ -3787,6 +3788,22 @@ dependencies = [
  "thiserror 2.0.19",
  "url",
  "windows",
+ "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-single-instance"
+version = "2.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "726b6da0dd5bd1344f84f4108a622c07d01923baacb5c803a605189672c5352f"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
  "zbus",
 ]
 

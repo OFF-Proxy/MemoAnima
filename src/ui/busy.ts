@@ -34,6 +34,30 @@ export function setBusyImpl(fn: BusyImpl | null): void {
   setBusyProbe(() => hide !== null);
 }
 
+/** ★V230 (A-148・独立レビューの指摘 4): OS のファイルの窓（開く・保存の選択）が開いている数。窓の間に外から開いたファイルを乗せない
+ *  （窓はアプリの窓を止めるが、ライブラリの中の作品は箱を出さずに開くので、画像を選んでいる間に描く画面の作品が替わり得た） */
+let nativeDialogDepth = 0;
+/** OS のファイルの窓を開く関数を包んで数える（plugin-dialog の open・save を読み込む所で包む） */
+export function trackNativeDialog<A extends unknown[], R>(fn: (...a: A) => Promise<R>): (...a: A) => Promise<R> {
+  return async (...a: A) => {
+    nativeDialogDepth++;
+    try {
+      return await fn(...a);
+    } finally {
+      nativeDialogDepth--;
+    }
+  };
+}
+/** OS のファイルの窓が開いているか */
+export function nativeDialogOpen(): boolean {
+  return nativeDialogDepth > 0;
+}
+
+/** ★V230 (A-148): 長い処理（runWithBusy）の中か（中央表示が出る前の 450ms も含む）。外から開いたファイルを待たせるのに使う */
+export function busyActive(): boolean {
+  return depth > 0;
+}
+
 /** いま中央表示が出ているか。 */
 export function busyVisible(): boolean {
   return hide !== null;

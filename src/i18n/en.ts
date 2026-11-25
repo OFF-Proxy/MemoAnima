@@ -256,6 +256,8 @@ const en: Record<keyof typeof ja, string> = {
   "keys.cmd.toolPen.label": "Pen",
   "keys.cmd.toolBrush.label": "Brush",
   "keys.cmd.toolEraser.label": "Eraser",
+  "keys.cmd.toolEraserHold.label": "Eraser (while held)",
+  "keys.cmd.toolEraserHold.hint": "Set your pen tablet's pen button to this key to erase only while it is held",
   "keys.cmd.toolFill.label": "Fill (bucket)",
   "keys.cmd.toolShape.label": "Shape",
   "keys.cmd.toolText.label": "Text",

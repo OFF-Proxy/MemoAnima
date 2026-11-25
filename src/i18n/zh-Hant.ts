@@ -919,6 +919,8 @@ const zhHant: Partial<Record<keyof typeof ja, string>> = {
   "keys.cmd.toolPen.label": "畫筆",
   "keys.cmd.toolBrush.label": "筆刷",
   "keys.cmd.toolEraser.label": "橡皮擦",
+  "keys.cmd.toolEraserHold.label": "橡皮擦（按住期間）",
+  "keys.cmd.toolEraserHold.hint": "在繪圖板設定中把筆的按鈕設為此鍵，按住按鈕期間即為橡皮擦",
   "keys.cmd.toolFill.label": "填色（油漆桶）",
   "keys.cmd.toolShape.label": "圖形",
   "keys.cmd.toolText.label": "文字",

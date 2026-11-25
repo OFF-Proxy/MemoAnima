@@ -23,6 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { readEditorSource, editorSourceFiles } from "./editorSource";
 import { undoV216b } from "./v216b_named.ts";
+import { undoV230 } from "./v230_named.ts"; // ★V230: editor.ts の変更（A-145 ほか）が V217・V216b の差分の前後に当たる＝先に V230 を外す
 import { undoV217 } from "./v217_named.ts"; // ★V217: コメントの語を替えた行が V216b の差分の前後に当たる＝先に V217 を外す
 import {
   HEAVY_ALLOC_MAX_BYTES,
@@ -57,7 +58,7 @@ const ed = edRaw.replace(/^[ \t]*\/\/.*$/gm, "");
 //  眠らせの入口は止める印（sweepHold）も見るようになった（その回の検査 v216b_smoke [W]・[S] が見張る）。
 //  検査3 の 2 つの字の見張りは、V216b の名指しの差分を外した字で見る（ほかの見張りは今の字のまま）
 const edNo16 = editorSourceFiles(root)
-  .map(({ file, text }) => undoV216b(file, undoV217(file, text) ?? "") ?? "")
+  .map(({ file, text }) => undoV216b(file, undoV217(file, undoV230(file, text) ?? "") ?? "") ?? "")
   .join("\n")
   .replace(/^[ \t]*\/\/.*$/gm, "");
 check(

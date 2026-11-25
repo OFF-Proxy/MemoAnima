@@ -1,6 +1,6 @@
 [package]
 name = "animemo"
-version = "2.0.0"
+version = "2.0.1"
 description = "メモアニマ (MemoAnima) — 3DSのお絵かきアニメ作品をPCで編集・書き出しできる非公式・非営利のファンツール"
 authors = ["arcana"]
 edition = "2021"
@@ -37,6 +37,11 @@ hex = "0.4"
 # V207 (T): 2.14 より前へ戻さない。署名の版の確かめ（tauri.conf.json の requireSignedVersion）は 2.12 から
 #  （lib.rs の v207_tests が設定として読まれることを確かめる）。新しくない版なら check() が先に null を返す形は 2.14 から
 tauri-plugin-updater = "2.14"
+
+# ★V230 (A-148): アプリを 1 つにする（2 つ目に起動したものは引数を 1 つ目へ渡して終わる）。**Windows のビルドだけ**
+#  （Mac は Finder が開いているアプリへ渡す形＝RunEvent::Opened だけで受ける・要件 §0-2 の C-4）。Tauri 2.12 で使える一番新しい版
+[target.'cfg(windows)'.dependencies]
+tauri-plugin-single-instance = "2.5.5"
 
 # V202 (M-1a): モバイルだけの保存の仕組み（pclib::mobile）が使う依存。**PC の製品のビルドでは組み立てない**
 # （pclib::mobile は cfg(any(mobile, test, feature = "mobile-harness")) の中だけ。PC では cargo test〔dev-dependencies〕と

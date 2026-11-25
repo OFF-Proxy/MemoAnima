@@ -257,6 +257,8 @@ const ko: Record<keyof typeof ja, string> = {
   "keys.cmd.toolPen.label": "펜",
   "keys.cmd.toolBrush.label": "브러시",
   "keys.cmd.toolEraser.label": "지우개",
+  "keys.cmd.toolEraserHold.label": "지우개 (누르는 동안)",
+  "keys.cmd.toolEraserHold.hint": "펜 태블릿 설정에서 펜 버튼을 이 키로 지정하면 버튼을 누르는 동안만 지우개가 돼요",
   "keys.cmd.toolFill.label": "채우기(페인트통)",
   "keys.cmd.toolShape.label": "도형",
   "keys.cmd.toolText.label": "텍스트",

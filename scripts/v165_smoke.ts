@@ -16,6 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { readEditorSource } from "./editorSource";
+import { V230_COMMANDS } from "./v230_named.ts"; // ★V230 (A-145): 足したコマンド（tool.eraserHold＝hold 専用）は名指しで数えから外す
 import {
   COMMANDS,
   BUILTIN_PRESETS,
@@ -216,7 +217,7 @@ const TAPS: TapMod[] = ["Control", "Shift", "Alt"];
   check("4c ★xform.peek は hold 専用として印が付いている", isHoldOnlyCommand("xform.peek"));
   check("4c ふつうの操作は hold 専用ではない", !isHoldOnlyCommand("edit.undo") && !isHoldOnlyCommand("tool.pen"));
   // 反証: 印が全部に付いているわけではない（走査が空振りしていない）
-  check("4c 反証: hold 専用は1つだけ", COMMANDS.filter((c) => isHoldOnlyCommand(c.id)).length === 1);
+  check("4c 反証: hold 専用は1つだけ", COMMANDS.filter((c) => isHoldOnlyCommand(c.id)).filter((c) => !V230_COMMANDS.includes(c.id)).length === 1);
 }
 
 // ================= 5. keyLabel =================

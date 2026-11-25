@@ -17,6 +17,9 @@
 //   呼ぶ時                                           PC（Editor）がすること
 //   renderCanvas()           作品の絵が変わった・コマを移った    キャンバスを描き直す（眠ったコマは起こしてから）
 //   paintFilmThumb(i)        コマ i の絵が変わった              フィルムのサムネを塗り直す
+//   repaintFilmLayers()      ★V230 (A-146): 他のコマの見た目も   見えているコマのサムネを全部塗り直す（既定の中身＝今のコマだけ
+//                            変わった（表示・不透明度・クリップ・ を塗り直す＝前と同じ。上書きしない画面は前のまま）
+//                            並べ替え・削除・統合と元に戻す）
 //   rebuildFilm()            コマの数・並び・色の目印が変わった  タイムラインのフィルムを組み直す
 //   rebuildLayers()          レイヤー・フォルダが変わった        レイヤーの一覧を組み直す
 //                            ★V214: コアの既定の中身は選択の手入れ（pruneSelection）。上書きするときは、組み直す前に super.rebuildLayers() を呼ぶ
@@ -1118,6 +1121,9 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
     if (this._pointerDown === v) return;
     this._pointerDown = v;
     this.pointerDownChanged(v); // ★V213: HUD を薄くする／戻すのは画面（PC・パンの最中を除く）
+    // ★V230 (A-145): 線が終わった。ペンの消しゴム側の線なら前の道具へ・押している間に離した消しゴムなら戻す。
+    //   線の終わりの手続きの途中では道具を替えない＝今の手続きを終えてから（microtask）
+    if (!v && (this.penEraserPrev !== null || this.eraserHoldRestorePending)) queueMicrotask(() => this.eraserAfterStroke());
   }
   protected shapeStart: { x: number; y: number } | null = null;
   /** M10-7: 図形ドラッグ中の**生の**終点（拘束前）。Shift の押下/解放を
@@ -1268,8 +1274,89 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
     return t === "brush" ? "brush" : t === "eraser" ? "eraser" : "pen";
   }
 
+  // ================= ★V230 (A-145): 押している間だけ消しゴム・ペンの消しゴム側 =================
+  // 道具を替える・戻すのはコア（E と同じ道＝runCoreCommand("tool.eraser")）。キーを押した／離した・フォーカスを失った・ペンの消しゴム側で
+  // 押した、を受けて呼ぶのは画面（PC の onKeyDown・keyup・blur・onPointerDownInner）
+  /** 押したときの印（押したキー・前の道具・押している間に利用者が道具を選んだか）。押していなければ null */
+  private eraserHold: { code: string | null; prev: Tool; userChose: boolean } | null = null;
+  /** 描いている途中に離した＝線を描き終えてから戻す */
+  private eraserHoldRestorePending = false;
+  /** 押したときに自分で道具を替えている最中（setTool で「利用者が選んだ」と数えない） */
+  private eraserHoldSwitching = false;
+  /** ペンの消しゴム側で始めた線の、前の道具（線が終わったら戻す・道具の表示は変えない）。線の外では null */
+  private penEraserPrev: Tool | null = null;
+  /** ペンの消しゴム側で消しゴムに替えてよい道具（描く道具だけ。変形・選択・文字・歪みの途中の状態を壊さない） */
+  protected static readonly PEN_ERASER_FROM: ReadonlySet<Tool> = new Set<Tool>(["pen", "brush", "fill", "shape"]);
+
+  /** 押したとき。今が消しゴムなら何もしない。そうでなければ前の道具を覚えて消しゴムに（E と同じ道＝替えられない状態の扱いも同じ）。
+   *  替えられなかったら覚えない（離しても何もしない）。キーリピートは画面が捨てる（holdOnly は repeatable でない） */
+  protected eraserHoldStart(code: string | null): void {
+    if (this.eraserHold) return;
+    if (this.tool === "eraser") return;
+    const prev = this.tool;
+    this.eraserHoldSwitching = true;
+    try {
+      this.runCoreCommand("tool.eraser");
+    } finally {
+      this.eraserHoldSwitching = false;
+    }
+    if ((this.tool as Tool) !== "eraser") return; // 替えられなかった（runCoreCommand の中で替わる＝型の絞り込みを外す）
+    this.eraserHold = { code, prev, userChose: false };
+    this.eraserHoldRestorePending = false;
+  }
+
+  /** 押しているキー（押していなければ undefined・キーの分からない押し方は null＝どのキーを離しても戻す） */
+  protected eraserHoldKey(): string | null | undefined {
+    return this.eraserHold ? this.eraserHold.code : undefined;
+  }
+
+  /** 離したとき（とフォーカスを失ったとき）。描いている途中ならその線を描き終えてから戻す。押している間に利用者が道具を選んでいたら戻さない */
+  protected eraserHoldEnd(): void {
+    const h = this.eraserHold;
+    if (!h) return;
+    if (this.pointerDown) {
+      this.eraserHoldRestorePending = true;
+      return;
+    }
+    this.eraserHold = null;
+    this.eraserHoldRestorePending = false;
+    if (!this.mounted || h.userChose || this.tool !== "eraser") return;
+    this.setTool(h.prev);
+  }
+
+  /** ペンの消しゴム側で線を始める前（画面が buttons の 32・button の 5 を見て呼ぶ）。描く道具のときだけ、その線だけ消しゴム（道具の表示は変えない） */
+  protected penEraserBegin(): void {
+    if (!EditorCore.PEN_ERASER_FROM.has(this.tool)) return;
+    this.penEraserPrev = this.tool;
+    this.tool = "eraser";
+  }
+
+  /** 線の始まりのあと（画面が strokeStart のあとに呼ぶ）。線が始まらなかった（ロック等）ならすぐ戻す（線の終わりが来ない） */
+  protected penEraserSettle(): void {
+    if (this.penEraserPrev === null || this.pointerDown) return;
+    if (this.tool === "eraser") this.tool = this.penEraserPrev;
+    this.penEraserPrev = null;
+  }
+
+  /** 線が終わったあとの戻し（pointerDown が下りたとき・microtask） */
+  private eraserAfterStroke(): void {
+    if (this.pointerDown) return; // もう次の線が始まっている
+    if (this.penEraserPrev !== null) {
+      const prev = this.penEraserPrev;
+      this.penEraserPrev = null;
+      if (this.tool === "eraser") this.tool = prev; // 表示は替えていないので、道具だけ戻す
+      this.repaintCursor();
+    }
+    if (this.eraserHoldRestorePending) {
+      this.eraserHoldRestorePending = false;
+      this.eraserHoldEnd();
+    }
+  }
+
   protected setTool(t: Tool) {
     const _t0 = perfNow();
+    // ★V230 (A-145): 押している間だけ消しゴムの最中に利用者が道具を選んだ＝離しても戻さない
+    if (this.eraserHold && !this.eraserHoldSwitching) this.eraserHold.userChose = true;
     // M11-12: 文字ツールから抜けるときは浮動テキストを**確定**する（変形の「取り消し」とは逆。
     // 打った文字が黙って消えないように＝REQ「別のツールへ切り替える＝確定」）
     if (this.textDraft && t !== "text") this.commitTextDraft();
@@ -6482,8 +6569,30 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
     this.dirty = true;
     this.rebuildLayers();
     this.renderCanvas();
-    this.paintFilmThumb(this.frameIndex);
+    // ★V230 (A-146): レイヤー・フォルダの表示・不透明度・クリップ・並べ替え・削除・統合（と、それぞれの元に戻す・やり直し＝構造の履歴を戻したとき）は
+    //   他のコマの見た目も変える＝見えているコマを全部（前は今のコマだけ＝帯を送るまで古い絵が出ていた）。間引きの途中なら捨てて今描く
+    this.flushFilmLayers();
     this.updateSizeMeter(); // V154 (W-2): レイヤーの増減で実体の数が変わる
+  }
+
+  /** ★V230 (A-146): 不透明度のつまみを動かしている間の、コマの絵の描き直しの間引き（本体はすぐ・コマの絵は 150ms に 1 回） */
+  private filmLayersTimer: ReturnType<typeof setTimeout> | null = null;
+  protected static readonly FILM_LAYERS_THROTTLE_MS = 150;
+  /** 動かしている間: まだ待っていなければ 150ms 後に 1 回描く（待っている間に来たものはその 1 回にまとめる） */
+  protected repaintFilmLayersSoon(): void {
+    if (this.filmLayersTimer != null) return;
+    this.filmLayersTimer = setTimeout(() => {
+      this.filmLayersTimer = null;
+      if (this.mounted) this.repaintFilmLayers();
+    }, EditorCore.FILM_LAYERS_THROTTLE_MS);
+  }
+  /** 今すぐ描く（待っていた分は捨てる）。離したとき・構造が変わったとき */
+  protected flushFilmLayers(): void {
+    if (this.filmLayersTimer != null) {
+      clearTimeout(this.filmLayersTimer);
+      this.filmLayersTimer = null;
+    }
+    this.repaintFilmLayers();
   }
 
   /** M11-20: レイヤーのクリッピング on/off。**履歴に積む（undo 1回）**。
@@ -7496,11 +7605,13 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
   protected setFolderOpacityLive(f: LayerFolder, v: number): void {
     f.opacity = v / 100;
     this.renderCanvas();
+    this.repaintFilmLayersSoon(); // ★V230 (A-146)
     this.dirty = true;
   }
 
   /** フォルダの不透明度を離した。動かす前（from）と違えば履歴を 1 つ積む（from が null なら何もしない） */
   protected commitFolderOpacity(f: LayerFolder, opBefore: number | null): void {
+    this.flushFilmLayers(); // ★V230 (A-146): 離したら必ず 1 回（変わっていなくても）
     if (opBefore != null && opBefore !== f.opacity) {
       const from = opBefore;
       const to = f.opacity;
@@ -7531,6 +7642,7 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
     ld.visible = !ld.visible;
     this.rebuildLayers();
     this.renderCanvas();
+    this.flushFilmLayers(); // ★V230 (A-146): 他のコマの絵も
     // M10-23 レビュー検出の既存バグ: visible は保存対象なのに dirty を立てておらず、
     // 可視切替だけではオートセーブも終了警告も働かなかった（不透明度・名前と同じ流儀）
     this.dirty = true;
@@ -7549,7 +7661,13 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
   protected setLayerOpacityLive(ld: LayerDef, v: number): void {
     ld.opacity = v / 100;
     this.renderCanvas();
+    this.repaintFilmLayersSoon(); // ★V230 (A-146): コマの絵は間引いて
     this.dirty = true;
+  }
+
+  /** ★V230 (A-146): レイヤーの不透明度のつまみを離した＝コマの絵を必ず 1 回描く（履歴は今も積まない） */
+  protected commitLayerOpacity(): void {
+    this.flushFilmLayers();
   }
 
   /** 行を押したときの選び方（前は PC の updateSelection の中）。click=単独 / Ctrl・⌘=トグル / Shift=表示の並び（order）の範囲。
@@ -7588,12 +7706,15 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
     this.rebuildLayers();
   }
 
-  /** 行を掴んでドラッグが始まった（前は PC の updateRowDrag の中）。選択の外の行から掴んだら単独選択に切り替える（替えたら true） */
+  /** 行を掴んでドラッグが始まった（前は PC の updateRowDrag の中）。選択の外の行から掴んだら単独選択に切り替える（替えたら true）。
+   *  ★V230 (A-151): 替えたときは「選んだフォルダ」も決め直す（フォルダならそのフォルダ・レイヤーなら無し）。
+   *  前のフォルダが残ると［このコマの絵を消す］・［＋］・レイヤーのコピーが前のフォルダに効いていた。選択の中の行を掴んだときは今のまま */
   protected grabRowForDrag(id: string, kind: "layer" | "folder"): boolean {
     if (this.selectedNodeIds.has(id)) return false;
     this.selectedNodeIds = new Set([id]);
     this.selAnchorId = id;
     if (kind === "layer") this.activeLayerId = id;
+    this.selectedFolderId = kind === "folder" ? id : null;
     return true;
   }
 
@@ -8034,6 +8155,15 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
   /** 閉じる: 開いた印を下ろす（最後） */
   protected closeWorkEnd(): void {
     this.mounted = false;
+    // ★V230 (A-145): 押している間だけ消しゴム・ペンの消しゴム側の印を残さない（次の作品へ持ち越さない）
+    this.eraserHold = null;
+    this.eraserHoldRestorePending = false;
+    this.penEraserPrev = null;
+    // ★V230 (A-146): 間引きの待ちを残さない
+    if (this.filmLayersTimer != null) {
+      clearTimeout(this.filmLayersTimer);
+      this.filmLayersTimer = null;
+    }
   }
 
   /** ★V214 (M-2b-1a): オートセーブを書き始めない、作品の側の条件（前は PC の runAutosave の入口・字は同じ）。
@@ -8453,6 +8583,10 @@ export class EditorCore<CB extends CoreCallbacks = CoreCallbacks, CV = unknown> 
   protected renderCanvas(): void {}
   protected rebuildFilm(): void {}
   protected paintFilmThumb(_i: number): void {}
+  /** ★V230 (A-146): 他のコマの見た目も変わったとき。既定は今のコマだけ（前と同じ）。PC は見えているコマを全部描き直す */
+  protected repaintFilmLayers(): void {
+    this.paintFilmThumb(this.frameIndex);
+  }
   protected rebuildTexPicker(): void {}
   protected updateAudioToolButton(): void {}
   protected updateFilmSeMarks(): void {}

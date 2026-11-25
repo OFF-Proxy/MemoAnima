@@ -730,6 +730,9 @@ export class Editor extends EditorCore<EditorCallbacks, HTMLCanvasElement> {
     if (this.xformPeek && (this.peekCode === null || e.code === this.peekCode)) {
       this.setXformPeek(false);
     }
+    // ★V230 (A-145): 「押している間だけ消しゴム」も同じ物理キーを離したら戻す（戻すのはコア）
+    const holdKey = this.eraserHoldKey();
+    if (holdKey !== undefined && (holdKey === null || e.code === holdKey)) this.eraserHoldEnd();
   };
   /** M11-5: ウィンドウがフォーカスを失ったときの後始末。
    *
@@ -756,6 +759,8 @@ export class Editor extends EditorCore<EditorCallbacks, HTMLCanvasElement> {
     this.altHeld = false;
     // M11-11: 透かしたままフォーカスを失うと keyup が来ない（薄いまま戻らなくなる）
     this.setXformPeek(false);
+    // ★V230 (A-145): 押している間だけ消しゴムも同じ（離したのと同じに戻す。描いている途中なら下の endPointerSession で線を終えてから）
+    this.eraserHoldEnd();
     this.endPointerSession("blur");
     // レイヤー行のドラッグも同じ理由で取り残される（pointerup が来ないと
     // 以後どの行も掴めなくなる）。こちらは取り消し＝並びは動かさない
@@ -821,7 +826,7 @@ export class Editor extends EditorCore<EditorCallbacks, HTMLCanvasElement> {
     this.saveRedirect = null;
     // ★V199 (A-106): 開いたファイルの名前。保存先が決まっていて選び直さない（＝ライブラリのファイルを開いた・
     //  その作品のオートセーブを戻した）ならその名前、ドロップで開いたならそのファイルの名前、新しいメモは null。
-    //  「保存先を選ぶ」かどうかの判定は main.ts の editorWorkRef（V198）と同じ
+    //  「保存先を選ぶ」かどうかの判定は V198 の editorWorkRef と同じだった（V230 で editorWorkRef は消した）
     this.fileBase = opts.fileName || (saveCtx && !this.askSaveTarget ? saveCtx.baseName : null);
     // ★V214: 位置・履歴・未保存の印・開いた印・性能の口・作品ごとの知らせ・描きかけを最初の姿に（コアの openWorkReset・字と順は前と同じ）
     this.openWorkReset(project, cb);
@@ -3602,6 +3607,7 @@ export class Editor extends EditorCore<EditorCallbacks, HTMLCanvasElement> {
         className: "lay-op",
         title: t("ed.layer.opacity.title"),
         onInput: (v) => this.setLayerOpacityLive(ld, v), // ★V214: 中身はコア
+        onChange: () => this.commitLayerOpacity(), // ★V230 (A-146): 離したらコマの絵を必ず 1 回
       });
       // M15 (K-1): 📌 全コマ共通トグル（クリップの隣）。フォルダには付けない＝レイヤー行だけ
       const pin = document.createElement("span");
@@ -4442,6 +4448,8 @@ export class Editor extends EditorCore<EditorCallbacks, HTMLCanvasElement> {
   private async onWobbleClick(): Promise<void> {
     if (this.xformGuard()) return; // 変形中は止める（既存の流儀）
     if (!this.project.frames[this.frameIndex]) return;
+    // ★V230 (A-151): 小窓の前に再生を止める（［このコマの絵を消す］・画像の取り込みと同じ形）。見本と起点は止めたときのコマ
+    if (this.playing) this.stopPlayback();
     const opt = await this.openWobbleDialog();
     if (!opt) return;
     // ★V213 (M-2a): 作る計算はコア（applyWobble）。ダイアログは画面（PC）
@@ -5058,6 +5066,15 @@ export class Editor extends EditorCore<EditorCallbacks, HTMLCanvasElement> {
       this.refitFilmTimer = null;
       if (this.mounted) this.refitFilmNow();
     }, 120);
+  }
+
+  /** ★V230 (A-146): 他のコマの見た目も変わった → 見えている（前後 200px の内の）コマのサムネを全部描き直す。
+   *  見えていないものは手放してある＝見えたときに今の状態で描かれる。眠ったコマは paintFilmThumb が起こして描いて片づける（V156・V216b） */
+  protected override repaintFilmLayers() {
+    for (const cv of [...this.filmVisible]) {
+      const idx = Number((cv.parentElement as HTMLElement | null)?.dataset.idx);
+      if (!Number.isNaN(idx)) this.paintFilmThumb(idx, cv);
+    }
   }
 
   private refitFilmNow() {
@@ -7231,8 +7248,12 @@ export class Editor extends EditorCore<EditorCallbacks, HTMLCanvasElement> {
       this.updatePanCursor(true);
       return;
     }
+    // ★V230 (A-145・§2-2 の 6): ペンの消しゴム側（buttons の 32・button の 5）で始めた線は消しゴムで描く。道具の表示は変えない（その線だけ）。
+    //   右ボタン（button 2）の扱い（M10-19）は上のまま。描く道具のときだけ（変形・選択・文字・歪みの途中の状態は壊さない）
+    if (e.pointerType === "pen" && ((e.buttons & 32) !== 0 || e.button === 5)) this.penEraserBegin();
     // ★V213 (M-2a): 描き始めはコア（サンプルの画素への落とし方・道具ごとの始め方）。PC は画面の続きだけ
     const r = this.strokeStart(this.sampleOf(e));
+    this.penEraserSettle(); // ★V230 (A-145): 線が始まらなかった（ロック等）ならすぐ戻す
     if (r === "xform") {
       // R-2: ドラッグ開始直後にモードラベルを表示（ペンでhoverが取れない環境でも判別できる）
       this.showXformModeLabel(this.dragMode, e.clientX, e.clientY);
@@ -8014,9 +8035,16 @@ export class Editor extends EditorCore<EditorCallbacks, HTMLCanvasElement> {
   private async onAddFramesClick(): Promise<void> {
     if (this.xformGuard()) return;
     if (!this.project.frames[this.frameIndex]) return;
+    // ★V230 (A-151): 小窓の前に再生を止める（ゆらゆら差分と同じ）
+    if (this.playing) this.stopPlayback();
     const opt = await this.openAddFramesDialog();
     if (!opt) return;
     await this.addFrames(opt.count, opt.duplicate);
+  }
+
+  /** ★V230 (A-148): 外から開いたファイルを今は道に乗せない（ダイアログ・重い処理・保存の飛行中）。終わってから main.ts が乗せる */
+  isBusyForOpen(): boolean {
+    return this.dialogOpen() || this.saveInFlight != null;
   }
 
   /** M11-2: ダイアログ（確認・保存先ピッカー・音声パネル等）が開いているか。
@@ -8268,6 +8296,10 @@ export class Editor extends EditorCore<EditorCallbacks, HTMLCanvasElement> {
       case "xform.peek":
         // 押している間だけ透かす。戻すのは keyup（peekCode が一致したとき）
         if (this.xformActive) this.setXformPeek(true, this.peekPendingCode);
+        break;
+      case "tool.eraserHold":
+        // ★V230 (A-145): 押している間だけ消しゴム。戻すのは keyup（同じ物理キー）・blur（xform.peek と同じ考え）
+        this.eraserHoldStart(this.peekPendingCode);
         break;
       case "view.miniToggle":
         // M11-16: id は据え置き（旧プリセットに保存された割り当てがそのまま新トグルを動かす）。

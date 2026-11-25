@@ -919,6 +919,8 @@ const zhHans: Partial<Record<keyof typeof ja, string>> = {
   "keys.cmd.toolPen.label": "画笔",
   "keys.cmd.toolBrush.label": "笔刷",
   "keys.cmd.toolEraser.label": "橡皮擦",
+  "keys.cmd.toolEraserHold.label": "橡皮擦（按住期间）",
+  "keys.cmd.toolEraserHold.hint": "在数位板设置中把笔的按钮设为此键，按住按钮期间即为橡皮擦",
   "keys.cmd.toolFill.label": "填充（油漆桶）",
   "keys.cmd.toolShape.label": "图形",
   "keys.cmd.toolText.label": "文字",
